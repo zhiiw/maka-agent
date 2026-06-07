@@ -916,7 +916,7 @@ function SettingsSurface(props: {
               settings,
             });
             return (
-              <div key={group} className="settingsNavGroup">
+              <div key={group} className="settingsNavGroup" role="group" aria-label={group}>
                 <div className="settingsNavGroupLabel">{group}</div>
                 {summary && (
                   <div className="settingsNavGroupSummary" data-tone={summary.tone ?? 'neutral'}>
@@ -5159,7 +5159,7 @@ function BotChatSettingsPage(props: {
             }}
           />
         )}
-        <div className="settingsBotActionStack">
+        <div className="settingsBotActionStack" role="group" aria-label={`${BOT_LABELS[selected].label}机器人操作`}>
           {selected === 'wechat' ? (
             <>
               <button
@@ -5442,7 +5442,7 @@ function UsageSettingsPage(props: {
 
   return (
     <div className="settingsUsagePage">
-      <div className="settingsUsageToolbar">
+      <div className="settingsUsageToolbar" role="group" aria-label="使用统计范围与刷新">
         <Segmented
           value={usageDraft.range}
           ariaLabel="使用统计时间范围"
