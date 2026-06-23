@@ -7,11 +7,13 @@
 
 import { z } from 'zod';
 import { promises as fs } from 'node:fs';
-import { exec, spawn } from 'node:child_process';
+import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { glob as nodeGlob } from 'node:fs/promises'; // Node 22+ stable glob
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { computeEditedSource } from './edit-replace.js';
+import { truncateToolOutput } from './tool-output.js';
+import { runShellWithBoundedTail } from './shell-exec.js';
 
 // Single source of truth for tool shape. AiSdkBackend exports them; we just
 // re-export here for back-compat with external callers that imported from
@@ -20,7 +22,6 @@ import type { MakaTool, MakaToolContext } from './ai-sdk-backend.js';
 export type { MakaTool, MakaToolContext };
 
 const execAsync = promisify(exec);
-const BASH_MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 
 export function buildBuiltinTools(): MakaTool[] {
   return [
@@ -44,8 +45,8 @@ export function buildBuiltinTools(): MakaTool[] {
           cwd,
           cmd: command,
           exitCode: result.exitCode,
-          stdout: result.stdout,
-          stderr: result.stderr,
+          stdout: truncateToolOutput(result.stdout, { direction: 'tail' }).content,
+          stderr: truncateToolOutput(result.stderr, { direction: 'tail' }).content,
         };
       },
     },
@@ -159,6 +160,10 @@ export function buildBuiltinTools(): MakaTool[] {
   ];
 }
 
+// Thin wrapper over the shared runShellWithBoundedTail (the one place a shell
+// command actually runs — see shell-exec.ts). Keeps the builtin's contract:
+// throw on timeout / abort / non-zero exit (with stdout+stderr+code attached),
+// stream live via emitOutput, and return the bounded tail on success.
 async function runStreamingShell(
   command: string,
   options: {
@@ -168,73 +173,31 @@ async function runStreamingShell(
     emitOutput: (stream: 'stdout' | 'stderr', chunk: string) => void;
   },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return await new Promise((resolvePromise, reject) => {
-    const child = spawn(command, {
-      cwd: options.cwd,
-      shell: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    let outputBytes = 0;
-    let settled = false;
-
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      rejectOnce(new Error(`Command timed out after ${options.timeout}ms`));
-    }, options.timeout);
-
-    const abort = () => {
-      child.kill('SIGTERM');
-      rejectOnce(new Error('Command aborted'));
-    };
-    if (options.abortSignal.aborted) abort();
-    else options.abortSignal.addEventListener('abort', abort, { once: true });
-
-    child.stdout?.setEncoding('utf8');
-    child.stderr?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string) => append('stdout', chunk));
-    child.stderr?.on('data', (chunk: string) => append('stderr', chunk));
-    child.on('error', rejectOnce);
-    child.on('close', (code, signal) => {
-      if (settled) return;
-      cleanup();
-      const exitCode = code ?? (signal ? 128 : 1);
-      if (exitCode !== 0) {
-        const error = new Error(`Command failed with exit code ${exitCode}`);
-        Object.assign(error, { stdout, stderr, code: exitCode });
-        settled = true;
-        reject(error);
-        return;
-      }
-      settled = true;
-      resolvePromise({ stdout, stderr, exitCode });
-    });
-
-    function append(stream: 'stdout' | 'stderr', chunk: string): void {
-      outputBytes += Buffer.byteLength(chunk, 'utf8');
-      if (outputBytes > BASH_MAX_OUTPUT_BYTES) {
-        child.kill('SIGTERM');
-        rejectOnce(new Error(`Command output exceeded ${BASH_MAX_OUTPUT_BYTES} bytes`));
-        return;
-      }
-      if (stream === 'stdout') stdout += chunk;
-      else stderr += chunk;
-      options.emitOutput(stream, chunk);
-    }
-
-    function rejectOnce(error: Error): void {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    }
-
-    function cleanup(): void {
-      clearTimeout(timer);
-      options.abortSignal.removeEventListener('abort', abort);
-    }
+  const result = await runShellWithBoundedTail(command, {
+    cwd: options.cwd,
+    timeoutMs: options.timeout,
+    abortSignal: options.abortSignal,
+    emitOutput: options.emitOutput,
   });
+  // Attach the captured (bounded) stdout/stderr + an exit code to EVERY failure,
+  // not just non-zero exit. coerceTerminalFailure only folds the tail into the
+  // model-facing result when error.code is a number, so without a code on
+  // timeout/abort the model would be blind to the logs leading up to the failure
+  // (124 = timeout, 130 = aborted, both conventional).
+  if (result.timedOut) throw terminalError(`Command timed out after ${options.timeout}ms`, result, 124);
+  if (result.aborted) throw terminalError('Command aborted', result, 130);
+  if (result.exitCode !== 0) throw terminalError(`Command failed with exit code ${result.exitCode}`, result, result.exitCode);
+  return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+}
+
+function terminalError(
+  message: string,
+  result: { stdout: string; stderr: string },
+  code: number,
+): Error {
+  const error = new Error(message);
+  Object.assign(error, { stdout: result.stdout, stderr: result.stderr, code });
+  return error;
 }
 
 function shellEscape(arg: string): string {

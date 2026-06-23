@@ -17,6 +17,7 @@ import {
   buildProviderOptions,
   getAIModel,
   getBuiltinPricing,
+  runShellWithBoundedTail,
   type MakaTool,
   type InvocationResult,
 } from '@maka/runtime';
@@ -338,7 +339,37 @@ export function buildHarborCellAiSdkTools(
 export function createHarborCellLocalToolExecutor(env: RunHarborCellEnv = process.env): IsolatedToolExecutor {
   const childEnv = childProcessEnv(env);
   return {
-    exec: async ({ command, cwd, timeoutMs }) => {
+    exec: async ({ command, cwd, timeoutMs, boundedTail }) => {
+      if (boundedTail) {
+        // Bash opted in: stream into a bounded tail (shared with the in-process
+        // builtin Bash) instead of execAsync({ maxBuffer }). A command whose
+        // output passes 10MB is no longer KILLED with only its head returned —
+        // it runs to completion and we keep the last ~1MB (the recoverable tail).
+        try {
+          const result = await runShellWithBoundedTail(command, {
+            cwd,
+            env: childEnv,
+            timeoutMs: timeoutMs ?? 120_000,
+          });
+          return {
+            exitCode: result.timedOut ? 124 : result.exitCode,
+            stdout: result.stdout,
+            stderr: result.stderr,
+          };
+        } catch (error) {
+          // runShellWithBoundedTail only rejects when the process cannot be
+          // spawned at all (e.g. the shell binary is missing).
+          return {
+            exitCode: shellErrorExitCode(error),
+            stdout: shellErrorText(error, 'stdout'),
+            stderr: shellErrorText(error, 'stderr') || shellErrorMessage(error),
+          };
+        }
+      }
+      // Default (Read/Glob/Grep/Edit fallbacks): FULL output up to the buffer
+      // cap. These must return complete, head-first content — a bounded tail
+      // would silently drop the head of a file or search result and the model
+      // would edit code from a partial view.
       try {
         const result = await execAsync(command, {
           cwd,

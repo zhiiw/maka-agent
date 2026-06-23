@@ -3,6 +3,7 @@ import {
   buildSubagentProjectionTools,
   buildSubagentSpawnTool,
   COMPUTE_EDITED_SOURCE_FN_SOURCE,
+  truncateToolOutput,
 } from '@maka/runtime';
 import { posix as pathPosix } from 'node:path';
 import { z } from 'zod';
@@ -80,11 +81,18 @@ export function buildIsolatedBashTool(
         cwd,
         timeoutMs: timeout_ms ?? 120_000,
       };
+      // boundedTail: Bash is the one caller that wants a recoverable tail of a
+      // huge, never-killed output. Read/Glob/Grep deliberately omit it so they
+      // get full, head-first content from the executor.
       const result = await executor.exec({
         command: input.command,
         cwd: input.cwd,
         timeoutMs: input.timeoutMs,
+        boundedTail: true,
       });
+      // The isolated executor returns a single (already tail-bounded) result —
+      // there is no live per-chunk channel across the executor boundary, so we
+      // surface that result to history here, then bound it further for the model.
       if (result.stdout) emitOutput('stdout', result.stdout);
       if (result.stderr) emitOutput('stderr', result.stderr);
       await options.heavyTaskEvidence?.recordToolEvidence({ name: 'Bash', input, result }, ctx);
@@ -93,8 +101,8 @@ export function buildIsolatedBashTool(
         cwd,
         cmd: command,
         exitCode: result.exitCode,
-        stdout: result.stdout,
-        stderr: result.stderr,
+        stdout: truncateToolOutput(result.stdout, { direction: 'tail' }).content,
+        stderr: truncateToolOutput(result.stderr, { direction: 'tail' }).content,
       };
     },
   };
