@@ -82,13 +82,15 @@ export interface LegacyCredentialDecryptor {
  * One-time migration of a legacy (pre-version, externally-encrypted)
  * credentials.json to the shared v1 plaintext-0600 shape, in place.
  *
- * Runs under the SAME cross-process lock as the live store and re-reads inside
- * it, so a racing process that already migrated (and a live writer that added a
- * newer secret) is never clobbered by a stale snapshot. Idempotent: a no-op
- * when the file is missing or already v1. Fails closed: an unexpected version,
- * a malformed `values`, or a decryptor that is unavailable while there are
- * values to decrypt throws and leaves the file untouched rather than risk
- * tombstoning unrecoverable secrets.
+ * Idempotent: a no-op when the file is missing or already v1. Missing and
+ * current-v1 files return before locking so stale legacy locks do not block
+ * startup. The legacy migration path still runs under the SAME cross-process
+ * lock as the live store and re-reads inside it, so a racing process that
+ * already migrated (and a live writer that added a newer secret) is never
+ * clobbered by a stale snapshot. Fails closed: an unexpected version, a
+ * malformed `values`, or a decryptor that is unavailable while there are values
+ * to decrypt throws and leaves the file untouched rather than risk tombstoning
+ * unrecoverable secrets.
  *
  * Tombstone, not dual-active: a successful run rewrites every value as
  * plaintext, so no decryptable copy survives.
@@ -97,6 +99,21 @@ export async function migrateLegacyCredentialFile(
   path: string,
   decryptor: LegacyCredentialDecryptor,
 ): Promise<void> {
+  let snapshot: string;
+  try {
+    snapshot = await readFile(path, 'utf8');
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') return; // nothing to migrate
+    throw error;
+  }
+
+  try {
+    const parsed = JSON.parse(snapshot) as { version?: number };
+    if (parsed.version === CREDENTIAL_SCHEMA_VERSION) return; // already migrated; do not wait on stale legacy locks
+  } catch {
+    // Preserve the fail-closed lock path below for malformed files.
+  }
+
   await withCredentialFileLock(path, async () => {
     let raw: string;
     try {
