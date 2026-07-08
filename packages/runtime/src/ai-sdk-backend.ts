@@ -537,6 +537,12 @@ export class AiSdkBackend implements AgentBackend {
   private currentWatchdog: StreamWatchdog | null = null;
   private currentRunTrace: RunTrace | null = null;
   private priorRequestShape: RequestShapeDiagnostic | undefined;
+  /**
+   * Id of the assistant step currently streaming. Read by ToolRuntime via
+   * `getCurrentStepId` so each tool call's `tool_start` carries the step it
+   * belongs to. Rotated at every step boundary in `send()`; null between turns.
+   */
+  private currentStepMessageId: string | null = null;
 
   constructor(input: AiSdkBackendInput) {
     this.input = input;
@@ -570,6 +576,7 @@ export class AiSdkBackend implements AgentBackend {
       now: this.now,
       getPermissionPauseTarget: () => this.currentWatchdog,
       getCurrentRunId: () => this.currentRunId ?? undefined,
+      getCurrentStepId: () => this.currentStepMessageId ?? undefined,
       spawnChildAgent: input.spawnChildAgent,
       listChildAgents: input.listChildAgents,
       readChildAgentOutput: input.readChildAgentOutput,
@@ -677,11 +684,74 @@ export class AiSdkBackend implements AgentBackend {
     const queue = new AsyncEventQueue<SessionEvent>();
     this.currentQueue = queue;
 
-    const assistantMessageId = this.newId();
-    let assistantText = '';
-    let thinkingText = '';
-    let thinkingSignature: string | undefined;
+    // One AssistantMessage is flushed per AI SDK step (not per turn), so the
+    // ledger records the text↔tool timeline at step granularity and each step's
+    // Anthropic thinking signature stays paired with its own thinking text. The
+    // turn's first step reuses this id; every later step rotates to a fresh one
+    // at its step boundary (see the fullStream loop below).
+    this.currentStepMessageId = this.newId();
+    let stepText = '';
+    let stepThinking = '';
+    let stepSignature: string | undefined;
+    // Whether any step flushed non-empty text this turn — drives the step-cap
+    // grace notice below (a turn whose every step was tool-only gets the notice).
+    let turnHadAnyText = false;
     const startedAt = this.now();
+
+    // Flush the current step's AssistantMessage (text + thinking) and the paired
+    // terminal thinking/text events, then clear the per-step accumulators.
+    // Persist when the step produced text OR reasoning — a thinking-only step
+    // (Anthropic's signed/omitted reasoning has empty text) still round-trips its
+    // signed block; a pure-tool step (no text, no thinking) writes nothing, so
+    // tool-only steps leave no placeholder assistant row. thinking_complete
+    // precedes text_complete so the read-model attaches this step's reasoning to
+    // this step's assistant row. Hoisted to send() scope so both the streaming
+    // path and the abort/error handler can flush a partial step.
+    const flushStep = async (): Promise<void> => {
+      const hasThinking = stepThinking.length > 0 || stepSignature !== undefined;
+      if (stepText.length === 0 && !hasThinking) return;
+      const stepId = this.currentStepMessageId ?? this.newId();
+      const msg: AssistantMessage = {
+        type: 'assistant',
+        id: stepId,
+        turnId,
+        ts: this.now(),
+        text: stepText,
+        modelId: this.input.modelId,
+        ...(hasThinking
+          ? {
+              thinking: {
+                text: stepThinking,
+                ...(stepSignature !== undefined ? { signature: stepSignature } : {}),
+              },
+            }
+          : {}),
+      };
+      await this.input.appendMessage(msg);
+      if (hasThinking) {
+        queue.push({
+          type: 'thinking_complete',
+          id: this.newId(),
+          turnId,
+          ts: this.now(),
+          messageId: stepId,
+          text: stepThinking,
+          ...(stepSignature !== undefined ? { signature: stepSignature } : {}),
+        } satisfies ThinkingCompleteEvent);
+      }
+      queue.push({
+        type: 'text_complete',
+        id: this.newId(),
+        turnId,
+        ts: this.now(),
+        messageId: stepId,
+        text: stepText,
+      } satisfies TextCompleteEvent);
+      if (stepText.length > 0) turnHadAnyText = true;
+      stepText = '';
+      stepThinking = '';
+      stepSignature = undefined;
+    };
     let tokenUsage: NormalizedAiSdkUsage | undefined;
     let tokenUsageCostUsd: number | undefined;
     let streamStatus: LlmCallRecord['status'] = 'success';
@@ -936,18 +1006,35 @@ export class AiSdkBackend implements AgentBackend {
         for await (const chunk of result.fullStream) {
           if (this.aborted) break;
           watchdog.markActivity();
-          if (chunk.type === 'step-finish') {
+          // Step boundary, version-tolerant: AI SDK v6 delimits steps with
+          // `start-step` / `finish-step`, older releases said `step-finish`.
+          // Missing the boundary would silently degrade back to one message per
+          // turn, so match both names. A duplicate boundary is harmless: the
+          // second flush no-ops (accumulators already cleared) and one extra id
+          // rotation just discards an unused id.
+          const isStepFinishChunk = chunk.type === 'finish-step' || chunk.type === 'step-finish';
+          if (isStepFinishChunk) {
             runtimeSteps += 1;
           }
-          if (chunk.type === 'finish' || chunk.type === 'step-finish') {
+          if (chunk.type === 'finish' || isStepFinishChunk) {
             rawFinishReason = rawFinishReasonString(chunk.finishReason) ?? rawFinishReason;
           }
-          this.modelAdapter.handleStreamChunk(chunk, turnId, assistantMessageId, queue, {
-            onText: (t) => { assistantText += t; },
-            onTextComplete: (t) => { assistantText = t; },
-            onThinking: (t) => { thinkingText += t; },
-            onThinkingSignature: (sig) => { thinkingSignature = sig; },
+          this.modelAdapter.handleStreamChunk(chunk, turnId, this.currentStepMessageId!, queue, {
+            onText: (t) => { stepText += t; },
+            onTextComplete: (t) => { stepText = t; },
+            onThinking: (t) => { stepThinking += t; },
+            onThinkingSignature: (sig) => { stepSignature = sig; },
           });
+          // The step's text/thinking deltas are all in (the fullStream is
+          // drained in order), so flush this step's AssistantMessage and rotate
+          // to a fresh id for the next step. The step's tool calls (appended
+          // mid-step via execute()) already carry the pre-rotation id via
+          // `getCurrentStepId`, so replay can regroup them with this step's
+          // reasoning even though they land before this row in the ledger.
+          if (isStepFinishChunk) {
+            await flushStep();
+            this.currentStepMessageId = this.newId();
+          }
         }
 
         // If the stream loop exited because stop() flipped this.aborted while a
@@ -957,6 +1044,10 @@ export class AiSdkBackend implements AgentBackend {
         if (this.aborted) {
           throw Object.assign(new Error('aborted'), { name: 'AbortError' });
         }
+
+        // Catch-all: flush any residual step content if the provider closed the
+        // stream without a trailing `finish-step` for the last step.
+        await flushStep();
 
         // Same-turn deferred load: prepareStep expanded the provider tool set on
         // later steps, so refine the durable cost record + prefix baseline against
@@ -982,74 +1073,42 @@ export class AiSdkBackend implements AgentBackend {
         if (finishReasonForGrace === 'tool-calls' && runtimeSteps < this.maxSteps) {
           runtimeSteps = this.maxSteps;
         }
+        // Step-cap grace notice: when the loop tripped `stepCountIs(maxSteps)`
+        // mid-tool-loop and no step ever produced closing text, append a final
+        // assistant message (its own step id) so the UI has a closing line and
+        // the user can send "继续" for a fresh turn.
         if (
           !this.aborted
-          && assistantText.length === 0
+          && !turnHadAnyText
           && finishReasonForGrace === 'tool-calls'
         ) {
-          assistantText =
+          // Always a fresh id. When the stream closed without a trailing
+          // finish-step, `currentStepMessageId` is already taken: the catch-all
+          // flush just used it for a thinking-only last step's AssistantMessage
+          // (reuse would duplicate a ledger id), and a pure-tool last step's
+          // tool_starts carry it as stepId (replay would adopt the grace text
+          // as that step's closer). A rotated-but-unused id is discardable.
+          const graceId = this.newId();
+          const graceText =
             `⚠️ 已达到本轮 ${this.maxSteps} 步工具调用上限。\n\n`
             + '上一步工具调用已落盘；如果还需要继续，请发一条新消息让对话进入下一回合（可以直接输入「继续」）。';
-        }
-
-        // Persist the assistant turn if it produced text OR reasoning. A turn
-        // that ends with only thinking (no final text) must still persist its
-        // reasoning; gating solely on text would drop it. The AssistantMessage
-        // carries an empty `text` in that case, and we still emit text_complete
-        // (empty) so the RuntimeEvent read-model has a same-turn assistant row
-        // to attach the thinking to — otherwise projectThinking has nothing to
-        // hang the reasoning on and discards it.
-        //
-        // A signature is thinking even with no text: Anthropic's omitted /
-        // redacted thinking returns a signed reasoning block whose text is
-        // empty. Dropping it would lose the signed block for provider-native
-        // replay (reasoning continuity). Persist `text: ''` + signature so the
-        // block round-trips faithfully; the render layer is responsible for not
-        // surfacing an empty thinking entry.
-        const hasThinking = thinkingText.length > 0 || thinkingSignature !== undefined;
-        if (assistantText.length > 0 || hasThinking) {
-          const msg: AssistantMessage = {
+          await this.input.appendMessage({
             type: 'assistant',
-            id: assistantMessageId,
+            id: graceId,
             turnId,
             ts: this.now(),
-            text: assistantText,
+            text: graceText,
             modelId: this.input.modelId,
-            ...(hasThinking
-              ? {
-                  thinking: {
-                    text: thinkingText,
-                    ...(thinkingSignature !== undefined ? { signature: thinkingSignature } : {}),
-                  },
-                }
-              : {}),
-          };
-          await this.input.appendMessage(msg);
-          // Emit the terminal thinking event before text_complete so the
-          // RuntimeEvent stream carries a non-partial `thinking` message. Only
-          // partial `thinking_delta`s were emitted during streaming, so without
-          // this the read-model projection (and materialized session) drops all
-          // reasoning. The read-model attaches this to the same-turn assistant
-          // text row emitted just below.
-          if (hasThinking) {
-            queue.push({
-              type: 'thinking_complete',
-              id: this.newId(),
-              turnId,
-              ts: this.now(),
-              messageId: assistantMessageId,
-              text: thinkingText,
-              ...(thinkingSignature !== undefined ? { signature: thinkingSignature } : {}),
-            } satisfies ThinkingCompleteEvent);
-          }
+          });
           queue.push({
             type: 'text_complete',
             id: this.newId(),
             turnId,
             ts: this.now(),
-            messageId: assistantMessageId,
-            text: assistantText,
+            messageId: graceId,
+            text: graceText,
           } satisfies TextCompleteEvent);
+          turnHadAnyText = true;
         }
 
         // Final usage event. AI SDK `usage` is the last step only; `totalUsage`
@@ -1161,6 +1220,12 @@ export class AiSdkBackend implements AgentBackend {
       } catch (err) {
         streamStatus = this.aborted ? 'aborted' : 'error';
         streamErrorClass = this.modelAdapter.classifyError(watchdogTimeoutError ?? err);
+        // Flush the in-flight step's partial text/thinking before the terminal
+        // abort/error events. Earlier steps already flushed at their
+        // `finish-step`; this keeps their and this step's streamed-out output on
+        // BOTH exits — user stop and provider error / watchdog timeout — so
+        // partialOutputRetained reflects what the user actually saw.
+        await flushStep().catch(() => {});
         if (this.aborted) {
           queue.push({
             type: 'abort',
@@ -2168,27 +2233,48 @@ export class AiSdkBackend implements AgentBackend {
     return true;
   }
 
+  /**
+   * Materialize a replay plan into provider messages, grouping each assistant
+   * step's reasoning + text + tool calls into ONE assistant message (Anthropic
+   * requires the signed thinking block to lead the tool-use assistant message).
+   *
+   * The ledger lands a step's parts as: tool_call(s), tool_result(s), thinking,
+   * text (the per-step AssistantMessage flushes at `finish-step`, after the
+   * step's tool events). Model text carries the step id and closes the step: it
+   * emits `[reasoning, text, tool-call…]` then the tool results. Steps with no
+   * text closer — a thinking + tool step (its empty text closer is skipped from
+   * the plan as `empty_text_skipped`) or a pure-tool step — flush grouped by
+   * stepId, claiming any parked reasoning for that step. Legacy per-turn items
+   * (no step id) keep the older shape: tool calls form a tool-only assistant,
+   * text/thinking become standalone messages.
+   */
   private async materializeRuntimeReplayPlan(plan: RuntimeEventModelReplayPlan): Promise<ModelMessage[]> {
+    type ToolCallItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_call' }>;
+    type ToolResultItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_result' }>;
+    type ThinkingItem = Extract<RuntimeEventModelReplayItem, { kind: 'thinking' }>;
     const out: ModelMessage[] = [];
-    let toolBlock: {
-      calls: Extract<RuntimeEventModelReplayItem, { kind: 'tool_call' }>[];
-      results: Map<string, Extract<RuntimeEventModelReplayItem, { kind: 'tool_result' }>>;
-      pending: Set<string>;
-    } | undefined;
-    const flushToolBlock = () => {
-      if (!toolBlock) return;
-      out.push({
-        role: 'assistant',
-        content: toolBlock.calls.map((item) => ({
-          type: 'tool-call',
-          toolCallId: item.toolCallId,
-          toolName: item.toolName,
-          input: item.input,
-        })),
-      });
-      for (const call of toolBlock.calls) {
-        const result = toolBlock.results.get(call.toolCallId);
+    let bufferedCalls: ToolCallItem[] = [];
+    const results = new Map<string, ToolResultItem>();
+    const reasoningByStep = new Map<string, ThinkingItem>();
+
+    const reasoningPart = (item: ThinkingItem) => ({
+      type: 'reasoning' as const,
+      text: item.text,
+      providerOptions: { anthropic: { signature: item.signature } },
+    });
+    // Tool results are emitted only when their tool_call claims them here. A
+    // result whose call never appears in the plan (sliced-away call, corrupt
+    // ledger) is INTENTIONALLY dropped at the end: a standalone tool message
+    // with no preceding tool_use in an assistant message is an Anthropic 400.
+    // The old item-by-item materializer emitted such orphans; do not "fix" this
+    // back — the plan flags them as `unmatched_tool_result` (a non-blocking
+    // diagnostic precisely so this drop path is reachable; see
+    // hasBlockingReplayDiagnostics).
+    const pushToolResults = (calls: readonly ToolCallItem[]) => {
+      for (const call of calls) {
+        const result = results.get(call.toolCallId);
         if (!result) continue;
+        results.delete(call.toolCallId);
         out.push({
           role: 'tool',
           content: [{
@@ -2199,26 +2285,95 @@ export class AiSdkBackend implements AgentBackend {
           }],
         });
       }
-      toolBlock = undefined;
+    };
+    // Emit one assistant message for a step: reasoning (if any), text (if any),
+    // then the step's tool calls, followed by those calls' tool results.
+    const emitStep = (reasoning: ThinkingItem | undefined, text: string, calls: readonly ToolCallItem[]) => {
+      const content: unknown[] = [];
+      if (reasoning) content.push(reasoningPart(reasoning));
+      if (text.length > 0) content.push({ type: 'text', text });
+      for (const call of calls) {
+        content.push({ type: 'tool-call', toolCallId: call.toolCallId, toolName: call.toolName, input: call.input });
+      }
+      if (content.length > 0) out.push({ role: 'assistant', content } as ModelMessage);
+      pushToolResults(calls);
+    };
+    // Emit tool calls no assistant text closed: a thinking + tool step with no
+    // text (its empty closer is skipped from the plan), a pure-tool step, or a
+    // legacy per-turn tool block. Group consecutive calls by stepId so each step
+    // stays one assistant message, and claim the step's parked reasoning by
+    // stepId — this is how the common Anthropic interleaved-thinking step shape
+    // (reasoning + tool call, no text) gets its reasoning merged ahead of its
+    // calls. Calls without a stepId group together (legacy shape, no reasoning).
+    const emitGroupedCalls = (calls: readonly ToolCallItem[]) => {
+      let group: ToolCallItem[] = [];
+      const emitGroup = () => {
+        if (group.length === 0) return;
+        const stepId = group[0]!.stepId;
+        const reasoning = stepId !== undefined ? reasoningByStep.get(stepId) : undefined;
+        if (stepId !== undefined) reasoningByStep.delete(stepId);
+        emitStep(reasoning, '', group);
+        group = [];
+      };
+      for (const call of calls) {
+        if (group.length > 0 && group[0]!.stepId !== call.stepId) emitGroup();
+        group.push(call);
+      }
+      emitGroup();
+    };
+    const flushLooseCalls = () => {
+      if (bufferedCalls.length === 0) return;
+      const calls = bufferedCalls;
+      bufferedCalls = [];
+      emitGroupedCalls(calls);
     };
 
     for (const item of plan.items) {
-      if (item.kind === 'tool_call') {
-        toolBlock ??= { calls: [], results: new Map(), pending: new Set() };
-        toolBlock.calls.push(item);
-        toolBlock.pending.add(item.toolCallId);
-        continue;
+      switch (item.kind) {
+        case 'tool_call':
+          bufferedCalls.push(item);
+          break;
+        case 'tool_result':
+          results.set(item.toolCallId, item);
+          break;
+        case 'thinking':
+          if (item.stepId !== undefined) {
+            reasoningByStep.set(item.stepId, item);
+          } else {
+            // Legacy standalone reasoning (pure-reasoning turn): emit on its own.
+            flushLooseCalls();
+            out.push({ role: 'assistant', content: [reasoningPart(item)] } as ModelMessage);
+          }
+          break;
+        case 'text':
+          if (item.role !== 'assistant') {
+            flushLooseCalls();
+            out.push(await this.materializeRuntimeReplayItem(item));
+            break;
+          }
+          if (item.stepId !== undefined) {
+            const stepId = item.stepId;
+            const thisCalls = bufferedCalls.filter((call) => call.stepId === stepId);
+            const otherCalls = bufferedCalls.filter((call) => call.stepId !== stepId);
+            bufferedCalls = [];
+            // Earlier steps' unclosed calls flush first (with their own parked
+            // reasoning, if any) so step order is preserved.
+            if (otherCalls.length > 0) emitGroupedCalls(otherCalls);
+            emitStep(reasoningByStep.get(stepId), item.content, thisCalls);
+            reasoningByStep.delete(stepId);
+          } else {
+            // Legacy per-turn assistant text: standalone after any tool block.
+            flushLooseCalls();
+            out.push({ role: 'assistant', content: item.content });
+          }
+          break;
       }
-      if (item.kind === 'tool_result' && toolBlock?.pending.has(item.toolCallId)) {
-        toolBlock.results.set(item.toolCallId, item);
-        toolBlock.pending.delete(item.toolCallId);
-        if (toolBlock.pending.size === 0) flushToolBlock();
-        continue;
-      }
-      flushToolBlock();
-      out.push(await this.materializeRuntimeReplayItem(item));
     }
-    flushToolBlock();
+    flushLooseCalls();
+    // Any reasoning whose closing text never arrived (defensive): emit standalone.
+    for (const reasoning of reasoningByStep.values()) {
+      out.push({ role: 'assistant', content: [reasoningPart(reasoning)] } as ModelMessage);
+    }
     return out;
   }
 
@@ -2359,6 +2514,7 @@ export class AiSdkBackend implements AgentBackend {
     this.currentTurnId = null;
     this.currentRunId = null;
     this.currentRunTrace = null;
+    this.currentStepMessageId = null;
     this.toolRuntime.resetTurnState();
     this.aborted = false;
   }
@@ -2423,10 +2579,13 @@ function stableStringifyForSignature(value: unknown): string {
 }
 
 function hasBlockingReplayDiagnostics(plan: RuntimeEventModelReplayPlan): boolean {
+  // `unmatched_tool_result` is deliberately NOT blocking: the materializer
+  // drops an orphan tool result (its call sliced away or the ledger corrupt)
+  // on its own — see pushToolResults — so one orphan must not degrade the
+  // whole ledger to stored-message projection.
   return plan.diagnostics.some((diagnostic) =>
     diagnostic.code === 'unsupported_role' ||
     diagnostic.code === 'unsupported_content' ||
-    diagnostic.code === 'unmatched_tool_result' ||
     diagnostic.code === 'tool_id_mismatch'
   );
 }

@@ -2053,6 +2053,62 @@ describe('AiSdkBackend model history', () => {
     );
   });
 
+  test('provider error mid-step still persists the streamed partial text (partialOutputRetained)', async () => {
+    // Codex P1: the non-abort error exit (provider failure / watchdog timeout)
+    // must flush the in-flight step's partial accumulators just like the abort
+    // exit does — the user already saw the streamed text, so it belongs in the
+    // ledger. The gate releases only after the backend has emitted the partial
+    // text_delta, so consumption-before-error is deterministic.
+    const gate = makeGate();
+    const model = new MockLanguageModelV3({
+      doStream: {
+        stream: new ReadableStream<LanguageModelV3StreamPart>({
+          async start(controller) {
+            controller.enqueue({ type: 'stream-start', warnings: [] });
+            controller.enqueue({ type: 'text-start', id: 'text-1' });
+            controller.enqueue({ type: 'text-delta', id: 'text-1', delta: 'partial answer' });
+            await gate.promise;
+            controller.error(new Error('provider exploded mid-step'));
+          },
+        }),
+      },
+    });
+    const assistants: AssistantMessage[] = [];
+    const backend = new AiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async (message) => {
+        if (message.type === 'assistant') assistants.push(message);
+      },
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      permissionEngine: new PermissionEngine({ newId: () => 'permission-id', now: () => 1 }),
+      modelFactory: () => model,
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    const events: SessionEvent[] = [];
+    for await (const event of backend.send({ turnId: 'turn-1', text: 'hi', context: [] })) {
+      events.push(event);
+      if (event.type === 'text_delta' && event.text === 'partial answer') gate.release();
+    }
+
+    // The streamed partial persists as this step's AssistantMessage.
+    assert.equal(assistants.length, 1);
+    assert.equal(assistants[0]!.text, 'partial answer');
+    // And the turn still closes as an error, not a false success.
+    assert.equal(events.some((event) => event.type === 'error'), true);
+    const completes = events.filter((event) => event.type === 'complete');
+    assert.equal(completes.length > 0, true);
+    assert.equal(
+      completes.every((event) => (event as { stopReason?: string }).stopReason === 'error'),
+      true,
+    );
+  });
+
   test('writes host history compact block and replays the host summary in the same request', async () => {
     const model = completionModel();
     const events: SessionEvent[] = [];
@@ -2456,7 +2512,11 @@ describe('AiSdkBackend model history', () => {
     assert.equal(prompt.includes('large fold source fact 0'), false);
   });
 
-  test('uses StoredMessage projection when RuntimeEvent tool results are unmatched', async () => {
+  test('keeps RuntimeEvent replay when a tool result is unmatched (orphan dropped, rest replayed)', async () => {
+    // `unmatched_tool_result` is a non-blocking diagnostic: the materializer
+    // drops the orphan itself (a standalone tool message is an Anthropic 400),
+    // so the ledger stays on RuntimeEvent replay instead of falling back to
+    // StoredMessage projection.
     const model = completionModel();
     const backend = new AiSdkBackend({
       sessionId: 'session-1',
@@ -2491,9 +2551,9 @@ describe('AiSdkBackend model history', () => {
       ],
     }));
 
+    // RuntimeEvent replay (not the StoredMessage projection), orphan gone.
     assert.deepEqual(compactPrompt(model), [
-      { role: 'user', content: [{ type: 'text', text: 'projection user' }] },
-      { role: 'assistant', content: [{ type: 'text', text: 'projection assistant' }] },
+      { role: 'user', content: [{ type: 'text', text: 'runtime user' }] },
       { role: 'user', content: [{ type: 'text', text: 'current user' }] },
     ]);
   });
@@ -5691,14 +5751,168 @@ describe('AiSdkBackend thinking persistence', () => {
     assert.match(prompt, /sig-replay/);
   });
 
-  test('signed thinking from a tool-calling turn is NOT replayed as a stray reasoning block', async () => {
-    // Reproduce the ledger a signed Anthropic tool turn produces. The backend
-    // accumulates the turn's reasoning and emits ONE thinking_complete AFTER the
-    // tool events, so the ledger order is tool_start → tool_result →
-    // thinking_complete → text_complete. If that thinking re-entered
-    // provider-native replay it would materialize as an assistant reasoning
-    // message positioned AFTER the tool result — Anthropic 400. The replay must
-    // send the tool call/result but drop the thinking.
+  test('signed thinking from a per-step tool-calling turn IS replayed, merged with its tool call', async () => {
+    // Per-step ledger: the tool_start carries the step id (stepId === the
+    // step's message id 'm1'), so the step's signed reasoning + text + tool call
+    // regroup into ONE assistant message on replay (reasoning leads, then text,
+    // then the tool call, then the tool result) — the Anthropic-valid shape.
+    const ctx = {
+      sessionId: 'session-1',
+      invocationId: 'inv-1',
+      runId: 'run-prev',
+      turnId: 'turn-prev',
+      now: () => 7,
+      newId: idGenerator(),
+    } as unknown as InvocationContext;
+    const memory = createSessionEventMapMemory();
+    const priorEvents: SessionEvent[] = [
+      { type: 'tool_start', id: 'e1', turnId: 'turn-prev', ts: 1, toolUseId: 'tool-1', toolName: 'Read', args: { path: 'package.json' }, stepId: 'm1' },
+      { type: 'tool_result', id: 'e2', turnId: 'turn-prev', ts: 2, toolUseId: 'tool-1', isError: false, content: { kind: 'text', text: 'file contents' } },
+      { type: 'thinking_complete', id: 'e3', turnId: 'turn-prev', ts: 3, messageId: 'm1', text: 'reasoning about the tool result', signature: 'sig-tool' },
+      { type: 'text_complete', id: 'e4', turnId: 'turn-prev', ts: 4, messageId: 'm1', text: 'the answer' },
+    ];
+    const runtimeContext = priorEvents.map((event) => mapSessionEventToRuntimeEvent(event, ctx, memory));
+
+    const secondModel = completionModel();
+    const secondBackend = new AiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      permissionEngine: new PermissionEngine({ newId: () => 'permission-id', now: () => 1 }),
+      modelFactory: () => secondModel,
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drain(secondBackend.send({ turnId: 'turn-current', text: 'follow up', context: [], runtimeContext }));
+
+    const prompt = JSON.stringify(compactPrompt(secondModel));
+    // Reasoning (with signature), text, and the tool call all reach the request.
+    assert.match(prompt, /"type":"reasoning"/);
+    assert.match(prompt, /sig-tool/);
+    assert.match(prompt, /reasoning about the tool result/);
+    assert.match(prompt, /"toolName":"Read"|"toolCallId":"tool-1"/);
+    // Reasoning leads the tool call inside the assistant message (Anthropic order).
+    assert.ok(prompt.indexOf('reasoning about the tool result') < prompt.indexOf('tool-1'));
+  });
+
+  test('thinking-only tool step (no text) replays reasoning + tool call in one assistant message without an empty text block', async () => {
+    // Anthropic interleaved thinking's most common step shape: the step reasons,
+    // calls a tool, and produces NO closing text — the backend still flushes the
+    // step's AssistantMessage (text: '') so the signed block persists, and emits
+    // text_complete with empty text. On replay the step must merge into ONE
+    // assistant message [reasoning, tool-call] with NO empty text part between
+    // them (emitStep skips text.length === 0; an empty text block is provider
+    // noise and this locks that skip path).
+    const ctx = {
+      sessionId: 'session-1',
+      invocationId: 'inv-1',
+      runId: 'run-prev',
+      turnId: 'turn-prev',
+      now: () => 7,
+      newId: idGenerator(),
+    } as unknown as InvocationContext;
+    const memory = createSessionEventMapMemory();
+    const priorEvents: SessionEvent[] = [
+      { type: 'tool_start', id: 'e1', turnId: 'turn-prev', ts: 1, toolUseId: 'tool-1', toolName: 'Read', args: { path: 'package.json' }, stepId: 'm1' },
+      { type: 'tool_result', id: 'e2', turnId: 'turn-prev', ts: 2, toolUseId: 'tool-1', isError: false, content: { kind: 'text', text: 'file contents' } },
+      { type: 'thinking_complete', id: 'e3', turnId: 'turn-prev', ts: 3, messageId: 'm1', text: 'plan the read', signature: 'sig-interleaved' },
+      { type: 'text_complete', id: 'e4', turnId: 'turn-prev', ts: 4, messageId: 'm1', text: '' },
+    ];
+    const runtimeContext = priorEvents.map((event) => mapSessionEventToRuntimeEvent(event, ctx, memory));
+
+    const secondModel = completionModel();
+    const secondBackend = new AiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      permissionEngine: new PermissionEngine({ newId: () => 'permission-id', now: () => 1 }),
+      modelFactory: () => secondModel,
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drain(secondBackend.send({ turnId: 'turn-current', text: 'follow up', context: [], runtimeContext }));
+
+    const prompt = compactPrompt(secondModel) as Array<{ role: string; content: unknown }>;
+    const assistantMessages = prompt.filter((message) => message.role === 'assistant');
+    assert.equal(assistantMessages.length, 1, 'reasoning and tool call must merge into one assistant message');
+    const parts = assistantMessages[0]!.content as Array<{ type: string; text?: string }>;
+    // Reasoning leads the tool call; no text part at all (not even an empty one).
+    assert.deepEqual(parts.map((part) => part.type), ['reasoning', 'tool-call']);
+    assert.equal(parts[0]!.text, 'plan the read');
+    const promptJson = JSON.stringify(prompt);
+    assert.match(promptJson, /sig-interleaved/);
+    assert.match(promptJson, /"toolCallId":"tool-1"/);
+  });
+
+  test('an orphan tool_result does not degrade replay: dropped, while paired history replays provider-native', async () => {
+    // Codex P2: `unmatched_tool_result` must not be a blocking diagnostic — the
+    // materializer intentionally drops the orphan (a standalone tool message is
+    // an Anthropic 400), so one orphan must not push the whole ledger back to
+    // stored-message projection. Paired call/result and the step's signed
+    // reasoning must all still reach the provider request.
+    const ctx = {
+      sessionId: 'session-1',
+      invocationId: 'inv-1',
+      runId: 'run-prev',
+      turnId: 'turn-prev',
+      now: () => 7,
+      newId: idGenerator(),
+    } as unknown as InvocationContext;
+    const memory = createSessionEventMapMemory();
+    const priorEvents: SessionEvent[] = [
+      // Orphan: result with no prior tool_start (its call was sliced away).
+      { type: 'tool_result', id: 'e0', turnId: 'turn-prev', ts: 1, toolUseId: 'tool-orphan', isError: false, content: { kind: 'text', text: 'orphan payload' } },
+      // Paired per-step tool call + result + signed reasoning + text.
+      { type: 'tool_start', id: 'e1', turnId: 'turn-prev', ts: 2, toolUseId: 'tool-1', toolName: 'Read', args: { path: 'package.json' }, stepId: 'm1' },
+      { type: 'tool_result', id: 'e2', turnId: 'turn-prev', ts: 3, toolUseId: 'tool-1', isError: false, content: { kind: 'text', text: 'file contents' } },
+      { type: 'thinking_complete', id: 'e3', turnId: 'turn-prev', ts: 4, messageId: 'm1', text: 'plan the read', signature: 'sig-paired' },
+      { type: 'text_complete', id: 'e4', turnId: 'turn-prev', ts: 5, messageId: 'm1', text: 'the answer' },
+    ];
+    const runtimeContext = priorEvents.map((event) => mapSessionEventToRuntimeEvent(event, ctx, memory));
+
+    const secondModel = completionModel();
+    const secondBackend = new AiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      permissionEngine: new PermissionEngine({ newId: () => 'permission-id', now: () => 1 }),
+      modelFactory: () => secondModel,
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drain(secondBackend.send({ turnId: 'turn-current', text: 'follow up', context: [], runtimeContext }));
+
+    const prompt = compactPrompt(secondModel) as Array<{ role: string; content: unknown }>;
+    const promptJson = JSON.stringify(prompt);
+    // Provider-native replay happened: reasoning + signature + paired tool pair.
+    assert.match(promptJson, /"type":"reasoning"/);
+    assert.match(promptJson, /sig-paired/);
+    assert.match(promptJson, /"toolCallId":"tool-1"/);
+    assert.match(promptJson, /file contents/);
+    // The orphan result is dropped — no tool message for it anywhere.
+    assert.doesNotMatch(promptJson, /tool-orphan/);
+    assert.doesNotMatch(promptJson, /orphan payload/);
+  });
+
+  test('signed thinking from a legacy (unpaired) tool turn is NOT replayed as a stray reasoning block', async () => {
+    // Legacy per-turn ledger: the tool_start carries NO step id, so its
+    // end-of-turn reasoning cannot be paired to a tool-use assistant message and
+    // is still dropped from replay (no worse than before; avoids Anthropic 400).
     const ctx = {
       sessionId: 'session-1',
       invocationId: 'inv-1',
@@ -5833,6 +6047,162 @@ describe('AiSdkBackend thinking persistence', () => {
     const prompt = JSON.stringify(compactPrompt(secondModel));
     assert.match(prompt, /"type":"reasoning"/);
     assert.match(prompt, /sig-omitted/);
+  });
+
+  test('grace notice never reuses a taken step id when the stream ends without a trailing finish-step', async () => {
+    // ChatGPT P2: on the catch-all path (no trailing finish-step) the last
+    // step's id is already taken — by the thinking-only AssistantMessage the
+    // catch-all flush just wrote, and by the tool step's tool_start.stepId. The
+    // grace notice must mint its own id or the ledger gets a duplicate message
+    // id / replay adopts the grace text as the tool step's closer.
+    //
+    // streamText always synthesizes trailing step boundaries, so drive the
+    // backend through a patched startStream: step 1 runs a real tool via the
+    // wrapped execute (genuine tool_start.stepId), step 2 is thinking-only and
+    // the stream ends abruptly with no finish-step / finish.
+    const appended: StoredMessage[] = [];
+    const events: SessionEvent[] = [];
+    const backend = new AiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async (message) => { appended.push(message); },
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      permissionEngine: new PermissionEngine({ newId: () => 'permission-id', now: () => 1 }),
+      modelFactory: () => completionModel(),
+      tools: [testTool('Read', z.object({ path: z.string() }))],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    type FakeStreamInput = {
+      tools: Record<string, { execute: (args: unknown, ctx: { toolCallId: string; abortSignal: AbortSignal }) => Promise<unknown> }>;
+      abortSignal: AbortSignal;
+    };
+    (backend as unknown as {
+      modelAdapter: { startStream: (input: FakeStreamInput) => Promise<unknown> };
+    }).modelAdapter.startStream = async (input: FakeStreamInput) => ({
+      fullStream: (async function* () {
+        // Step 1 (pure tool): execute mid-step, then close the step.
+        await input.tools['Read']!.execute({ path: 'a.md' }, { toolCallId: 'tool-1', abortSignal: input.abortSignal });
+        yield { type: 'finish-step', finishReason: { unified: 'tool-calls', raw: 'tool_calls' } };
+        // Step 2 (thinking-only): signed reasoning, then the stream ends with
+        // NO trailing finish-step and NO finish chunk.
+        yield { type: 'reasoning-delta', delta: 'final thoughts' };
+        yield { type: 'reasoning-delta', delta: '', providerMetadata: { anthropic: { signature: 'sig-last' } } };
+      })(),
+      usage: Promise.resolve(undefined),
+      totalUsage: Promise.resolve(undefined),
+      finishReason: Promise.resolve('tool-calls'),
+    });
+
+    for await (const event of backend.send({ turnId: 'turn-1', text: 'hi', context: [] })) {
+      events.push(event);
+    }
+
+    const assistants = appended.filter((m): m is AssistantMessage => m.type === 'assistant');
+    // Catch-all flush persisted the thinking-only step; grace added its own row.
+    assert.equal(assistants.length, 2);
+    const thinkingOnly = assistants.find((m) => m.thinking?.signature === 'sig-last');
+    const grace = assistants.find((m) => m.text.includes('步工具调用上限'));
+    assert.ok(thinkingOnly, 'thinking-only last step must persist');
+    assert.ok(grace, 'grace notice must persist');
+    // The grace id collides with nothing: not the last step's assistant row...
+    assert.notEqual(grace.id, thinkingOnly.id);
+    // ...and not any tool step's stepId.
+    const toolStepIds = events
+      .filter((event): event is Extract<SessionEvent, { type: 'tool_start' }> => event.type === 'tool_start')
+      .map((event) => event.stepId);
+    assert.equal(toolStepIds.length, 1);
+    assert.equal(toolStepIds.includes(grace.id), false);
+    // No duplicate message ids anywhere in the ledger.
+    const ids = appended.map((m) => (m as { id: string }).id);
+    assert.equal(new Set(ids).size, ids.length, `duplicate ledger ids: ${ids.join(', ')}`);
+  });
+
+  test('flushes one AssistantMessage per step, each with its own thinking + signature, and stamps tool_start.stepId', async () => {
+    // Two-step tool turn: step 1 reasons + calls a tool; step 2 reasons + answers.
+    // Each step must persist its own AssistantMessage with its own signature, and
+    // the step-1 tool_start must carry the step-1 assistant id.
+    let streamCalls = 0;
+    const model = new MockLanguageModelV3({
+      doStream: async () => {
+        streamCalls += 1;
+        const chunks: LanguageModelV3StreamPart[] = streamCalls === 1
+          ? [
+              { type: 'stream-start', warnings: [] },
+              { type: 'reasoning-start', id: 'r1' },
+              { type: 'reasoning-delta', id: 'r1', delta: 'think one' },
+              { type: 'reasoning-delta', id: 'r1', delta: '', providerMetadata: { anthropic: { signature: 'sig-step-1' } } },
+              { type: 'reasoning-end', id: 'r1' },
+              { type: 'text-start', id: 't1' },
+              { type: 'text-delta', id: 't1', delta: 'calling the tool' },
+              { type: 'text-end', id: 't1' },
+              { type: 'tool-call', toolCallId: 'tool-1', toolName: 'Read', input: JSON.stringify({ path: 'a.md' }) },
+              { type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool_calls' }, usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } } },
+            ]
+          : [
+              { type: 'stream-start', warnings: [] },
+              { type: 'reasoning-start', id: 'r2' },
+              { type: 'reasoning-delta', id: 'r2', delta: 'think two' },
+              { type: 'reasoning-delta', id: 'r2', delta: '', providerMetadata: { anthropic: { signature: 'sig-step-2' } } },
+              { type: 'reasoning-end', id: 'r2' },
+              { type: 'text-start', id: 't2' },
+              { type: 'text-delta', id: 't2', delta: 'final answer' },
+              { type: 'text-end', id: 't2' },
+              { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } } },
+            ];
+        return {
+          stream: simulateReadableStream({ chunks, initialDelayInMs: null, chunkDelayInMs: null }),
+        };
+      },
+    });
+
+    const assistants: AssistantMessage[] = [];
+    const events: SessionEvent[] = [];
+    const backend = new AiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async (m) => { if (m.type === 'assistant') assistants.push(m); },
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      permissionEngine: new PermissionEngine({ newId: () => 'permission-id', now: () => 1 }),
+      modelFactory: () => model,
+      tools: [testTool('Read', z.object({ path: z.string() }))],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    for await (const event of backend.send({ turnId: 'turn-1', text: 'hi', context: [] })) {
+      events.push(event);
+    }
+
+    // Two assistant rows with distinct ids and correctly paired signatures.
+    assert.equal(assistants.length, 2);
+    assert.equal(assistants[0]!.text, 'calling the tool');
+    assert.equal(assistants[0]!.thinking?.text, 'think one');
+    assert.equal(assistants[0]!.thinking?.signature, 'sig-step-1');
+    assert.equal(assistants[1]!.text, 'final answer');
+    assert.equal(assistants[1]!.thinking?.text, 'think two');
+    assert.equal(assistants[1]!.thinking?.signature, 'sig-step-2');
+    assert.notEqual(assistants[0]!.id, assistants[1]!.id);
+
+    // The tool_start of step 1 carries the step-1 assistant id.
+    const toolStart = events.find(
+      (event): event is Extract<SessionEvent, { type: 'tool_start' }> => event.type === 'tool_start',
+    );
+    assert.ok(toolStart, 'expected a tool_start event');
+    assert.equal(toolStart.stepId, assistants[0]!.id);
+
+    // Each step emits its own thinking_complete/text_complete pointing at its row.
+    const textCompletes = events.filter(
+      (event): event is Extract<SessionEvent, { type: 'text_complete' }> => event.type === 'text_complete',
+    );
+    assert.deepEqual(
+      textCompletes.map((event) => [event.messageId, event.text]),
+      [[assistants[0]!.id, 'calling the tool'], [assistants[1]!.id, 'final answer']],
+    );
   });
 });
 
