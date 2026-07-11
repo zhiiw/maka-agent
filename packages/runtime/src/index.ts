@@ -325,6 +325,12 @@ export type {
   HistoryCompactArtifactStore,
   PersistHistoryCompactBlocksDeps,
 } from './history-compact-artifacts.js';
+export { cleanupLegacyHistoryCompactArtifacts } from './history-compact-cleanup.js';
+export type {
+  HistoryCompactCleanupDiagnostic,
+  HistoryCompactCleanupResult,
+  HistoryCompactCleanupSkip,
+} from './history-compact-cleanup.js';
 export { buildLlmHistorySummarizer } from './history-compact-summarizer.js';
 export type {
   BuildLlmHistorySummarizerOptions,
