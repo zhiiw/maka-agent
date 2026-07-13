@@ -1,8 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type {
   ChatDefaultPermissionMode,
-  ConnectionEvent,
-  LlmConnection,
   PermissionMode,
   PlanReminder,
   SessionSummary,
@@ -24,11 +22,8 @@ import {
   MakaUriContext,
   type NavSelection,
   SessionListPanel,
-  type BundledSkillCatalogEntry,
   SkillsPage,
-  type ManagedSkillSourceEntry,
   type SessionViewMode,
-  type SkillEntry,
   type TurnFooterActionMeta,
   useToast,
   activePermissionFor,
@@ -90,9 +85,8 @@ import type { AppShellCommandListOptions } from './app-shell-command-actions';
 import { AppShellTopbarActions, AppShellWorkspaceTopActions } from './app-shell-chrome-actions';
 import { AppShellOverlays } from './app-shell-overlays';
 import { createAppShellDailyReviewBridge } from './app-shell-daily-review-bridge';
-import { createAppShellPlanActions } from './app-shell-plan-actions';
-import { createAppShellProjectActions, type RendererAppInfo } from './app-shell-project-actions';
-import { createAppShellSkillActions } from './app-shell-skill-actions';
+import { useAppShellModuleData } from './use-module-data';
+import { useAppShellProjectContext } from './use-project-context';
 import { createAppShellSessionEventHandlers } from './app-shell-session-events';
 import { createAppShellVisualSmokeActions } from './app-shell-visual-smoke';
 import { createAppShellChatActions } from './app-shell-chat-actions';
@@ -114,16 +108,10 @@ import {
   useSettledSessionTransientReconcile,
 } from './app-shell-effects';
 import { loadComposerDefaults, saveComposerDefaults } from './composer-defaults';
+import { useKeyedPendingRegistry } from './use-pending-action-registry';
 import { useAppShellComposerAttachments } from './use-app-shell-composer-attachments';
 import { useAppShellSessionWorkspace } from './use-app-shell-session-workspace';
-
-function connectionsEqual(a: LlmConnection[], b: LlmConnection[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i].slug !== b[i].slug || a[i].updatedAt !== b[i].updatedAt) return false;
-  }
-  return true;
-}
+import { useShellConnections } from './use-shell-connections';
 
 type ComposerImportOwner = {
   sessionId: string | undefined;
@@ -212,8 +200,14 @@ export function AppShell({
   // whenever the Settings modal closes (the user may have toggled
   // the agentReadEnabled switch).
   const [memoryActive, setMemoryActive] = useState(false);
-  const [connections, setConnections] = useState<LlmConnection[]>([]);
-  const [defaultConnection, setDefaultConnection] = useState<string | null>(null);
+  const {
+    connections,
+    defaultConnection,
+    setConnections,
+    setDefaultConnection,
+    refreshConnections,
+    handleConnectionEvent,
+  } = useShellConnections({ toastApi });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsRequestedSection, setSettingsRequestedSection] = useState<SettingsSection | undefined>(undefined);
   const [themePref, setThemePref] = useState<ThemePreference>('auto');
@@ -226,10 +220,6 @@ export function AppShell({
   // so a stale value here can briefly mislabel the chip but never changes
   // which mode a session is created with.
   const [defaultPermissionMode, setDefaultPermissionMode] = useState<ChatDefaultPermissionMode>('ask');
-  const [skills, setSkills] = useState<SkillEntry[]>([]);
-  const [managedSkillSources, setManagedSkillSources] = useState<ManagedSkillSourceEntry[]>([]);
-  const [bundledSkillCatalog, setBundledSkillCatalog] = useState<BundledSkillCatalogEntry[]>([]);
-  const [planReminders, setPlanReminders] = useState<PlanReminder[]>([]);
   // Persisted composer defaults seed the empty-state model, project path, and
   // recent workspace history so the home view is populated before the async
   // `app:info` round-trip completes on mount.
@@ -237,17 +227,6 @@ export function AppShell({
   const [pendingNewChatModel, setPendingNewChatModel] = useState<{ llmConnectionSlug: string; model: string } | null>(
     persistedComposerDefaults?.model ?? null,
   );
-  const [appInfo, setAppInfo] = useState<RendererAppInfo | null>(
-    persistedComposerDefaults?.projectPath
-      ? { projectPath: persistedComposerDefaults.projectPath, projectGit: { isGitRepo: false } }
-      : null,
-  );
-  const [branchList, setBranchList] = useState<{ branches: string[]; current?: string } | null>(null);
-  const [branchPending, setBranchPending] = useState(false);
-  const [recentProjectPaths, setRecentProjectPaths] = useState<string[]>(
-    persistedComposerDefaults?.recentProjectPaths ?? [],
-  );
-  const [projectPickerPending, setProjectPickerPending] = useState(false);
   const [helpOpen, closeHelp, openHelp] = useKeyboardHelp();
   const [paletteOpen, openPalette, closePalette] = useCommandPalette();
   // Search modal state. Sidebar `搜索` opens the real thread-search
@@ -274,8 +253,6 @@ export function AppShell({
   }
   const composerRef = useRef<ComposerHandle>(null);
   const rendererMountedRef = useRef(true);
-  const projectPickerPendingRef = useRef(false);
-  const projectPickerRequestRef = useRef(0);
   // Active autonomous goal for the current session drives the header
   // kill-switch pill (visible indicator + one-click clear).
   const activeGoal = useSessionGoal(activeId);
@@ -492,36 +469,19 @@ export function AppShell({
   // mask. Per @kenji PR109d review: pending state prevents double-click
   // duplicate sibling turns by disabling the action button between
   // click and `sessions:changed turn-status-change` arriving.
-  const [pendingTurnActions, setPendingTurnActions] = useState<Set<string>>(() => new Set());
-  const pendingTurnActionsRef = useRef<Set<string>>(new Set());
-  const pendingTurnActionTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
-  const pendingSessionRowActionsRef = useRef<Set<string>>(new Set());
-  const pendingPermissionModeChangesRef = useRef<Set<string>>(new Set());
-  const pendingSessionModelChangesRef = useRef<Set<string>>(new Set());
+  // The four de-dup registries (turn-footer actions, session-row actions,
+  // per-session permission-mode / model changes) all share the same keyed-Set
+  // shape; see useKeyedPendingRegistry. Only the turn-footer registry mirrors
+  // into React state (drives the disabled mask) and arms a 5s auto-clear
+  // fallback timer; the other three stay ref-only and clear in their action's
+  // `finally`.
+  const turnActionRegistry = useKeyedPendingRegistry({ trackState: true, autoClearMs: 5000 });
+  const pendingTurnActions = turnActionRegistry.keys;
+  const sessionRowActionRegistry = useKeyedPendingRegistry();
+  const permissionModeChangeRegistry = useKeyedPendingRegistry();
+  const sessionModelChangeRegistry = useKeyedPendingRegistry();
   const pendingKeyOf = (sessionId: string, turnId: string, actionId: TurnFooterActionMeta['id']) =>
     `${sessionId}:${turnId}:${actionId}`;
-  function addPendingTurnAction(key: string): boolean {
-    if (pendingTurnActionsRef.current.has(key)) return false;
-    pendingTurnActionsRef.current.add(key);
-    setPendingTurnActions(new Set(pendingTurnActionsRef.current));
-    const timeoutHandle = setTimeout(() => clearPendingTurnAction(key), 5000);
-    pendingTurnActionTimersRef.current.set(key, timeoutHandle);
-    return true;
-  }
-  function clearPendingTurnAction(key: string): void {
-    if (!pendingTurnActionsRef.current.has(key)) return;
-    pendingTurnActionsRef.current.delete(key);
-    const timeoutHandle = pendingTurnActionTimersRef.current.get(key);
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-    pendingTurnActionTimersRef.current.delete(key);
-    setPendingTurnActions(new Set(pendingTurnActionsRef.current));
-  }
-  function clearPendingTurnActionsForSession(sessionId: string): void {
-    const prefix = `${sessionId}:`;
-    for (const key of Array.from(pendingTurnActionsRef.current)) {
-      if (key.startsWith(prefix)) clearPendingTurnAction(key);
-    }
-  }
   function omitSessionKey<T>(current: Record<string, T>, sessionId: string): Record<string, T> {
     if (!(sessionId in current)) return current;
     const next = { ...current };
@@ -552,15 +512,15 @@ export function AppShell({
 
   function clearSessionRendererState(sessionId: string): void {
     clearOwnedSessionState(sessionId);
-    clearPendingTurnActionsForSession(sessionId);
-    pendingPermissionModeChangesRef.current.delete(sessionId);
-    pendingSessionModelChangesRef.current.delete(sessionId);
+    turnActionRegistry.clearForSession(sessionId);
+    permissionModeChangeRegistry.keysRef.current.delete(sessionId);
+    sessionModelChangeRegistry.keysRef.current.delete(sessionId);
   }
 
   const sessionRowActionHandlers = createAppShellSessionRowActions({
     activeIdRef,
     clearSessionRendererState,
-    pendingSessionRowActionsRef,
+    pendingSessionRowActionsRef: sessionRowActionRegistry.keysRef,
     refreshSessions,
     sessionsRef,
     setActiveId,
@@ -587,8 +547,8 @@ export function AppShell({
   } = createAppShellSessionSettingsActions({
     activeIdRef,
     connections,
-    pendingPermissionModeChangesRef,
-    pendingSessionModelChangesRef,
+    pendingPermissionModeChangesRef: permissionModeChangeRegistry.keysRef,
+    pendingSessionModelChangesRef: sessionModelChangeRegistry.keysRef,
     refreshSessions,
     sessionsRef,
     setDefaultPermissionMode,
@@ -860,6 +820,10 @@ export function AppShell({
   }
 
   const {
+    skills,
+    managedSkillSources,
+    bundledSkillCatalog,
+    planReminders,
     refreshPlanReminders,
     createPlanReminder,
     updatePlanReminder,
@@ -868,36 +832,6 @@ export function AppShell({
     snoozePlanReminder,
     clearPlanReminderRunHistory,
     deletePlanReminder,
-  } = createAppShellPlanActions({
-    getPlanReminders: () => planReminders,
-    isAutomationsSurfaceActive,
-    setPlanReminders,
-    toastApi,
-  });
-
-  const {
-    refreshAppInfo,
-    selectProjectDirectory,
-    selectRecentProjectDirectory,
-    openProjectFolder,
-    openWorkspaceFolder,
-    openSkillsFolder,
-    listGitBranches,
-    checkoutGitBranch,
-  } = createAppShellProjectActions({
-    projectPickerPendingRef,
-    projectPickerRequestRef,
-    rendererMountedRef,
-    setAppInfo,
-    setProjectPickerPending,
-    setBranchPending,
-    setBranchList,
-    setRecentProjectPaths,
-    recentProjectPaths,
-    toastApi,
-  });
-
-  const {
     refreshSkills,
     refreshManagedSkillSources,
     refreshBundledSkillCatalog,
@@ -909,11 +843,31 @@ export function AppShell({
     updateManagedSkill,
     setSkillEnabled,
     openSkill,
-  } = createAppShellSkillActions({
+  } = useAppShellModuleData({
     isSkillsSurfaceActive,
-    setSkills,
-    setManagedSkillSources,
-    setBundledSkillCatalog,
+    isAutomationsSurfaceActive,
+    toastApi,
+  });
+
+  const {
+    appInfo,
+    branchList,
+    branchPending,
+    recentProjectPaths,
+    projectPickerPending,
+    projectPickerPendingRef,
+    projectPickerRequestRef,
+    refreshAppInfo,
+    selectProjectDirectory,
+    selectRecentProjectDirectory,
+    openProjectFolder,
+    openWorkspaceFolder,
+    openSkillsFolder,
+    listGitBranches,
+    checkoutGitBranch,
+  } = useAppShellProjectContext({
+    persistedComposerDefaults,
+    rendererMountedRef,
     toastApi,
   });
 
@@ -961,8 +915,8 @@ export function AppShell({
 
   const { handleTurnFooterAction } = createAppShellTurnActions({
     activeIdRef,
-    addPendingTurnAction,
-    clearPendingTurnAction,
+    addPendingTurnAction: turnActionRegistry.addKey,
+    clearPendingTurnAction: turnActionRegistry.clearKey,
     openSessionInChat,
     pendingKeyOf,
     refreshMessages,
@@ -1056,15 +1010,15 @@ export function AppShell({
     activeIdRef,
     applyVisualSmokeFixture,
     bootstrapSessions,
-    clearPendingTurnActionsForSession,
+    clearPendingTurnActionsForSession: turnActionRegistry.clearForSession,
     clearSessionRendererState,
     createSession,
     handleConnectionEvent,
     openSettings,
-    pendingPermissionModeChangesRef,
-    pendingSessionModelChangesRef,
-    pendingTurnActionTimersRef,
-    pendingTurnActionsRef,
+    pendingPermissionModeChangesRef: permissionModeChangeRegistry.keysRef,
+    pendingSessionModelChangesRef: sessionModelChangeRegistry.keysRef,
+    pendingTurnActionTimersRef: turnActionRegistry.timersRef,
+    pendingTurnActionsRef: turnActionRegistry.keysRef,
     projectPickerPendingRef,
     projectPickerRequestRef,
     refreshAppInfo,
@@ -1176,19 +1130,6 @@ export function AppShell({
     bootstrapSelectionLease.release();
   }
 
-  async function refreshConnections() {
-    try {
-      const [next, nextDefault] = await Promise.all([
-        window.maka.connections.list(),
-        window.maka.connections.getDefault(),
-      ]);
-      setConnections((prev) => connectionsEqual(prev, next) ? prev : next);
-      setDefaultConnection(nextDefault);
-    } catch (error) {
-      toastApi.error('刷新模型连接失败', generalizedErrorMessageChinese(error, '模型连接暂时无法刷新，请稍后重试。'));
-    }
-  }
-
   async function createSession() {
     startNewSession();
     setNavSelection({ section: 'sessions', filter: 'chats' });
@@ -1214,14 +1155,6 @@ export function AppShell({
       setMemoryActive(next.agentReadEnabled && next.status === 'ok' && next.content.trim().length > 0);
     } catch (error) {
       toastApi.error(failureTitle, generalizedErrorMessageChinese(error, '本地记忆状态暂时无法刷新，请稍后重试。'));
-    }
-  }
-
-  function handleConnectionEvent(event: ConnectionEvent) {
-    switch (event.type) {
-      case 'connection_list_changed':
-        void refreshConnections();
-        break;
     }
   }
 
