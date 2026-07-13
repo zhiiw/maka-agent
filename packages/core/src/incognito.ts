@@ -24,11 +24,8 @@ export interface WorkspacePrivacyContext {
    * the main process; renderers may read but cannot durably claim
    * incognito on their own. Defaults to `false` on a fresh workspace.
    *
-   * Current consumers block thread search, local-memory reads/writes,
-   * plan-reminder creation/triggering, automation trigger execution, user web
-   * search queries, and run-completion notifications while this is true.
-   * Explicit credential and permission self-tests remain user actions. New
-   * consumers must define their own fail-closed result at the main boundary.
+   * Each consumer defines its own fail-closed result at the main-process
+   * boundary. Main composition and focused consumer tests own the inventory.
    */
   incognitoActive: boolean;
 }
@@ -103,8 +100,7 @@ export function isWorkspacePrivacyContext(value: unknown): value is WorkspacePri
  * as untrusted; main / session / workspace owner is the only valid
  * write authority for the actual workspace state.
  *
- * @see docs/workspace-privacy-context.md "Consumer obligations" for
- *      the per-lane gate examples.
+ * @see docs/workspace-privacy-context.md "Consumer rule"
  */
 export function validateWorkspacePrivacyContext(input: unknown): WorkspacePrivacyContextResult {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) {

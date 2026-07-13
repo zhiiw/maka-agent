@@ -304,7 +304,7 @@ export function AppShell({
       }),
     [sessions, connections],
   );
-  // PR109b: status-grouped sidebar (design-system §9.8). The `chats`
+  // Status-grouped sidebar. The `chats`
   // filter shows sessions grouped by SessionStatus (Pinned →
   // Running → Waiting → Blocked → Active → Review → Done → Archived);
   // `aborted` is dropped. Pinned (flagged) sessions float to the top
@@ -1220,7 +1220,7 @@ export function AppShell({
    * No other cases exist today by design — the parser only emits
    * these two discriminants. If a new variant is added in `MakaUriDest`,
    * TypeScript's exhaustiveness check below trips and a new branch
-   * must be wired here (and in smoke.md Path 17).
+   * must be wired here with corresponding fixture and journey coverage.
    */
   function dispatchMakaUri(dest: MakaUriDest) {
     switch (dest.kind) {

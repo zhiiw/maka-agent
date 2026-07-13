@@ -29,7 +29,7 @@ Read [Maka Backend Architecture](./ARCHITECTURE.md) for the complete design.
 |---|---|---|
 | **Desktop** | Daily interaction, file and Artifact workflows, model and permission setup | Electron + React with streaming sessions, tool timelines, branching, search, and recovery |
 | **TUI / CLI** | Using Maka in the current project directory or running one non-interactive Turn | `maka`, `maka run`; shares workspace and model connections with Desktop |
-| **Headless** | Durable tasks, recoverable TaskRuns, experiments, and evaluation | `maka eval` / `maka-headless` with task logs, export, resume, and comparison |
+| **Headless** | Durable tasks, recoverable TaskRuns, experiments, and evaluation | `maka eval` with task logs, export, resume, and comparison |
 
 ## Current capabilities
 
@@ -161,11 +161,11 @@ Current boundaries that matter:
 
 - Sessions and connection metadata live in the local filesystem;
 - Runtime credentials such as API keys, bot tokens, and proxy passwords currently live in local plaintext `credentials.json`, behind the OS account boundary, with POSIX directory mode `0700` and file mode `0600` enforced;
-- Supported subscription OAuth tokens use Electron `safeStorage` and fail closed when it is unavailable;
+- Claude and Codex keep an Electron `safeStorage` desktop copy and also export a best-effort plaintext `oauth_token` copy to `credentials.json` for the pure-Node runtime; Cursor and Antigravity remain non-operational preview integrations;
 - Renderer does not receive plaintext credentials. File writes, Shell, and dangerous tool calls pass through the permission engine;
 - Headless real-model evaluation fails closed by default and requires an explicit external isolation boundary.
 
-Read [SECURITY.md](./SECURITY.md) for security reporting and policy. Detailed privacy and threat-model documents live under `docs/`.
+Read [SECURITY.md](./SECURITY.md) for security reporting and policy, and [docs/README.md](./docs/README.md) for current privacy and sandbox contracts.
 
 ## Development and verification
 
