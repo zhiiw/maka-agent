@@ -883,6 +883,24 @@ export type {
   BuildModelHistoryOptions,
 } from './model-history.js';
 
+// runtime-resume.ts - Phase 0 replay projection and safety diagnostics.
+export {
+  INDETERMINATE_TOOL_RESULT_DIRECTIVE,
+  buildResumePlanFromRuntimeEvents,
+  buildResumeReplayRuntimeEvents,
+  projectToolOperationsFromRuntimeEvents,
+} from './runtime-resume.js';
+export type {
+  BuildResumePlanOptions,
+  ResumePlan,
+  ResumePlanDiagnostic,
+  ResumePlanDiagnosticCode,
+  ResumePlanDisposition,
+  ResumeRejectionReason,
+  ToolOperation,
+  ToolOperationStatus,
+} from './runtime-resume.js';
+
 // agent-flow.ts — formal Flow seam.
 export type {
   AgentFlow,
