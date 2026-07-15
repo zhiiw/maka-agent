@@ -316,7 +316,8 @@ export function createCuaDriverBackend(opts: CuaDriverBackendOptions): CuDispatc
   }
   const observations = new Map<string, StoredObservation>();
   const observationIdsBySession = new Map<string, string[]>();
-  let operationQueue = Promise.resolve();
+  const operationQueues = new Map<string, Promise<void>>();
+  let sessionClearReleaseEvents: CuaDriverReleaseEvent[] | undefined;
   let disposed = false;
 
   async function physicalInputFailure(): Promise<CuRunResult | undefined> {
@@ -455,16 +456,17 @@ export function createCuaDriverBackend(opts: CuaDriverBackendOptions): CuDispatc
     );
   }
 
-  function onServiceRelease(event: CuaDriverReleaseEvent): void {
-    if (event.reason === 'disposed') return;
-    if (event.reason === 'session_cleared') return;
+  function applyServiceRelease(events: readonly CuaDriverReleaseEvent[]): void {
+    const generationReleased = events.some((event) => event.generationReleased);
     const sessions = [
       ...new Set([
-        ...event.sessionIds,
-        ...targetsBySession.keys(),
-        ...[...observations.values()].map(
-          (observation) => observation.context.sessionId,
-        ),
+        ...events.flatMap((event) => event.sessionIds),
+        ...(generationReleased ? targetsBySession.keys() : []),
+        ...(generationReleased
+          ? [...observations.values()].map(
+              (observation) => observation.context.sessionId,
+            )
+          : []),
       ]),
     ];
     for (const sessionId of sessions) {
@@ -472,13 +474,22 @@ export function createCuaDriverBackend(opts: CuaDriverBackendOptions): CuDispatc
       try {
         opts.onSessionInvalidated?.({
           sessionId,
-          reason: event.reason,
-          outcomeUnknown: event.outcomeUnknown,
+          reason: events[0]!.reason,
+          outcomeUnknown: events.some((event) => event.outcomeUnknown),
         });
       } catch {
         // Host lifecycle observers cannot change service recovery.
       }
     }
+  }
+
+  function onServiceRelease(event: CuaDriverReleaseEvent): void {
+    if (event.reason === 'disposed') return;
+    if (event.reason === 'session_cleared' && sessionClearReleaseEvents) {
+      sessionClearReleaseEvents.push(event);
+      return;
+    }
+    applyServiceRelease([event]);
   }
 
   const actionClient = new CuaDriverService({
@@ -591,14 +602,15 @@ export function createCuaDriverBackend(opts: CuaDriverBackendOptions): CuDispatc
     sessionId?: string,
   ): Promise<T> {
     if (disposed) throw new Error('cua-driver backend disposed');
+    const queueKey = '__shared_child__';
     const sessionGeneration = sessionId === undefined
       ? undefined
       : sessionGenerations.get(sessionId) ?? 0;
-    const previous = operationQueue;
+    const previous = operationQueues.get(queueKey) ?? Promise.resolve();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const current = previous.then(() => gate);
-    operationQueue = current;
+    operationQueues.set(queueKey, current);
     await previous;
     try {
       if (disposed) throw new Error('cua-driver backend disposed');
@@ -620,6 +632,9 @@ export function createCuaDriverBackend(opts: CuaDriverBackendOptions): CuDispatc
         captureClient.withSession(sessionId, operation));
     } finally {
       release();
+      if (operationQueues.get(queueKey) === current) {
+        operationQueues.delete(queueKey);
+      }
     }
   }
 
@@ -697,8 +712,11 @@ export function createCuaDriverBackend(opts: CuaDriverBackendOptions): CuDispatc
     if (!windowPoint) {
       throw new Error('cua-driver returned invalid window screenshot dimensions');
     }
+    if (!Array.isArray(structured.elements)) {
+      throw new Error('cua-driver returned invalid AX elements');
+    }
     return {
-      elements: (structured.elements ?? []) as CuaSnapshotElement[],
+      elements: structured.elements as CuaSnapshotElement[],
       screenshotWidthPx: Number(structured.screenshot_width),
       screenshotHeightPx: Number(structured.screenshot_height),
       windowPoint,
@@ -2581,6 +2599,29 @@ export function createCuaDriverBackend(opts: CuaDriverBackendOptions): CuDispatc
         case 'wait':
           await new Promise((res) => setTimeout(res, Math.min(action.durationMs, 10_000)));
           return { outcome: { ok: true, tier: 'coordinate-background' } };
+        case 'cursor_position': {
+          const result = await actionClient.callTool('get_cursor_position', {}, signal);
+          const structured = result?.structuredContent ?? {};
+          if (
+            result?.isError
+            || typeof structured.x !== 'number'
+            || !Number.isFinite(structured.x)
+            || typeof structured.y !== 'number'
+            || !Number.isFinite(structured.y)
+          ) {
+            return {
+              outcome: {
+                ok: false,
+                error: 'capture_failed',
+                message: 'cua-driver returned an invalid cursor position',
+              },
+            };
+          }
+          return {
+            outcome: { ok: true, tier: 'coordinate-background' },
+            resolvedScreenPoint: { x: structured.x, y: structured.y },
+          };
+        }
         case 'mouse_move':
           {
             const win = await coordinateTarget(
@@ -2622,9 +2663,19 @@ export function createCuaDriverBackend(opts: CuaDriverBackendOptions): CuDispatc
     },
 
     clearSession(sessionId) {
-      clearLocalSession(sessionId);
-      actionClient.clearSession(sessionId);
-      captureClient.clearSession(sessionId);
+      const releases: CuaDriverReleaseEvent[] = [];
+      sessionClearReleaseEvents = releases;
+      try {
+        actionClient.clearSession(sessionId);
+        captureClient.clearSession(sessionId);
+      } finally {
+        sessionClearReleaseEvents = undefined;
+      }
+      if (releases.length > 0) {
+        applyServiceRelease(releases);
+      } else {
+        clearLocalSession(sessionId);
+      }
     },
 
     dispose() {
