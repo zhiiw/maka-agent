@@ -3,6 +3,7 @@ import { describe, test } from 'node:test';
 import {
   assertTerminalBench21TaskSet,
   assertTerminalBench21TaskTreeFingerprint,
+  buildHarnessAbResumeFingerprint,
   buildHarnessAbRunManifest,
   deterministicHarnessTaskOrder,
   HARNESS_MAKA_CONTEXT_BUDGET,
@@ -84,28 +85,39 @@ describe('harness A/B manifest', () => {
     assert.notEqual(changed.arms[1].fingerprint, original.arms[1].fingerprint);
   });
 
-  test('binds Oracle qualification evidence into the run identity', () => {
-    const original = buildHarnessAbRunManifest({
+  test('records advisory Oracle annotations without changing frozen A/B selection', () => {
+    const oracleEvidence = {
+      registryUrl: 'https://github.com/maka-agent/maka-agent/releases/download/oracle-evidence/snapshot.json',
+      expectedSnapshotFingerprint: `sha256:${'a'.repeat(64)}`,
+      resolvedSnapshotFingerprint: `sha256:${'a'.repeat(64)}`,
+      annotations: [{
+        taskId: 'a',
+        state: 'passed' as const,
+        qualificationKey: `sha256:${'b'.repeat(64)}`,
+        evidenceFingerprint: `sha256:${'c'.repeat(64)}`,
+      }],
+      warnings: [] as string[],
+    };
+    const passed = buildHarnessAbRunManifest({
       ...manifestInput(['a', 'b', 'c']),
-      qualification: {
-        agent: 'oracle',
-        evidenceFingerprint: 'sha256:evidence-a',
-        verifierPolicyFingerprint: 'sha256:verifier',
-        inspectedTaskIds: ['a', 'b', 'c'],
-      },
+      oracleEvidence,
     });
-    const changed = buildHarnessAbRunManifest({
+    const failed = buildHarnessAbRunManifest({
       ...manifestInput(['a', 'b', 'c']),
-      qualification: {
-        agent: 'oracle',
-        evidenceFingerprint: 'sha256:evidence-b',
-        verifierPolicyFingerprint: 'sha256:verifier',
-        inspectedTaskIds: ['a', 'b', 'c'],
+      oracleEvidence: {
+        ...oracleEvidence,
+        annotations: [{ ...oracleEvidence.annotations[0]!, state: 'failed' as const }],
+        warnings: ['Oracle evidence failed for task a'],
       },
     });
 
-    assert.equal(original.metadata.qualification?.evidenceFingerprint, 'sha256:evidence-a');
-    assert.notEqual(changed.fingerprint, original.fingerprint);
+    assert.deepEqual(failed.evaluationTaskIds, passed.evaluationTaskIds);
+    assert.deepEqual(passed.metadata.oracleEvidence?.annotations, oracleEvidence.annotations);
+    assert.notEqual(failed.fingerprint, passed.fingerprint);
+    assert.equal(
+      buildHarnessAbResumeFingerprint(failed),
+      buildHarnessAbResumeFingerprint(passed),
+    );
   });
 
   test('rejects duplicate tasks and a pilot longer than the full run', () => {

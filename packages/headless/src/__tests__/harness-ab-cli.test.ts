@@ -44,6 +44,118 @@ test('harness A/B runtime keeps pruning enabled and semantic compact disabled', 
   });
 });
 
+test('harness Oracle environment selects the linux/amd64 image manifest digest', async () => {
+  const { resolvedImageDigestFromInspect } = await import(
+    new URL('../../harbor/run-harness-ab.mjs', import.meta.url).href
+  );
+  const digest = resolvedImageDigestFromInspect(JSON.stringify({
+    digest: `sha256:${'0'.repeat(64)}`,
+    manifests: [
+      { digest: `sha256:${'a'.repeat(64)}`, platform: { os: 'linux', architecture: 'arm64' } },
+      { digest: `sha256:${'b'.repeat(64)}`, platform: { os: 'linux', architecture: 'amd64' } },
+    ],
+  }), 'linux/amd64');
+
+  assert.equal(digest, `sha256:${'b'.repeat(64)}`);
+});
+
+test('harness A/B degrades identity resolution failures to missing advisory evidence', async () => {
+  const { resolveAdvisoryOracleEvidence } = await import(
+    new URL('../../harbor/run-harness-ab.mjs', import.meta.url).href
+  );
+  const evidence = await resolveAdvisoryOracleEvidence({
+    allTasks: [{ id: 'task-a', path: '/tasks/task-a' }],
+    executionPolicyFingerprint: `sha256:${'a'.repeat(64)}`,
+    registryUrl: 'https://example.invalid/oracle-registry.json',
+    expectedSnapshotFingerprint: `sha256:${'b'.repeat(64)}`,
+    loadSnapshot: async () => ({ fingerprint: `sha256:${'b'.repeat(64)}` }),
+    buildAuditTasks: async () => {
+      throw new Error('registry unavailable');
+    },
+  });
+
+  assert.deepEqual(evidence.annotations, [{ taskId: 'task-a', state: 'missing' }]);
+  assert.deepEqual(evidence.warnings, [
+    'Oracle registry could not be resolved; A/B continues without it',
+  ]);
+});
+
+test('harness A/B keeps advisory task states structured instead of duplicating corpus warnings', async () => {
+  const { resolveAdvisoryOracleEvidence } = await import(
+    new URL('../../harbor/run-harness-ab.mjs', import.meta.url).href
+  );
+  const evidence = await resolveAdvisoryOracleEvidence({
+    allTasks: [
+      { id: 'task-a', path: '/tasks/task-a' },
+      { id: 'task-b', path: '/tasks/task-b' },
+    ],
+    executionPolicyFingerprint: `sha256:${'a'.repeat(64)}`,
+    registryUrl: undefined,
+    expectedSnapshotFingerprint: undefined,
+  });
+
+  assert.deepEqual(evidence.annotations, [
+    { taskId: 'task-a', state: 'missing' },
+    { taskId: 'task-b', state: 'missing' },
+  ]);
+  assert.deepEqual(evidence.warnings, [
+    'Oracle registry URL and fingerprint are not both configured; A/B continues without it',
+  ]);
+});
+
+test('harness A/B bounds a stalled advisory evidence lookup', async () => {
+  const { resolveAdvisoryOracleEvidence } = await import(
+    new URL('../../harbor/run-harness-ab.mjs', import.meta.url).href
+  );
+  const resolution = resolveAdvisoryOracleEvidence({
+    allTasks: [{ id: 'task-a', path: '/tasks/task-a' }],
+    executionPolicyFingerprint: `sha256:${'a'.repeat(64)}`,
+    registryUrl: 'https://example.invalid/oracle-registry.json',
+    expectedSnapshotFingerprint: `sha256:${'b'.repeat(64)}`,
+    resolutionTimeoutMs: 10,
+    loadSnapshot: async () => new Promise(() => {}),
+  });
+
+  const evidence = await Promise.race([
+    resolution,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('advisory lookup remained pending')), 100)),
+  ]);
+
+  assert.deepEqual(evidence.annotations, [{ taskId: 'task-a', state: 'missing' }]);
+});
+
+test('harness A/B freezes the stored advisory evidence when resuming a run', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'maka-harness-ab-evidence-resume-'));
+  try {
+    const { buildHarnessAbManifest, resolveHarnessOracleEvidenceForRun } = await import(
+      new URL('../../harbor/run-harness-ab.mjs', import.meta.url).href
+    );
+    const oracleEvidence = {
+      annotations: [{ taskId: 'task-a', state: 'missing' }],
+      warnings: ['frozen warning'],
+    };
+    const manifest = buildHarnessAbManifest({
+      subjectFingerprint: 'subject',
+      taskSourceFingerprint: 'tasks',
+      toolchainFingerprint: 'tools',
+      oracleEvidence,
+    });
+    const path = join(dir, 'harness-ab-manifest.json');
+    await writeFile(path, `${JSON.stringify(manifest)}\n`, 'utf8');
+    let resolved = false;
+
+    const evidence = await resolveHarnessOracleEvidenceForRun(path, async () => {
+      resolved = true;
+      return { annotations: [], warnings: [] };
+    });
+
+    assert.deepEqual(evidence, oracleEvidence);
+    assert.equal(resolved, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('harness A/B manifest uses the pinned OpenCode toolchain version', async () => {
   const { buildHarnessAbManifest } = await import(
     new URL('../../harbor/run-harness-ab.mjs', import.meta.url).href
@@ -151,6 +263,25 @@ test('harness A/B CLI accepts the fixed 30-task pilot limit', async () => {
         MAKA_HARNESS_AB_OUT_DIR: join(dir, 'out'),
         MAKA_HARNESS_AB_TASKS_ROOT: join(dir, 'missing-tasks'),
         MAKA_HARNESS_AB_LIMIT: '30',
+        MAKA_HARNESS_AB_DRY_RUN: '1',
+      },
+    }), /Terminal-Bench 2\.1 task set mismatch/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('harness A/B CLI accepts the complete 89-task profile limit', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'maka-harness-ab-cli-'));
+  try {
+    const scriptPath = new URL('../../harbor/run-harness-ab.mjs', import.meta.url);
+    await assert.rejects(execFileAsync(process.execPath, [scriptPath.pathname], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        MAKA_HARNESS_AB_OUT_DIR: join(dir, 'out'),
+        MAKA_HARNESS_AB_TASKS_ROOT: join(dir, 'missing-tasks'),
+        MAKA_HARNESS_AB_LIMIT: '89',
         MAKA_HARNESS_AB_DRY_RUN: '1',
       },
     }), /Terminal-Bench 2\.1 task set mismatch/);
