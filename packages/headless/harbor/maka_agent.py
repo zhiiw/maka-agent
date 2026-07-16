@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import os
 import secrets
 import shlex
 import threading
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,27 @@ from trial_pricing import estimate_cost, pricing_from_env
 
 _COMMAND_SCOPE_ENV = "MAKA_HARBOR_COMMAND_SCOPE"
 _COMMAND_SCOPE_ROOT = "/tmp/maka-harbor-command-scopes"
+
+# Default wall-clock budget for a single bridged tool command when the client
+# does not request its own timeout. Matches the in-container executor floor
+# (HARBOR_CELL_DEFAULT_COMMAND_TIMEOUT_MS = 120_000) rather than the whole-cell
+# budget, so an individual command cannot silently borrow the 15-minute cell
+# deadline.
+_BRIDGE_DEFAULT_TIMEOUT_SEC = 120
+
+# Location of this adapter and the repo it ships in. The task-run host mode
+# spawns `node <repo>/packages/headless/dist/cli.js` on the host, so it needs to
+# find the built headless CLI relative to this file when no explicit repo root
+# env is set.
+_HARBOR_DIR = Path(__file__).resolve().parent
+_HEADLESS_DIR = _HARBOR_DIR.parent
+_REPO_ROOT_DEFAULT = _HEADLESS_DIR.parent.parent
+_DEFAULT_RUNNER_ENV = Path(
+    os.environ.get(
+        "MAKA_HARBOR_RUNNER_ENV_FILE",
+        str(Path.home() / ".config" / "maka" / "harbor-runner.env"),
+    )
+)
 
 
 _HOST_NODE_ENV_ALLOWLIST = {
@@ -103,10 +126,34 @@ class MakaAgent(BaseInstalledAgent):
     def name() -> str:
         return "maka"
 
+    def _harbor_mode(self) -> str:
+        """cell (default) runs a RuntimeRunner cell; task-run runs the full
+        task-run controller on the host and bridges tool execution into the
+        container via the shared _ToolExecutorServer. task-run is the
+        heavy-task / autonomous experiment path."""
+        mode = (self._get_env("MAKA_HARBOR_MODE") or "cell").strip()
+        if mode not in ("cell", "task-run"):
+            raise RuntimeError(f"MAKA_HARBOR_MODE must be cell or task-run, got {mode!r}")
+        return mode
+
     def get_version_command(self) -> str | None:
+        # task-run runs Maka on the host, not in the container, so there is no
+        # in-container binary to version-check.
+        if self._harbor_mode() == "task-run":
+            return None
         return "node --version"
 
     async def install(self, environment: BaseEnvironment) -> None:
+        if self._harbor_mode() == "task-run":
+            # Host-bridge task-run: node and the headless CLI run on the host and
+            # bridge tool execution into the task container, so nothing installs
+            # inside the task. Fail fast if the built CLI is missing.
+            cli_path = self._headless_cli_path()
+            if not cli_path.is_file():
+                raise RuntimeError(
+                    f"headless CLI not built at {cli_path}; run `npm run build` in packages/headless"
+                )
+            return
         maka_repo = self._resolved_flags.get("maka_repo", "/opt/maka-agent")
         self._harbor_backend()
         run_cell = (Path(maka_repo) / "packages" / "headless" / "harbor" / "run-cell.mjs").as_posix()
@@ -165,6 +212,9 @@ class MakaAgent(BaseInstalledAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        if self._harbor_mode() == "task-run":
+            await self._run_task_run_host(instruction, environment, context)
+            return
         agent_dir = EnvironmentPaths.agent_dir
         await self.exec_as_agent(environment, command=f"mkdir -p {agent_dir.as_posix()}")
 
@@ -200,6 +250,13 @@ class MakaAgent(BaseInstalledAgent):
     def _run_host_cell_path(self) -> str:
         maka_repo = self._get_env("MAKA_HOST_REPO_ROOT") or os.getcwd()
         return (Path(maka_repo) / "packages" / "headless" / "harbor" / "run-host-cell.mjs").as_posix()
+
+    def _host_repo_root(self) -> Path:
+        override = self._get_env("MAKA_HOST_REPO_ROOT") or self._get_env("MAKA_REPO_DIR")
+        return Path(override) if override else _REPO_ROOT_DEFAULT
+
+    def _headless_cli_path(self) -> Path:
+        return self._host_repo_root() / "packages" / "headless" / "dist" / "cli.js"
 
     _DEFAULT_CELL_TIMEOUT_SEC = 900
     _DEFAULT_CELL_SETTLEMENT_GRACE_SEC = 30
@@ -458,6 +515,351 @@ class MakaAgent(BaseInstalledAgent):
             self.logger.debug("Could not write Maka trajectory %s: %s", trajectory_path, exc)
 
 
+    async def _run_task_run_host(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: AgentContext,
+    ) -> None:
+        """Run the full task-run controller on the host, bridging tool execution
+        into the task container."""
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        env = os.environ.copy()
+        env.update(_load_env_file(_DEFAULT_RUNNER_ENV))
+        env.update(getattr(self, "_extra_env", {}) or {})
+        _normalize_cli_env(env)
+        env.setdefault("MAKA_REPO_DIR", str(self._host_repo_root()))
+        env.setdefault("MAKA_MODEL", "deepseek-chat")
+        env.setdefault("MAKA_MAX_STEPS", "35")
+        env.setdefault("MAKA_TASK_RUN_OUT_DIR", str(self.logs_dir / "maka-task-run"))
+        task_run_out_dir = Path(env["MAKA_TASK_RUN_OUT_DIR"])
+        if not task_run_out_dir.is_absolute():
+            task_run_out_dir = task_run_out_dir.resolve()
+            env["MAKA_TASK_RUN_OUT_DIR"] = str(task_run_out_dir)
+        # _normalize_cli_env derives MAKA_OUTPUT_DIR/MAKA_STORAGE_ROOT from
+        # MAKA_TASK_RUN_OUT_DIR; re-apply now that the out dir is finalized.
+        env.setdefault("MAKA_OUTPUT_DIR", str(task_run_out_dir))
+        env.setdefault("MAKA_STORAGE_ROOT", str(task_run_out_dir / "runs"))
+
+        task_workdir, workdir_probe = await self._resolve_task_workdir(environment)
+
+        stdout_path = self.logs_dir / "maka-harbor.stdout.json"
+        stderr_path = self.logs_dir / "maka-harbor.stderr.log"
+        status_path = self.logs_dir / "maka-harbor.status.json"
+        instruction_path = self.logs_dir / "instruction.txt"
+        started_at = _utc_now()
+        task_run_out_dir.mkdir(parents=True, exist_ok=True)
+        instruction_path.write_text(instruction, encoding="utf-8")
+        stdout_path.write_bytes(b"")
+        stderr_path.write_bytes(b"")
+        self._write_status(
+            status_path,
+            {
+                "status": "starting",
+                "startedAt": started_at,
+                "stdoutLog": str(stdout_path),
+                "stderrLog": str(stderr_path),
+                "taskRunOutDir": str(task_run_out_dir),
+                "resolvedCwd": task_workdir,
+                "workdirProbe": workdir_probe,
+                "runnerEnv": _runner_env_summary(env),
+            },
+        )
+
+        timeout_sec = int(env.get("MAKA_HARBOR_AGENT_TIMEOUT_SEC", "1800"))
+        proc: asyncio.subprocess.Process | None = None
+        async with _ToolExecutorServer(self, environment) as executor:
+            env["MAKA_HARBOR_TOOL_EXECUTOR_URL"] = executor.url
+            env["MAKA_HARBOR_TOOL_EXECUTOR_TOKEN"] = executor.token
+            command = _headless_harbor_command(
+                cli_path=self._headless_cli_path(),
+                instruction_path=instruction_path,
+                task_workdir=task_workdir,
+                task_id=str(getattr(environment, "session_id", None) or env.get("MAKA_TASK_ID") or "terminal-bench-task"),
+                out_dir=task_run_out_dir,
+                env=env,
+            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *command,
+                    cwd=str(self._host_repo_root()),
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
+                self._write_status(
+                    status_path,
+                    {
+                        "status": "running",
+                        "startedAt": started_at,
+                        "updatedAt": _utc_now(),
+                        "runnerPid": proc.pid,
+                        "timeoutSec": timeout_sec,
+                        "stdoutLog": str(stdout_path),
+                        "stderrLog": str(stderr_path),
+                        "taskRunOutDir": str(task_run_out_dir),
+                        "resolvedCwd": task_workdir,
+                        "workdirProbe": workdir_probe,
+                        "runnerEnv": _runner_env_summary(env),
+                        "command": _redacted_command(command),
+                    },
+                )
+                stdout, stderr = await self._communicate_streaming(
+                    proc=proc,
+                    stdin_payload=b"",
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    timeout_sec=timeout_sec,
+                )
+            except asyncio.TimeoutError:
+                self._write_status(
+                    status_path,
+                    {
+                        "status": "timeout",
+                        "startedAt": started_at,
+                        "finishedAt": _utc_now(),
+                        "runnerPid": proc.pid if proc else None,
+                        "returnCode": proc.returncode if proc else None,
+                        "timeoutSec": timeout_sec,
+                        "stdoutLog": str(stdout_path),
+                        "stderrLog": str(stderr_path),
+                        "taskRunOutDir": str(task_run_out_dir),
+                        "resolvedCwd": task_workdir,
+                        "workdirProbe": workdir_probe,
+                        "runnerEnv": _runner_env_summary(env),
+                        "command": _redacted_command(command),
+                    },
+                )
+                raise
+            except Exception as exc:
+                self._write_status(
+                    status_path,
+                    {
+                        "status": "failed",
+                        "startedAt": started_at,
+                        "finishedAt": _utc_now(),
+                        "runnerPid": proc.pid if proc else None,
+                        "returnCode": proc.returncode if proc else None,
+                        "error": str(exc),
+                        "stdoutLog": str(stdout_path),
+                        "stderrLog": str(stderr_path),
+                        "taskRunOutDir": str(task_run_out_dir),
+                        "resolvedCwd": task_workdir,
+                        "workdirProbe": workdir_probe,
+                        "runnerEnv": _runner_env_summary(env),
+                        "command": _redacted_command(command),
+                    },
+                )
+                raise
+
+            # A non-zero runner exit is an infrastructure failure. Flag it inside
+            # the executor scope so __aexit__ reclaims scoped background processes
+            # instead of preserving them as if the run had completed. A clean exit
+            # (return code 0) still preserves verifier-visible services.
+            if proc is not None and proc.returncode != 0:
+                executor.mark_infra_failure()
+
+        parsed = self._parse_node_result(stdout)
+        assert proc is not None
+        self._write_status(
+            status_path,
+            {
+                "status": "completed" if proc.returncode == 0 else "failed",
+                "startedAt": started_at,
+                "finishedAt": _utc_now(),
+                "runnerPid": proc.pid,
+                "returnCode": proc.returncode,
+                "parsedStatus": parsed.get("status"),
+                "benchmarkFailureKind": parsed.get("benchmarkFailureKind"),
+                "benchmarkFailureShouldThrow": parsed.get("benchmarkFailureShouldThrow"),
+                "stdoutBytes": len(stdout),
+                "stderrBytes": len(stderr),
+                "stdoutLog": str(stdout_path),
+                "stderrLog": str(stderr_path),
+                "taskRunOutDir": str(task_run_out_dir),
+                "resolvedCwd": task_workdir,
+                "workdirProbe": workdir_probe,
+                "runnerEnv": _runner_env_summary(env),
+                "command": _redacted_command(command),
+            },
+        )
+        context.metadata = {
+            **(context.metadata or {}),
+            "maka_harbor": {
+                "return_code": proc.returncode,
+                "stdout_log": str(stdout_path),
+                "stderr_log": str(stderr_path),
+                "status": parsed.get("status"),
+                "model": parsed.get("model"),
+                "max_steps": parsed.get("maxSteps"),
+                "autonomous": parsed.get("autonomous"),
+                "autonomous_max_attempts": parsed.get("autonomousMaxAttempts"),
+                "autonomous_max_runtime_steps": parsed.get("autonomousMaxRuntimeSteps"),
+                "autonomous_max_wall_time_ms": parsed.get("autonomousMaxWallTimeMs"),
+                "event_count": parsed.get("eventCount"),
+                "message_count": parsed.get("messageCount"),
+                "llm_call_count": parsed.get("llmCallCount"),
+                "tool_call_count": parsed.get("toolCallCount"),
+                "error": parsed.get("error"),
+                "benchmark_failure_kind": parsed.get("benchmarkFailureKind"),
+                "benchmark_failure_should_throw": parsed.get("benchmarkFailureShouldThrow"),
+                "task_run": parsed.get("taskRun") or _task_run_summary(parsed),
+                "resolved_cwd": task_workdir,
+                "workdir_probe": workdir_probe,
+            },
+        }
+        usage = parsed.get("tokenUsage") if isinstance(parsed, dict) else None
+        if isinstance(usage, dict):
+            context.n_input_tokens = _int_or_none(usage.get("input"))
+            context.n_cache_tokens = _int_or_none(usage.get("cacheHitInput"))
+            context.n_output_tokens = _int_or_none(usage.get("output"))
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"Maka Harbor task-run failed; see {stderr_path}")
+
+    async def _resolve_task_workdir(
+        self,
+        environment: BaseEnvironment,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        configured = getattr(getattr(environment, "task_env_config", None), "workdir", None)
+        candidates: list[str | None] = []
+        if configured:
+            candidates.append(str(configured))
+        candidates.extend([None, "/app", "/workspace", "/"])
+
+        seen: set[str] = set()
+        probes: list[dict[str, Any]] = []
+        for candidate in candidates:
+            marker = "<default>" if candidate is None else candidate
+            if marker in seen:
+                continue
+            seen.add(marker)
+            # Probe with a bare exec: an invalid candidate directory makes `pwd`
+            # exit non-zero, and that must skip to the next candidate rather than
+            # abort the whole probe (exec_as_agent would raise on the first miss).
+            result = await environment.exec(
+                command="pwd",
+                cwd=candidate,
+                timeout_sec=10,
+            )
+            stdout = _exec_stdout(result).strip()
+            stderr = _exec_stderr(result).strip()
+            return_code = _exec_exit_code(result)
+            probes.append(
+                {
+                    "candidate": marker,
+                    "return_code": return_code,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                }
+            )
+            if return_code == 0:
+                resolved = _last_absolute_path(stdout)
+                if resolved:
+                    return resolved, probes
+
+        fallback = str(configured or "/")
+        probes.append({"fallback": fallback})
+        return fallback, probes
+
+    async def _communicate_streaming(
+        self,
+        *,
+        proc: asyncio.subprocess.Process,
+        stdin_payload: bytes,
+        stdout_path: Path,
+        stderr_path: Path,
+        timeout_sec: int,
+    ) -> tuple[bytes, bytes]:
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        stdin_task = asyncio.create_task(self._write_process_stdin(proc, stdin_payload))
+        stdout_task = asyncio.create_task(self._tee_stream(proc.stdout, stdout_path, stdout_chunks))
+        stderr_task = asyncio.create_task(self._tee_stream(proc.stderr, stderr_path, stderr_chunks))
+
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout_sec)
+            await asyncio.wait_for(
+                asyncio.gather(stdin_task, stdout_task, stderr_task),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            with stderr_path.open("ab") as handle:
+                marker = {
+                    "event": "maka_harbor_timeout",
+                    "timeoutSec": timeout_sec,
+                    "at": _utc_now(),
+                }
+                handle.write(("\n" + json.dumps(marker) + "\n").encode("utf-8"))
+                handle.flush()
+            if proc.returncode is None:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(proc.wait(), timeout=10)
+            raise
+        finally:
+            for task in (stdin_task, stdout_task, stderr_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(stdin_task, stdout_task, stderr_task, return_exceptions=True)
+
+        return b"".join(stdout_chunks), b"".join(stderr_chunks)
+
+    @staticmethod
+    async def _write_process_stdin(
+        proc: asyncio.subprocess.Process,
+        payload: bytes,
+    ) -> None:
+        if proc.stdin is None:
+            return
+        try:
+            proc.stdin.write(payload)
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                proc.stdin.close()
+            with contextlib.suppress(Exception):
+                await proc.stdin.wait_closed()
+
+    @staticmethod
+    async def _tee_stream(
+        reader: asyncio.StreamReader | None,
+        path: Path,
+        chunks: list[bytes],
+    ) -> None:
+        if reader is None:
+            return
+        with path.open("ab") as handle:
+            while True:
+                chunk = await reader.read(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                handle.write(chunk)
+                handle.flush()
+
+    @staticmethod
+    def _write_status(path: Path, payload: dict[str, Any]) -> None:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _parse_node_result(stdout: bytes) -> dict[str, Any]:
+        text = stdout.decode("utf-8", errors="replace").strip()
+        if not text:
+            return {}
+        # The runner writes one JSON object to stdout. If a dependency writes
+        # noise, use the last JSON-looking line.
+        for line in reversed(text.splitlines()):
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                return json.loads(line)
+        return {}
+
+
 class _ToolExecutorServer:
     def __init__(self, agent: MakaAgent, environment: BaseEnvironment) -> None:
         self._agent = agent
@@ -468,6 +870,7 @@ class _ToolExecutorServer:
         self._futures: set[concurrent.futures.Future[Any]] = set()
         self._futures_lock = threading.Lock()
         self._accepting_requests = False
+        self._infra_failure = False
         self.token = secrets.token_urlsafe(32)
         self.command_scope = secrets.token_urlsafe(24)
         self.url = ""
@@ -492,16 +895,25 @@ class _ToolExecutorServer:
         self._thread.start()
         return self
 
+    def mark_infra_failure(self) -> None:
+        """Record that the run failed for infrastructure reasons so teardown
+        reclaims scoped background processes even when the `async with` block
+        exits without raising. A non-zero runner subprocess is such a failure:
+        leaving its orphaned background services alive would masquerade as a
+        successful completion to the verifier."""
+        self._infra_failure = True
+
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         stop_error: BaseException | None = None
         cleanup_error: BaseException | None = None
+        reclaim = exc_type is not None or self._infra_failure
         try:
             cleanup_error = await self._stop_server(
-                reclaim_scoped_processes=exc_type is not None
+                reclaim_scoped_processes=reclaim
             )
         except BaseException as error:
             stop_error = error
-        if stop_error is not None and exc_type is None:
+        if stop_error is not None and not reclaim:
             cleanup_error = await self._cleanup_all_scoped_processes()
         if stop_error is not None:
             raise stop_error
@@ -584,14 +996,17 @@ class _ToolExecutorServer:
                 raise ValueError("command is required")
             cwd = payload.get("cwd")
             timeout_ms = payload.get("timeoutMs")
-            timeout_sec = _timeout_sec(timeout_ms)
+            timeout_sec = _timeout_sec(timeout_ms) or _BRIDGE_DEFAULT_TIMEOUT_SEC
             assert self._loop is not None
             with self._futures_lock:
                 if not self._accepting_requests:
                     raise RuntimeError("tool executor is shutting down")
+                # Run the bridged tool command as a bare container exec, not via
+                # exec_as_agent: a non-zero exit is a *successful* transport
+                # response (the tool ran and reported a failure), and the agent's
+                # _extra_env must never leak into the model's command environment.
                 future = asyncio.run_coroutine_threadsafe(
-                    self._agent.exec_as_agent(
-                        self._environment,
+                    self._environment.exec(
                         command=_scoped_command(
                             command,
                             self.command_scope,
@@ -604,9 +1019,11 @@ class _ToolExecutorServer:
                 )
                 self._futures.add(future)
             future.add_done_callback(self._discard_future)
-            result = future.result(timeout=(timeout_sec or self._agent._cell_timeout_sec()) + 30)
+            result = future.result(timeout=timeout_sec + 30)
+            return_code = _exec_exit_code(result)
             _write_http(handler, 200, {
-                "exitCode": _exec_exit_code(result),
+                "exitCode": return_code,
+                "returnCode": return_code,
                 "stdout": _exec_stdout(result),
                 "stderr": _exec_stderr(result),
             })
@@ -680,7 +1097,9 @@ def _exec_stderr(result: Any) -> str:
 
 
 def _exec_exit_code(result: Any) -> int:
-    for name in ("exit_code", "exitCode", "returncode"):
+    # Harbor 0.13.2 ExecResult exposes the exit status as `return_code`; the
+    # other names stay for compatibility with older/stubbed exec results.
+    for name in ("return_code", "exit_code", "exitCode", "returncode"):
         value = getattr(result, name, None)
         if isinstance(value, int):
             return value
@@ -745,3 +1164,205 @@ def _apply_trial_pricing(agent: MakaAgent, token_summary: dict[str, Any]) -> Non
         pricing,
     )
     token_summary["pricingSource"] = agent._get_env("MAKA_TRIAL_PRICING_SOURCE") or "env"
+
+
+# ---------------------------------------------------------------------------
+# task-run host mode helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            values[key] = value
+    return values
+
+
+def _normalize_cli_env(env: dict[str, str]) -> None:
+    provider = env.get("MAKA_PROVIDER") or env.get("MAKA_PROVIDER_TYPE")
+    if provider:
+        env.setdefault("MAKA_PROVIDER", provider)
+    if env.get("MAKA_API_KEY"):
+        env.setdefault(
+            _provider_api_key_env(env.get("MAKA_PROVIDER") or provider or "deepseek"),
+            env["MAKA_API_KEY"],
+        )
+    if env.get("MAKA_TASK_RUN_OUT_DIR"):
+        env.setdefault("MAKA_OUTPUT_DIR", env["MAKA_TASK_RUN_OUT_DIR"])
+        env.setdefault("MAKA_STORAGE_ROOT", str(Path(env["MAKA_TASK_RUN_OUT_DIR"]) / "runs"))
+    if env.get("MAKA_HARBOR_MAX_ATTEMPTS"):
+        env.setdefault("MAKA_MAX_ATTEMPTS", env["MAKA_HARBOR_MAX_ATTEMPTS"])
+    if env.get("MAKA_AUTONOMOUS_MAX_ATTEMPTS"):
+        env.setdefault("MAKA_MAX_ATTEMPTS", env["MAKA_AUTONOMOUS_MAX_ATTEMPTS"])
+    if env.get("MAKA_AUTONOMOUS_MAX_RUNTIME_STEPS"):
+        env.setdefault("MAKA_MAX_RUNTIME_STEPS", env["MAKA_AUTONOMOUS_MAX_RUNTIME_STEPS"])
+    if env.get("MAKA_AUTONOMOUS_MAX_WALL_TIME_SEC"):
+        env.setdefault("MAKA_MAX_WALL_TIME_SEC", env["MAKA_AUTONOMOUS_MAX_WALL_TIME_SEC"])
+    if env.get("MAKA_HARBOR_REPLAY_PRIOR_ATTEMPT_RUNTIME_CONTEXT"):
+        env.setdefault(
+            "MAKA_REPLAY_PRIOR_ATTEMPT_RUNTIME_CONTEXT",
+            env["MAKA_HARBOR_REPLAY_PRIOR_ATTEMPT_RUNTIME_CONTEXT"],
+        )
+    if env.get("MAKA_HARBOR_HEAVY_TASK_MODE"):
+        env.setdefault("MAKA_HEAVY_TASK_MODE", env["MAKA_HARBOR_HEAVY_TASK_MODE"])
+    env.setdefault("MAKA_BACKEND", "ai-sdk")
+
+
+def _provider_api_key_env(provider: str) -> str:
+    if provider == "zai-coding-plan":
+        return "ZAI_API_KEY"
+    if provider == "moonshot":
+        return "MOONSHOT_API_KEY"
+    if provider == "google":
+        return "GOOGLE_API_KEY"
+    if provider in {"anthropic", "kimi-coding-plan", "claude-subscription"}:
+        return "ANTHROPIC_API_KEY"
+    if provider in {"openai", "openai-compatible"}:
+        return "OPENAI_API_KEY"
+    return "DEEPSEEK_API_KEY"
+
+
+def _headless_harbor_command(
+    *,
+    cli_path: Path,
+    instruction_path: Path,
+    task_workdir: str,
+    task_id: str,
+    out_dir: Path,
+    env: dict[str, str],
+) -> list[str]:
+    command = [
+        "node",
+        str(cli_path),
+        "harbor",
+        "run",
+        "--mode",
+        "task-run",
+        "--backend",
+        env.get("MAKA_BACKEND", "ai-sdk"),
+        "--isolation",
+        "harbor-http",
+        "--instruction-file",
+        str(instruction_path),
+        "--workdir",
+        task_workdir,
+        "--task-id",
+        task_id,
+        "--task-run-id",
+        env.get("MAKA_TASK_RUN_ID", f"harbor-{task_id}"),
+        "--out",
+        str(out_dir),
+        "--storage-root",
+        env.get("MAKA_STORAGE_ROOT", str(out_dir / "runs")),
+        "--include-events",
+    ]
+    if env.get("MAKA_PROVIDER"):
+        command.extend(["--provider", env["MAKA_PROVIDER"]])
+    if env.get("MAKA_MODEL"):
+        command.extend(["--model", env["MAKA_MODEL"]])
+    if env.get("MAKA_HARBOR_USE_TASK_RUN") == "1" and env.get("MAKA_HARBOR_AUTONOMOUS", "1") != "0":
+        command.append("--autonomous")
+    if env.get("MAKA_HEAVY_TASK_MODE") in {"1", "true", "TRUE", "yes", "on", "enabled"}:
+        command.append("--heavy-task")
+    return command
+
+
+def _redacted_command(command: list[str]) -> list[str]:
+    redacted: list[str] = []
+    skip_next = False
+    for arg in command:
+        if skip_next:
+            redacted.append("<redacted>")
+            skip_next = False
+            continue
+        redacted.append(arg)
+        if arg in {"--api-key", "--api-key-file"}:
+            skip_next = True
+    return redacted
+
+
+def _task_run_summary(parsed: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "taskRunId": parsed.get("taskRunId"),
+        "status": parsed.get("status"),
+        "taxonomy": parsed.get("taxonomy"),
+        "scored": parsed.get("scored"),
+        "authoritative": parsed.get("authoritative"),
+        "exportDir": parsed.get("exportDir"),
+        "files": parsed.get("files"),
+        "result": parsed.get("result"),
+    }
+
+
+def _runner_env_summary(env: dict[str, str]) -> dict[str, str]:
+    allowed_keys = [
+        "MAKA_REPO_DIR",
+        "MAKA_MODEL",
+        "MAKA_MAX_STEPS",
+        "MAKA_TASK_RUN_OUT_DIR",
+        "MAKA_OUTPUT_DIR",
+        "MAKA_STORAGE_ROOT",
+        "MAKA_BACKEND",
+        "MAKA_PROVIDER",
+        "MAKA_HARBOR_MODE",
+        "MAKA_HARBOR_USE_TASK_RUN",
+        "MAKA_HARBOR_AUTONOMOUS",
+        "MAKA_AUTONOMOUS",
+        "MAKA_HARBOR_REPLAY_PRIOR_ATTEMPT_RUNTIME_CONTEXT",
+        "MAKA_REPLAY_PRIOR_ATTEMPT_RUNTIME_CONTEXT",
+        "MAKA_HEAVY_TASK_MODE",
+        "MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE",
+        "MAKA_CONTEXT_STALE_TOOL_RESULT_MAX_ESTIMATED_TOKENS",
+        "MAKA_CONTEXT_STALE_TOOL_RESULT_MIN_RECENT_TURNS_FULL",
+        "MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE",
+        "MAKA_CONTEXT_ACTIVE_TOOL_RESULT_MAX_ESTIMATED_TOKENS",
+        "MAKA_CONTEXT_ACTIVE_TOOL_RESULT_MIN_STEP_NUMBER",
+        "MAKA_CONTEXT_ACTIVE_TOOL_RESULT_ARCHIVE_REQUIRED",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_MODE",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_MIN_STEP_NUMBER",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_HIGH_WATER_RATIO",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_FORCE_RATIO",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_TARGET_RATIO",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_MAX_ACTIVE_ESTIMATED_TOKENS",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_MIN_RECENT_MESSAGES",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_MIN_RECENT_TOOL_PAIRS",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_MAX_SUMMARY_ESTIMATED_TOKENS",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_ARCHIVE_REQUIRED",
+        "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_HIGH_WATER_NAME",
+        "MAKA_CONTEXT_ARCHIVE_RETRIEVAL",
+        "MAKA_HARBOR_AGENT_TIMEOUT_SEC",
+        "MAKA_HARBOR_MAX_ATTEMPTS",
+        "MAKA_AUTONOMOUS_MAX_ATTEMPTS",
+        "MAKA_AUTONOMOUS_MAX_RUNTIME_STEPS",
+        "MAKA_AUTONOMOUS_MAX_WALL_TIME_MS",
+    ]
+    return {key: env[key] for key in allowed_keys if key in env}
+
+
+def _last_absolute_path(text: str) -> str | None:
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("/"):
+            return stripped
+    return None
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

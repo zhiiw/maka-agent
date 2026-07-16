@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "description": "Structured Terminal-Bench sample run profiles for the local Harbor smoke harness.",
+  "description": "Structured Terminal-Bench sample run profiles for the local Harbor smoke harness. Maka profiles drive the authoritative maka_agent:MakaAgent adapter in task-run host-bridge mode (MAKA_HARBOR_MODE=task-run).",
   "defaults": {
-    "jobsDir": "terminal-bench-smoke/jobs",
-    "generatedConfigDir": "terminal-bench-smoke/generated-configs",
+    "jobsDir": "packages/headless/harbor/smoke-jobs",
+    "generatedConfigDir": "packages/headless/harbor/smoke-generated-configs",
     "dataset": {
       "name": "terminal-bench-sample",
       "version": "2.0"
@@ -17,11 +17,12 @@
   },
   "profiles": {
     "maka-basic": {
-      "description": "Maka Harbor bridge against terminal-bench-sample, matching the successful sqlite-with-gcov DeepSeek V4 Pro sample run shape.",
+      "description": "Maka task-run host bridge against terminal-bench-sample, matching the successful sqlite-with-gcov DeepSeek V4 Pro sample run shape.",
       "agentTimeoutMultiplier": 4.0,
       "agent": {
-        "importPath": "maka_harbor_agent:MakaHarborAgent",
+        "importPath": "maka_agent:MakaAgent",
         "env": {
+          "MAKA_HARBOR_MODE": "task-run",
           "MAKA_HARBOR_USE_TASK_RUN": "0",
           "MAKA_HARBOR_AUTONOMOUS": "0",
           "MAKA_MODEL": "deepseek-v4-pro",
@@ -34,8 +35,9 @@
       "description": "Maka task-run heavy-task bridge for public sample trace/evidence experiments.",
       "agentTimeoutMultiplier": 8.0,
       "agent": {
-        "importPath": "maka_harbor_agent:MakaHarborAgent",
+        "importPath": "maka_agent:MakaAgent",
         "env": {
+          "MAKA_HARBOR_MODE": "task-run",
           "MAKA_HARBOR_USE_TASK_RUN": "1",
           "MAKA_HARBOR_AUTONOMOUS": "0",
           "MAKA_HEAVY_TASK_MODE": "1",
@@ -49,8 +51,9 @@
       "description": "Maka heavy-task bridge with autonomous prior-attempt runtime replay and stale tool-result archive pruning enabled.",
       "agentTimeoutMultiplier": 8.0,
       "agent": {
-        "importPath": "maka_harbor_agent:MakaHarborAgent",
+        "importPath": "maka_agent:MakaAgent",
         "env": {
+          "MAKA_HARBOR_MODE": "task-run",
           "MAKA_HARBOR_USE_TASK_RUN": "1",
           "MAKA_HARBOR_AUTONOMOUS": "1",
           "MAKA_HARBOR_REPLAY_PRIOR_ATTEMPT_RUNTIME_CONTEXT": "1",
@@ -75,11 +78,12 @@
       }
     },
     "maka-prune-default": {
-      "description": "Post-#621 default prune pipeline (active + stale on) with continuation enabled. Per-turn step cap deliberately low so tasks cross turn boundaries and stale prune fires. B arm for the stale-prune A/B; A arm for the retrieval A/B.",
+      "description": "Post-#621 default prune pipeline (active + stale on) with continuation enabled. Per-turn step cap deliberately low so tasks cross turn boundaries and stale prune fires. B arm for the stale-prune A/B; A arm for the retrieval A/B. Note: the continuation env vars are currently inert in task-run mode (never consumed by the CLI path; pre-existing).",
       "agentTimeoutMultiplier": 4.0,
       "agent": {
-        "importPath": "maka_harbor_agent:MakaHarborAgent",
+        "importPath": "maka_agent:MakaAgent",
         "env": {
+          "MAKA_HARBOR_MODE": "task-run",
           "MAKA_HARBOR_USE_TASK_RUN": "0",
           "MAKA_HARBOR_AUTONOMOUS": "0",
           "MAKA_HARBOR_CONTINUATION": "on",
@@ -92,11 +96,12 @@
       }
     },
     "maka-stale-off": {
-      "description": "Same as maka-prune-default but stale tool-result prune explicitly off. A arm for the stale-prune A/B.",
+      "description": "Same as maka-prune-default but stale tool-result prune explicitly off. A arm for the stale-prune A/B. Note: the continuation env vars are currently inert in task-run mode (never consumed by the CLI path; pre-existing).",
       "agentTimeoutMultiplier": 4.0,
       "agent": {
-        "importPath": "maka_harbor_agent:MakaHarborAgent",
+        "importPath": "maka_agent:MakaAgent",
         "env": {
+          "MAKA_HARBOR_MODE": "task-run",
           "MAKA_HARBOR_USE_TASK_RUN": "0",
           "MAKA_HARBOR_AUTONOMOUS": "0",
           "MAKA_HARBOR_CONTINUATION": "on",
@@ -110,11 +115,12 @@
       }
     },
     "maka-retrieval-on": {
-      "description": "Same as maka-prune-default plus eager archive retrieval, so stale-pruned placeholders hydrate back (newest first, bounded). B arm for the retrieval A/B.",
+      "description": "Same as maka-prune-default plus eager archive retrieval, so stale-pruned placeholders hydrate back (newest first, bounded). B arm for the retrieval A/B. Note: the continuation env vars are currently inert in task-run mode (never consumed by the CLI path; pre-existing).",
       "agentTimeoutMultiplier": 4.0,
       "agent": {
-        "importPath": "maka_harbor_agent:MakaHarborAgent",
+        "importPath": "maka_agent:MakaAgent",
         "env": {
+          "MAKA_HARBOR_MODE": "task-run",
           "MAKA_HARBOR_USE_TASK_RUN": "0",
           "MAKA_HARBOR_AUTONOMOUS": "0",
           "MAKA_HARBOR_CONTINUATION": "on",
