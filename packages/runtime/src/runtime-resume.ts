@@ -5,10 +5,7 @@ import {
   type RuntimeEventFunctionResponseContent,
 } from '@maka/core/runtime-event';
 
-export type ToolOperationStatus =
-  | 'succeeded'
-  | 'failed'
-  | 'indeterminate';
+export type ToolOperationStatus = 'succeeded' | 'failed' | 'indeterminate';
 
 export interface ToolOperation {
   toolCallId: string;
@@ -20,9 +17,7 @@ export interface ToolOperation {
   responseIsError?: boolean;
 }
 
-export type ResumePlanDisposition =
-  | 'safe_replay'
-  | 'blocked';
+export type ResumePlanDisposition = 'safe_replay' | 'blocked';
 
 export type ResumePlanDiagnosticCode =
   | 'pending_tool_result'
@@ -30,9 +25,7 @@ export type ResumePlanDiagnosticCode =
   | 'tool_name_mismatch'
   | 'runtime_offset_mismatch';
 
-export type ResumeRejectionReason =
-  | 'runtime_offset_mismatch'
-  | 'dangling_tool_state';
+export type ResumeRejectionReason = 'runtime_offset_mismatch' | 'dangling_tool_state';
 
 export interface ResumePlanDiagnostic {
   code: ResumePlanDiagnosticCode;
@@ -93,14 +86,42 @@ export interface RuntimeResumeFailpointSpec {
  */
 export const RUNTIME_RESUME_FAILPOINTS = [
   { id: 'P0', boundary: 'before tool preparation (T1)', committedPrefix: 'before_function_call' },
-  { id: 'P1', boundary: 'function_call committed before prepared journal', committedPrefix: 'after_function_call' },
-  { id: 'P2', boundary: 'prepared journal committed before implementation', committedPrefix: 'after_function_call' },
+  {
+    id: 'P1',
+    boundary: 'function_call committed before prepared journal',
+    committedPrefix: 'after_function_call',
+  },
+  {
+    id: 'P2',
+    boundary: 'prepared journal committed before implementation',
+    committedPrefix: 'after_function_call',
+  },
   { id: 'P3', boundary: 'tool implementation in progress', committedPrefix: 'after_function_call' },
-  { id: 'P4', boundary: 'side effect completed before outcome transaction (T2)', committedPrefix: 'after_function_call' },
-  { id: 'P5', boundary: 'function_response committed before outcome journal', committedPrefix: 'after_function_response' },
-  { id: 'P6', boundary: 'outcome transaction committed before model result delivery', committedPrefix: 'after_function_response' },
-  { id: 'P7', boundary: 'tool result delivered before the next provider step', committedPrefix: 'after_function_response' },
-  { id: 'P8', boundary: 'terminal RuntimeEvent commit', committedPrefix: 'after_function_response' },
+  {
+    id: 'P4',
+    boundary: 'side effect completed before outcome transaction (T2)',
+    committedPrefix: 'after_function_call',
+  },
+  {
+    id: 'P5',
+    boundary: 'function_response committed before outcome journal',
+    committedPrefix: 'after_function_response',
+  },
+  {
+    id: 'P6',
+    boundary: 'outcome transaction committed before model result delivery',
+    committedPrefix: 'after_function_response',
+  },
+  {
+    id: 'P7',
+    boundary: 'tool result delivered before the next provider step',
+    committedPrefix: 'after_function_response',
+  },
+  {
+    id: 'P8',
+    boundary: 'terminal RuntimeEvent commit',
+    committedPrefix: 'after_function_response',
+  },
   { id: 'P9', boundary: 'terminal run header commit', committedPrefix: 'after_terminal_event' },
   { id: 'P10', boundary: 'recovery decision commit', committedPrefix: 'after_terminal_event' },
   { id: 'P11', boundary: 'continuation run creation', committedPrefix: 'after_terminal_event' },
@@ -180,9 +201,7 @@ export function buildResumePlanFromRuntimeEvents(
   };
 }
 
-export function buildResumeReplayRuntimeEvents(
-  events: readonly RuntimeEvent[],
-): RuntimeEvent[] {
+export function buildResumeReplayRuntimeEvents(events: readonly RuntimeEvent[]): RuntimeEvent[] {
   const pairedCallIds = collectPairedCallIds(events);
   const replayEvents: RuntimeEvent[] = [];
 
@@ -215,8 +234,8 @@ function collectResumeDiagnostics(
   const diagnostics: ResumePlanDiagnostic[] = [];
   const operationsById = new Map(operations.map((operation) => [operation.toolCallId, operation]));
   if (
-    options.expectedRuntimeEventHighWater !== undefined
-    && options.expectedRuntimeEventHighWater !== events.length
+    options.expectedRuntimeEventHighWater !== undefined &&
+    options.expectedRuntimeEventHighWater !== events.length
   ) {
     diagnostics.push({
       code: 'runtime_offset_mismatch',
