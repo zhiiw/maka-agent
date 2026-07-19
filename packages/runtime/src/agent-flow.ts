@@ -31,6 +31,7 @@
  */
 
 import type { AttachmentRef } from '@maka/core/events';
+import type { SteeringLease } from '@maka/core/backend-types';
 import type { StoredMessage } from '@maka/core/session';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { InvocationContext } from './invocation-context.js';
@@ -70,6 +71,14 @@ export interface FlowInput {
    * compatibility projection.
    */
   runtimeContext?: RuntimeEvent[];
+  /**
+   * Steering lease/ack/nack forwarded to a steppable backend. Leases queued
+   * mid-turn user messages at each step boundary; see
+   * `BackendSendInput.pullSteering`.
+   */
+  pullSteering?: () => readonly SteeringLease[];
+  ackSteering?: (leaseIds: readonly string[]) => void;
+  nackSteering?: (leaseIds: readonly string[]) => void;
   /** Abort signal propagated to the underlying engine. */
   abortSignal?: AbortSignal;
 }
@@ -127,8 +136,12 @@ export type RunnableAgentFlow = Pick<AgentFlow, 'run'>;
  */
 export interface AgentFlowControl {
   stop(reason: 'user_stop' | 'redirect'): Promise<void>;
-  respondToPermission(decision: import('@maka/core/backend-types').PermissionDecision): Promise<void>;
-  respondToUserQuestion(response: import('@maka/core/user-question').UserQuestionResponse): Promise<void>;
+  respondToPermission(
+    decision: import('@maka/core/backend-types').PermissionDecision,
+  ): Promise<void>;
+  respondToUserQuestion(
+    response: import('@maka/core/user-question').UserQuestionResponse,
+  ): Promise<void>;
   dispose(): Promise<void>;
 }
 
