@@ -12,6 +12,7 @@ import {
   buildChildAgentTools,
   buildProviderOptions,
   buildSubscriptionModelFetch,
+  createProviderRequestCaptureRecorder,
   getAIModel,
   getBuiltinPricing,
   loadSynthesisCacheBlocksFromArtifacts,
@@ -25,6 +26,7 @@ import {
   createArtifactStore,
   createRuntimeEventStore,
   createSessionStore,
+  persistProviderRequestCaptureArtifact,
 } from '@maka/storage';
 import { registerFakeBackend } from './backends.js';
 import {
@@ -259,6 +261,7 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
   await registerBackends(backends, {
     config,
     task,
+    storageRoot: input.storageRoot,
     workspaceDir: input.cwd,
     ...sessionCapabilities.capabilities,
     ...(backendNeedsIsolation(input.config.backend)
@@ -721,14 +724,6 @@ export function buildAiSdkCellBackendRegistration(input: {
     : getBuiltinPricing;
   const permissionEngine = new PermissionEngine({ newId: input.newId, now: input.now });
   const contextBudgetBackendOptions = buildHarborCellContextBudgetBackendOptions(input.env);
-  // Back the synthesis cache with the run-scoped `@maka/storage` artifact store
-  // (blocks land under `{storageRoot}/artifacts/{sessionId}/`, run- and
-  // session-scoped, sharing the same lift as desktop). Only constructed when the
-  // policy is active so a baseline arm stays untouched.
-  const synthesisCacheCallbacks = buildHarborCellSynthesisCacheCallbacks(
-    input.env,
-    contextBudgetBackendOptions.contextBudget?.synthesisCache?.enabled === true,
-  );
   const taskLedgerExperimentPolicy = buildHarborCellTaskLedgerExperimentPolicy(input.env);
   const taskLedgerExperimentStore = taskLedgerExperimentPolicy
     ? createInMemoryTaskLedgerExperimentStore({ now: input.now, newId: input.newId })
@@ -737,6 +732,13 @@ export function buildAiSdkCellBackendRegistration(input: {
     if (!context.toolExecutor) {
       throw new Error('Harbor ai-sdk backend requires an isolated tool executor');
     }
+    // FileArtifactStore owns an in-memory metadata index, so every artifact
+    // consumer under the run's authoritative storage root shares this instance.
+    const artifactStore = createArtifactStore(context.storageRoot);
+    const synthesisCacheCallbacks = buildHarborCellSynthesisCacheCallbacks(
+      artifactStore,
+      contextBudgetBackendOptions.contextBudget?.synthesisCache?.enabled === true,
+    );
     registry.register('ai-sdk', (ctx) => {
       const subscriptionFetch = buildSubscriptionModelFetch({
         connection,
@@ -793,6 +795,25 @@ export function buildAiSdkCellBackendRegistration(input: {
         newId: input.newId,
         now: input.now,
         recordRunTrace: ctx.recordRunTrace,
+        ...(ctx.recordProviderRequestCapture
+          ? {
+              recordProviderRequestCapture: createProviderRequestCaptureRecorder({
+                persistArtifact: async (capture) => {
+                  const artifact = await persistProviderRequestCaptureArtifact(artifactStore, {
+                    sessionId: ctx.sessionId,
+                    turnId: capture.turnId,
+                    captureId: capture.captureId,
+                    step: capture.step,
+                    serializedRequest: capture.serializedRequest,
+                    now: input.now(),
+                  });
+                  return { artifactId: artifact.id };
+                },
+                recordLedger: ctx.recordProviderRequestCapture,
+              }),
+              recordProviderRequestAttempt: ctx.recordProviderRequestAttempt,
+            }
+          : {}),
         recordActiveFullCompactBlock: ctx.recordActiveFullCompactBlock,
         recordSemanticCompactBlock: ctx.recordSemanticCompactBlock,
         ...(input.recordUsageCheckpoint
@@ -839,13 +860,10 @@ async function writeHarborCellArtifact(path: string, contents: string): Promise<
 }
 
 function buildHarborCellSynthesisCacheCallbacks(
-  env: RunHarborCellEnv,
+  artifactStore: ReturnType<typeof createArtifactStore>,
   enabled: boolean,
 ): { loadSynthesisCache?: SynthesisCacheLoader; writeSynthesisCache?: SynthesisCacheWriter } {
   if (!enabled) return {};
-  const outputDir = env.MAKA_OUTPUT_DIR ?? '/logs/agent';
-  const storageRoot = env.MAKA_STORAGE_ROOT ?? join(outputDir, 'maka-storage');
-  const artifactStore = createArtifactStore(storageRoot);
   return {
     loadSynthesisCache: (event) => loadSynthesisCacheBlocksFromArtifacts(artifactStore, event),
     writeSynthesisCache: (event) => persistSynthesisCacheBlocksToArtifacts(artifactStore, event),

@@ -15,9 +15,12 @@ import {
   PermissionEngine,
   PiAgentBackend,
   type AgentBackend,
+  type AiSdkBackendInput,
   type BackendFactoryContext,
   type PiAgentTransport,
+  type ProviderRequestCaptureRecord,
   type SessionStore,
+  type SynthesisCacheWriteInput,
   type ToolResultArchiveReader,
   type ToolResultArchiveRecorder,
 } from '@maka/runtime';
@@ -1961,6 +1964,7 @@ describe('runHarborCell', () => {
           systemPrompt: DEFAULT_HEADLESS_SYSTEM_PROMPT,
         },
         task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
         workspaceDir,
         realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
         toolExecutor,
@@ -1992,6 +1996,133 @@ describe('runHarborCell', () => {
     });
   });
 
+  test('Harbor persists provider captures and synthesis blocks under the run storage root', async () => {
+    await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
+      const registry = new BackendRegistry();
+      const toolExecutor = fakeToolExecutor();
+      const register = buildAiSdkCellBackendRegistration({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          MAKA_STORAGE_ROOT: outputDir,
+          MAKA_CONTEXT_SYNTHESIS_CACHE: 'on',
+          MAKA_CONTEXT_SYNTHESIS_CACHE_MODE: 'read_write',
+        },
+        now: () => 123,
+        newId: testIdFactory(),
+      });
+      const context: HeadlessBackendContext = {
+        config: {
+          id: 'harbor-ai-sdk',
+          backend: 'ai-sdk',
+          llmConnectionSlug: 'openai',
+          model: 'gpt-4o-mini',
+        },
+        task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        workspaceDir,
+        storageRoot,
+        realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
+        toolExecutor,
+      };
+      await register(registry, context);
+
+      const backend = await registry.build('ai-sdk', {
+        ...backendContext(workspaceDir),
+        recordProviderRequestCapture: async () => {},
+      });
+      const backendInput = (
+        backend as unknown as {
+          input: Pick<
+            AiSdkBackendInput,
+            'loadSynthesisCache' | 'writeSynthesisCache' | 'recordProviderRequestCapture'
+          >;
+        }
+      ).input;
+      assert.ok(backendInput.loadSynthesisCache);
+      assert.ok(backendInput.writeSynthesisCache);
+      assert.ok(backendInput.recordProviderRequestCapture);
+
+      await backendInput.loadSynthesisCache({ sessionId: 'session-1' });
+      const capture: ProviderRequestCaptureRecord = {
+        schemaVersion: 1,
+        traceId: 'trace-1',
+        captureId: 'capture-1',
+        turnId: 'turn-1',
+        step: 0,
+        providerId: 'openai',
+        modelId: 'gpt-4o-mini',
+        requestHash: 'sha256:request',
+        requestBytes: 18,
+        segments: [],
+        serializedRequest: '{"prompt":"hello"}',
+      };
+      await backendInput.recordProviderRequestCapture(capture);
+
+      const sourceResult = { key: 'key-alpha', sentinel: 'SYNTH_SENTINEL' };
+      const serializedResult = JSON.stringify(sourceResult);
+      const sourceBodySha256 = sha256(serializedResult);
+      const synthesisWrite: SynthesisCacheWriteInput = {
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        source: {
+          createdFrom: 'gated_archive_retrieval',
+          query: 'Recover key-alpha sentinel',
+          hydratedRuntimeEvents: [
+            {
+              id: 'runtime-result-1',
+              sessionId: 'session-1',
+              runId: 'run-1',
+              turnId: 'turn-1',
+              invocationId: 'invocation-1',
+              ts: 122,
+              partial: false,
+              role: 'tool',
+              author: 'tool',
+              content: {
+                kind: 'function_response',
+                id: 'tool-call-1',
+                name: 'Read',
+                result: sourceResult,
+              },
+            },
+          ],
+          retrievedArchiveRefs: [
+            {
+              kind: 'archived_tool_result',
+              sessionId: 'session-1',
+              turnId: 'turn-1',
+              runtimeEventId: 'runtime-result-1',
+              toolCallId: 'tool-call-1',
+              toolName: 'Read',
+              artifactId: 'archive-artifact-1',
+              bodySha256: sourceBodySha256,
+              originalEstimatedTokens: 12,
+              originalBytes: Buffer.byteLength(serializedResult, 'utf8'),
+              placeholderReason: 'stale_tool_result_pruned_before_compact',
+            },
+          ],
+          archiveRetrievalMode: 'history_search_gated',
+        },
+        limits: {
+          maxBlocks: 1,
+          maxBlockEstimatedTokens: 1_024,
+          maxEstimatedTokens: 2_048,
+          charsPerToken: 4,
+        },
+      };
+      const synthesisResult = await backendInput.writeSynthesisCache(synthesisWrite);
+      assert.equal(synthesisResult?.blocks.length, 1);
+
+      const records = await createArtifactStore(storageRoot).list('session-1');
+      assert.deepEqual(records.map((record) => record.source).sort(), [
+        'provider_request_capture',
+        'synthesis_cache_block',
+      ]);
+      assert.deepEqual(await createArtifactStore(outputDir).list('session-1'), []);
+    });
+  });
+
   test('Harbor ai-sdk backend uses the discovered GitHub Copilot wire', async () => {
     await withDirs(async ({ workspaceDir }) => {
       const registry = new BackendRegistry();
@@ -2014,6 +2145,7 @@ describe('runHarborCell', () => {
           model: 'gpt-5.4',
         },
         task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
         workspaceDir,
         realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
         toolExecutor,
@@ -2087,6 +2219,7 @@ describe('runHarborCell', () => {
           model: 'gpt-4o-mini',
         },
         task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
         workspaceDir,
         realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
         toolExecutor,
@@ -2119,6 +2252,7 @@ describe('runHarborCell', () => {
           model: 'gpt-4o-mini',
         },
         task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
         workspaceDir,
         realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
         toolExecutor,
@@ -2198,6 +2332,7 @@ describe('runHarborCell', () => {
           systemPrompt: candidatePrompt,
         },
         task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
         workspaceDir,
         realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
         toolExecutor,
@@ -2237,6 +2372,7 @@ describe('runHarborCell', () => {
           model: 'deepseek-v4-flash',
         },
         task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
         workspaceDir,
         realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
         toolExecutor,
@@ -2295,6 +2431,7 @@ describe('runHarborCell', () => {
           model: 'gpt-4o-mini',
         },
         task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
         workspaceDir,
         realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
         toolExecutor,
@@ -2394,6 +2531,7 @@ describe('runHarborCell', () => {
           model: 'gpt-4o-mini',
         },
         task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
         workspaceDir,
         realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
         toolExecutor,
@@ -2441,6 +2579,7 @@ describe('runHarborCell', () => {
           model: 'gpt-4o-mini',
         },
         task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
         workspaceDir,
         realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
         toolExecutor,
@@ -2485,6 +2624,7 @@ describe('runHarborCell', () => {
                 model: 'gpt-4o-mini',
               },
               task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+              storageRoot: workspaceDir,
               workspaceDir,
               realBackendIsolation: {
                 kind: 'external',
@@ -2562,6 +2702,7 @@ describe('runHarborCell', () => {
             model: 'gpt-4o-mini',
           },
           task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+          storageRoot: workspaceDir,
           workspaceDir,
           realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
           toolExecutor,
@@ -2596,6 +2737,7 @@ describe('runHarborCell', () => {
           model: 'gpt-4o-mini',
         },
         task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
         workspaceDir,
         realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
         toolExecutor,

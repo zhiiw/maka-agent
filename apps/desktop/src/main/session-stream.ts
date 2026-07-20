@@ -11,6 +11,7 @@ import {
   buildLlmHistorySummarizer,
   buildMcpTools,
   buildProviderOptions,
+  createProviderRequestCaptureRecorder,
   getAIModel,
   loadHistoryCompactBlocksFromArtifacts,
   loadSynthesisCacheBlocksFromArtifacts,
@@ -38,6 +39,7 @@ import {
   createAttachmentByteReader,
   createTelemetryRepo,
   openRuntimeEventPersistence,
+  persistProviderRequestCaptureArtifact,
 } from '@maka/storage';
 import { WEB_SEARCH_TOOL_NAME } from './web-search/agent-tool.js';
 import {
@@ -252,6 +254,25 @@ export function createAiSdkBackendFactory(deps: AiSdkBackendFactoryDeps): Backen
         },
       }),
       recordRunTrace: ctx.recordRunTrace,
+      ...(ctx.recordProviderRequestCapture
+        ? {
+            recordProviderRequestCapture: createProviderRequestCaptureRecorder({
+              persistArtifact: async (capture) => {
+                const artifact = await persistProviderRequestCaptureArtifact(artifactStore, {
+                  sessionId: ctx.sessionId,
+                  turnId: capture.turnId,
+                  captureId: capture.captureId,
+                  step: capture.step,
+                  serializedRequest: capture.serializedRequest,
+                  now: Date.now(),
+                });
+                return { artifactId: artifact.id };
+              },
+              recordLedger: ctx.recordProviderRequestCapture,
+            }),
+            recordProviderRequestAttempt: ctx.recordProviderRequestAttempt,
+          }
+        : {}),
       recordHistoryCompactCheckpoint: ctx.recordHistoryCompactCheckpoint,
       loadTurnRuntimeEvents: ctx.loadTurnRuntimeEvents,
       recordActiveFullCompactBlock: ctx.recordActiveFullCompactBlock,
