@@ -198,7 +198,7 @@ describe('RuntimeEvent actions', () => {
       ...baseEvent(),
       actions: {
         runtimeFact: {
-          kind: 'future.recovery_fact',
+          kind: 'maka.test.future_fact',
           version: 7,
           legacyProjection: 'invisible',
           payload: { checkpointId: 'checkpoint-1' },
@@ -207,7 +207,7 @@ describe('RuntimeEvent actions', () => {
     });
 
     expect((decoded.actions as Record<string, unknown>).runtimeFact).toEqual({
-      kind: 'future.recovery_fact',
+      kind: 'maka.test.future_fact',
       version: 7,
       legacyProjection: 'invisible',
       payload: { checkpointId: 'checkpoint-1' },
@@ -220,7 +220,7 @@ describe('RuntimeEvent actions', () => {
         ...baseEvent(),
         actions: {
           runtimeFact: {
-            kind: 'future.recovery_fact',
+            kind: 'maka.test.future_fact',
             version: 0,
             legacyProjection: 'invisible',
             payload: null,

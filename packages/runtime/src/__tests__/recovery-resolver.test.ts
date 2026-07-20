@@ -201,7 +201,7 @@ describe('RecoveryResolver', () => {
         id: 'future-runtime-fact',
         actions: {
           runtimeFact: {
-            kind: 'future.recovery_fact',
+            kind: 'maka.test.future_fact',
             version: 7,
             legacyProjection: 'invisible',
             payload: { checkpointId: 'checkpoint-1' },
@@ -214,7 +214,7 @@ describe('RecoveryResolver', () => {
       {
         code: 'runtime_fact_unsupported',
         eventId: 'future-runtime-fact',
-        kind: 'future.recovery_fact',
+        kind: 'maka.test.future_fact',
         version: 7,
       },
     ]);

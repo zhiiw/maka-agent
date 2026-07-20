@@ -783,7 +783,7 @@ describe('projectRuntimeEventsToStoredMessages', () => {
           author: 'system',
           actions: {
             runtimeFact: {
-              kind: 'future.recovery_fact',
+              kind: 'maka.test.future_fact',
               version: 7,
               legacyProjection: 'invisible',
               payload: { checkpointId: 'checkpoint-1' },
@@ -800,10 +800,36 @@ describe('projectRuntimeEventsToStoredMessages', () => {
         {
           code: 'unknown_runtime_fact',
           eventId: 'future-runtime-fact',
-          detail: { kind: 'future.recovery_fact', version: 7 },
+          detail: { kind: 'maka.test.future_fact', version: 7 },
         },
       ],
     );
+  });
+
+  test('projects visible content while diagnosing an unknown runtime fact on the same event', () => {
+    const out = projectRuntimeEventsToStoredMessages(
+      [
+        ev({
+          id: 'mixed-future-runtime-fact',
+          role: 'model',
+          author: 'agent',
+          content: { kind: 'text', text: 'visible answer' },
+          actions: {
+            runtimeFact: {
+              kind: 'maka.test.future_fact',
+              version: 1,
+              legacyProjection: 'invisible',
+              payload: {},
+            },
+          },
+        }),
+      ],
+      { runHeaders: [header] },
+    );
+
+    expect(out.messages).toHaveLength(1);
+    expect(out.messages[0]).toMatchObject({ type: 'assistant', text: 'visible answer' });
+    expect(out.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(['unknown_runtime_fact']);
   });
 
   test('continuation-start recovery facts are accepted without creating legacy message rows', () => {

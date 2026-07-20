@@ -2041,6 +2041,110 @@ describe('SessionManager permission mode updates', () => {
     expect(backendCalls).toBe(0);
   });
 
+  test('rejects execution when a runtime fact is appended after continuation planning', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    let backendCalls = 0;
+    backends.register(
+      'fake',
+      (ctx) =>
+        new CountingFinalTextBackend(ctx, () => {
+          backendCalls += 1;
+        }),
+    );
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      inspectContinuationSafety: inspectStableContinuationSafety,
+      newId: nextId(),
+      now: nextNow(6_592),
+      runtimeSource: 'test',
+    });
+    const session = await manager.createSession(makeInput());
+    const header = await store.readHeader(session.id);
+    const sourceRunId = 'source-run-fact-race';
+    const sourceTurnId = 'source-turn-fact-race';
+    const sourceInvocationId = 'source-invocation-fact-race';
+    await seedRuntimeRun(
+      runStore,
+      makeRunHeader({
+        runId: sourceRunId,
+        sessionId: session.id,
+        turnId: sourceTurnId,
+        status: 'failed',
+        cwd: header.cwd,
+        createdAt: 1,
+        updatedAt: 2,
+        completedAt: 2,
+        failureClass: 'app_restarted',
+      }),
+      [
+        runtimeEvent({
+          id: 'source-user-fact-race',
+          invocationId: sourceInvocationId,
+          runId: sourceRunId,
+          sessionId: session.id,
+          turnId: sourceTurnId,
+          ts: 1,
+          role: 'user',
+          author: 'user',
+          content: { kind: 'text', text: 'continue safely' },
+        }),
+        runtimeEvent({
+          id: 'source-terminal-fact-race',
+          invocationId: sourceInvocationId,
+          runId: sourceRunId,
+          sessionId: session.id,
+          turnId: sourceTurnId,
+          ts: 2,
+          status: 'failed',
+          actions: { endInvocation: true, stateDelta: { failureClass: 'app_restarted' } },
+        }),
+      ],
+    );
+    const plan = await manager.planSafeBoundaryContinuation(session.id, {
+      sourceRunId,
+      currentCwd: header.cwd,
+      sourceWorkspaceIdentity: 'workspace-1',
+      currentWorkspaceIdentity: 'workspace-1',
+      backgroundOperationsSettled: true,
+      availableToolNames: [],
+    });
+    if (!plan.continuation) throw new Error('expected continuation');
+
+    await runStore.appendRuntimeEvent(
+      session.id,
+      sourceRunId,
+      runtimeEvent({
+        id: 'source-future-fact-race',
+        invocationId: sourceInvocationId,
+        runId: sourceRunId,
+        sessionId: session.id,
+        turnId: sourceTurnId,
+        ts: 3,
+        role: 'system',
+        author: 'system',
+        actions: {
+          runtimeFact: {
+            kind: 'maka.test.future_fact',
+            version: 1,
+            legacyProjection: 'invisible',
+            payload: {},
+          },
+        },
+      }),
+    );
+
+    await expectRejects(
+      collectSessionEvents(manager.resumeSafeBoundaryContinuation(plan.continuation)),
+      /high-water/i,
+    );
+    expect(backendCalls).toBe(0);
+  });
+
   test('rejects continuation when the authoritative workspace identity changes after planning', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
@@ -4653,7 +4757,7 @@ describe('SessionManager permission mode updates', () => {
           author: 'system',
           actions: {
             runtimeFact: {
-              kind: 'future.recovery_fact',
+              kind: 'maka.test.future_fact',
               version: 7,
               legacyProjection: 'invisible',
               payload: { checkpointId: 'checkpoint-1' },

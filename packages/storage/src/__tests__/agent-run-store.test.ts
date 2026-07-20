@@ -594,6 +594,36 @@ describe('AgentRunStore', () => {
     });
   });
 
+  it('rejects runtime facts in the legacy JSONL writer', async () => {
+    await withStores(async (runStore, runtimeEventStore) => {
+      await runStore.createRun(makeHeader({ invocationId: 'turn-1' }));
+      assert.equal(runtimeEventStore.runtimeFactWriteCapability, undefined);
+
+      await assert.rejects(
+        runtimeEventStore.appendRuntimeEvent(
+          'session-1',
+          'run-1',
+          makeRuntimeEvent({
+            id: 'future-runtime-fact',
+            role: 'system',
+            author: 'system',
+            content: undefined,
+            actions: {
+              runtimeFact: {
+                kind: 'maka.test.future_fact',
+                version: 1,
+                legacyProjection: 'invisible',
+                payload: {},
+              },
+            },
+          }),
+        ),
+        /runtime fact writer capability/i,
+      );
+      assert.deepEqual(await runtimeEventStore.readRuntimeEvents('session-1', 'run-1'), []);
+    });
+  });
+
   it('returns an empty runtime event list when the runtime ledger is missing', async () => {
     await withStores(async (runStore, runtimeEventStore) => {
       await runStore.createRun(makeHeader());

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import type { RuntimeEvent } from '@maka/core';
 import {
@@ -13,7 +14,9 @@ import {
 describe('SqliteRuntimeStore', () => {
   it('applies versioned migrations and reopens the same database without rewriting schema', async () => {
     await withStore(async (store, dbPath) => {
+      assert.equal(SQLITE_RUNTIME_SCHEMA_VERSION, 5);
       assert.equal(store.schemaVersion(), SQLITE_RUNTIME_SCHEMA_VERSION);
+      assert.equal(store.runtimeFactWriteCapability, 'runtime_fact_envelope_v1');
       assert.equal(store.journalMode(), 'wal');
       assert.equal(store.foreignKeysEnabled(), true);
       store.close();
@@ -28,7 +31,7 @@ describe('SqliteRuntimeStore', () => {
     });
   });
 
-  it('round-trips an unknown versioned runtime fact without requiring a schema migration', async () => {
+  it('round-trips an unknown versioned runtime fact through the capability-gated schema', async () => {
     await withStore(async (store) => {
       const fact: RuntimeEvent = {
         id: 'future-runtime-fact',
@@ -42,7 +45,7 @@ describe('SqliteRuntimeStore', () => {
         author: 'system',
         actions: {
           runtimeFact: {
-            kind: 'future.recovery_fact',
+            kind: 'maka.test.future_fact',
             version: 7,
             legacyProjection: 'invisible',
             payload: { checkpointId: 'checkpoint-1' },
@@ -53,6 +56,46 @@ describe('SqliteRuntimeStore', () => {
       await store.appendRuntimeEvent('session-1', 'run-1', fact);
 
       assert.deepEqual(await store.readRuntimeEvents('session-1', 'run-1'), [fact]);
+    });
+  });
+
+  it('upgrades a populated schema 4 database to the runtime-fact reader gate without data loss', async () => {
+    await withStore(async (store, dbPath) => {
+      const event = functionCallEvent();
+      await store.appendRuntimeEvent('session-1', 'run-1', event);
+      store.close();
+
+      const legacy = new DatabaseSync(dbPath);
+      legacy.exec('DROP TABLE runtime_capabilities');
+      legacy.exec('PRAGMA user_version = 4');
+      legacy.close();
+
+      const upgraded = createSqliteRuntimeStore(dbPath);
+      try {
+        assert.equal(upgraded.schemaVersion(), 5);
+        assert.equal(upgraded.runtimeFactWriteCapability, 'runtime_fact_envelope_v1');
+        assert.deepEqual(await upgraded.readRuntimeEvents('session-1', 'run-1'), [event]);
+      } finally {
+        upgraded.close();
+      }
+    });
+  });
+
+  it('fails closed when schema 5 lacks its runtime-fact capability declaration', async () => {
+    await withStore(async (store, dbPath) => {
+      store.close();
+      const corrupted = new DatabaseSync(dbPath);
+      corrupted.exec("DELETE FROM runtime_capabilities WHERE capability = 'runtime_fact_envelope'");
+      corrupted.close();
+
+      let unexpectedlyOpened: ReturnType<typeof createSqliteRuntimeStore> | undefined;
+      try {
+        assert.throws(() => {
+          unexpectedlyOpened = createSqliteRuntimeStore(dbPath);
+        }, /runtime fact envelope capability declaration/i);
+      } finally {
+        unexpectedlyOpened?.close();
+      }
     });
   });
 

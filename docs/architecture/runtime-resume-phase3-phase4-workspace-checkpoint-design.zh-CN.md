@@ -501,6 +501,23 @@ interface RuntimeEventActions {
 - 新 writer 只能在 storage schema/capability 声明 reader 已支持该 envelope 后写入 Phase 3 fact；
 - PR 0 必须先独立发布并经过兼容测试，之后才能有任何 Phase 3 writer 落盘新 kind。
 
+Runtime fact kind 统一使用 `maka.<domain>.<name>` 小写点分命名，例如
+`maka.tool.recovery_decision`、`maka.tool.reconcile_result`、
+`maka.workspace.checkpoint`。兼容性由 `kind + version` 共同决定；不得通过改用
+snake_case、缩写或省略 `maka.` 前缀表达协议版本。
+
+PR 0 的 reader/writer capability matrix：
+
+| Store / binary | 读取 envelope | 写入 envelope | downgrade 行为 |
+| --- | --- | --- | --- |
+| SQLite schema 5+ / PR 0+ | 可读；UI soft diagnostic，recovery hard park | 仅当 store 声明 `runtime_fact_envelope_v1` | pre-PR0 binary 最高只支持 schema 4，必须拒绝打开 |
+| legacy JSONL / PR 0+ | 可导入和读取既有兼容数据 | 禁止写入 `runtimeFact` | 不会产生 pre-PR0 reader 无法理解的新事实 |
+| pre-PR0 binary | 不理解 envelope | 不具备 capability | 不能打开 schema 5 SQLite；不能由 JSONL 新 writer 暴露新事实 |
+
+SQLite schema 5 是 envelope 的 downgrade gate，不表示某个具体 fact kind 已被 recovery
+支持。具体 kind 的 writer 还必须检查 store capability，并且不得在 legacy JSONL host 上
+降级写入。PR 0 本身仍不包含任何生产 fact writer。
+
 这一区分保证“旧 UI 尽量可读”而不把“旧 Runtime 可以安全执行”混为一谈。
 
 ## 7. Phase 3A：受控工具恢复
@@ -601,8 +618,8 @@ interface ToolReconcileResultFact {
 }
 
 // envelope.kind/version:
-// tool_recovery_decision / 1
-// tool_reconcile_result   / 1
+// maka.tool.recovery_decision / 1
+// maka.tool.reconcile_result / 1
 ```
 
 `observationDigest` 保护证据身份，原始敏感内容不进入 telemetry。若需要合成 provider-visible tool response，应另追加合法 function response event，并清楚标记 `origin: 'runtime_recovery'`；不能把 recovery decision event 伪装成模型原始结果。
@@ -751,7 +768,7 @@ branch 是新 session 的历史导入，不代表外部副作用再次发生。o
 
 ### 8.5 Canonical checkpoint fact
 
-通过 `RuntimeEvent.actions.runtimeFact` 表达 checkpoint；envelope 使用 `kind: 'workspace_checkpoint'`、`version: 1`、`legacyProjection: 'invisible'`：
+通过 `RuntimeEvent.actions.runtimeFact` 表达 checkpoint；envelope 使用 `kind: 'maka.workspace.checkpoint'`、`version: 1`、`legacyProjection: 'invisible'`：
 
 ```ts
 interface WorkspaceCheckpointFact {

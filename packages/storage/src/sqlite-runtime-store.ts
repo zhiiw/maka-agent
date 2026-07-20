@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import {
+  RUNTIME_FACT_WRITE_CAPABILITY_V1,
   isPartialRuntimeEvent,
   isTerminalRuntimeEvent,
   type RuntimeEvent,
@@ -112,6 +113,7 @@ export function createSqliteRuntimeStore(
 export class SqliteRuntimeStore implements RuntimeEventStore {
   readonly durability = 'canonical' as const;
   readonly toolBoundaryProtocol = 't1_after_preflight_v1' as const;
+  readonly runtimeFactWriteCapability: typeof RUNTIME_FACT_WRITE_CAPABILITY_V1;
   private readonly db: DatabaseSync;
   private closed = false;
 
@@ -122,8 +124,14 @@ export class SqliteRuntimeStore implements RuntimeEventStore {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     const DatabaseSync = loadDatabaseSync();
     this.db = new DatabaseSync(path);
-    configureSqliteRuntimeDatabase(this.db);
-    migrateSqliteRuntimeDatabase(this.db);
+    try {
+      configureSqliteRuntimeDatabase(this.db);
+      migrateSqliteRuntimeDatabase(this.db);
+      this.runtimeFactWriteCapability = readRuntimeFactWriteCapability(this.db);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   schemaVersion(): number {
@@ -775,6 +783,25 @@ export class SqliteRuntimeStore implements RuntimeEventStore {
       .get(operationId) as ToolOperationRow | undefined;
     return row ? toolOperationFromRow(row) : undefined;
   }
+}
+
+function readRuntimeFactWriteCapability(db: DatabaseSync): typeof RUNTIME_FACT_WRITE_CAPABILITY_V1 {
+  let row: { version?: unknown } | undefined;
+  try {
+    row = db
+      .prepare(
+        "SELECT version FROM runtime_capabilities WHERE capability = 'runtime_fact_envelope'",
+      )
+      .get() as { version?: unknown } | undefined;
+  } catch (error) {
+    throw new Error('SQLite runtime fact envelope capability declaration is unavailable', {
+      cause: error,
+    });
+  }
+  if (row?.version !== 1) {
+    throw new Error('SQLite runtime fact envelope capability declaration is invalid');
+  }
+  return RUNTIME_FACT_WRITE_CAPABILITY_V1;
 }
 
 interface ToolOperationRow {

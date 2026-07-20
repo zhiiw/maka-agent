@@ -155,8 +155,11 @@ export {
 } from './execution-evidence.js';
 
 // runtime-event-store.ts
-export type { RuntimeEventStore } from './runtime-event-store.js';
-export { DurableStoreWriteError } from './runtime-event-store.js';
+export type { RuntimeEventStore, RuntimeFactWriteCapability } from './runtime-event-store.js';
+export {
+  DurableStoreWriteError,
+  RUNTIME_FACT_WRITE_CAPABILITY_V1,
+} from './runtime-event-store.js';
 
 // session.ts
 export type {

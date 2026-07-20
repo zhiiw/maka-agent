@@ -839,19 +839,24 @@ function collectResumeDiagnostics(
   }
 
   for (const issue of recovery.issues) {
-    if (issue.code === 'runtime_fact_unsupported') {
-      diagnostics.push({
-        code: 'runtime_fact_unsupported',
-        message: `runtime fact ${issue.kind}@${issue.version} is not supported by this recovery runtime`,
-        eventId: issue.eventId,
-        detail: { kind: issue.kind, version: issue.version },
-      });
-    } else {
-      diagnostics.push({
-        code: 'protocol_marker_invalid',
-        message: 'runtime protocol marker is only valid on the first canonical event',
-        eventId: issue.eventId,
-      });
+    switch (issue.code) {
+      case 'runtime_fact_unsupported':
+        diagnostics.push({
+          code: 'runtime_fact_unsupported',
+          message: `runtime fact ${issue.kind}@${issue.version} is not supported by this recovery runtime`,
+          eventId: issue.eventId,
+          detail: { kind: issue.kind, version: issue.version },
+        });
+        break;
+      case 'protocol_marker_invalid':
+        diagnostics.push({
+          code: 'protocol_marker_invalid',
+          message: 'runtime protocol marker is only valid on the first canonical event',
+          eventId: issue.eventId,
+        });
+        break;
+      default:
+        assertNever(issue);
     }
   }
 
@@ -902,6 +907,10 @@ function collectResumeDiagnostics(
   }
 
   return diagnostics;
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled recovery issue: ${JSON.stringify(value)}`);
 }
 
 function deriveRejectionReasons(

@@ -673,6 +673,7 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
     event: RuntimeEvent,
     options: { durable?: boolean } = {},
   ): Promise<void> {
+    assertLegacyRuntimeEventWriteSupported(event);
     assertSafeId(sessionId, 'Invalid session id');
     assertSafeId(runId, 'Invalid run id');
     await this.withQueue(sessionId, runId, async () => {
@@ -733,6 +734,7 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
     runId: string,
     event: RuntimeEvent,
   ): Promise<void> {
+    assertLegacyRuntimeEventWriteSupported(event);
     assertSafeId(sessionId, 'Invalid session id');
     assertSafeId(runId, 'Invalid run id');
     if (event.partial || !isTerminalRuntimeEvent(event)) {
@@ -918,6 +920,14 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
     assertSafeId(sessionId, 'Invalid session id');
     assertSafeId(runId, 'Invalid run id');
     return chainWrite(this.writeQueues, `${sessionId}:${runId}`, operation);
+  }
+}
+
+function assertLegacyRuntimeEventWriteSupported(event: RuntimeEvent): void {
+  if (event.actions?.runtimeFact) {
+    throw new Error(
+      'Runtime fact writer capability is unavailable in the legacy JSONL RuntimeEvent store',
+    );
   }
 }
 

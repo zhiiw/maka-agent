@@ -139,7 +139,7 @@ describe('runtime resume phase 0 projection', () => {
       id: 'future-runtime-fact',
       actions: {
         runtimeFact: {
-          kind: 'future.recovery_fact',
+          kind: 'maka.test.future_fact',
           version: 7,
           legacyProjection: 'invisible',
           payload: { checkpointId: 'checkpoint-1' },
@@ -156,15 +156,51 @@ describe('runtime resume phase 0 projection', () => {
     assert.deepEqual(plan.diagnostics, [
       {
         code: 'runtime_fact_unsupported',
-        message: 'runtime fact future.recovery_fact@7 is not supported by this recovery runtime',
+        message: 'runtime fact maka.test.future_fact@7 is not supported by this recovery runtime',
         eventId: 'future-runtime-fact',
-        detail: { kind: 'future.recovery_fact', version: 7 },
+        detail: { kind: 'maka.test.future_fact', version: 7 },
       },
     ]);
   });
 });
 
 describe('runtime resume phase 1 safe-boundary continuation', () => {
+  test('parks a continuation plan when its source contains an unknown runtime fact', async () => {
+    const sourceEvents = [
+      textEvent('source-user', 'user', 'continue safely'),
+      base({
+        id: 'source-future-runtime-fact',
+        actions: {
+          runtimeFact: {
+            kind: 'maka.test.future_fact',
+            version: 1,
+            legacyProjection: 'invisible',
+            payload: {},
+          },
+        },
+      }),
+      base({ id: 'source-terminal', status: 'failed', actions: { endInvocation: true } }),
+    ];
+    const planner = new RuntimeContinuationPlanner({
+      readSourceRun: async () => ({ cwd: '/workspace/repo', status: 'failed' }),
+      readRuntimeEvents: async () => sourceEvents,
+      newId: () => 'unused',
+    });
+
+    const plan = await planner.plan({
+      sessionId: 'session-1',
+      sourceRunId: 'run-1',
+      currentCwd: '/workspace/repo',
+      sourceWorkspaceIdentity: 'workspace-1',
+      currentWorkspaceIdentity: 'workspace-1',
+      backgroundOperationsSettled: true,
+      availableToolNames: [],
+    });
+
+    assert.equal(plan.disposition, 'park');
+    assert.deepEqual(plan.rejectionReasons, ['runtime_fact_unsupported']);
+  });
+
   test('replays the user-anchored ancestor prefix when continuing a continuation run', async () => {
     const rootEvents = [
       textEvent('root-user', 'user', 'finish the task'),
