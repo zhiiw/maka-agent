@@ -110,6 +110,11 @@ SQLite canonical storage, Tool Journal T1/T2 transactions, operation IDs,
 reconciliation, and idempotent re-execution remain later phases. Phase 1 adds
 no hashing policy, lease, fencing token, or distributed scheduler ownership.
 
+The complete target design for controlled tool reconciliation, RuntimeEvent
+boundary binding, Git-backed workspace checkpoints, and isolated recovery is
+documented in [Runtime Resume Phase 3–4: controlled recovery and workspace
+checkpoints](./runtime-resume-phase3-phase4-workspace-checkpoint-design.zh-CN.md).
+
 ## Host responsibilities
 
 Workspace identity, background-operation settlement, current tool catalog, and
