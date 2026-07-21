@@ -355,6 +355,98 @@ describe('SqliteRuntimeStore', () => {
     });
   });
 
+  it('atomically projects canonical recovery facts and rebuilds the same journal', async () => {
+    await withStore(async (store) => {
+      await commitPrepared(store);
+      const reconcile = toolRecoveryFactEvent({
+        id: 'reconcile-event-1',
+        ts: 20,
+        kind: 'maka.tool.reconcile_result',
+        payload: {
+          protocol: 'tool_reconcile_v1',
+          operationId: 'operation-1',
+          result: 'applied',
+          observationDigest: 'sha256:observation-1',
+          observedAt: '2026-07-21T00:00:00.000Z',
+          nextAction: 'synthesize_response',
+        },
+      });
+      const decision = toolRecoveryFactEvent({
+        id: 'recovery-decision-event-1',
+        ts: 21,
+        kind: 'maka.tool.recovery_decision',
+        payload: {
+          protocol: 'tool_recovery_v1',
+          operationId: 'operation-1',
+          disposition: 'reconcile_required',
+          reasonCode: 'reconcile_applied',
+          evidenceEventIds: ['call-event-1', 'dispatch-event-1', 'reconcile-event-1'],
+        },
+      });
+
+      await store.commitToolRecoveryFact({
+        operationId: 'operation-1',
+        journalEventId: 'journal-reconcile-1',
+        state: 'reconcile_recorded',
+        runtimeEvent: reconcile,
+        committedAt: 20,
+      });
+      await store.commitToolRecoveryFact({
+        operationId: 'operation-1',
+        journalEventId: 'journal-recovery-decision-1',
+        state: 'recovery_decided',
+        runtimeEvent: decision,
+        committedAt: 21,
+      });
+      const outcome = functionResponseEvent({ id: 'recovered-response-event-1', ts: 22 });
+      await store.commitToolOutcome({
+        operationId: 'operation-1',
+        journalEventId: 'journal-recovered-outcome-1',
+        runtimeEvent: outcome,
+        committedAt: 22,
+      });
+
+      const beforeRebuild = await store.readToolJournal('operation-1');
+      assert.deepEqual(
+        beforeRebuild.map(({ state, runtimeEventId, metadata }) => ({
+          state,
+          runtimeEventId,
+          metadata,
+        })),
+        [
+          { state: 'prepared', runtimeEventId: 'dispatch-event-1', metadata: undefined },
+          {
+            state: 'reconcile_recorded',
+            runtimeEventId: 'reconcile-event-1',
+            metadata: reconcile.actions?.runtimeFact,
+          },
+          {
+            state: 'recovery_decided',
+            runtimeEventId: 'recovery-decision-event-1',
+            metadata: decision.actions?.runtimeFact,
+          },
+          {
+            state: 'outcome_committed',
+            runtimeEventId: 'recovered-response-event-1',
+            metadata: undefined,
+          },
+        ],
+      );
+      assert.equal((await store.readToolOperation('operation-1'))?.version, 4);
+
+      const result = await store.rebuildToolProjectionsFromRuntimeEvents();
+
+      assert.deepEqual(result, { operations: 1, journalEvents: 4 });
+      assert.deepEqual(
+        (await store.readToolJournal('operation-1')).map(
+          ({ journalEventId: _, ...record }) => record,
+        ),
+        beforeRebuild.map(({ journalEventId: _, ...record }) => record),
+      );
+      assert.equal((await store.readToolOperation('operation-1'))?.version, 4);
+    });
+  });
+
   it('coalesces stream chunks outside the immutable high-water ledger', async () => {
     await withStore(async (store) => {
       for (const [index, text] of ['hel', 'lo', '!'].entries()) {
@@ -530,6 +622,34 @@ function toolDispatchEvent(overrides: Partial<RuntimeEvent> = {}): RuntimeEvent 
     },
     refs: { operationId: 'operation-1', toolCallId: 'provider-call-1' },
     ...overrides,
+  };
+}
+
+function toolRecoveryFactEvent(input: {
+  id: string;
+  ts: number;
+  kind: 'maka.tool.reconcile_result' | 'maka.tool.recovery_decision';
+  payload: Record<string, unknown>;
+}): RuntimeEvent {
+  return {
+    id: input.id,
+    invocationId: 'invocation-1',
+    runId: 'run-1',
+    sessionId: 'session-1',
+    turnId: 'turn-1',
+    ts: input.ts,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      runtimeFact: {
+        kind: input.kind,
+        version: 1,
+        legacyProjection: 'invisible',
+        payload: input.payload,
+      },
+    },
+    refs: { operationId: 'operation-1' },
   };
 }
 

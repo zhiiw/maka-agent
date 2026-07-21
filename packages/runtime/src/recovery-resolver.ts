@@ -7,6 +7,7 @@ import type { ToolRecoveryContractRegistry } from './tool-recovery-contract.js';
 import {
   parseToolRecoveryFact,
   type ToolRecoveryDecisionFact,
+  type ToolReconcileResultFact,
 } from './tool-recovery-facts.js';
 
 export type RecoveryDisposition =
@@ -22,6 +23,10 @@ export type RecoveryReasonCode =
   | 'recovery_contract_unavailable'
   | 'recovery_contract_mismatch'
   | 'manual_recovery_required'
+  | 'reconcile_applied'
+  | 'reconcile_not_applied'
+  | 'reconcile_conflict'
+  | 'reconcile_still_running'
   | 'new_protocol_before_dispatch'
   | 'legacy_dispatch_unknown'
   | 'orphan_dispatch'
@@ -76,7 +81,13 @@ export interface RuntimeRecoveryResolution {
     | {
         code: 'recovery_fact_corruption';
         eventId: string;
-        reason: 'invalid_payload' | 'orphan_operation' | 'duplicate_decision' | 'invalid_evidence';
+        reason:
+          | 'invalid_payload'
+          | 'orphan_operation'
+          | 'duplicate_decision'
+          | 'duplicate_reconcile_result'
+          | 'fact_after_decision'
+          | 'invalid_evidence';
       }
   >;
   hasCorruption: boolean;
@@ -96,10 +107,10 @@ export function resolveRuntimeRecovery(
       ? TOOL_BOUNDARY_PROTOCOL_V1
       : undefined;
   const issues: RuntimeRecoveryResolution['issues'] = [];
-  const recoveryDecisionFacts: Array<{
-    eventId: string;
-    fact: ToolRecoveryDecisionFact;
-  }> = [];
+  const recoveryFacts: Array<
+    | { kind: 'recovery_decision'; eventId: string; fact: ToolRecoveryDecisionFact }
+    | { kind: 'reconcile_result'; eventId: string; fact: ToolReconcileResultFact }
+  > = [];
   if (firstProtocol !== undefined && toolBoundaryProtocol === undefined && firstCanonicalEvent) {
     issues.push({
       code: 'protocol_marker_invalid' as const,
@@ -117,7 +128,11 @@ export function resolveRuntimeRecovery(
     if (!fact) continue;
     const parsed = parseToolRecoveryFact(fact);
     if (parsed.status === 'recovery_decision') {
-      recoveryDecisionFacts.push({ eventId: event.id, fact: parsed.fact });
+      recoveryFacts.push({ kind: parsed.status, eventId: event.id, fact: parsed.fact });
+      continue;
+    }
+    if (parsed.status === 'reconcile_result') {
+      recoveryFacts.push({ kind: parsed.status, eventId: event.id, fact: parsed.fact });
       continue;
     }
     if (parsed.status === 'invalid') {
@@ -303,15 +318,41 @@ export function resolveRuntimeRecovery(
     decision.automaticActionAllowed = true;
   }
   const appliedRecoveryDecisions = new Set<string>();
+  const appliedReconcileResults = new Set<string>();
   const canonicalEventPositions = new Map(
     canonicalEvents.map((event, index) => [event.id, index] as const),
   );
-  for (const { eventId, fact } of recoveryDecisionFacts) {
-    const decision = decisionsByOperationId.get(fact.operationId);
+  for (const recoveryFact of recoveryFacts) {
+    const { eventId } = recoveryFact;
+    const decision = decisionsByOperationId.get(recoveryFact.fact.operationId);
     if (!decision) {
       issues.push({ code: 'recovery_fact_corruption', eventId, reason: 'orphan_operation' });
       continue;
     }
+    if (recoveryFact.kind === 'reconcile_result') {
+      const { fact } = recoveryFact;
+      if (appliedRecoveryDecisions.has(fact.operationId)) {
+        markRecoveryFactCorruption(decision, eventId);
+        issues.push({ code: 'recovery_fact_corruption', eventId, reason: 'fact_after_decision' });
+        continue;
+      }
+      if (appliedReconcileResults.has(fact.operationId)) {
+        markRecoveryFactCorruption(decision, eventId);
+        issues.push({
+          code: 'recovery_fact_corruption',
+          eventId,
+          reason: 'duplicate_reconcile_result',
+        });
+        continue;
+      }
+      appliedReconcileResults.add(fact.operationId);
+      decision.disposition = fact.nextAction === 'park' ? 'parked' : 'reconcile_required';
+      decision.reasonCode = reconcileReasonCode(fact.result);
+      decision.automaticActionAllowed = fact.nextAction !== 'park';
+      decision.evidenceEventIds.push(eventId);
+      continue;
+    }
+    const { fact } = recoveryFact;
     if (appliedRecoveryDecisions.has(fact.operationId)) {
       decision.disposition = 'corruption';
       decision.reasonCode = 'duplicate_operation_id';
@@ -353,11 +394,30 @@ export function resolveRuntimeRecovery(
       issues.some(
         (issue) =>
           issue.code === 'protocol_marker_invalid' || issue.code === 'recovery_fact_corruption',
-      ) ||
-      decisions.some((decision) => decision.disposition === 'corruption'),
+      ) || decisions.some((decision) => decision.disposition === 'corruption'),
     hasUnsupportedFacts: issues.some((issue) => issue.code === 'runtime_fact_unsupported'),
     requiresReconciliation: decisions.some(
       (decision) => decision.disposition === 'reconcile_required',
     ),
   };
+}
+
+function reconcileReasonCode(result: ToolReconcileResultFact['result']): RecoveryReasonCode {
+  switch (result) {
+    case 'applied':
+      return 'reconcile_applied';
+    case 'not_applied':
+      return 'reconcile_not_applied';
+    case 'conflict':
+      return 'reconcile_conflict';
+    case 'still_running':
+      return 'reconcile_still_running';
+  }
+}
+
+function markRecoveryFactCorruption(decision: RecoveryDecision, eventId: string): void {
+  decision.disposition = 'corruption';
+  decision.reasonCode = 'identity_conflict';
+  decision.automaticActionAllowed = false;
+  decision.evidenceEventIds.push(eventId);
 }

@@ -18,6 +18,10 @@ const RECOVERY_REASON_CODES = new Set<RecoveryReasonCode>([
   'recovery_contract_unavailable',
   'recovery_contract_mismatch',
   'manual_recovery_required',
+  'reconcile_applied',
+  'reconcile_not_applied',
+  'reconcile_conflict',
+  'reconcile_still_running',
   'new_protocol_before_dispatch',
   'legacy_dispatch_unknown',
   'orphan_dispatch',
@@ -117,11 +121,21 @@ function parseReconcileResult(payload: unknown): ParsedToolRecoveryFact {
     payload.observedAt.length === 0 ||
     !['synthesize_response', 'retry_allowed', 'reattach', 'park'].includes(
       String(payload.nextAction),
-    )
+    ) ||
+    !isSafeReconcileTransition(String(payload.result), String(payload.nextAction))
   ) {
     return { status: 'invalid' };
   }
   return { status: 'reconcile_result', fact: payload as unknown as ToolReconcileResultFact };
+}
+
+function isSafeReconcileTransition(result: string, nextAction: string): boolean {
+  return (
+    nextAction === 'park' ||
+    (result === 'applied' && nextAction === 'synthesize_response') ||
+    (result === 'not_applied' && nextAction === 'retry_allowed') ||
+    (result === 'still_running' && nextAction === 'reattach')
+  );
 }
 
 function hasExactKeys(

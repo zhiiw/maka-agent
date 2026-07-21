@@ -6,9 +6,23 @@ import {
 import {
   TOOL_RECOVERY_DECISION_FACT_KIND,
   TOOL_RECOVERY_FACT_VERSION,
+  TOOL_RECONCILE_RESULT_FACT_KIND,
   parseToolRecoveryFact,
   type ToolRecoveryDecisionFact,
+  type ToolReconcileResultFact,
 } from './tool-recovery-facts.js';
+
+export interface ToolRecoveryFactCommitInput {
+  operationId: string;
+  journalEventId: string;
+  state: 'reconcile_recorded' | 'recovery_decided';
+  runtimeEvent: RuntimeEvent;
+  committedAt: number;
+}
+
+export interface ToolRecoveryFactCommitStore extends RuntimeEventStore {
+  commitToolRecoveryFact(input: ToolRecoveryFactCommitInput): Promise<unknown>;
+}
 
 export interface CommitToolRecoveryDecisionFactInput {
   runtimeEventStore: RuntimeEventStore;
@@ -24,17 +38,63 @@ export interface CommitToolRecoveryDecisionFactInput {
 export async function commitToolRecoveryDecisionFact(
   input: CommitToolRecoveryDecisionFactInput,
 ): Promise<RuntimeEvent> {
+  return commitToolRecoveryFact({
+    ...input,
+    kind: TOOL_RECOVERY_DECISION_FACT_KIND,
+    state: 'recovery_decided',
+    expectedParseStatus: 'recovery_decision',
+  });
+}
+
+export interface CommitToolReconcileResultFactInput {
+  runtimeEventStore: RuntimeEventStore;
+  sessionId: string;
+  invocationId: string;
+  runId: string;
+  turnId: string;
+  eventId: string;
+  ts: number;
+  fact: ToolReconcileResultFact;
+}
+
+export async function commitToolReconcileResultFact(
+  input: CommitToolReconcileResultFactInput,
+): Promise<RuntimeEvent> {
+  return commitToolRecoveryFact({
+    ...input,
+    kind: TOOL_RECONCILE_RESULT_FACT_KIND,
+    state: 'reconcile_recorded',
+    expectedParseStatus: 'reconcile_result',
+  });
+}
+
+async function commitToolRecoveryFact(input: {
+  runtimeEventStore: RuntimeEventStore;
+  sessionId: string;
+  invocationId: string;
+  runId: string;
+  turnId: string;
+  eventId: string;
+  ts: number;
+  fact: ToolRecoveryDecisionFact | ToolReconcileResultFact;
+  kind: typeof TOOL_RECOVERY_DECISION_FACT_KIND | typeof TOOL_RECONCILE_RESULT_FACT_KIND;
+  state: ToolRecoveryFactCommitInput['state'];
+  expectedParseStatus: 'recovery_decision' | 'reconcile_result';
+}): Promise<RuntimeEvent> {
   if (input.runtimeEventStore.runtimeFactWriteCapability !== RUNTIME_FACT_WRITE_CAPABILITY_V1) {
-    throw new Error('Runtime fact writer capability is unavailable for tool recovery decisions');
+    throw new Error('Runtime fact writer capability is unavailable for tool recovery facts');
+  }
+  if (!isToolRecoveryFactCommitStore(input.runtimeEventStore)) {
+    throw new Error('Atomic tool recovery fact projection capability is unavailable');
   }
   const runtimeFact = {
-    kind: TOOL_RECOVERY_DECISION_FACT_KIND,
+    kind: input.kind,
     version: TOOL_RECOVERY_FACT_VERSION,
     legacyProjection: 'invisible' as const,
     payload: input.fact,
   };
-  if (parseToolRecoveryFact(runtimeFact).status !== 'recovery_decision') {
-    throw new Error('Invalid canonical tool recovery decision fact');
+  if (parseToolRecoveryFact(runtimeFact).status !== input.expectedParseStatus) {
+    throw new Error('Invalid canonical tool recovery fact');
   }
   const event: RuntimeEvent = {
     id: input.eventId,
@@ -49,8 +109,21 @@ export async function commitToolRecoveryDecisionFact(
     actions: { runtimeFact },
     refs: { operationId: input.fact.operationId },
   };
-  await input.runtimeEventStore.appendRuntimeEvent(input.sessionId, input.runId, event, {
-    durable: true,
+  await input.runtimeEventStore.commitToolRecoveryFact({
+    operationId: input.fact.operationId,
+    journalEventId: `${input.eventId}_journal`,
+    state: input.state,
+    runtimeEvent: event,
+    committedAt: input.ts,
   });
   return event;
+}
+
+function isToolRecoveryFactCommitStore(
+  store: RuntimeEventStore,
+): store is ToolRecoveryFactCommitStore {
+  return (
+    'commitToolRecoveryFact' in store &&
+    typeof (store as { commitToolRecoveryFact?: unknown }).commitToolRecoveryFact === 'function'
+  );
 }

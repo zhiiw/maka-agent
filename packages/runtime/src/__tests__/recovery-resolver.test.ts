@@ -485,6 +485,159 @@ describe('RecoveryResolver', () => {
     ]);
   });
 
+  it('uses a canonical reconcile result to select the next restricted recovery action', () => {
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      functionCallEvent(),
+      toolDispatchEvent({ recoveryMode: 'reconcile' }),
+      event({
+        id: 'reconcile-result-1',
+        actions: {
+          runtimeFact: {
+            kind: 'maka.tool.reconcile_result',
+            version: 1,
+            legacyProjection: 'invisible',
+            payload: {
+              protocol: 'tool_reconcile_v1',
+              operationId: 'operation-1',
+              result: 'applied',
+              observationDigest: 'sha256:observation-1',
+              observedAt: '2026-07-21T00:00:00.000Z',
+              nextAction: 'synthesize_response',
+            },
+          },
+        },
+      }),
+    ]);
+
+    assert.deepEqual(resolution.issues, []);
+    assert.equal(resolution.decisions[0]?.disposition, 'reconcile_required');
+    assert.equal(resolution.decisions[0]?.reasonCode, 'reconcile_applied');
+    assert.equal(resolution.decisions[0]?.automaticActionAllowed, true);
+    assert.deepEqual(resolution.decisions[0]?.evidenceEventIds, [
+      'function-call-1',
+      'dispatch-1',
+      'reconcile-result-1',
+    ]);
+  });
+
+  it('parks a canonical reconcile conflict', () => {
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      functionCallEvent(),
+      toolDispatchEvent({ recoveryMode: 'reconcile' }),
+      event({
+        id: 'reconcile-result-1',
+        actions: {
+          runtimeFact: {
+            kind: 'maka.tool.reconcile_result',
+            version: 1,
+            legacyProjection: 'invisible',
+            payload: {
+              protocol: 'tool_reconcile_v1',
+              operationId: 'operation-1',
+              result: 'conflict',
+              observationDigest: 'sha256:observation-1',
+              observedAt: '2026-07-21T00:00:00.000Z',
+              nextAction: 'park',
+            },
+          },
+        },
+      }),
+    ]);
+
+    assert.equal(resolution.decisions[0]?.disposition, 'parked');
+    assert.equal(resolution.decisions[0]?.reasonCode, 'reconcile_conflict');
+    assert.equal(resolution.decisions[0]?.automaticActionAllowed, false);
+  });
+
+  it('rejects a reconcile result whose result and next action are inconsistent', () => {
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      functionCallEvent(),
+      toolDispatchEvent({ recoveryMode: 'reconcile' }),
+      event({
+        id: 'reconcile-result-1',
+        actions: {
+          runtimeFact: {
+            kind: 'maka.tool.reconcile_result',
+            version: 1,
+            legacyProjection: 'invisible',
+            payload: {
+              protocol: 'tool_reconcile_v1',
+              operationId: 'operation-1',
+              result: 'conflict',
+              observationDigest: 'sha256:observation-1',
+              observedAt: '2026-07-21T00:00:00.000Z',
+              nextAction: 'retry_allowed',
+            },
+          },
+        },
+      }),
+    ]);
+
+    assert.deepEqual(resolution.issues, [
+      {
+        code: 'recovery_fact_corruption',
+        eventId: 'reconcile-result-1',
+        reason: 'invalid_payload',
+      },
+    ]);
+    assert.equal(resolution.hasCorruption, true);
+  });
+
+  it('rejects a reconcile result appended after the final recovery decision', () => {
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      functionCallEvent(),
+      toolDispatchEvent({ recoveryMode: 'reconcile' }),
+      event({
+        id: 'recovery-decision-1',
+        actions: {
+          runtimeFact: {
+            kind: 'maka.tool.recovery_decision',
+            version: 1,
+            legacyProjection: 'invisible',
+            payload: {
+              protocol: 'tool_recovery_v1',
+              operationId: 'operation-1',
+              disposition: 'parked',
+              reasonCode: 'manual_recovery_required',
+              evidenceEventIds: ['function-call-1', 'dispatch-1'],
+            },
+          },
+        },
+      }),
+      event({
+        id: 'reconcile-result-1',
+        actions: {
+          runtimeFact: {
+            kind: 'maka.tool.reconcile_result',
+            version: 1,
+            legacyProjection: 'invisible',
+            payload: {
+              protocol: 'tool_reconcile_v1',
+              operationId: 'operation-1',
+              result: 'applied',
+              observationDigest: 'sha256:observation-1',
+              observedAt: '2026-07-21T00:00:00.000Z',
+              nextAction: 'synthesize_response',
+            },
+          },
+        },
+      }),
+    ]);
+
+    assert.deepEqual(resolution.issues, [
+      {
+        code: 'recovery_fact_corruption',
+        eventId: 'reconcile-result-1',
+        reason: 'fact_after_decision',
+      },
+    ]);
+    assert.equal(resolution.decisions[0]?.disposition, 'corruption');
+  });
+
   it('rejects a recovery decision that cites evidence from after the decision event', () => {
     const recoveryDecision = event({
       id: 'recovery-decision-1',
