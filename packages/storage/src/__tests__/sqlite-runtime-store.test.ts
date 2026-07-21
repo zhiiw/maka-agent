@@ -391,18 +391,18 @@ describe('SqliteRuntimeStore', () => {
         runtimeEvent: reconcile,
         committedAt: 20,
       });
+      const outcome = functionResponseEvent({ id: 'recovered-response-event-1', ts: 21 });
+      await store.commitToolOutcome({
+        operationId: 'operation-1',
+        journalEventId: 'journal-recovered-outcome-1',
+        runtimeEvent: outcome,
+        committedAt: 21,
+      });
       await store.commitToolRecoveryFact({
         operationId: 'operation-1',
         journalEventId: 'journal-recovery-decision-1',
         state: 'recovery_decided',
         runtimeEvent: decision,
-        committedAt: 21,
-      });
-      const outcome = functionResponseEvent({ id: 'recovered-response-event-1', ts: 22 });
-      await store.commitToolOutcome({
-        operationId: 'operation-1',
-        journalEventId: 'journal-recovered-outcome-1',
-        runtimeEvent: outcome,
         committedAt: 22,
       });
 
@@ -421,14 +421,14 @@ describe('SqliteRuntimeStore', () => {
             metadata: reconcile.actions?.runtimeFact,
           },
           {
-            state: 'recovery_decided',
-            runtimeEventId: 'recovery-decision-event-1',
-            metadata: decision.actions?.runtimeFact,
-          },
-          {
             state: 'outcome_committed',
             runtimeEventId: 'recovered-response-event-1',
             metadata: undefined,
+          },
+          {
+            state: 'recovery_decided',
+            runtimeEventId: 'recovery-decision-event-1',
+            metadata: decision.actions?.runtimeFact,
           },
         ],
       );

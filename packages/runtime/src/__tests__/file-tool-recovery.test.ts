@@ -1,0 +1,130 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { createWriteEditRecoveryContracts } from '../file-tool-recovery.js';
+import type { UnsettledToolOperation } from '../tool-recovery-contract.js';
+
+describe('Write/Edit read-only recovery contracts', () => {
+  it('classifies Write by its observable postcondition without mutating the target', async () => {
+    const reads: string[] = [];
+    const contracts = createWriteEditRecoveryContracts({
+      readText: async (path) => {
+        reads.push(path);
+        return { status: 'text', content: 'expected contents' };
+      },
+    });
+    const operation = writeOperation();
+    const observation = await contracts.Write.observe?.(operation);
+
+    assert.deepEqual(contracts.Write.decide?.({ operation, observation }), {
+      result: 'applied',
+      reasonCode: 'write_postcondition_matches',
+      nextAction: 'synthesize_response',
+      synthesizedResult: {
+        ok: true,
+        path: 'notes.txt',
+        bytes: 17,
+        recovered: true,
+      },
+    });
+    assert.deepEqual(reads, ['notes.txt']);
+  });
+
+  it('distinguishes a missing Write target from conflicting contents', async () => {
+    const missingContracts = createWriteEditRecoveryContracts({
+      readText: async () => ({ status: 'missing' }),
+    });
+    const conflictContracts = createWriteEditRecoveryContracts({
+      readText: async () => ({ status: 'text', content: 'someone else changed this' }),
+    });
+    const operation = writeOperation();
+
+    const missing = await missingContracts.Write.observe?.(operation);
+    const conflict = await conflictContracts.Write.observe?.(operation);
+
+    assert.deepEqual(missingContracts.Write.decide?.({ operation, observation: missing }), {
+      result: 'not_applied',
+      reasonCode: 'write_target_missing',
+      nextAction: 'retry_allowed',
+    });
+    assert.deepEqual(conflictContracts.Write.decide?.({ operation, observation: conflict }), {
+      result: 'conflict',
+      reasonCode: 'write_postcondition_conflict',
+      nextAction: 'park',
+    });
+  });
+
+  it('classifies Edit postcondition, precondition, and ambiguous drift', async () => {
+    const operation = editOperation();
+    const decide = async (content: string) => {
+      const contract = createWriteEditRecoveryContracts({
+        readText: async () => ({ status: 'text', content }),
+      }).Edit;
+      const observation = await contract.observe?.(operation);
+      return contract.decide?.({ operation, observation });
+    };
+
+    assert.deepEqual(await decide('before NEW after'), {
+      result: 'applied',
+      reasonCode: 'edit_postcondition_matches',
+      nextAction: 'synthesize_response',
+      synthesizedResult: {
+        ok: true,
+        path: 'notes.txt',
+        replacements: 1,
+        recovered: true,
+      },
+    });
+    assert.deepEqual(await decide('before OLD after'), {
+      result: 'not_applied',
+      reasonCode: 'edit_precondition_matches',
+      nextAction: 'retry_allowed',
+    });
+    assert.deepEqual(await decide('OLD and NEW are both present'), {
+      result: 'conflict',
+      reasonCode: 'edit_state_ambiguous',
+      nextAction: 'park',
+    });
+  });
+
+  it('parks unreadable targets and malformed durable arguments', async () => {
+    const contracts = createWriteEditRecoveryContracts({
+      readText: async () => ({ status: 'unreadable' }),
+    });
+    const malformed = { ...writeOperation(), args: { path: 'notes.txt' } };
+    const unreadableObservation = await contracts.Write.observe?.(writeOperation());
+    const malformedObservation = await contracts.Write.observe?.(malformed);
+
+    assert.equal(
+      contracts.Write.decide?.({ operation: writeOperation(), observation: unreadableObservation })
+        .nextAction,
+      'park',
+    );
+    assert.equal(
+      contracts.Write.decide?.({ operation: malformed, observation: malformedObservation })
+        .nextAction,
+      'park',
+    );
+  });
+});
+
+function writeOperation(): UnsettledToolOperation {
+  return {
+    operationId: 'operation-write-1',
+    toolCallId: 'call-write-1',
+    toolName: 'Write',
+    args: { path: 'notes.txt', content: 'expected contents' },
+    recoveryMode: 'reconcile',
+    evidenceEventIds: ['call-1', 'dispatch-1'],
+  };
+}
+
+function editOperation(): UnsettledToolOperation {
+  return {
+    operationId: 'operation-edit-1',
+    toolCallId: 'call-edit-1',
+    toolName: 'Edit',
+    args: { path: 'notes.txt', old_string: 'OLD', new_string: 'NEW' },
+    recoveryMode: 'reconcile',
+    evidenceEventIds: ['call-1', 'dispatch-1'],
+  };
+}

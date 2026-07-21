@@ -53,13 +53,6 @@ export interface RecoveryDecision {
   evidenceEventIds: string[];
 }
 
-/** @deprecated Use RecoveryDisposition. */
-export type ToolRecoveryDecisionStatus = RecoveryDisposition;
-/** @deprecated Use RecoveryReasonCode. */
-export type ToolRecoveryDecisionReason = RecoveryReasonCode;
-/** @deprecated Use RecoveryDecision. */
-export type ToolRecoveryDecision = RecoveryDecision;
-
 export interface ResolveRuntimeRecoveryOptions {
   contracts?: ToolRecoveryContractRegistry;
 }

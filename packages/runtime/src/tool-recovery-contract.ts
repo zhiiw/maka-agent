@@ -23,6 +23,7 @@ export interface ToolReconcileDecision {
   result: 'applied' | 'not_applied' | 'conflict' | 'still_running' | 'unknown';
   reasonCode: string;
   nextAction: 'synthesize_response' | 'retry_allowed' | 'reattach' | 'park';
+  synthesizedResult?: unknown;
 }
 
 export interface ToolRecoveryContract<TObservation = unknown> {

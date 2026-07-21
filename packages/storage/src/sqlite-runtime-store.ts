@@ -452,7 +452,10 @@ export class SqliteRuntimeStore implements RuntimeEventStore {
     return this.transaction(() => {
       const operation = this.readToolOperationSync(input.operationId);
       if (!operation) throw new Error(`Unknown tool operation ${input.operationId}`);
-      if (operation.currentState !== 'prepared' || operation.resultEventId) {
+      if (
+        input.state === 'reconcile_recorded' &&
+        (operation.currentState !== 'prepared' || operation.resultEventId)
+      ) {
         throw new Error(`Tool operation ${input.operationId} is already settled`);
       }
       const existing = this.db
@@ -495,11 +498,12 @@ export class SqliteRuntimeStore implements RuntimeEventStore {
         );
       this.options.failpoint?.('after_journal_event_insert');
       const updated = this.db
-        .prepare(`
-        UPDATE tool_operations
-        SET version = version + 1
-        WHERE operation_id = ? AND current_state = 'prepared' AND result_event_id IS NULL
-      `)
+        .prepare(
+          input.state === 'reconcile_recorded'
+            ? `UPDATE tool_operations SET version = version + 1
+               WHERE operation_id = ? AND current_state = 'prepared' AND result_event_id IS NULL`
+            : 'UPDATE tool_operations SET version = version + 1 WHERE operation_id = ?',
+        )
         .run(input.operationId);
       if (updated.changes !== 1) {
         throw new Error(`Tool operation compare-and-set failed for ${input.operationId}`);

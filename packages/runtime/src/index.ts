@@ -1083,9 +1083,6 @@ export type {
   RecoveryDisposition,
   RecoveryReasonCode,
   RuntimeRecoveryResolution,
-  ToolRecoveryDecision,
-  ToolRecoveryDecisionReason,
-  ToolRecoveryDecisionStatus,
 } from './recovery-resolver.js';
 
 export {
@@ -1122,6 +1119,28 @@ export {
   type ToolRecoveryFactCommitInput,
   type ToolRecoveryFactCommitStore,
 } from './tool-recovery-fact-writer.js';
+
+export { executeRestrictedVerification } from './restricted-verification.js';
+export type {
+  RestrictedVerificationBoundary,
+  RestrictedVerificationDiagnostic,
+  RestrictedVerificationRequest,
+  RestrictedVerificationResult,
+  RestrictedVerificationWorkspaceEffect,
+} from './restricted-verification.js';
+
+export { createWriteEditRecoveryContracts } from './file-tool-recovery.js';
+export type {
+  ReadOnlyFileObservation,
+  ReadOnlyFileRecoveryObserver,
+  WriteEditRecoveryContracts,
+} from './file-tool-recovery.js';
+
+export { reconcileUnsettledToolOperation } from './tool-recovery-coordinator.js';
+export type {
+  ReconcileUnsettledToolOperationInput,
+  ReconcileUnsettledToolOperationResult,
+} from './tool-recovery-coordinator.js';
 
 export { createLocalContinuationSafetyInspector } from './continuation-safety.js';
 export type { LocalContinuationSafetyInspectorDeps } from './continuation-safety.js';
