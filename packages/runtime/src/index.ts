@@ -1189,6 +1189,17 @@ export {
 } from './workspace-checkpoint-fact-writer.js';
 
 export {
+  DEFAULT_GIT_WORKSPACE_SNAPSHOT_POLICY_V1,
+  GitWorkspaceCheckpointProvider,
+  workspaceSnapshotPolicyIdentity,
+  type CaptureGitWorkspaceCheckpointInput,
+  type GitWorkspaceCheckpointProviderOptions,
+  type GitCheckpointOrphanCandidate,
+  type PreparedGitWorkspaceCheckpoint,
+  type WorkspaceSnapshotPolicyV1,
+} from './git-workspace-checkpoint-provider.js';
+
+export {
   commitToolReconcileResultFact,
   commitToolRecoveryDecisionFact,
   type CommitToolReconcileResultFactInput,
