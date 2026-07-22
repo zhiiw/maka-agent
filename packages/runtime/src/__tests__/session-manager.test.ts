@@ -63,6 +63,8 @@ import {
   materializeExpertAgentDefinition,
 } from '../expert-catalog.js';
 import { AGENT_TEAM_CHILD_TOOL_NAMES } from '../agent-team-tool-names.js';
+import { createSqliteRuntimeStore } from '@maka/storage';
+import { ToolRecoveryContractRegistry } from '../tool-recovery-contract.js';
 
 describe('SessionManager automatic titles', () => {
   test('starts after user persistence and does not block the turn', async () => {
@@ -990,6 +992,233 @@ describe('SessionManager permission mode updates', () => {
       backgroundOperationsSettled: true,
       availableToolNames: [],
     });
+  });
+
+  test('reconciles an interrupted Write before authoritative planning and replans from durable facts', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const runtimeStore = createSqliteRuntimeStore(':memory:');
+    const lifecycleEvents: string[] = [];
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runtimeStore,
+      toolRecoveryStore: runtimeStore,
+      recoveryContracts: new ToolRecoveryContractRegistry([
+        {
+          toolName: 'Write',
+          contract: {
+            id: 'maka.tool.write.reconcile',
+            version: 1,
+            mode: 'reconcile_then_decide',
+            observe: async () => ({ status: 'text', content: 'expected contents' }),
+            decide: () => ({
+              result: 'applied',
+              reasonCode: 'write_postcondition_matches',
+              nextAction: 'synthesize_response',
+              synthesizedResult: { ok: true, path: 'notes.txt', recovered: true },
+            }),
+          },
+        },
+      ]),
+      backends: new BackendRegistry(),
+      safeBoundaryResumeEnabled: true,
+      inspectContinuationSafety: async () => ({
+        workspaceIdentity: 'workspace-authoritative',
+        backgroundOperationsSettled: true,
+        availableToolNames: ['Write'],
+      }),
+      onContinuationLifecycleEvent: (event) => {
+        lifecycleEvents.push(event.type);
+      },
+      newId: nextId(),
+      now: nextNow(6_533),
+    });
+    const session = await manager.createSession(makeInput());
+    const header = await store.readHeader(session.id);
+    const sourceRunId = 'source-run-write-reconcile';
+    const sourceTurnId = 'source-turn-write-reconcile';
+    const sourceInvocationId = 'source-invocation-write-reconcile';
+    await runStore.createRun(
+      makeRunHeader({
+        runId: sourceRunId,
+        sessionId: session.id,
+        turnId: sourceTurnId,
+        status: 'failed',
+        cwd: header.cwd,
+        workspaceIdentity: 'workspace-authoritative',
+        createdAt: 1,
+        updatedAt: 4,
+        completedAt: 4,
+        failureClass: 'app_restarted',
+      }),
+    );
+    const initial = runtimeEvent({
+      id: 'source-user-write-reconcile',
+      invocationId: sourceInvocationId,
+      runId: sourceRunId,
+      sessionId: session.id,
+      turnId: sourceTurnId,
+      ts: 1,
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text: 'write notes.txt' },
+      actions: { runtimeProtocol: { toolBoundary: 't1_after_preflight_v1' } },
+    });
+    const call = runtimeEvent({
+      id: 'source-call-write-reconcile',
+      invocationId: sourceInvocationId,
+      runId: sourceRunId,
+      sessionId: session.id,
+      turnId: sourceTurnId,
+      ts: 2,
+      role: 'model',
+      author: 'agent',
+      content: {
+        kind: 'function_call',
+        id: 'provider-call-write-reconcile',
+        name: 'Write',
+        args: { path: 'notes.txt', content: 'expected contents' },
+      },
+    });
+    const dispatch = runtimeEvent({
+      id: 'source-dispatch-write-reconcile',
+      invocationId: sourceInvocationId,
+      runId: sourceRunId,
+      sessionId: session.id,
+      turnId: sourceTurnId,
+      ts: 3,
+      actions: {
+        toolDispatch: {
+          protocol: 't1_after_preflight_v1',
+          operationId: 'operation-write-reconcile',
+          providerToolCallId: 'provider-call-write-reconcile',
+          toolName: 'Write',
+          canonicalArgsHash: 'sha256:write-reconcile',
+          recoveryMode: 'reconcile',
+        },
+      },
+      refs: {
+        operationId: 'operation-write-reconcile',
+        toolCallId: 'provider-call-write-reconcile',
+      },
+    });
+    await runtimeStore.appendRuntimeEvent(session.id, sourceRunId, initial);
+    await runtimeStore.commitToolPrepared({
+      operationId: 'operation-write-reconcile',
+      journalEventId: 'journal-write-reconcile-prepared',
+      runtimeEvent: call,
+      dispatchRuntimeEvent: dispatch,
+      providerToolCallId: 'provider-call-write-reconcile',
+      toolName: 'Write',
+      canonicalArgsHash: 'sha256:write-reconcile',
+      recoveryMode: 'reconcile',
+      committedAt: 3,
+    });
+    await runtimeStore.appendRuntimeEvent(
+      session.id,
+      sourceRunId,
+      runtimeEvent({
+        id: 'source-terminal-write-reconcile',
+        invocationId: sourceInvocationId,
+        runId: sourceRunId,
+        sessionId: session.id,
+        turnId: sourceTurnId,
+        ts: 4,
+        status: 'failed',
+        actions: { endInvocation: true, stateDelta: { failureClass: 'app_restarted' } },
+      }),
+    );
+
+    try {
+      const plan = await manager.planAuthoritativeSafeBoundaryContinuation(session.id, {
+        sourceRunId,
+      });
+
+      expect(plan.disposition).toBe('continue');
+      expect(
+        (await runtimeStore.readRuntimeEvents(session.id, sourceRunId)).some(
+          (event) => event.actions?.stateDelta?.toolOutcomeOrigin === 'runtime_recovery',
+        ),
+      ).toBe(true);
+      expect(
+        (await runtimeStore.readToolJournal('operation-write-reconcile')).map(
+          (event) => event.state,
+        ),
+      ).toEqual(['prepared', 'reconcile_recorded', 'outcome_committed', 'recovery_decided']);
+      expect(lifecycleEvents).toEqual(['plan_approved']);
+    } finally {
+      runtimeStore.close();
+    }
+  });
+
+  test('does not observe tool state when the authoritative workspace identity gate fails', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const runtimeStore = createSqliteRuntimeStore(':memory:');
+    let observations = 0;
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runtimeStore,
+      toolRecoveryStore: runtimeStore,
+      recoveryContracts: new ToolRecoveryContractRegistry([
+        {
+          toolName: 'Write',
+          contract: {
+            id: 'maka.tool.write.reconcile',
+            version: 1,
+            mode: 'reconcile_then_decide',
+            observe: async () => {
+              observations += 1;
+              return { status: 'missing' };
+            },
+            decide: () => ({
+              result: 'not_applied',
+              reasonCode: 'write_target_missing',
+              nextAction: 'retry_allowed',
+            }),
+          },
+        },
+      ]),
+      backends: new BackendRegistry(),
+      safeBoundaryResumeEnabled: true,
+      inspectContinuationSafety: async () => ({
+        workspaceIdentity: 'workspace-current',
+        backgroundOperationsSettled: true,
+        availableToolNames: ['Write'],
+      }),
+      newId: nextId(),
+      now: nextNow(6_534),
+    });
+    const session = await manager.createSession(makeInput());
+    const header = await store.readHeader(session.id);
+    await runStore.createRun(
+      makeRunHeader({
+        runId: 'source-run-workspace-drift',
+        sessionId: session.id,
+        turnId: 'source-turn-workspace-drift',
+        status: 'failed',
+        cwd: header.cwd,
+        workspaceIdentity: 'workspace-source',
+        createdAt: 1,
+        updatedAt: 2,
+        completedAt: 2,
+        failureClass: 'app_restarted',
+      }),
+    );
+
+    try {
+      const plan = await manager.planAuthoritativeSafeBoundaryContinuation(session.id, {
+        sourceRunId: 'source-run-workspace-drift',
+      });
+
+      expect(plan.disposition).toBe('park');
+      expect(plan.rejectionReasons).toContain('workspace_identity_mismatch');
+      expect(observations).toBe(0);
+    } finally {
+      runtimeStore.close();
+    }
   });
 
   test('keeps the authoritative continuation entry disabled unless the host enables it', async () => {

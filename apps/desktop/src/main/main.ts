@@ -35,6 +35,8 @@ import {
   SessionManager,
   createLocalContinuationSafetyInspector,
   buildDeepResearchTools,
+  createLocalReadOnlyFileRecoveryObserver,
+  createWriteEditRecoveryContractRegistry,
   getAIModel,
   generateSessionTitle as generateRuntimeSessionTitle,
   buildProviderOptions,
@@ -205,6 +207,9 @@ const runtimePersistence = await openRuntimeEventPersistence({
   sqliteCanonical: process.env.MAKA_RUNTIME_SQLITE_CANONICAL === '1',
 });
 const runtimeEventStore = runtimePersistence.runtimeEventStore;
+const recoveryContracts = runtimePersistence.runtimeCommitStore
+  ? createWriteEditRecoveryContractRegistry(createLocalReadOnlyFileRecoveryObserver())
+  : undefined;
 const shellRunStore = createShellRunStore(workspaceRoot);
 const connectionStore = createConnectionStore(workspaceRoot);
 const settingsStore = createSettingsStore(workspaceRoot);
@@ -731,8 +736,12 @@ const runtime = new SessionManager({
   planStore,
   runStore,
   runtimeEventStore,
-  ...(runtimePersistence.runtimeCommitStore
-    ? { toolBoundaryProtocol: runtimePersistence.runtimeCommitStore.toolBoundaryProtocol }
+  ...(runtimePersistence.runtimeCommitStore && recoveryContracts
+    ? {
+        toolBoundaryProtocol: runtimePersistence.runtimeCommitStore.toolBoundaryProtocol,
+        toolRecoveryStore: runtimePersistence.runtimeCommitStore,
+        recoveryContracts,
+      }
     : {}),
   shellRuns,
   backends,

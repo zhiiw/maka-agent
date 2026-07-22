@@ -1129,8 +1129,13 @@ export type {
   RestrictedVerificationWorkspaceEffect,
 } from './restricted-verification.js';
 
-export { createWriteEditRecoveryContracts } from './file-tool-recovery.js';
+export {
+  createLocalReadOnlyFileRecoveryObserver,
+  createWriteEditRecoveryContractRegistry,
+  createWriteEditRecoveryContracts,
+} from './file-tool-recovery.js';
 export type {
+  LocalReadOnlyFileRecoveryObserverOptions,
   ReadOnlyFileObservation,
   ReadOnlyFileRecoveryObserver,
   WriteEditRecoveryContracts,
@@ -1140,6 +1145,7 @@ export { reconcileUnsettledToolOperation } from './tool-recovery-coordinator.js'
 export type {
   ReconcileUnsettledToolOperationInput,
   ReconcileUnsettledToolOperationResult,
+  ToolRecoveryExecutionStore,
 } from './tool-recovery-coordinator.js';
 
 export { createLocalContinuationSafetyInspector } from './continuation-safety.js';

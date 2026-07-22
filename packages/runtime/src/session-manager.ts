@@ -124,8 +124,13 @@ import {
   type RuntimeContinuationPlannerInput,
   type RuntimeContinuationSafetyObservation,
   type SafeBoundaryContinuationPlan,
+  type ToolOperation,
 } from './runtime-resume.js';
 import type { ToolRecoveryContractRegistry } from './tool-recovery-contract.js';
+import {
+  reconcileUnsettledToolOperation,
+  type ToolRecoveryExecutionStore,
+} from './tool-recovery-coordinator.js';
 
 export interface StopSessionInput {
   source?: 'stop_button' | 'benchmark_deadline';
@@ -357,6 +362,8 @@ export interface SessionManagerDeps {
   runtimeEventStore?: RuntimeEventStore;
   /** One registry instance shared by planning and execution revalidation. */
   recoveryContracts?: ToolRecoveryContractRegistry;
+  /** Canonical SQLite writer used by Phase 3A production reconciliation. */
+  toolRecoveryStore?: ToolRecoveryExecutionStore;
   /** Host capability; RuntimeKernel gates it by the selected backend. */
   toolBoundaryProtocol?: ToolBoundaryProtocol;
   backends: BackendRegistry;
@@ -415,6 +422,9 @@ export class SessionManager {
   constructor(private readonly deps: SessionManagerDeps) {
     if (deps.runStore && !deps.runtimeEventStore) {
       throw new Error('RuntimeEventStore is required when AgentRunStore is configured');
+    }
+    if (deps.toolRecoveryStore && deps.toolRecoveryStore !== deps.runtimeEventStore) {
+      throw new Error('Tool recovery must use the authoritative RuntimeEventStore instance');
     }
     if (deps.runStore && deps.runtimeEventStore) {
       this.runtimeLedgerRepair = new RuntimeLedgerRepair({
@@ -987,10 +997,17 @@ export class SessionManager {
     sessionId: string,
     input: PlanSafeBoundaryContinuationInput,
   ): Promise<SafeBoundaryContinuationPlan> {
+    const plan = await this.buildSafeBoundaryContinuationPlan(sessionId, input);
+    this.recordContinuationPlan(sessionId, input.sourceRunId, plan);
+    return plan;
+  }
+
+  private async buildSafeBoundaryContinuationPlan(
+    sessionId: string,
+    input: PlanSafeBoundaryContinuationInput,
+  ): Promise<SafeBoundaryContinuationPlan> {
     const planner = new RuntimeContinuationPlanner({
-      ...(this.deps.recoveryContracts
-        ? { recoveryContracts: this.deps.recoveryContracts }
-        : {}),
+      ...(this.deps.recoveryContracts ? { recoveryContracts: this.deps.recoveryContracts } : {}),
       readSourceRun: async (targetSessionId, runId) => {
         if (!this.deps.runStore) throw new Error('AgentRunStore is not configured');
         return this.deps.runStore.readRun(targetSessionId, runId);
@@ -1013,9 +1030,7 @@ export class SessionManager {
       },
       newId: this.deps.newId,
     });
-    const plan = await planner.plan({ sessionId, ...input });
-    this.recordContinuationPlan(sessionId, input.sourceRunId, plan);
-    return plan;
+    return planner.plan({ sessionId, ...input });
   }
 
   async planAuthoritativeSafeBoundaryContinuation(
@@ -1073,7 +1088,7 @@ export class SessionManager {
       this.deps.store.readHeader(sessionId),
       this.deps.inspectContinuationSafety(sessionId),
     ]);
-    return this.planSafeBoundaryContinuation(sessionId, {
+    const planInput: PlanSafeBoundaryContinuationInput = {
       sourceRunId: input.sourceRunId,
       currentCwd: header.cwd,
       sourceWorkspaceIdentity: sourceRun.workspaceIdentity,
@@ -1086,7 +1101,100 @@ export class SessionManager {
       ...(observation.workspaceCheckpoint
         ? { workspaceCheckpoint: observation.workspaceCheckpoint }
         : {}),
+    };
+    let plan = await this.buildSafeBoundaryContinuationPlan(sessionId, planInput);
+    const recoveryEvents = await this.deps.runtimeEventStore!.readRuntimeEvents(
+      sessionId,
+      input.sourceRunId,
+    );
+    const recoveryPlan = buildResumePlanFromRuntimeEvents(recoveryEvents, {
+      ...(this.deps.recoveryContracts ? { recoveryContracts: this.deps.recoveryContracts } : {}),
     });
+    if (this.canAttemptToolRecovery(plan, recoveryPlan.operations)) {
+      const recoveryDiagnostic = await this.reconcileToolOperations(
+        recoveryPlan.operations,
+        recoveryPlan.runtimeEvents,
+        sourceRun.cwd,
+      );
+      if (recoveryDiagnostic) {
+        plan = {
+          ...plan,
+          diagnostics: [...plan.diagnostics, recoveryDiagnostic],
+          rejectionReasons: plan.rejectionReasons.includes('dangling_tool_state')
+            ? plan.rejectionReasons
+            : [...plan.rejectionReasons, 'dangling_tool_state'],
+        };
+      } else {
+        const recoveredEvents = await this.deps.runtimeEventStore!.readRuntimeEvents(
+          sessionId,
+          input.sourceRunId,
+        );
+        plan = await this.buildSafeBoundaryContinuationPlan(sessionId, {
+          ...planInput,
+          expectedRuntimeEventHighWater: recoveredEvents.length,
+        });
+      }
+    }
+    this.recordContinuationPlan(sessionId, input.sourceRunId, plan);
+    return plan;
+  }
+
+  private canAttemptToolRecovery(
+    plan: SafeBoundaryContinuationPlan,
+    operations: readonly ToolOperation[],
+  ): boolean {
+    return (
+      this.deps.recoveryContracts !== undefined &&
+      this.deps.toolRecoveryStore !== undefined &&
+      plan.diagnostics.length > 0 &&
+      plan.diagnostics.every((diagnostic) => diagnostic.code === 'tool_recovery_required') &&
+      operations.some(
+        (operation) =>
+          operation.status === 'reconcile_required' &&
+          operation.recoveryReason === 'recovery_contract_available' &&
+          operation.automaticActionAllowed,
+      )
+    );
+  }
+
+  private async reconcileToolOperations(
+    operations: readonly ToolOperation[],
+    runtimeEvents: readonly RuntimeEvent[],
+    workspaceCwd: string,
+  ): Promise<SafeBoundaryContinuationPlan['diagnostics'][number] | undefined> {
+    const identity = runtimeEvents[0];
+    if (!identity) return undefined;
+    for (const operation of operations) {
+      if (
+        operation.status !== 'reconcile_required' ||
+        operation.recoveryReason !== 'recovery_contract_available' ||
+        !operation.automaticActionAllowed
+      )
+        continue;
+      const result = await reconcileUnsettledToolOperation({
+        contracts: this.deps.recoveryContracts!,
+        runtimeEventStore: this.deps.toolRecoveryStore!,
+        operation: {
+          ...(operation.operationId ? { operationId: operation.operationId } : {}),
+          toolCallId: operation.toolCallId,
+          toolName: operation.toolName,
+          args: operation.args,
+          ...(operation.recoveryMode ? { recoveryMode: operation.recoveryMode } : {}),
+          workspaceCwd,
+          evidenceEventIds: operation.evidenceEventIds,
+        },
+        runtimeIdentity: {
+          sessionId: identity.sessionId,
+          invocationId: identity.invocationId,
+          runId: identity.runId,
+          turnId: identity.turnId,
+        },
+        newId: this.deps.newId,
+        now: this.deps.now,
+      });
+      if (result.status === 'blocked') return result.diagnostic;
+    }
+    return undefined;
   }
 
   async planLatestAuthoritativeSafeBoundaryContinuation(

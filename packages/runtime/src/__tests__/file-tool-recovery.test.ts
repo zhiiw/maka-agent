@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { createWriteEditRecoveryContracts } from '../file-tool-recovery.js';
+import {
+  createLocalReadOnlyFileRecoveryObserver,
+  createWriteEditRecoveryContractRegistry,
+  createWriteEditRecoveryContracts,
+} from '../file-tool-recovery.js';
 import type { UnsettledToolOperation } from '../tool-recovery-contract.js';
 
 describe('Write/Edit read-only recovery contracts', () => {
@@ -104,6 +111,38 @@ describe('Write/Edit read-only recovery contracts', () => {
         .nextAction,
       'park',
     );
+  });
+
+  it('registers Write/Edit against a bounded observer confined to the source workspace', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-file-recovery-'));
+    const outside = join(root, '..', `outside-${Date.now()}.txt`);
+    try {
+      await writeFile(join(root, 'notes.txt'), 'expected contents');
+      await writeFile(outside, 'outside contents');
+      const observer = createLocalReadOnlyFileRecoveryObserver({ maxBytes: 64 });
+      const registry = createWriteEditRecoveryContractRegistry(observer);
+      const operation = { ...writeOperation(), workspaceCwd: root };
+      const contract = registry.resolve('Write', 'reconcile');
+      assert.equal(contract.status, 'available');
+      if (contract.status !== 'available') return;
+
+      assert.deepEqual(await contract.contract.observe?.(operation), {
+        path: 'notes.txt',
+        status: 'text',
+        content: 'expected contents',
+      });
+      assert.deepEqual(await observer.readText('missing.txt', operation), { status: 'missing' });
+      assert.deepEqual(await observer.readText(outside, operation), { status: 'unreadable' });
+      await writeFile(join(root, 'large.txt'), 'x'.repeat(65));
+      assert.deepEqual(await observer.readText('large.txt', operation), { status: 'unreadable' });
+      await writeFile(join(root, 'binary.dat'), Buffer.from([0xff, 0xfe, 0xfd]));
+      assert.deepEqual(await observer.readText('binary.dat', operation), {
+        status: 'unreadable',
+      });
+    } finally {
+      await rm(outside, { force: true });
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

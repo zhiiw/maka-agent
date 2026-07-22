@@ -25,6 +25,9 @@ export interface ToolOperation {
   toolCallId: string;
   toolName: string;
   args: unknown;
+  operationId?: string;
+  recoveryMode?: NonNullable<NonNullable<RuntimeEvent['actions']>['toolDispatch']>['recoveryMode'];
+  automaticActionAllowed: boolean;
   status: ToolOperationStatus;
   callRuntimeEventId: string;
   responseRuntimeEventId?: string;
@@ -395,9 +398,7 @@ export class RuntimeContinuationPlanner {
       currentWorkspaceIdentity: input.currentWorkspaceIdentity,
       backgroundOperationsSettled: input.backgroundOperationsSettled,
       availableToolNames: input.availableToolNames,
-      ...(this.deps.recoveryContracts
-        ? { recoveryContracts: this.deps.recoveryContracts }
-        : {}),
+      ...(this.deps.recoveryContracts ? { recoveryContracts: this.deps.recoveryContracts } : {}),
       continuationIdentity: {
         invocationId: this.deps.newId(),
         runId: this.deps.newId(),
@@ -497,10 +498,18 @@ function projectToolOperations(
       event.content?.kind === 'function_call' ? [[event.id, event.content] as const] : [],
     ),
   );
+  const dispatchesByEventId = new Map(
+    events.flatMap((event) =>
+      event.actions?.toolDispatch ? [[event.id, event.actions.toolDispatch] as const] : [],
+    ),
+  );
   return recovery.decisions.flatMap((decision) => {
     if (!decision.callRuntimeEventId) return [];
     const call = callsByEventId.get(decision.callRuntimeEventId);
     if (!call) return [];
+    const dispatch = decision.dispatchRuntimeEventId
+      ? dispatchesByEventId.get(decision.dispatchRuntimeEventId)
+      : undefined;
     const status: ToolOperationStatus =
       decision.disposition === 'completed'
         ? decision.responseIsError
@@ -514,6 +523,9 @@ function projectToolOperations(
         toolCallId: decision.toolCallId,
         toolName: call.name,
         args: call.args,
+        ...(decision.operationId ? { operationId: decision.operationId } : {}),
+        ...(dispatch ? { recoveryMode: dispatch.recoveryMode } : {}),
+        automaticActionAllowed: decision.automaticActionAllowed,
         status,
         recoveryReason: decision.reasonCode,
         evidenceEventIds: decision.evidenceEventIds,

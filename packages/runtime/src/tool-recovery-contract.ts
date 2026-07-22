@@ -16,6 +16,7 @@ export interface UnsettledToolOperation {
   toolName: string;
   args: unknown;
   recoveryMode?: ToolRecoveryMode;
+  workspaceCwd?: string;
   evidenceEventIds: readonly string[];
 }
 

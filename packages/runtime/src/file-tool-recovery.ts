@@ -1,8 +1,11 @@
+import { lstat, readFile, realpath } from 'node:fs/promises';
+import { isAbsolute, relative, resolve } from 'node:path';
 import type {
   ToolReconcileDecision,
   ToolRecoveryContract,
   UnsettledToolOperation,
 } from './tool-recovery-contract.js';
+import { ToolRecoveryContractRegistry } from './tool-recovery-contract.js';
 
 export type ReadOnlyFileObservation =
   | { status: 'missing' }
@@ -10,7 +13,60 @@ export type ReadOnlyFileObservation =
   | { status: 'unreadable' };
 
 export interface ReadOnlyFileRecoveryObserver {
-  readText(path: string): Promise<ReadOnlyFileObservation>;
+  readText(path: string, operation: UnsettledToolOperation): Promise<ReadOnlyFileObservation>;
+}
+
+export interface LocalReadOnlyFileRecoveryObserverOptions {
+  maxBytes?: number;
+}
+
+export function createLocalReadOnlyFileRecoveryObserver(
+  options: LocalReadOnlyFileRecoveryObserverOptions = {},
+): ReadOnlyFileRecoveryObserver {
+  const maxBytes = options.maxBytes ?? 16 * 1024 * 1024;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new Error('File recovery observer maxBytes must be a positive safe integer');
+  }
+  return {
+    readText: async (path, operation) => {
+      const cwd = operation.workspaceCwd;
+      if (!cwd) return { status: 'unreadable' };
+      const target = resolve(cwd, path);
+      if (!isPathWithin(cwd, target)) return { status: 'unreadable' };
+      try {
+        const [canonicalCwd, targetInfo] = await Promise.all([realpath(cwd), lstat(target)]);
+        if (!targetInfo.isFile() || targetInfo.isSymbolicLink() || targetInfo.size > maxBytes) {
+          return { status: 'unreadable' };
+        }
+        const canonicalTarget = await realpath(target);
+        if (!isPathWithin(canonicalCwd, canonicalTarget)) return { status: 'unreadable' };
+        const bytes = await readFile(canonicalTarget);
+        if (bytes.length > maxBytes || bytes.includes(0)) return { status: 'unreadable' };
+        try {
+          return {
+            status: 'text',
+            content: new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+          };
+        } catch {
+          return { status: 'unreadable' };
+        }
+      } catch (error) {
+        return isNodeError(error) && error.code === 'ENOENT'
+          ? { status: 'missing' }
+          : { status: 'unreadable' };
+      }
+    },
+  };
+}
+
+export function createWriteEditRecoveryContractRegistry(
+  observer: ReadOnlyFileRecoveryObserver,
+): ToolRecoveryContractRegistry {
+  const contracts = createWriteEditRecoveryContracts(observer);
+  return new ToolRecoveryContractRegistry([
+    { toolName: 'Write', contract: contracts.Write },
+    { toolName: 'Edit', contract: contracts.Edit },
+  ]);
 }
 
 type FileToolObservation =
@@ -58,7 +114,7 @@ async function observeFileTarget(
 ): Promise<FileToolObservation> {
   const args = parseArgs(operation.args);
   if (!args) return { status: 'invalid_args' };
-  return { path: args.path, ...(await observer.readText(args.path)) };
+  return { path: args.path, ...(await observer.readText(args.path, operation)) };
 }
 
 function decideWrite(
@@ -171,4 +227,13 @@ function countOccurrences(content: string, needle: string): number {
     cursor = found + needle.length;
   }
   return count;
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const pathFromRoot = relative(resolve(root), resolve(candidate));
+  return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot));
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error;
 }

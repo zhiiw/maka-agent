@@ -23,6 +23,8 @@ import {
   createProviderRequestCaptureRecorder,
   createFilesystemWorkerLaunchSpecProvider,
   createLocalContinuationSafetyInspector,
+  createLocalReadOnlyFileRecoveryObserver,
+  createWriteEditRecoveryContractRegistry,
   FilesystemWorkerClient,
   buildDefaultContextBudgetPolicy,
   buildSkillAgentTool,
@@ -176,6 +178,9 @@ export async function createMakaCliRuntimeContext(
     sqliteCanonical: process.env.MAKA_RUNTIME_SQLITE_CANONICAL === '1',
   });
   const runtimeEventStore = runtimePersistence.runtimeEventStore;
+  const recoveryContracts = runtimePersistence.runtimeCommitStore
+    ? createWriteEditRecoveryContractRegistry(createLocalReadOnlyFileRecoveryObserver())
+    : undefined;
   const shellRunStore = createShellRunStore(input.workspaceRoot);
   const artifactStore = createArtifactStore(input.workspaceRoot);
   const connectionStore = createConnectionStore(input.workspaceRoot);
@@ -687,8 +692,12 @@ export async function createMakaCliRuntimeContext(
     store,
     runStore,
     runtimeEventStore,
-    ...(runtimePersistence.runtimeCommitStore
-      ? { toolBoundaryProtocol: runtimePersistence.runtimeCommitStore.toolBoundaryProtocol }
+    ...(runtimePersistence.runtimeCommitStore && recoveryContracts
+      ? {
+          toolBoundaryProtocol: runtimePersistence.runtimeCommitStore.toolBoundaryProtocol,
+          toolRecoveryStore: runtimePersistence.runtimeCommitStore,
+          recoveryContracts,
+        }
       : {}),
     shellRuns,
     backends,
