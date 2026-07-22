@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_RUNTIME_SCHEMA_VERSION = 5;
+export const SQLITE_RUNTIME_SCHEMA_VERSION = 6;
 
 const MIGRATIONS: ReadonlyMap<number, string> = new Map([
   [
@@ -110,6 +110,43 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
 
     INSERT INTO runtime_capabilities(capability, version)
       VALUES ('runtime_fact_envelope', 1);
+  `,
+  ],
+  [
+    6,
+    `
+    CREATE TABLE workspace_runtime_facts (
+      event_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      invocation_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
+      event_seq INTEGER NOT NULL CHECK (event_seq > 0),
+      fact_kind TEXT NOT NULL CHECK (
+        fact_kind IN ('maka.workspace.checkpoint', 'maka.workspace.transition')
+      ),
+      payload_json TEXT NOT NULL,
+      committed_at INTEGER NOT NULL,
+      FOREIGN KEY(event_id) REFERENCES runtime_events(event_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX workspace_runtime_facts_by_session
+      ON workspace_runtime_facts(session_id, committed_at, event_id);
+
+    INSERT INTO workspace_runtime_facts (
+      event_id, session_id, invocation_id, run_id, turn_id, event_seq,
+      fact_kind, payload_json, committed_at
+    )
+    SELECT
+      event_id, session_id, invocation_id, run_id, turn_id, event_seq,
+      json_extract(payload_json, '$.actions.runtimeFact.kind'),
+      payload_json, committed_at
+    FROM runtime_events
+    WHERE json_extract(payload_json, '$.actions.runtimeFact.kind') IN (
+      'maka.workspace.checkpoint', 'maka.workspace.transition'
+    )
+      AND json_extract(payload_json, '$.actions.runtimeFact.version') = 1
+      AND json_extract(payload_json, '$.actions.runtimeFact.legacyProjection') = 'invisible';
   `,
   ],
 ]);

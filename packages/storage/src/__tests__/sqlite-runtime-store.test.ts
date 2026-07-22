@@ -14,7 +14,7 @@ import {
 describe('SqliteRuntimeStore', () => {
   it('applies versioned migrations and reopens the same database without rewriting schema', async () => {
     await withStore(async (store, dbPath) => {
-      assert.equal(SQLITE_RUNTIME_SCHEMA_VERSION, 5);
+      assert.equal(SQLITE_RUNTIME_SCHEMA_VERSION, 6);
       assert.equal(store.schemaVersion(), SQLITE_RUNTIME_SCHEMA_VERSION);
       assert.equal(store.runtimeFactWriteCapability, 'runtime_fact_envelope_v1');
       assert.equal(store.journalMode(), 'wal');
@@ -66,13 +66,14 @@ describe('SqliteRuntimeStore', () => {
       store.close();
 
       const legacy = new DatabaseSync(dbPath);
+      legacy.exec('DROP TABLE workspace_runtime_facts');
       legacy.exec('DROP TABLE runtime_capabilities');
       legacy.exec('PRAGMA user_version = 4');
       legacy.close();
 
       const upgraded = createSqliteRuntimeStore(dbPath);
       try {
-        assert.equal(upgraded.schemaVersion(), 5);
+        assert.equal(upgraded.schemaVersion(), SQLITE_RUNTIME_SCHEMA_VERSION);
         assert.equal(upgraded.runtimeFactWriteCapability, 'runtime_fact_envelope_v1');
         assert.deepEqual(await upgraded.readRuntimeEvents('session-1', 'run-1'), [event]);
       } finally {
@@ -143,6 +144,46 @@ describe('SqliteRuntimeStore', () => {
         (await store.listUnsettledToolOperations()).map((operation) => operation.operationId),
         ['operation-1'],
       );
+    });
+  });
+
+  it('projects workspace facts as a disposable index over canonical RuntimeEvents', async () => {
+    await withStore(async (store) => {
+      const checkpoint = workspaceFactEvent('checkpoint-event', 'maka.workspace.checkpoint');
+      const transition = workspaceFactEvent('transition-event', 'maka.workspace.transition', 2);
+      await store.appendRuntimeEvent('session-1', 'run-1', checkpoint);
+      await store.appendRuntimeEvent('session-1', 'run-1', transition);
+
+      assert.deepEqual(await store.readWorkspaceRuntimeFactEvents('session-1'), [
+        checkpoint,
+        transition,
+      ]);
+      assert.deepEqual(await store.rebuildWorkspaceFactProjection(), { facts: 2 });
+      assert.deepEqual(await store.readWorkspaceRuntimeFactEvents('session-1'), [
+        checkpoint,
+        transition,
+      ]);
+    });
+  });
+
+  it('backfills the workspace fact projection when upgrading a populated schema 5 database', async () => {
+    await withStore(async (store, dbPath) => {
+      const checkpoint = workspaceFactEvent('checkpoint-event', 'maka.workspace.checkpoint');
+      await store.appendRuntimeEvent('session-1', 'run-1', checkpoint);
+      store.close();
+
+      const legacy = new DatabaseSync(dbPath);
+      legacy.exec('DROP TABLE workspace_runtime_facts');
+      legacy.exec('PRAGMA user_version = 5');
+      legacy.close();
+
+      const upgraded = createSqliteRuntimeStore(dbPath);
+      try {
+        assert.equal(upgraded.schemaVersion(), 6);
+        assert.deepEqual(await upgraded.readWorkspaceRuntimeFactEvents('session-1'), [checkpoint]);
+      } finally {
+        upgraded.close();
+      }
     });
   });
 
@@ -768,6 +809,32 @@ function toolRecoveryFactEvent(input: {
       },
     },
     refs: { operationId: 'operation-1' },
+  };
+}
+
+function workspaceFactEvent(
+  id: string,
+  kind: 'maka.workspace.checkpoint' | 'maka.workspace.transition',
+  ts = 1,
+): RuntimeEvent {
+  return {
+    id,
+    invocationId: 'invocation-1',
+    runId: 'run-1',
+    sessionId: 'session-1',
+    turnId: 'turn-1',
+    ts,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      runtimeFact: {
+        kind,
+        version: 1,
+        legacyProjection: 'invisible',
+        payload: { protocol: 'fixture' },
+      },
+    },
   };
 }
 

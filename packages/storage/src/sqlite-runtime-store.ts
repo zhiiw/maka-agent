@@ -100,6 +100,10 @@ export interface ToolProjectionRebuildResult {
   journalEvents: number;
 }
 
+export interface WorkspaceFactProjectionRebuildResult {
+  facts: number;
+}
+
 export interface ToolOperationRecord {
   operationId: string;
   invocationId: string;
@@ -341,6 +345,45 @@ export class SqliteRuntimeStore implements RuntimeEventStore {
         a.event.id.localeCompare(b.event.id),
     );
     return ordered.map((item) => item.event);
+  }
+
+  async readWorkspaceRuntimeFactEvents(sessionId: string): Promise<RuntimeEvent[]> {
+    const rows = this.db
+      .prepare(`
+      SELECT payload_json FROM workspace_runtime_facts
+      WHERE session_id = ?
+      ORDER BY committed_at ASC, event_id ASC
+    `)
+      .all(sessionId) as Array<{ payload_json: string }>;
+    return rows.map((row) => JSON.parse(row.payload_json) as RuntimeEvent);
+  }
+
+  async rebuildWorkspaceFactProjection(): Promise<WorkspaceFactProjectionRebuildResult> {
+    return this.transaction(() => {
+      this.db.exec('DELETE FROM workspace_runtime_facts');
+      this.db.exec(`
+        INSERT INTO workspace_runtime_facts (
+          event_id, session_id, invocation_id, run_id, turn_id, event_seq,
+          fact_kind, payload_json, committed_at
+        )
+        SELECT
+          event_id, session_id, invocation_id, run_id, turn_id, event_seq,
+          json_extract(payload_json, '$.actions.runtimeFact.kind'),
+          payload_json, committed_at
+        FROM runtime_events
+        WHERE json_extract(payload_json, '$.actions.runtimeFact.kind') IN (
+          'maka.workspace.checkpoint', 'maka.workspace.transition'
+        )
+          AND json_extract(payload_json, '$.actions.runtimeFact.version') = 1
+          AND json_extract(payload_json, '$.actions.runtimeFact.legacyProjection') = 'invisible'
+      `);
+      const row = this.db
+        .prepare('SELECT COUNT(*) AS count FROM workspace_runtime_facts')
+        .get() as {
+        count: number;
+      };
+      return { facts: row.count };
+    });
   }
 
   async commitToolPrepared(input: CommitToolPreparedInput): Promise<ToolCommitResult> {
@@ -815,8 +858,46 @@ export class SqliteRuntimeStore implements RuntimeEventStore {
     const partial = partialRuntimeStream(event);
     if (partial) return this.upsertRuntimePartial(event, partial);
     const existing = this.readRuntimeEventJson(event.id) !== undefined;
-    this.insertRuntimeEvent(event, event.ts, true);
+    const eventSeq = this.insertRuntimeEvent(event, event.ts, true);
+    this.projectWorkspaceRuntimeFact(event, eventSeq, event.ts);
     return !existing;
+  }
+
+  private projectWorkspaceRuntimeFact(
+    event: RuntimeEvent,
+    eventSeq: number,
+    committedAt: number,
+  ): void {
+    const fact = event.actions?.runtimeFact;
+    if (
+      !fact ||
+      fact.version !== 1 ||
+      fact.legacyProjection !== 'invisible' ||
+      (fact.kind !== 'maka.workspace.checkpoint' && fact.kind !== 'maka.workspace.transition')
+    ) {
+      return;
+    }
+    this.db
+      .prepare(`
+      INSERT INTO workspace_runtime_facts (
+        event_id, session_id, invocation_id, run_id, turn_id, event_seq,
+        fact_kind, payload_json, committed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(event_id) DO UPDATE SET
+        payload_json = excluded.payload_json,
+        committed_at = excluded.committed_at
+    `)
+      .run(
+        event.id,
+        event.sessionId,
+        event.invocationId,
+        event.runId,
+        event.turnId,
+        eventSeq,
+        fact.kind,
+        JSON.stringify(event),
+        committedAt,
+      );
   }
 
   private insertRuntimeEvent(
