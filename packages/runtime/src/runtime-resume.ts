@@ -13,6 +13,10 @@ import {
 } from './recovery-resolver.js';
 import type { ToolRecoveryContractRegistry } from './tool-recovery-contract.js';
 import type { PreparedFileMutationFact } from './tool-recovery-facts.js';
+import type {
+  CheckpointValidationResult,
+  WorkspaceCheckpointFact,
+} from './workspace-checkpoint.js';
 
 export type ToolOperationStatus =
   | 'succeeded'
@@ -85,6 +89,13 @@ export type ResumePlanDiagnosticCode =
   | 'interrupted_model_suffix_omitted'
   | 'workspace_ref_missing'
   | 'checkpoint_restore_failed'
+  | 'workspace_checkpoint_boundary_mismatch'
+  | 'workspace_checkpoint_drifted'
+  | 'workspace_checkpoint_unavailable'
+  | 'workspace_checkpoint_identity_mismatch'
+  | 'workspace_checkpoint_policy_mismatch'
+  | 'workspace_checkpoint_capability_insufficient'
+  | 'workspace_checkpoint_corrupt'
   | 'source_run_unreadable'
   | 'continuation_already_exists'
   | 'workspace_identity_missing'
@@ -119,6 +130,13 @@ export type ResumeRejectionReason =
   | 'provider_resume_boundary_unsupported'
   | 'workspace_ref_missing'
   | 'checkpoint_restore_failed'
+  | 'workspace_checkpoint_boundary_mismatch'
+  | 'workspace_checkpoint_drifted'
+  | 'workspace_checkpoint_unavailable'
+  | 'workspace_checkpoint_identity_mismatch'
+  | 'workspace_checkpoint_policy_mismatch'
+  | 'workspace_checkpoint_capability_insufficient'
+  | 'workspace_checkpoint_corrupt'
   | 'source_run_unreadable'
   | 'continuation_already_exists'
   | 'workspace_identity_missing'
@@ -249,11 +267,12 @@ export interface SafeBoundaryContinuationFacts {
   /** User-anchored replay prefix inherited from continuation ancestors. */
   priorRuntimeContext?: readonly RuntimeEvent[];
   expectedRuntimeEventHighWater?: number;
-  workspaceCheckpoint?: {
-    ref?: string;
-    restored: boolean;
-    runtimeEventHighWater: number;
-  };
+  workspaceCheckpoint?: ValidatedWorkspaceCheckpoint;
+}
+
+export interface ValidatedWorkspaceCheckpoint {
+  fact: WorkspaceCheckpointFact;
+  validation: CheckpointValidationResult;
 }
 
 export interface RuntimeContinuation {
@@ -277,8 +296,11 @@ export interface RuntimeContinuationSafetySnapshot {
   backgroundOperationsSettled: true;
   availableToolNames: string[];
   workspaceCheckpoint?: {
-    ref: string;
-    runtimeEventHighWater: number;
+    checkpointId: string;
+    replayManifestDigest: string;
+    workspaceEpochId: string;
+    policyHash: string;
+    observedArtifactDigest?: string;
   };
 }
 
@@ -286,11 +308,7 @@ export interface RuntimeContinuationSafetyObservation {
   workspaceIdentity: string;
   backgroundOperationsSettled: boolean;
   availableToolNames: readonly string[];
-  workspaceCheckpoint?: {
-    ref?: string;
-    restored: boolean;
-    runtimeEventHighWater: number;
-  };
+  workspaceCheckpoint?: ValidatedWorkspaceCheckpoint;
 }
 
 export interface SafeBoundaryContinuationPlan {
@@ -616,7 +634,8 @@ export function buildSafeBoundaryContinuationPlan(
   facts: SafeBoundaryContinuationFacts,
 ): SafeBoundaryContinuationPlan {
   const expectedRuntimeEventHighWater =
-    facts.workspaceCheckpoint?.runtimeEventHighWater ?? facts.expectedRuntimeEventHighWater;
+    facts.workspaceCheckpoint?.fact.coveredBoundary.sourceHighWater ??
+    facts.expectedRuntimeEventHighWater;
   const replayPlan = buildResumePlanFromRuntimeEvents(events, {
     ...(expectedRuntimeEventHighWater !== undefined ? { expectedRuntimeEventHighWater } : {}),
     ...(facts.recoveryContracts ? { recoveryContracts: facts.recoveryContracts } : {}),
@@ -700,20 +719,12 @@ export function buildSafeBoundaryContinuationPlan(
     phaseOneRejectionReasons.push('background_operation_pending');
   }
   if (facts.workspaceCheckpoint) {
-    if (!facts.workspaceCheckpoint.ref) {
-      phaseOneDiagnostics.push({
-        code: 'workspace_ref_missing',
-        message: 'workspace checkpoint does not contain a restorable ref',
-      });
-      phaseOneRejectionReasons.push('workspace_ref_missing');
-    } else if (!facts.workspaceCheckpoint.restored) {
-      phaseOneDiagnostics.push({
-        code: 'checkpoint_restore_failed',
-        message: 'workspace checkpoint ref could not be restored',
-        detail: { workspaceRef: facts.workspaceCheckpoint.ref },
-      });
-      phaseOneRejectionReasons.push('checkpoint_restore_failed');
-    }
+    collectWorkspaceCheckpointDiagnostics(
+      facts.workspaceCheckpoint,
+      source,
+      phaseOneDiagnostics,
+      phaseOneRejectionReasons,
+    );
   }
   const interruptedSuffix = buildContinuationReplayRuntimeEvents(replayPlan.replayRuntimeEvents);
   const sourceReplayRuntimeEvents = interruptedSuffix.runtimeEvents;
@@ -801,11 +812,20 @@ export function buildSafeBoundaryContinuationPlan(
         workspaceIdentity: facts.currentWorkspaceIdentity,
         backgroundOperationsSettled: true,
         availableToolNames: [...new Set(facts.availableToolNames)].sort(),
-        ...(facts.workspaceCheckpoint?.ref
+        ...(facts.workspaceCheckpoint?.validation.disposition === 'current_matches'
           ? {
               workspaceCheckpoint: {
-                ref: facts.workspaceCheckpoint.ref,
-                runtimeEventHighWater: facts.workspaceCheckpoint.runtimeEventHighWater,
+                checkpointId: facts.workspaceCheckpoint.fact.checkpointId,
+                replayManifestDigest:
+                  facts.workspaceCheckpoint.fact.coveredBoundary.replayManifestDigest,
+                workspaceEpochId: facts.workspaceCheckpoint.fact.workspaceEpochId,
+                policyHash: facts.workspaceCheckpoint.fact.policy.hash,
+                ...(facts.workspaceCheckpoint.validation.observedArtifactDigest
+                  ? {
+                      observedArtifactDigest:
+                        facts.workspaceCheckpoint.validation.observedArtifactDigest,
+                    }
+                  : {}),
               },
             }
           : {}),
@@ -850,6 +870,79 @@ export function buildContinuationReplayRuntimeEvents(events: readonly RuntimeEve
     return !omitted;
   });
   return { runtimeEvents, omittedEventIds };
+}
+
+function collectWorkspaceCheckpointDiagnostics(
+  checkpoint: ValidatedWorkspaceCheckpoint,
+  source: RuntimeEvent | undefined,
+  diagnostics: ResumePlanDiagnostic[],
+  rejectionReasons: ResumeRejectionReason[],
+): void {
+  const { fact, validation } = checkpoint;
+  if (
+    validation.checkpointId !== fact.checkpointId ||
+    fact.workspaceEpochId !== fact.coveredBoundary.replaySources.at(-1)?.workspaceEpochId
+  ) {
+    diagnostics.push({
+      code: 'workspace_checkpoint_corrupt',
+      message: 'workspace checkpoint identity or epoch is internally inconsistent',
+      detail: { checkpointId: fact.checkpointId },
+    });
+    rejectionReasons.push('workspace_checkpoint_corrupt');
+    return;
+  }
+  if (
+    source &&
+    (fact.coveredBoundary.sourceInvocationId !== source.invocationId ||
+      fact.coveredBoundary.sourceRunId !== source.runId ||
+      fact.coveredBoundary.sourceTurnId !== source.turnId)
+  ) {
+    diagnostics.push({
+      code: 'workspace_checkpoint_boundary_mismatch',
+      message: 'workspace checkpoint belongs to a different RuntimeEvent boundary',
+      detail: { checkpointId: fact.checkpointId },
+    });
+    rejectionReasons.push('workspace_checkpoint_boundary_mismatch');
+    return;
+  }
+  const rejection = checkpointValidationRejection(validation.disposition);
+  if (!rejection) return;
+  diagnostics.push({
+    code: rejection,
+    message: `workspace checkpoint validation did not prove a current boundary: ${validation.disposition}`,
+    detail: { checkpointId: fact.checkpointId, validationDisposition: validation.disposition },
+  });
+  rejectionReasons.push(rejection);
+}
+
+function checkpointValidationRejection(
+  disposition: CheckpointValidationResult['disposition'],
+):
+  | 'workspace_checkpoint_drifted'
+  | 'workspace_checkpoint_unavailable'
+  | 'workspace_checkpoint_identity_mismatch'
+  | 'workspace_checkpoint_policy_mismatch'
+  | 'workspace_checkpoint_capability_insufficient'
+  | 'workspace_checkpoint_corrupt'
+  | undefined {
+  switch (disposition) {
+    case 'current_matches':
+      return undefined;
+    case 'drifted_restore_available':
+    case 'drifted_restore_unavailable':
+      return 'workspace_checkpoint_drifted';
+    case 'missing':
+    case 'provider_mismatch':
+      return 'workspace_checkpoint_unavailable';
+    case 'identity_mismatch':
+      return 'workspace_checkpoint_identity_mismatch';
+    case 'policy_mismatch':
+      return 'workspace_checkpoint_policy_mismatch';
+    case 'capability_insufficient':
+      return 'workspace_checkpoint_capability_insufficient';
+    case 'corrupt':
+      return 'workspace_checkpoint_corrupt';
+  }
 }
 
 function collectPendingPermissionDiagnostics(

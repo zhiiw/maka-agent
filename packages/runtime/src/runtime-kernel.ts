@@ -1796,9 +1796,14 @@ function assertContinuationSafetyUnchanged(
   if (snapshot.workspaceCheckpoint) {
     const current = observation.workspaceCheckpoint;
     if (
-      !current?.restored ||
-      current.ref !== snapshot.workspaceCheckpoint.ref ||
-      current.runtimeEventHighWater !== snapshot.workspaceCheckpoint.runtimeEventHighWater
+      current?.validation.disposition !== 'current_matches' ||
+      current.fact.checkpointId !== snapshot.workspaceCheckpoint.checkpointId ||
+      current.fact.coveredBoundary.replayManifestDigest !==
+        snapshot.workspaceCheckpoint.replayManifestDigest ||
+      current.fact.workspaceEpochId !== snapshot.workspaceCheckpoint.workspaceEpochId ||
+      current.fact.policy.hash !== snapshot.workspaceCheckpoint.policyHash ||
+      current.validation.observedArtifactDigest !==
+        snapshot.workspaceCheckpoint.observedArtifactDigest
     ) {
       throw new RuntimeContinuationRevalidationError(
         'workspace_checkpoint_changed',

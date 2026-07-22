@@ -12,6 +12,12 @@ import {
   projectToolOperationsFromRuntimeEvents,
 } from '../runtime-resume.js';
 import { ToolRecoveryContractRegistry } from '../tool-recovery-contract.js';
+import {
+  buildRuntimeBoundaryCursor,
+  buildRuntimePrefixSegment,
+  type CheckpointValidationDisposition,
+  type WorkspaceCheckpointFact,
+} from '../workspace-checkpoint.js';
 
 describe('runtime resume phase 0 projection', () => {
   test('publishes the stable P0-P11 crash failpoint catalog', () => {
@@ -636,25 +642,35 @@ describe('runtime resume phase 1 safe-boundary continuation', () => {
     assert.equal(plan.diagnostics[0]?.code, 'provider_resume_head_unsupported');
   });
 
-  test('requires a restored workspace checkpoint with the same runtime high-water when supplied', () => {
+  test('requires a current, valid workspace checkpoint at the same runtime boundary when supplied', () => {
     const events = [textEvent('user-1', 'user', 'continue')];
-    const missingRef = buildSafeBoundaryContinuationPlan(events, {
+    const policyMismatch = buildSafeBoundaryContinuationPlan(events, {
       ...safeBoundaryFacts(),
-      workspaceCheckpoint: { restored: true, runtimeEventHighWater: 1 },
+      workspaceCheckpoint: workspaceCheckpoint(events, 'policy_mismatch'),
     });
-    assert.deepEqual(missingRef.rejectionReasons, ['workspace_ref_missing']);
+    assert.deepEqual(policyMismatch.rejectionReasons, ['workspace_checkpoint_policy_mismatch']);
 
-    const restoreFailed = buildSafeBoundaryContinuationPlan(events, {
+    const drifted = buildSafeBoundaryContinuationPlan(events, {
       ...safeBoundaryFacts(),
-      workspaceCheckpoint: { ref: 'checkpoint-1', restored: false, runtimeEventHighWater: 1 },
+      workspaceCheckpoint: workspaceCheckpoint(events, 'drifted_restore_available'),
     });
-    assert.deepEqual(restoreFailed.rejectionReasons, ['checkpoint_restore_failed']);
+    assert.deepEqual(drifted.rejectionReasons, ['workspace_checkpoint_drifted']);
 
     const offsetMismatch = buildSafeBoundaryContinuationPlan(events, {
       ...safeBoundaryFacts(),
-      workspaceCheckpoint: { ref: 'checkpoint-1', restored: true, runtimeEventHighWater: 2 },
+      workspaceCheckpoint: workspaceCheckpoint(events, 'current_matches', 2),
     });
     assert.deepEqual(offsetMismatch.rejectionReasons, ['runtime_offset_mismatch']);
+
+    const valid = buildSafeBoundaryContinuationPlan(events, {
+      ...safeBoundaryFacts(),
+      workspaceCheckpoint: workspaceCheckpoint(events, 'current_matches'),
+    });
+    assert.equal(valid.disposition, 'continue');
+    assert.equal(
+      valid.continuation?.safetySnapshot.workspaceCheckpoint?.checkpointId,
+      'checkpoint-1',
+    );
   });
 
   test('keeps the durable high-water even when partial events are excluded from replay context', () => {
@@ -695,6 +711,65 @@ function safeBoundaryFacts() {
       invocationId: 'invocation-2',
       runId: 'run-2',
       turnId: 'turn-2',
+    },
+  };
+}
+
+function workspaceCheckpoint(
+  events: RuntimeEvent[],
+  disposition: CheckpointValidationDisposition,
+  highWater = events.length,
+) {
+  const workspace = {
+    workspaceInstanceIdentity: 'workspace-1',
+    canonicalRoot: '/workspace/repo',
+  };
+  const coveredBoundary = buildRuntimeBoundaryCursor([
+    buildRuntimePrefixSegment({
+      events,
+      highWater: events.length,
+      workspaceEpochId: 'epoch-1',
+      workspace,
+    }),
+  ]);
+  if (highWater !== events.length) {
+    coveredBoundary.sourceHighWater = highWater;
+    coveredBoundary.replaySources.at(-1)!.highWater = highWater;
+  }
+  const fact: WorkspaceCheckpointFact = {
+    protocol: 'workspace_checkpoint_v1',
+    checkpointId: 'checkpoint-1',
+    kind: 'captured',
+    coveredBoundary,
+    workspaceEpochId: 'epoch-1',
+    workspace,
+    coverage: 'full_policy_scope',
+    capabilities: {
+      coverage: 'full_policy_scope',
+      contentRetention: 'full_snapshot',
+      validation: 'manifest_hash',
+      restore: 'isolated_directory',
+      repositoryAware: false,
+      executableMode: true,
+      symlinks: true,
+      submodules: false,
+    },
+    providerId: 'native-cas',
+    artifact: {
+      kind: 'native_cas_v1',
+      rootHash: 'sha256:root',
+      rootTreeId: 'sha256:tree',
+      snapshotObjectId: 'sha256:snapshot',
+    },
+    policy: { version: 1, hash: 'sha256:policy' },
+    capturedAt: '2026-07-23T00:00:00.000Z',
+  };
+  return {
+    fact,
+    validation: {
+      disposition,
+      checkpointId: fact.checkpointId,
+      ...(disposition === 'current_matches' ? { observedArtifactDigest: 'sha256:observed' } : {}),
     },
   };
 }

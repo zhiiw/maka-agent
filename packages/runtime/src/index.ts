@@ -1075,6 +1075,7 @@ export type {
   SafeBoundaryContinuationPlan,
   ToolOperation,
   ToolOperationStatus,
+  ValidatedWorkspaceCheckpoint,
 } from './runtime-resume.js';
 
 export { resolveRuntimeRecovery } from './recovery-resolver.js';
@@ -1139,6 +1140,37 @@ export {
   type GitFileCheckpointFailpoint,
   type PrepareGitFileMutationInput,
 } from './git-file-checkpoint-carrier.js';
+
+export {
+  buildRuntimeBoundaryCursor,
+  buildRuntimePrefixSegment,
+  evaluateWorkspaceCheckpointCapabilities,
+  InMemoryWorkspaceCheckpointProvider,
+  selectWorkspaceCheckpointProvider,
+  validateWorkspaceCheckpointForResume,
+  type BuildRuntimePrefixSegmentInput,
+  type CheckpointValidationDisposition,
+  type CheckpointValidationResult,
+  type RuntimeBoundaryCursor,
+  type RuntimePrefixSegment,
+  type ValidateCheckpointInput,
+  type ValidateWorkspaceCheckpointForResumeInput,
+  type WorkspaceCheckpointArtifact,
+  type WorkspaceCheckpointCapabilities,
+  type WorkspaceCheckpointCapabilityEvaluation,
+  type WorkspaceCheckpointCapabilityGap,
+  type WorkspaceCheckpointContentRetention,
+  type WorkspaceCheckpointCoverage,
+  type WorkspaceCheckpointFact,
+  type WorkspaceCheckpointProvider,
+  type WorkspaceCheckpointProviderDescriptor,
+  type WorkspaceCheckpointRestore,
+  type WorkspaceCheckpointValidation,
+  type WorkspaceEpoch,
+  type WorkspaceIdentity,
+  type WorkspaceResumeRequirement,
+  type WorkspaceTransitionFact,
+} from './workspace-checkpoint.js';
 
 export {
   commitToolReconcileResultFact,
