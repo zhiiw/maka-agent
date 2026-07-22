@@ -36,7 +36,7 @@ import {
   createLocalContinuationSafetyInspector,
   buildDeepResearchTools,
   createPreparedWriteEditRecoveryContractRegistry,
-  GitFileCheckpointCarrier,
+  LocalFileCheckpointCarrier,
   getAIModel,
   generateSessionTitle as generateRuntimeSessionTitle,
   buildProviderOptions,
@@ -208,7 +208,7 @@ const runtimePersistence = await openRuntimeEventPersistence({
 });
 const runtimeEventStore = runtimePersistence.runtimeEventStore;
 const fileMutationCheckpointCarrier = runtimePersistence.runtimeCommitStore
-  ? new GitFileCheckpointCarrier()
+  ? new LocalFileCheckpointCarrier()
   : undefined;
 const recoveryContracts = fileMutationCheckpointCarrier
   ? createPreparedWriteEditRecoveryContractRegistry(fileMutationCheckpointCarrier)

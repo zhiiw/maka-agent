@@ -24,7 +24,7 @@ import {
   createFilesystemWorkerLaunchSpecProvider,
   createLocalContinuationSafetyInspector,
   createPreparedWriteEditRecoveryContractRegistry,
-  GitFileCheckpointCarrier,
+  LocalFileCheckpointCarrier,
   FilesystemWorkerClient,
   buildDefaultContextBudgetPolicy,
   buildSkillAgentTool,
@@ -179,7 +179,7 @@ export async function createMakaCliRuntimeContext(
   });
   const runtimeEventStore = runtimePersistence.runtimeEventStore;
   const fileMutationCheckpointCarrier = runtimePersistence.runtimeCommitStore
-    ? new GitFileCheckpointCarrier()
+    ? new LocalFileCheckpointCarrier()
     : undefined;
   const recoveryContracts = fileMutationCheckpointCarrier
     ? createPreparedWriteEditRecoveryContractRegistry(fileMutationCheckpointCarrier)
