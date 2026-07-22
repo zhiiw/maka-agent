@@ -150,11 +150,11 @@ describe('workspace checkpoint contracts', () => {
   });
 
   test('selects the highest-priority provider that satisfies the host requirement', () => {
-    const native = providerDescriptor('native-cas', 10, false);
+    const privateGit = providerDescriptor('git-private', 10, false);
     const git = providerDescriptor('git-repository', 20, true);
 
     assert.equal(
-      selectWorkspaceCheckpointProvider([native, git], {
+      selectWorkspaceCheckpointProvider([privateGit, git], {
         minimumCoverage: 'full_policy_scope',
         minimumContentRetention: 'full_snapshot',
         minimumRestore: 'isolated_directory',
@@ -163,7 +163,7 @@ describe('workspace checkpoint contracts', () => {
       'git-repository',
     );
     assert.equal(
-      selectWorkspaceCheckpointProvider([native, git], {
+      selectWorkspaceCheckpointProvider([privateGit, git], {
         minimumCoverage: 'full_policy_scope',
         minimumContentRetention: 'full_snapshot',
         minimumRestore: 'isolated_directory',
@@ -172,7 +172,7 @@ describe('workspace checkpoint contracts', () => {
       'git-repository',
     );
     assert.equal(
-      selectWorkspaceCheckpointProvider([native], {
+      selectWorkspaceCheckpointProvider([privateGit], {
         minimumCoverage: 'full_policy_scope',
         minimumContentRetention: 'full_snapshot',
         minimumRestore: 'isolated_directory',
@@ -184,7 +184,7 @@ describe('workspace checkpoint contracts', () => {
 
   test('fails policy validation before invoking the artifact provider', async () => {
     const provider = new InMemoryWorkspaceCheckpointProvider(
-      providerDescriptor('native-cas', 10, false),
+      providerDescriptor('git-repository', 10, true),
     );
     const checkpoint = checkpointFact(digest('a'));
 
@@ -205,7 +205,7 @@ describe('workspace checkpoint contracts', () => {
 
   test('delegates artifact validation only after Runtime-owned gates pass', async () => {
     const provider = new InMemoryWorkspaceCheckpointProvider(
-      providerDescriptor('native-cas', 10, false),
+      providerDescriptor('git-repository', 10, true),
     );
     const checkpoint = checkpointFact(digest('a'));
     provider.setValidation(checkpoint.checkpointId, {
@@ -367,13 +367,15 @@ function checkpointFact(policyHash: string): WorkspaceCheckpointFact {
     workspaceEpochId: 'epoch-1',
     workspace: identity('workspace-1'),
     coverage: 'full_policy_scope',
-    capabilities: providerDescriptor('native-cas', 10, false).capabilities,
-    providerId: 'native-cas',
+    capabilities: providerDescriptor('git-repository', 10, true).capabilities,
+    providerId: 'git-repository',
     artifact: {
-      kind: 'native_cas_v1',
-      rootHash: digest('1'),
-      rootTreeId: digest('2'),
-      snapshotObjectId: digest('3'),
+      kind: 'git_repository_v1',
+      repositoryIdentity: 'repository-1',
+      objectFormat: 'sha1',
+      commitOid: '1'.repeat(40),
+      treeOid: '2'.repeat(40),
+      retentionRef: 'refs/maka/checkpoints/checkpoint-1',
     },
     policy: { version: 1, hash: policyHash },
     capturedAt: '2026-07-23T00:00:00.000Z',

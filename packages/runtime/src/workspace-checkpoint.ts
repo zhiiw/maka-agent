@@ -99,17 +99,6 @@ export interface RuntimeBoundaryCursor {
 
 export type WorkspaceCheckpointArtifact =
   | {
-      kind: 'native_manifest_v1';
-      rootHash: string;
-      manifestObjectId: string;
-    }
-  | {
-      kind: 'native_cas_v1';
-      rootHash: string;
-      rootTreeId: string;
-      snapshotObjectId: string;
-    }
-  | {
       kind: 'git_repository_v1';
       repositoryIdentity: string;
       objectFormat: 'sha1' | 'sha256';
@@ -637,19 +626,6 @@ function isWorkspaceCheckpointCapabilities(
 function isWorkspaceCheckpointArtifact(value: unknown): value is WorkspaceCheckpointArtifact {
   if (!isRecord(value)) return false;
   switch (value.kind) {
-    case 'native_manifest_v1':
-      return (
-        hasExactKeys(value, ['kind', 'rootHash', 'manifestObjectId']) &&
-        isSha256Digest(value.rootHash) &&
-        isSha256Digest(value.manifestObjectId)
-      );
-    case 'native_cas_v1':
-      return (
-        hasExactKeys(value, ['kind', 'rootHash', 'rootTreeId', 'snapshotObjectId']) &&
-        isSha256Digest(value.rootHash) &&
-        isSha256Digest(value.rootTreeId) &&
-        isSha256Digest(value.snapshotObjectId)
-      );
     case 'git_repository_v1':
       return (
         hasExactKeys(value, [

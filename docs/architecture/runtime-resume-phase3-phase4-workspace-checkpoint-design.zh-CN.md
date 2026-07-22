@@ -264,7 +264,7 @@ Git 正好提供 checkpoint carrier 所需的最小原语：
 | 自研 filesystem CAS | 最终需要重新实现 blob/tree、metadata policy、GC、校验、restore 和损坏处理，相当于维护第二套 Git 子集 |
 | 自动 `git init` | 对用户 workspace 产生可见且长期的产品副作用，不是透明 fallback |
 
-因此“优先使用已有 Git”是范围控制，不是把 Git 当作恢复真相源：RuntimeEvent 仍决定 checkpoint 是否被接受，Git 只保存不可变 workspace artifact。非 Git filesystem CAS 可以在真实需求和资源足够时作为新的 `WorkspaceCheckpointProvider` 落地，而不改变 planner 的三平面语义。
+因此“使用已有 Git”是明确的产品边界，不是把 Git 当作恢复真相源：RuntimeEvent 仍决定 checkpoint 是否被接受，Git 只保存不可变 workspace artifact。当前路线不实现 Native workspace manifest/CAS。无 Git 环境的 Native 能力止于 Phase 3A 的 Write/Edit 文件事务 checkpoint；它能证明单次受支持文件操作的 before/after 三态，但不能升级为目录级 snapshot、内容漂移证明或隔离恢复。
 
 ## 2. 背景与问题边界
 
@@ -1959,7 +1959,7 @@ uncheckpointed_mutating_t2_count
 1. Runtime boundary 是否增加 SQLite global durable position，还是仅使用 lineage manifest；推荐先以后者为 correctness source，前者只做索引；
 2. untracked 默认是否纳入；推荐 Desktop `include_with_limits`，Headless 由任务 policy 显式配置；
 3. Git attributes/filter/LFS 首版是全部拒绝还是实现 exact-byte tree；推荐先拒绝不支持的 filter；
-4. non-Git workspace 是直接 park，还是后续实现 filesystem CAS carrier；推荐首版 park；
+4. non-Git workspace 在 checkpoint-required 模式直接 park；Native 只提供文件事务恢复，不规划 filesystem CAS carrier；
 5. Desktop legacy fallback 的淘汰时间；
 6. locked linked worktree 的用户可见位置、打开方式与任务完成后的清理交互；
 7. policy 是否允许 ignored secrets；推荐默认永不允许，必须有单独显式 host policy；
