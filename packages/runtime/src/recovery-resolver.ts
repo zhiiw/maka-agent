@@ -10,6 +10,7 @@ import {
   type ToolRecoveryDecisionFact,
   type ToolReconcileResultFact,
 } from './tool-recovery-facts.js';
+import { parseWorkspaceRuntimeFact } from './workspace-checkpoint.js';
 
 export type RecoveryDisposition =
   | 'completed'
@@ -145,6 +146,18 @@ export function resolveRuntimeRecovery(
       continue;
     }
     if (parsed.status === 'invalid') {
+      issues.push({
+        code: 'recovery_fact_corruption',
+        eventId: event.id,
+        reason: 'invalid_payload',
+      });
+      continue;
+    }
+    const workspaceFact = parseWorkspaceRuntimeFact(fact);
+    if (workspaceFact.status === 'checkpoint' || workspaceFact.status === 'transition') {
+      continue;
+    }
+    if (workspaceFact.status === 'invalid') {
       issues.push({
         code: 'recovery_fact_corruption',
         eventId: event.id,

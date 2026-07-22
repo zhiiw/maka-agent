@@ -3,10 +3,12 @@ import { describe, test } from 'node:test';
 import type { RuntimeEvent } from '@maka/core';
 
 import {
+  advanceWorkspaceEpoch,
   buildRuntimeBoundaryCursor,
   buildRuntimePrefixSegment,
   evaluateWorkspaceCheckpointCapabilities,
   InMemoryWorkspaceCheckpointProvider,
+  parseWorkspaceRuntimeFact,
   selectWorkspaceCheckpointProvider,
   validateWorkspaceCheckpointForResume,
   type RuntimeBoundaryCursor,
@@ -133,14 +135,14 @@ describe('workspace checkpoint contracts', () => {
     const provider = new InMemoryWorkspaceCheckpointProvider(
       providerDescriptor('native-cas', 10, false),
     );
-    const checkpoint = checkpointFact('policy-a');
+    const checkpoint = checkpointFact(digest('a'));
 
     const result = await validateWorkspaceCheckpointForResume({
       checkpoint,
       provider,
       currentWorkspace: checkpoint.workspace,
       requirement: fullWorkspaceRequirement(),
-      policy: { version: 1, hash: 'policy-b' },
+      policy: { version: 1, hash: digest('b') },
     });
 
     assert.deepEqual(result, {
@@ -154,7 +156,7 @@ describe('workspace checkpoint contracts', () => {
     const provider = new InMemoryWorkspaceCheckpointProvider(
       providerDescriptor('native-cas', 10, false),
     );
-    const checkpoint = checkpointFact('policy-a');
+    const checkpoint = checkpointFact(digest('a'));
     provider.setValidation(checkpoint.checkpointId, {
       disposition: 'current_matches',
       checkpointId: checkpoint.checkpointId,
@@ -172,6 +174,83 @@ describe('workspace checkpoint contracts', () => {
     assert.equal(result.disposition, 'current_matches');
     assert.equal(provider.validationCalls.length, 1);
     assert.equal(provider.validationCalls[0]?.checkpoint.checkpointId, checkpoint.checkpointId);
+  });
+
+  test('advances a workspace epoch only through a continuous canonical transition', () => {
+    const current = {
+      workspaceEpochId: 'epoch-1',
+      workspace: identity('workspace-1'),
+      openedByEventId: 'initial-event',
+    };
+
+    const next = advanceWorkspaceEpoch(current, 'transition-event', {
+      protocol: 'workspace_transition_v1',
+      fromEpochId: 'epoch-1',
+      toEpochId: 'epoch-2',
+      from: identity('workspace-1'),
+      to: identity('workspace-2'),
+      reason: 'session_cwd_move',
+    });
+
+    assert.deepEqual(next, {
+      workspaceEpochId: 'epoch-2',
+      workspace: identity('workspace-2'),
+      openedByEventId: 'transition-event',
+      previousEpochId: 'epoch-1',
+    });
+    assert.throws(
+      () =>
+        advanceWorkspaceEpoch(current, 'bad-transition', {
+          protocol: 'workspace_transition_v1',
+          fromEpochId: 'another-epoch',
+          toEpochId: 'epoch-3',
+          from: identity('workspace-1'),
+          to: identity('workspace-3'),
+          reason: 'session_cwd_move',
+        }),
+      /does not continue the active workspace epoch/,
+    );
+  });
+
+  test('parses exact checkpoint and transition runtime facts but rejects capability drift', () => {
+    const checkpoint = checkpointFact(digest('a'));
+    assert.equal(
+      parseWorkspaceRuntimeFact({
+        kind: 'maka.workspace.checkpoint',
+        version: 1,
+        legacyProjection: 'invisible',
+        payload: checkpoint,
+      }).status,
+      'checkpoint',
+    );
+    assert.equal(
+      parseWorkspaceRuntimeFact({
+        kind: 'maka.workspace.transition',
+        version: 1,
+        legacyProjection: 'invisible',
+        payload: {
+          protocol: 'workspace_transition_v1',
+          fromEpochId: 'epoch-1',
+          toEpochId: 'epoch-2',
+          from: identity('workspace-1'),
+          to: identity('workspace-2'),
+          reason: 'session_cwd_move',
+        },
+      }).status,
+      'transition',
+    );
+    assert.equal(
+      parseWorkspaceRuntimeFact({
+        kind: 'maka.workspace.checkpoint',
+        version: 1,
+        legacyProjection: 'invisible',
+        payload: {
+          ...checkpoint,
+          coverage: 'dependency_set',
+        },
+      }).status,
+      'invalid',
+    );
   });
 });
 
@@ -241,13 +320,17 @@ function checkpointFact(policyHash: string): WorkspaceCheckpointFact {
     providerId: 'native-cas',
     artifact: {
       kind: 'native_cas_v1',
-      rootHash: 'sha256:root',
-      rootTreeId: 'sha256:tree',
-      snapshotObjectId: 'sha256:snapshot',
+      rootHash: digest('1'),
+      rootTreeId: digest('2'),
+      snapshotObjectId: digest('3'),
     },
     policy: { version: 1, hash: policyHash },
     capturedAt: '2026-07-23T00:00:00.000Z',
   };
+}
+
+function digest(character: string): string {
+  return `sha256:${character.repeat(64)}`;
 }
 
 function boundary(): RuntimeBoundaryCursor {

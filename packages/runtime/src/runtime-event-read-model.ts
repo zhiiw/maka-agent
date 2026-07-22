@@ -17,6 +17,7 @@ import {
 } from '@maka/core';
 import { isArchivedToolResultPlaceholder } from './tool-result-archive.js';
 import { parseToolRecoveryFact } from './tool-recovery-facts.js';
+import { parseWorkspaceRuntimeFact } from './workspace-checkpoint.js';
 
 export type RuntimeEventReadModelDiagnosticCode =
   | 'partial_skipped'
@@ -183,7 +184,10 @@ export function projectRuntimeEventsToStoredMessages(
       // The envelope explicitly promises no legacy chat row, so older readers
       // can preserve session readability. Recovery remains fail-closed until a
       // handler recognizes this exact kind/version.
-      if (parseToolRecoveryFact(event.actions.runtimeFact).status === 'unsupported') {
+      if (
+        parseToolRecoveryFact(event.actions.runtimeFact).status === 'unsupported' &&
+        parseWorkspaceRuntimeFact(event.actions.runtimeFact).status === 'unsupported'
+      ) {
         diagnostic(
           state,
           event,

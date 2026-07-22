@@ -836,6 +836,43 @@ describe('projectRuntimeEventsToStoredMessages', () => {
     expect(out.diagnostics).toEqual([]);
   });
 
+  test('known workspace facts stay invisible without an unknown-fact diagnostic', () => {
+    const out = projectRuntimeEventsToStoredMessages(
+      [
+        ev({
+          id: 'workspace-transition',
+          role: 'system',
+          author: 'system',
+          actions: {
+            runtimeFact: {
+              kind: 'maka.workspace.transition',
+              version: 1,
+              legacyProjection: 'invisible',
+              payload: {
+                protocol: 'workspace_transition_v1',
+                fromEpochId: 'epoch-1',
+                toEpochId: 'epoch-2',
+                from: {
+                  workspaceInstanceIdentity: 'workspace-1',
+                  canonicalRoot: '/workspace/one',
+                },
+                to: {
+                  workspaceInstanceIdentity: 'workspace-2',
+                  canonicalRoot: '/workspace/two',
+                },
+                reason: 'session_cwd_move',
+              },
+            },
+          },
+        }),
+      ],
+      { runHeaders: [header] },
+    );
+
+    expect(out.messages).toEqual([]);
+    expect(out.diagnostics).toEqual([]);
+  });
+
   test('projects visible content while diagnosing an unknown runtime fact on the same event', () => {
     const out = projectRuntimeEventsToStoredMessages(
       [

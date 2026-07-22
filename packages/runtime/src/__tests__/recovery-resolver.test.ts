@@ -764,6 +764,39 @@ describe('RecoveryResolver', () => {
     assert.equal(resolution.decisions[0]?.responseRuntimeEventId, 'function-response-1');
     assert.equal(resolution.hasCorruption, true);
   });
+
+  it('recognizes canonical workspace facts without treating them as tool recovery facts', () => {
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      event({
+        id: 'workspace-transition-1',
+        actions: {
+          runtimeFact: {
+            kind: 'maka.workspace.transition',
+            version: 1,
+            legacyProjection: 'invisible',
+            payload: {
+              protocol: 'workspace_transition_v1',
+              fromEpochId: 'epoch-1',
+              toEpochId: 'epoch-2',
+              from: {
+                workspaceInstanceIdentity: 'workspace-1',
+                canonicalRoot: '/workspace/one',
+              },
+              to: {
+                workspaceInstanceIdentity: 'workspace-2',
+                canonicalRoot: '/workspace/two',
+              },
+              reason: 'session_cwd_move',
+            },
+          },
+        },
+      }),
+    ]);
+
+    assert.deepEqual(resolution.issues, []);
+    assert.equal(resolution.hasUnsupportedFacts, false);
+  });
 });
 
 function initialEvent(toolBoundary?: 't1_after_preflight_v1'): RuntimeEvent {

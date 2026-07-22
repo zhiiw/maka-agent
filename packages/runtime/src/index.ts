@@ -1142,15 +1142,18 @@ export {
 } from './git-file-checkpoint-carrier.js';
 
 export {
+  advanceWorkspaceEpoch,
   buildRuntimeBoundaryCursor,
   buildRuntimePrefixSegment,
   evaluateWorkspaceCheckpointCapabilities,
   InMemoryWorkspaceCheckpointProvider,
+  parseWorkspaceRuntimeFact,
   selectWorkspaceCheckpointProvider,
   validateWorkspaceCheckpointForResume,
   type BuildRuntimePrefixSegmentInput,
   type CheckpointValidationDisposition,
   type CheckpointValidationResult,
+  type ParsedWorkspaceRuntimeFact,
   type RuntimeBoundaryCursor,
   type RuntimePrefixSegment,
   type ValidateCheckpointInput,
@@ -1170,6 +1173,9 @@ export {
   type WorkspaceIdentity,
   type WorkspaceResumeRequirement,
   type WorkspaceTransitionFact,
+  WORKSPACE_CHECKPOINT_FACT_KIND,
+  WORKSPACE_RUNTIME_FACT_VERSION,
+  WORKSPACE_TRANSITION_FACT_KIND,
 } from './workspace-checkpoint.js';
 
 export {
