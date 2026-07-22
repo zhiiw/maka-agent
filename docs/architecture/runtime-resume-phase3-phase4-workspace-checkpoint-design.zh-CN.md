@@ -1556,6 +1556,29 @@ resume_revalidation_rejected
 
 验收：删除 projection 后重建等价；Bash 不自动重跑。
 
+### PR 2.5：Phase 3A 生产接线（进入 Phase 3B 的硬前置）
+
+PR 2 交付的是可独立验证的恢复协议和执行机制；PR 2.5 负责让 authoritative resume 入口真正驱动这些机制。它不是 Phase 3B 的 workspace checkpoint 工作，也不能被 PR 3 隐式吸收。
+
+交付：
+
+- `SessionManager` 在 authoritative safety gate 通过后、生成最终 continuation plan 前，扫描 RuntimeEvent 投影出的 eligible unsettled operations；
+- planning、reconcile 后 replan 和执行前 revalidation 共享同一个 `ToolRecoveryContractRegistry` 实例；
+- Desktop 与 CLI 在 SQLite canonical writer 可用时注册 Write/Edit read-only contracts；JSONL 路径不写 Phase 3 recovery facts；
+- observer 只读取 source Run 的 workspace cwd，拒绝越界路径、符号链接、非普通文件、二进制与超限文件；
+- reconcile fact、可选 synthetic outcome 和 recovery decision 作为一个 SQLite recovery bundle 原子提交；中途崩溃整笔回滚；
+- bundle 提交后重新读取 canonical RuntimeEvent，并用新的 high-water 重新规划；对外只发布最终 lifecycle decision；
+- observation failure、workspace identity/cwd 漂移、background operation、contract mismatch、conflict/unknown 均使用稳定诊断 fail closed。
+
+首版能力边界：
+
+- Write/Edit 已能证明 postcondition 生效时，允许合成 matching response 并继续，不重做副作用；
+- `not_applied` 只记录为 `retry_allowed` 并 park。只有未来引入可重新验证 durable permission、sandbox 与 exact-operation identity 的受限 executor 后，才允许自动执行原操作；
+- Bash、远程 API 与未知工具不因本 PR 自动重跑；
+- workspace checkpoint 尚未参与本 PR 的 reconcile；Phase 3B 从 PR 2.5 已收敛的 operation plane 开始。
+
+验收：真实 SessionManager 路径可将“Write/Edit 已实际落盘但 T2 丢失”的 Run 自动收敛并继续；恢复 bundle 任一 failpoint 后账本仍保持原始 prepared 状态；安全 gate 未通过时 observer 调用次数为零；Desktop/CLI 构建验证 registry 与 canonical writer 同时接入。
+
 ### PR 3：Phase 3B checkpoint contracts 与 fake provider
 
 交付：
