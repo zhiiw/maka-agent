@@ -1146,16 +1146,25 @@ export class SessionManager {
     plan: SafeBoundaryContinuationPlan,
     operations: readonly ToolOperation[],
   ): boolean {
+    const hasEligibleOperation = operations.some(
+      (operation) =>
+        operation.status === 'reconcile_required' &&
+        operation.recoveryReason === 'recovery_contract_available' &&
+        operation.automaticActionAllowed,
+    );
     return (
       this.deps.recoveryContracts !== undefined &&
       this.deps.toolRecoveryStore !== undefined &&
+      hasEligibleOperation &&
       plan.diagnostics.length > 0 &&
-      plan.diagnostics.every((diagnostic) => diagnostic.code === 'tool_recovery_required') &&
-      operations.some(
-        (operation) =>
-          operation.status === 'reconcile_required' &&
-          operation.recoveryReason === 'recovery_contract_available' &&
-          operation.automaticActionAllowed,
+      plan.diagnostics.every(
+        (diagnostic) =>
+          diagnostic.code === 'tool_recovery_required' ||
+          // An unmatched call is excluded from provider replay. If model text precedes it,
+          // that can leave a provisional model-role tail. A synthesized response makes the
+          // call/response pair replayable; the authoritative replan below must then clear
+          // this diagnostic before continuation is allowed.
+          diagnostic.code === 'provider_resume_boundary_unsupported',
       )
     );
   }

@@ -14,6 +14,40 @@ import { BackendRegistry, SessionManager } from '../session-manager.js';
 import { ToolRecoveryContractRegistry } from '../tool-recovery-contract.js';
 
 describe('SessionManager Phase 3A production recovery', () => {
+  it('recovers a Write when model text temporarily leaves replay at an unsupported tail', async () => {
+    await withInterruptedWrites(
+      [{ path: 'after-model-text.txt', result: 'applied' }],
+      async (fx) => {
+        const plan = await fx.plan();
+
+        assert.equal(plan.disposition, 'continue');
+        assert.equal(fx.observationCount('after-model-text.txt'), 1);
+        assert.deepEqual(await fx.journalStates('after-model-text.txt'), [
+          'prepared',
+          'reconcile_recorded',
+          'outcome_committed',
+          'recovery_decided',
+        ]);
+      },
+      { modelTextBeforeCalls: 'I will create the file now.' },
+    );
+  });
+
+  it('does not waive an unsupported provider replay head to attempt tool recovery', async () => {
+    await withInterruptedWrites(
+      [{ path: 'unsafe-head.txt', result: 'applied' }],
+      async (fx) => {
+        const plan = await fx.plan();
+
+        assert.equal(plan.disposition, 'park');
+        assert.ok(plan.diagnostics.some(({ code }) => code === 'provider_resume_head_unsupported'));
+        assert.equal(fx.observationCount('unsafe-head.txt'), 0);
+        assert.deepEqual(await fx.journalStates('unsafe-head.txt'), ['prepared']);
+      },
+      { initialRole: 'model' },
+    );
+  });
+
   it('keeps the plan parked and appends a stable diagnostic when observation is blocked', async () => {
     await withInterruptedWrites(
       [{ path: 'blocked.txt', result: 'observation_failed' }],
@@ -105,7 +139,11 @@ interface InterruptedWriteFixture {
 async function withInterruptedWrites(
   writes: readonly InterruptedWrite[],
   run: (fixture: InterruptedWriteFixture) => Promise<void>,
-  options: { canonical?: boolean } = {},
+  options: {
+    canonical?: boolean;
+    modelTextBeforeCalls?: string;
+    initialRole?: 'user' | 'model';
+  } = {},
 ): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'maka-session-recovery-'));
   const sessionStore = createSessionStore(root);
@@ -199,12 +237,30 @@ async function withInterruptedWrites(
         turnId: sourceTurnId,
         invocationId: sourceInvocationId,
         ts: 1,
-        role: 'user',
-        author: 'user',
+        role: options.initialRole ?? 'user',
+        author: options.initialRole === 'model' ? 'agent' : 'user',
         content: { kind: 'text', text: 'write files' },
         actions: { runtimeProtocol: { toolBoundary: 't1_after_preflight_v1' } },
       }),
     );
+    const eventTsOffset = options.modelTextBeforeCalls ? 1 : 0;
+    if (options.modelTextBeforeCalls) {
+      await runtimeEventStore.appendRuntimeEvent(
+        session.id,
+        sourceRunId,
+        event({
+          id: 'source-model-text',
+          sessionId: session.id,
+          runId: sourceRunId,
+          turnId: sourceTurnId,
+          invocationId: sourceInvocationId,
+          ts: 2,
+          role: 'model',
+          author: 'agent',
+          content: { kind: 'text', text: options.modelTextBeforeCalls },
+        }),
+      );
+    }
     for (const [index, write] of writes.entries()) {
       const operationId = operationIdFor(write.path);
       const toolCallId = `call-${index + 1}`;
@@ -214,7 +270,7 @@ async function withInterruptedWrites(
         runId: sourceRunId,
         turnId: sourceTurnId,
         invocationId: sourceInvocationId,
-        ts: index * 2 + 2,
+        ts: index * 2 + 2 + eventTsOffset,
         role: 'model',
         author: 'agent',
         content: {
@@ -230,7 +286,7 @@ async function withInterruptedWrites(
         runId: sourceRunId,
         turnId: sourceTurnId,
         invocationId: sourceInvocationId,
-        ts: index * 2 + 3,
+        ts: index * 2 + 3 + eventTsOffset,
         role: 'system',
         author: 'system',
         actions: {
@@ -255,7 +311,7 @@ async function withInterruptedWrites(
           toolName: 'Write',
           canonicalArgsHash: `sha256:${index + 1}`,
           recoveryMode: 'reconcile',
-          committedAt: index * 2 + 3,
+          committedAt: index * 2 + 3 + eventTsOffset,
         });
       } else {
         await runtimeEventStore.appendRuntimeEvent(session.id, sourceRunId, call);
@@ -271,7 +327,7 @@ async function withInterruptedWrites(
         runId: sourceRunId,
         turnId: sourceTurnId,
         invocationId: sourceInvocationId,
-        ts: writes.length * 2 + 2,
+        ts: writes.length * 2 + 2 + eventTsOffset,
         role: 'system',
         author: 'system',
         status: 'failed',
