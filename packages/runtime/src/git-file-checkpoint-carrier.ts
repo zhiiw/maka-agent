@@ -8,6 +8,10 @@ import {
   type CurrentFileCheckpointState,
 } from './prepared-file-mutation.js';
 
+// Phase 4A prototype only. Production Write/Edit currently use the Git-independent
+// LocalFileCheckpointCarrier; this implementation is retained as plumbing evidence for the
+// future workspace checkpoint provider and must not be treated as a configured host carrier.
+
 interface PrepareGitFileMutationBaseInput {
   operationId: string;
   workspaceRoot: string;

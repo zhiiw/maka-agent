@@ -114,6 +114,42 @@ describe('ToolRuntime durable boundary', () => {
     assert.equal(outcomes[0]?.runtimeEvent.refs?.operationId, prepared[0]?.operationId);
   });
 
+  it('treats a durable preflight validation failure as not dispatched', async () => {
+    let preparedCommits = 0;
+    let implementationCalls = 0;
+    const harness = makeHarness({
+      commitToolPrepared: async () => {
+        preparedCommits += 1;
+        return { created: true, runtimeEventSeq: 1 };
+      },
+      commitToolOutcome: async () => {
+        throw new Error('must not reach T2');
+      },
+    });
+    const target: MakaTool = {
+      ...tool(() => {
+        implementationCalls += 1;
+        return { ok: true };
+      }),
+      prepareDurableExecution: async () => {
+        throw new Error('old_string not found during preflight');
+      },
+    };
+
+    await assert.rejects(harness.execute(target), /old_string not found during preflight/);
+
+    assert.equal(preparedCommits, 0);
+    assert.equal(implementationCalls, 0);
+    assert.deepEqual(
+      harness.events.map((event) => event.type),
+      ['tool_start'],
+    );
+    assert.deepEqual(
+      harness.messages.map((message) => message.type),
+      ['tool_call'],
+    );
+  });
+
   it('releases a prepared mutation lease when T1 fails', async () => {
     const order: string[] = [];
     const harness = makeHarness({

@@ -1121,8 +1121,10 @@ export {
   type PreparedFileMutationDisposition,
 } from './prepared-file-mutation.js';
 export {
+  DEFAULT_PREPARED_FILE_MAX_BYTES,
   LocalFileCheckpointCarrier,
   LocalFileMutationConflictError,
+  PreparedFileCheckpointLimitError,
   type LocalFileCheckpointCarrierOptions,
   type LocalFileCheckpointFailpoint,
   type PrepareFileMutationInput,
