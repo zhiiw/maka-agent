@@ -13,9 +13,10 @@ import {
 } from './recovery-resolver.js';
 import type { ToolRecoveryContractRegistry } from './tool-recovery-contract.js';
 import type { PreparedFileMutationFact } from './tool-recovery-facts.js';
-import type {
-  CheckpointValidationResult,
-  WorkspaceCheckpointFact,
+import {
+  verifyRuntimeBoundaryCursor,
+  type CheckpointValidationResult,
+  type WorkspaceCheckpointFact,
 } from './workspace-checkpoint.js';
 
 export type ToolOperationStatus =
@@ -358,6 +359,8 @@ export interface RuntimeContinuationPlannerDeps {
     };
   }>;
   readRuntimeEvents(sessionId: string, runId: string): Promise<RuntimeEvent[]>;
+  /** Physical append-log rows only; required to prove a workspace checkpoint boundary. */
+  readImmutableRuntimeEvents?(sessionId: string, runId: string): Promise<RuntimeEvent[]>;
   findExistingContinuation?(
     sessionId: string,
     sourceRunId: string,
@@ -419,6 +422,37 @@ export class RuntimeContinuationPlanner {
         'source run already has a continuation child',
         { continuationRunId: existingContinuation.runId },
       );
+    }
+
+    if (input.workspaceCheckpoint) {
+      if (!this.deps.readImmutableRuntimeEvents) {
+        return parkedPlan(
+          'workspace_checkpoint_unavailable',
+          'immutable RuntimeEvent access is required to verify the workspace checkpoint boundary',
+        );
+      }
+      try {
+        const verification = await verifyRuntimeBoundaryCursor({
+          sessionId: input.sessionId,
+          cursor: input.workspaceCheckpoint.fact.coveredBoundary,
+          readImmutableRuntimeEvents: this.deps.readImmutableRuntimeEvents,
+        });
+        if (!verification.valid) {
+          return parkedPlan(
+            'workspace_checkpoint_boundary_mismatch',
+            'workspace checkpoint does not match the immutable RuntimeEvent boundary',
+            {
+              reason: verification.reason,
+              ...(verification.runId ? { runId: verification.runId } : {}),
+            },
+          );
+        }
+      } catch {
+        return parkedPlan(
+          'runtime_ledger_unreadable',
+          'immutable RuntimeEvent ledger could not be read for workspace checkpoint verification',
+        );
+      }
     }
 
     return buildSafeBoundaryContinuationPlan(events, {

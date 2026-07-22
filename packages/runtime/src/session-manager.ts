@@ -1017,6 +1017,12 @@ export class SessionManager {
         if (!this.deps.runtimeEventStore) throw new Error('RuntimeEventStore is not configured');
         return this.deps.runtimeEventStore.readRuntimeEvents(targetSessionId, runId);
       },
+      ...(this.deps.runtimeEventStore?.readImmutableRuntimeEvents
+        ? {
+            readImmutableRuntimeEvents: (targetSessionId: string, runId: string) =>
+              this.deps.runtimeEventStore!.readImmutableRuntimeEvents!(targetSessionId, runId),
+          }
+        : {}),
       findExistingContinuation: async (
         targetSessionId,
         sourceRunId,

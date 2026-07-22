@@ -673,6 +673,33 @@ describe('runtime resume phase 1 safe-boundary continuation', () => {
     );
   });
 
+  test('parks when the durable workspace boundary does not match the immutable source ledger', async () => {
+    const sourceEvents = [textEvent('user-1', 'user', 'continue')];
+    const planner = new RuntimeContinuationPlanner({
+      readSourceRun: async () => ({ cwd: '/workspace/repo', status: 'failed' }),
+      readRuntimeEvents: async () => sourceEvents,
+      readImmutableRuntimeEvents: async () => [textEvent('user-1', 'user', 'changed')],
+      newId: (() => {
+        let next = 1;
+        return () => `generated-${next++}`;
+      })(),
+    });
+
+    const plan = await planner.plan({
+      sessionId: 'session-1',
+      sourceRunId: 'run-1',
+      currentCwd: '/workspace/repo',
+      sourceWorkspaceIdentity: 'workspace-1',
+      currentWorkspaceIdentity: 'workspace-1',
+      backgroundOperationsSettled: true,
+      availableToolNames: [],
+      workspaceCheckpoint: workspaceCheckpoint(sourceEvents, 'current_matches'),
+    });
+
+    assert.equal(plan.disposition, 'park');
+    assert.deepEqual(plan.rejectionReasons, ['workspace_checkpoint_boundary_mismatch']);
+  });
+
   test('keeps the durable high-water even when partial events are excluded from replay context', () => {
     const plan = buildSafeBoundaryContinuationPlan(
       [

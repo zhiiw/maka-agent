@@ -11,6 +11,7 @@ import {
   parseWorkspaceRuntimeFact,
   selectWorkspaceCheckpointProvider,
   validateWorkspaceCheckpointForResume,
+  verifyRuntimeBoundaryCursor,
   type RuntimeBoundaryCursor,
   type WorkspaceCheckpointFact,
   type WorkspaceCheckpointProviderDescriptor,
@@ -70,6 +71,56 @@ describe('workspace checkpoint contracts', () => {
     assert.equal(cursor.sourceHighWater, source.highWater);
     assert.deepEqual(cursor.replaySources, [ancestor, source]);
     assert.match(cursor.replayManifestDigest, /^sha256:[0-9a-f]{64}$/);
+  });
+
+  test('recomputes every immutable ledger prefix before accepting a boundary cursor', async () => {
+    const workspace = identity('workspace-1');
+    const rootEvents = [runtimeEvent('root-1', { kind: 'text', text: 'root' })];
+    const sourceEvents = [
+      {
+        ...runtimeEvent('source-1', { kind: 'text', text: 'source' }),
+        invocationId: 'inv-2',
+        runId: 'run-2',
+        turnId: 'turn-2',
+      },
+    ];
+    const cursor = buildRuntimeBoundaryCursor([
+      buildRuntimePrefixSegment({
+        events: rootEvents,
+        highWater: 1,
+        workspaceEpochId: 'epoch-1',
+        workspace,
+      }),
+      buildRuntimePrefixSegment({
+        events: sourceEvents,
+        highWater: 1,
+        workspaceEpochId: 'epoch-1',
+        workspace,
+      }),
+    ]);
+    const ledgers = new Map([
+      ['run-1', rootEvents],
+      ['run-2', sourceEvents],
+    ]);
+
+    assert.deepEqual(
+      await verifyRuntimeBoundaryCursor({
+        sessionId: 'session-1',
+        cursor,
+        readImmutableRuntimeEvents: async (_sessionId, runId) => ledgers.get(runId)!,
+      }),
+      { valid: true },
+    );
+
+    ledgers.set('run-1', [runtimeEvent('root-1', { kind: 'text', text: 'tampered' })]);
+    assert.deepEqual(
+      await verifyRuntimeBoundaryCursor({
+        sessionId: 'session-1',
+        cursor,
+        readImmutableRuntimeEvents: async (_sessionId, runId) => ledgers.get(runId)!,
+      }),
+      { valid: false, reason: 'prefix_digest_mismatch', runId: 'run-1' },
+    );
   });
 
   test('reports capability gaps instead of silently degrading coverage', () => {

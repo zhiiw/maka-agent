@@ -192,6 +192,24 @@ export interface BuildRuntimePrefixSegmentInput {
   workspace: WorkspaceIdentity;
 }
 
+export type RuntimeBoundaryVerificationResult =
+  | { valid: true }
+  | {
+      valid: false;
+      reason:
+        | 'high_water_unavailable'
+        | 'execution_identity_mismatch'
+        | 'prefix_digest_mismatch'
+        | 'manifest_digest_mismatch';
+      runId?: string;
+    };
+
+export interface VerifyRuntimeBoundaryCursorInput {
+  sessionId: string;
+  cursor: RuntimeBoundaryCursor;
+  readImmutableRuntimeEvents(sessionId: string, runId: string): Promise<RuntimeEvent[]>;
+}
+
 export function buildRuntimePrefixSegment(
   input: BuildRuntimePrefixSegmentInput,
 ): RuntimePrefixSegment {
@@ -243,6 +261,48 @@ export function buildRuntimeBoundaryCursor(
       replaySources: copiedSources,
     }),
   };
+}
+
+/** Rebuilds the boundary exclusively from immutable ledger rows; checkpoint fields are not trusted. */
+export async function verifyRuntimeBoundaryCursor(
+  input: VerifyRuntimeBoundaryCursorInput,
+): Promise<RuntimeBoundaryVerificationResult> {
+  const rebuilt: RuntimePrefixSegment[] = [];
+  for (const claimed of input.cursor.replaySources) {
+    const events = await input.readImmutableRuntimeEvents(input.sessionId, claimed.runId);
+    if (events.length < claimed.highWater) {
+      return { valid: false, reason: 'high_water_unavailable', runId: claimed.runId };
+    }
+    const prefix = events.slice(0, claimed.highWater);
+    const first = prefix[0];
+    if (
+      !first ||
+      first.invocationId !== claimed.invocationId ||
+      first.runId !== claimed.runId ||
+      first.turnId !== claimed.turnId
+    ) {
+      return { valid: false, reason: 'execution_identity_mismatch', runId: claimed.runId };
+    }
+    let segment: RuntimePrefixSegment;
+    try {
+      segment = buildRuntimePrefixSegment({
+        events: prefix,
+        highWater: claimed.highWater,
+        workspaceEpochId: claimed.workspaceEpochId,
+        workspace: claimed.workspace,
+      });
+    } catch {
+      return { valid: false, reason: 'execution_identity_mismatch', runId: claimed.runId };
+    }
+    if (segment.prefixDigest !== claimed.prefixDigest) {
+      return { valid: false, reason: 'prefix_digest_mismatch', runId: claimed.runId };
+    }
+    rebuilt.push(segment);
+  }
+  const rebuiltCursor = buildRuntimeBoundaryCursor(rebuilt);
+  return rebuiltCursor.replayManifestDigest === input.cursor.replayManifestDigest
+    ? { valid: true }
+    : { valid: false, reason: 'manifest_digest_mismatch' };
 }
 
 export function advanceWorkspaceEpoch(
