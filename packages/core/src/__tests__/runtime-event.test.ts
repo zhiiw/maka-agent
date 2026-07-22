@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import assert from 'node:assert/strict';
 import { expect } from '../test-helpers.js';
 import {
   RUNTIME_EVENT_AUTHORS,
