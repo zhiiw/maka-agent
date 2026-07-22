@@ -1182,6 +1182,13 @@ export {
 } from './workspace-checkpoint.js';
 
 export {
+  commitWorkspaceCheckpointFact,
+  commitWorkspaceTransitionFact,
+  type CommitWorkspaceCheckpointFactInput,
+  type CommitWorkspaceTransitionFactInput,
+} from './workspace-checkpoint-fact-writer.js';
+
+export {
   commitToolReconcileResultFact,
   commitToolRecoveryDecisionFact,
   type CommitToolReconcileResultFactInput,
