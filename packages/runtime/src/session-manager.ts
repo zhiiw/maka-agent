@@ -1100,6 +1100,9 @@ export class SessionManager {
       currentCwd: header.cwd,
       sourceWorkspaceIdentity: sourceRun.workspaceIdentity,
       currentWorkspaceIdentity: observation.workspaceIdentity,
+      ...(observation.legacyWorkspaceIdentities?.length
+        ? { currentWorkspaceIdentityAliases: observation.legacyWorkspaceIdentities }
+        : {}),
       backgroundOperationsSettled: observation.backgroundOperationsSettled,
       availableToolNames: observation.availableToolNames,
       ...(input.expectedRuntimeEventHighWater !== undefined
@@ -2411,7 +2414,6 @@ export function headerToSummary(h: SessionHeader): SessionSummary {
   const summary: SessionSummary = {
     id: h.id,
     cwd: h.cwd,
-    ...(h.pendingCwdReminder ? { pendingCwdReminder: h.pendingCwdReminder } : {}),
     name: h.name === 'New Session' ? DEFAULT_SESSION_NAME : h.name,
     isFlagged: h.isFlagged,
     isArchived: h.isArchived,

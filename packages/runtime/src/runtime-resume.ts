@@ -82,6 +82,7 @@ export type ResumePlanDiagnosticCode =
   | 'runtime_ledger_unreadable'
   | 'terminal_repair_failed'
   | 'workspace_cwd_mismatch'
+  | 'workspace_location_changed'
   | 'runtime_ledger_empty'
   | 'runtime_identity_mismatch'
   | 'continuation_identity_reused'
@@ -260,6 +261,7 @@ export interface SafeBoundaryContinuationFacts {
   currentCwd: string;
   sourceWorkspaceIdentity: string;
   currentWorkspaceIdentity: string;
+  currentWorkspaceIdentityAliases?: readonly string[];
   backgroundOperationsSettled: boolean;
   availableToolNames: readonly string[];
   /** Shared capability registry used by planning and execution revalidation. */
@@ -307,6 +309,10 @@ export interface RuntimeContinuationSafetySnapshot {
 
 export interface RuntimeContinuationSafetyObservation {
   workspaceIdentity: string;
+  /** Current location is diagnostic only and never participates in identity. */
+  workspacePath?: string;
+  /** One-way compatibility aliases for legacy fs:{dev}:{ino}:{path} AgentRuns. */
+  legacyWorkspaceIdentities?: readonly string[];
   backgroundOperationsSettled: boolean;
   availableToolNames: readonly string[];
   workspaceCheckpoint?: ValidatedWorkspaceCheckpoint;
@@ -336,6 +342,7 @@ export interface RuntimeContinuationPlannerInput {
   currentCwd: string;
   sourceWorkspaceIdentity: string;
   currentWorkspaceIdentity: string;
+  currentWorkspaceIdentityAliases?: readonly string[];
   backgroundOperationsSettled: boolean;
   availableToolNames: readonly string[];
   expectedRuntimeEventHighWater?: number;
@@ -477,6 +484,9 @@ export class RuntimeContinuationPlanner {
       currentCwd: input.currentCwd,
       sourceWorkspaceIdentity: input.sourceWorkspaceIdentity,
       currentWorkspaceIdentity: input.currentWorkspaceIdentity,
+      ...(input.currentWorkspaceIdentityAliases?.length
+        ? { currentWorkspaceIdentityAliases: input.currentWorkspaceIdentityAliases }
+        : {}),
       backgroundOperationsSettled: input.backgroundOperationsSettled,
       availableToolNames: input.availableToolNames,
       ...(this.deps.recoveryContracts ? { recoveryContracts: this.deps.recoveryContracts } : {}),
@@ -743,13 +753,15 @@ export function buildSafeBoundaryContinuationPlan(
   }
   if (normalizeCwd(facts.sourceCwd) !== normalizeCwd(facts.currentCwd)) {
     phaseOneDiagnostics.push({
-      code: 'workspace_cwd_mismatch',
-      message: 'current cwd differs from the source resume boundary',
+      code: 'workspace_location_changed',
+      message: 'workspace location differs from the source resume boundary',
       detail: { sourceCwd: facts.sourceCwd, currentCwd: facts.currentCwd },
     });
-    phaseOneRejectionReasons.push('workspace_cwd_mismatch');
   }
-  if (facts.sourceWorkspaceIdentity !== facts.currentWorkspaceIdentity) {
+  if (
+    facts.sourceWorkspaceIdentity !== facts.currentWorkspaceIdentity &&
+    !facts.currentWorkspaceIdentityAliases?.includes(facts.sourceWorkspaceIdentity)
+  ) {
     phaseOneDiagnostics.push({
       code: 'workspace_identity_mismatch',
       message: 'current workspace identity differs from the source resume boundary',
