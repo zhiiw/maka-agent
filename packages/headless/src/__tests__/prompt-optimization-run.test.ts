@@ -14,8 +14,8 @@ import {
   hashSystemPrompt,
   readFixedPromptWal,
   type FixedPromptTask,
-  type HarborTaskRunInput,
-  type HarborTaskRunOutput,
+  type TaskRunInput,
+  type TaskRunOutput,
 } from '../fixed-prompt-controller.js';
 import {
   buildPromptOptimizationTaskAgentEnv,
@@ -225,6 +225,7 @@ describe('discoverCachedHarborTasks', () => {
         estimatedDurationSec: 540,
         agentTimeoutSec: 900,
         verifierTimeoutSec: 1200,
+        buildTimeoutSec: 1800,
       });
       // A hash dir whose inner dir lacks task.toml is ignored.
       await mkdir(join(dir, 'hashC', 'not-a-task'), { recursive: true });
@@ -242,6 +243,7 @@ describe('discoverCachedHarborTasks', () => {
         estimatedDurationSec: 540,
         agentTimeoutSec: 900,
         verifierTimeoutSec: 1200,
+        buildTimeoutSec: 1800,
       });
     });
   });
@@ -727,7 +729,7 @@ function makeRunTasks(prefix: string, count: number): FixedPromptTask[] {
 function fakeRunHarborRunner(
   eventsDir: string,
   rewardFor: (roundId: string, taskId: string) => number,
-): (input: HarborTaskRunInput) => Promise<HarborTaskRunOutput> {
+): (input: TaskRunInput) => Promise<TaskRunOutput> {
   return async ({ roundId, task, systemPrompt }) => {
     const runtimeEventsPath = join(eventsDir, `${roundId}__${task.id}.jsonl`);
     await writeFile(
@@ -801,6 +803,7 @@ async function makeCachedTask(
     estimatedDurationSec?: number;
     agentTimeoutSec?: number;
     verifierTimeoutSec?: number;
+    buildTimeoutSec?: number;
   } = {},
 ): Promise<void> {
   const taskPath = join(root, hash, name);
@@ -830,6 +833,11 @@ async function makeCachedTask(
       '[agent]',
       ...(metadata.agentTimeoutSec !== undefined
         ? [`timeout_sec = ${metadata.agentTimeoutSec}`]
+        : []),
+      '',
+      '[environment]',
+      ...(metadata.buildTimeoutSec !== undefined
+        ? [`build_timeout_sec = ${metadata.buildTimeoutSec}`]
         : []),
       '',
     ].join('\n'),

@@ -2,6 +2,11 @@ import { ipcMain, shell } from 'electron';
 import { copyFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ArtifactSaveResult } from '@maka/core';
+import type {
+  HostCapabilities,
+  InvocableSkillEntry,
+  SkillSelectionReport,
+} from '@maka/runtime';
 import { createArtifactStore, resolveArtifactPath } from '@maka/storage';
 import type { createMainWindowController } from './main-window.js';
 import {
@@ -11,10 +16,11 @@ import {
   installBundledSkill,
   installManagedSkill,
   listBundledSkillCatalog,
-  listSkillEntries,
+  listGovernedSkillEntries,
   previewManagedSkillUpdate,
   resolveSkillOpenPath,
   setSkillEnabled,
+  setSkillPinned,
   toSkillEntry,
   updateManagedSkill,
 } from './skills.js';
@@ -32,6 +38,11 @@ interface WorkspaceResourcesIpcDeps {
   artifactStore: ArtifactStore;
   mainWindowController: MainWindowController;
   sendToRenderer: MainWindowController['send'];
+  listInvocableSkills(sessionId?: string): Promise<InvocableSkillEntry[]>;
+  skillHost?: HostCapabilities;
+  getCurrentProjectRoot?: () => Promise<string>;
+  getSkillSelectionReport?: (cwd: string) => SkillSelectionReport | undefined;
+  invalidateSkillSelectionReport?: (cwd: string) => void;
 }
 
 export function registerWorkspaceResourcesIpc(deps: WorkspaceResourcesIpcDeps): void {
@@ -112,7 +123,20 @@ export function registerWorkspaceResourcesIpc(deps: WorkspaceResourcesIpcDeps): 
   });
 
   ipcMain.handle('skills:list', async () => {
-    return listSkillEntries(deps.workspaceRoot);
+    const cwd = await deps.getCurrentProjectRoot?.();
+    return listGovernedSkillEntries(
+      deps.workspaceRoot,
+      {
+        ...(cwd ? { cwd } : {}),
+        ...(deps.skillHost ? { host: deps.skillHost } : {}),
+        ...(cwd && deps.getSkillSelectionReport?.(cwd)
+          ? { selectionReport: deps.getSkillSelectionReport(cwd) }
+          : {}),
+      },
+    );
+  });
+  ipcMain.handle('skills:listInvocable', async (_event, sessionId?: unknown) => {
+    return deps.listInvocableSkills(typeof sessionId === 'string' ? sessionId : undefined);
   });
   ipcMain.handle('skills:catalog:list', async () => {
     return listBundledSkillCatalog(deps.workspaceRoot);
@@ -161,7 +185,26 @@ export function registerWorkspaceResourcesIpc(deps: WorkspaceResourcesIpcDeps): 
     return { ok: true as const, skill: toSkillEntry(result.skill) };
   });
   ipcMain.handle('skills:setEnabled', async (_event, skillId: string, enabled: boolean) => {
-    return setSkillEnabled(deps.workspaceRoot, skillId, enabled === true);
+    const cwd = await deps.getCurrentProjectRoot?.();
+    const result = await setSkillEnabled(
+      deps.workspaceRoot,
+      skillId,
+      enabled === true,
+      { ...(cwd ? { cwd } : {}), ...(deps.skillHost ? { host: deps.skillHost } : {}) },
+    );
+    if (result.ok && cwd) deps.invalidateSkillSelectionReport?.(cwd);
+    return result;
+  });
+  ipcMain.handle('skills:setPinned', async (_event, skillRef: string, pinned: boolean) => {
+    const cwd = await deps.getCurrentProjectRoot?.();
+    const result = await setSkillPinned(
+      deps.workspaceRoot,
+      skillRef,
+      pinned === true,
+      { ...(cwd ? { cwd } : {}), ...(deps.skillHost ? { host: deps.skillHost } : {}) },
+    );
+    if (result.ok && cwd) deps.invalidateSkillSelectionReport?.(cwd);
+    return result;
   });
   ipcMain.handle('skills:createStarter', async () => {
     const result = await createStarterSkill(deps.workspaceRoot);
@@ -172,7 +215,13 @@ export function registerWorkspaceResourcesIpc(deps: WorkspaceResourcesIpcDeps): 
     return deleteSkill(deps.workspaceRoot, id);
   });
   ipcMain.handle('skills:open', async (_event, id: string, target: 'file' | 'directory' = 'file') => {
-    const resolved = await resolveSkillOpenPath(deps.workspaceRoot, id, target);
+    const cwd = await deps.getCurrentProjectRoot?.();
+    const resolved = await resolveSkillOpenPath(
+      deps.workspaceRoot,
+      id,
+      target,
+      cwd ? { cwd } : {},
+    );
     if (!resolved.ok) return resolved;
     const error = await shell.openPath(resolved.path);
     if (error) return { ok: false, reason: 'open_failed' as const };

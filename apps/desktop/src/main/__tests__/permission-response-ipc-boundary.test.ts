@@ -33,7 +33,8 @@ describe('permission response IPC boundary', () => {
 
   it('registers AskUserQuestion only on the Desktop root tool surface and routes its response', async () => {
     const main = await readMainProcessCombinedSource();
-    // Root surface is assembled as toolsBeforeSkill + Skill + toolsAfterSkill → builtinTools.
+    // Root surface is assembled as toolsBeforeSkill + Skill + SkillSearch +
+    // toolsAfterSkill → builtinTools.
     // The tool surface moved into tool-assembly.ts (arch R4), so the block
     // closers are now indented inside assembleDesktopTools — tolerate leading
     // whitespace on the closing bracket.
@@ -41,7 +42,7 @@ describe('permission response IPC boundary', () => {
       main.match(/const toolsBeforeSkill: MakaTool\[\] = \[[\s\S]*?\n\s*\];/)?.[0] ?? '';
     const rootBuiltin =
       main.match(
-        /const builtinTools: MakaTool\[\] = \[\.\.\.toolsBeforeSkill, skillTool, \.\.\.toolsAfterSkill\];/,
+        /const builtinTools: MakaTool\[\] = \[[\s\S]*?\.\.\.toolsBeforeSkill,[\s\S]*?skillTool,[\s\S]*?skillSearchTool,[\s\S]*?\.\.\.toolsAfterSkill,[\s\S]*?\];/,
       )?.[0] ?? '';
     const childTools = main.match(/const childAgentTools = buildChildAgentTools\([\s\S]*?\n\s*\]\);/)?.[0] ?? '';
     const handler = main.match(/ipcMain\.handle\('sessions:respondToUserQuestion'[\s\S]*?\n  \}\);/)?.[0] ?? '';
@@ -151,6 +152,7 @@ describe('permission response IPC boundary', () => {
         type: 'send',
         turnId: 'turn-1',
         text: 'hello',
+        skillIds: ['weekly-report'],
         attachmentItems: [{ approvalId: 'a', name: 'n' }],
         extra: true,
       }),
@@ -158,6 +160,7 @@ describe('permission response IPC boundary', () => {
         type: 'send',
         turnId: 'turn-1',
         text: 'hello',
+        skillIds: ['weekly-report'],
         attachmentItems: [{ approvalId: 'a', name: 'n' }],
       },
     );
@@ -165,9 +168,17 @@ describe('permission response IPC boundary', () => {
       normalizeSessionSendCommand({ type: 'send', text: 'hello' }),
       { type: 'send', text: 'hello' },
     );
+    assert.deepEqual(
+      normalizeSessionSendCommand({ type: 'send', text: '', skillIds: ['weekly-report'] }),
+      { type: 'send', text: '', skillIds: ['weekly-report'] },
+    );
     assert.equal(normalizeSessionSendCommand({ type: 'stop' }), undefined);
     assert.throws(() => normalizeSessionSendCommand(null), /session command/);
     assert.throws(() => normalizeSessionSendCommand({ type: 'send', text: '' }), /send text/);
+    assert.throws(
+      () => normalizeSessionSendCommand({ type: 'send', text: 'hello', skillIds: ['/bad'] }),
+      /skillIds/,
+    );
     assert.throws(() => normalizeSessionSendCommand({ type: 'send', turnId: 1, text: 'hello' }), /send turnId/);
   });
 
@@ -177,12 +188,14 @@ describe('permission response IPC boundary', () => {
         type: 'send',
         turnId: 'turn-swarm',
         text: 'inspect the repository',
+        skillIds: ['weekly-report'],
         turnOrchestration: { mode: 'swarm', source: 'slash_command', ignored: true },
       }),
       {
         type: 'send',
         turnId: 'turn-swarm',
         text: 'inspect the repository',
+        skillIds: ['weekly-report'],
         turnOrchestration: { mode: 'swarm', source: 'slash_command' },
       },
     );
@@ -485,7 +498,7 @@ describe('permission response IPC boundary', () => {
       'initial mount should call bootstrapSessions(), not raw refreshSessions(), for boot-only selection',
     );
     const quickChatHandler = renderer.match(
-      /async function handleQuickChatSubmit\(prompt: string, mode\?: QuickChatMode\): Promise<boolean> \{[\s\S]*?\n  function showModelSetupToast/,
+      /async function handleQuickChatSubmit\([\s\S]*?\): Promise<boolean> \{[\s\S]*?\n  async function handleExpertTeamStart/,
     );
     assert.ok(quickChatHandler, 'handleQuickChatSubmit() must exist');
     assert.match(
@@ -606,7 +619,7 @@ describe('permission response IPC boundary', () => {
     assert.match(sendBlock, /const turnId = crypto\.randomUUID\(\)/);
     assert.match(
       newSessionBranch,
-      /upsertSessionSummary\(session\)[\s\S]*window\.maka\.sessions\.send\(session\.id, \{\s*type: 'send',\s*turnId,\s*text,[\s\S]*if \(newChatOwner && isNewChatSendSurfaceActive\(newChatOwner\)\) \{[\s\S]*setNavSelection\(\{ section: 'sessions', filter: 'chats' \}\)[\s\S]*setActiveId\(session\.id\)[\s\S]*showOptimisticUserMessage\(session\.id, turnId, text, sendResult\.attachments, \{[\s\S]*?replaceCurrentMessages: true,[\s\S]*\}[\s\S]*if \(activeIdRef\.current === session\.id\) \{[\s\S]*refreshMessagesUntilTurn\(session\.id, turnId\)[\s\S]*\}[\s\S]*refreshSessions\(\)/,
+      /upsertSessionSummary\(session\)[\s\S]*window\.maka\.sessions\.send\(session\.id, \{\s*type: 'send',\s*turnId,\s*text,[\s\S]*if \(newChatOwner && isNewChatSendSurfaceActive\(newChatOwner\)\) \{[\s\S]*setNavSelection\(\{ section: 'sessions', filter: 'chats' \}\)[\s\S]*setActiveId\(session\.id\)[\s\S]*showOptimisticUserMessage\([\s\S]*session\.id,[\s\S]*turnId,[\s\S]*skillInvocationDisplayText\(text, sendResult\.skillInvocation\),[\s\S]*sendResult\.attachments,[\s\S]*\{[\s\S]*replaceCurrentMessages: true,[\s\S]*\}[\s\S]*\)[\s\S]*\}[\s\S]*if \(activeIdRef\.current === session\.id\) \{[\s\S]*refreshMessagesUntilTurn\(session\.id, turnId\)[\s\S]*\}[\s\S]*refreshSessions\(\)/,
       'normal Composer first-send must switch/show the new user turn only while the empty-chat surface still owns the async continuation',
     );
     assert.doesNotMatch(
@@ -621,7 +634,7 @@ describe('permission response IPC boundary', () => {
     );
     assert.match(
       existingSessionBranch,
-      /window\.maka\.sessions\.send\(sessionId, \{\s*type: 'send',\s*turnId,\s*text,[\s\S]*showOptimisticUserMessage\(sessionId, turnId, text, sendResult\.attachments, \{[\s\S]*?\}\)[\s\S]*refreshMessagesUntilTurn\(sessionId, turnId\)/,
+      /window\.maka\.sessions\.send\(sessionId, \{\s*type: 'send',\s*turnId,\s*text,[\s\S]*showOptimisticUserMessage\([\s\S]*sessionId,[\s\S]*turnId,[\s\S]*skillInvocationDisplayText\(text, sendResult\.skillInvocation\),[\s\S]*sendResult\.attachments,[\s\S]*\{[\s\S]*\}[\s\S]*\)[\s\S]*refreshMessagesUntilTurn\(sessionId, turnId\)/,
       'existing sessions should also show the user turn immediately before waiting for persisted storage',
     );
     assert.match(

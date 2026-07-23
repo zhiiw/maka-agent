@@ -28,6 +28,9 @@ import {
   FilesystemWorkerClient,
   buildDefaultContextBudgetPolicy,
   buildSkillAgentTool,
+  buildSkillSearchAgentTool,
+  SkillShadowSelectionTracker,
+  SKILL_SEARCH_TOOL_NAME,
   SKILL_TOOL_NAME,
   buildGoalTools,
   buildParentAgentTools,
@@ -69,6 +72,7 @@ import {
   type ForeignSessionStore,
   persistProviderRequestCaptureArtifact,
 } from '@maka/storage';
+import { resolveStorageRoot } from '@maka/storage/root-authority';
 import type { ToolPermissionRule } from '@maka/core/permission';
 import { fetchProviderModels } from '@maka/runtime';
 import { createApiKeyOnboardingSurface, type MakaOnboardingSurface } from './onboarding.js';
@@ -171,6 +175,7 @@ export function isMakaClaudeSubscriptionCloakEnabled(
 export async function createMakaCliRuntimeContext(
   input: CreateMakaCliRuntimeContextInput,
 ): Promise<MakaCliRuntimeContext> {
+  await resolveStorageRoot({ path: input.workspaceRoot, kind: 'interactive' });
   const store = createSessionStore(input.workspaceRoot);
   const runStore = createAgentRunStore(input.workspaceRoot);
   const runtimePersistence = await openRuntimeEventPersistence({
@@ -544,7 +549,11 @@ export async function createMakaCliRuntimeContext(
     ...surfaceTools,
   ].map((tool) => tool.name);
   // Skill is always registered on this host; include it before the instance exists.
-  const cliBoundToolNamesWithSkill = [...cliBoundToolNames, SKILL_TOOL_NAME];
+  const cliBoundToolNamesWithSkill = [
+    ...cliBoundToolNames,
+    SKILL_TOOL_NAME,
+    SKILL_SEARCH_TOOL_NAME,
+  ];
   assertProductBindingCatalogClean('cli', cliBoundToolNamesWithSkill);
   const host: HostCapabilities = buildHostCapabilitiesFromBinding(cliBoundToolNamesWithSkill);
   const toolAvailability: ToolAvailabilityConfig | undefined =
@@ -554,15 +563,23 @@ export async function createMakaCliRuntimeContext(
           groups: buildDeferredToolGroupsFromCatalog('cli', cliBoundToolNamesWithSkill),
         }
       : undefined;
+  const skillShadowTracker = new SkillShadowSelectionTracker();
   const skillTool = buildSkillAgentTool(
     ({ cwd }) => resolveSkillDiscoveryPaths(cwd, input.workspaceRoot),
     host,
+    { shadowTracker: skillShadowTracker },
+  );
+  const skillSearchTool = buildSkillSearchAgentTool(
+    ({ cwd }) => resolveSkillDiscoveryPaths(cwd, input.workspaceRoot),
+    host,
+    { shadowTracker: skillShadowTracker },
   );
   const allTools = [
     ...tools,
     automationTool,
     ...goalTools,
     skillTool,
+    skillSearchTool,
     ...subagentTools,
     ...surfaceTools,
   ];
@@ -650,7 +667,7 @@ export async function createMakaCliRuntimeContext(
       }),
       recordHistoryCompactCheckpoint: ctx.recordHistoryCompactCheckpoint,
       loadTurnRuntimeEvents: ctx.loadTurnRuntimeEvents,
-      systemPrompt: async ({ cwd }) => {
+      systemPrompt: async ({ cwd, emitSkillCatalogTrace }) => {
         const settings = await settingsStore.get();
         return buildCliSystemPrompt({
           settings,
@@ -658,6 +675,16 @@ export async function createMakaCliRuntimeContext(
           workspaceRoot: input.workspaceRoot,
           host,
           modelContextWindow: resolveSelectedModelContextWindow(ready.connection, ready.model),
+          onSkillSelection: (report) =>
+            emitSkillCatalogTrace?.('Skill catalog selection completed', {
+              policyVersion: report.policyVersion,
+              budgetChars: report.budgetChars,
+              usedChars: report.usedChars,
+              totalCount: report.totalCount,
+              eligibleCount: report.eligibleCount,
+              advertisedCount: report.advertisedCount,
+              omittedCount: report.omittedCount,
+            }),
         });
       },
       turnTailPrompt: ({ cwd }) =>

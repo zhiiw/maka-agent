@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -57,7 +57,9 @@ import {
   renderHarnessAbReportCsv,
   renderHarnessAbReportMarkdown,
 } from '#harness-ab-report';
-import { buildSubjectFingerprint, buildToolchainFingerprint } from './run-prompt-ab.mjs';
+import { envPath as parseEnvPath } from '#headless-run-env';
+import { buildSubjectFingerprint, buildToolchainFingerprint } from '#experiment-fingerprint';
+import { runExperiment } from '#experiment-engine';
 
 const execFileAsync = promisify(execFile);
 
@@ -123,7 +125,6 @@ export const HARNESS_COMPETITOR_PROFILES = Object.freeze({
       model: 'gpt-5.6-sol',
       reasoningEffort: 'xhigh',
       baseUrl: 'https://chatgpt.com/backend-api/codex',
-      apiKeyEnvName: 'OPENAI_CODEX_OAUTH_TOKEN',
       billingMode: 'account-plan',
       pricing: Object.freeze({
         currency: 'USD',
@@ -161,7 +162,6 @@ export function resolveHarnessRuntimeProfile(competitorProfile) {
       model: MODEL,
       reasoningEffort: REASONING_EFFORT,
       baseUrl: BASE_URL,
-      apiKeyEnvName: 'ANTHROPIC_API_KEY',
       billingMode: BILLING_MODE,
       pricing: PRICING,
     }
@@ -183,7 +183,6 @@ export function buildHarnessExecutionProfile(competitorProfile) {
     model: runtime.model,
     reasoningEffort: runtime.reasoningEffort,
     baseUrl: runtime.baseUrl,
-    apiKeyEnvName: runtime.apiKeyEnvName,
     billingMode: runtime.billingMode,
     pricing: {
       inputUsdPer1M: runtime.pricing.input,
@@ -278,15 +277,8 @@ export function resolveHarnessCompetitorToolchain(runRoot, competitorProfile, en
   throw new Error(`unsupported harness competitor: ${competitorProfile.id}`);
 }
 
-function envPath(name, fallback) {
-  return envPathFrom(process.env, name, fallback);
-}
-
-function envPathFrom(env, name, fallback) {
-  const raw = env[name] || fallback;
-  if (!raw) throw new Error(`${name} is required`);
-  return raw.startsWith('~') ? join(homedir(), raw.slice(1)) : resolve(raw);
-}
+const envPath = (name, fallback) => parseEnvPath(name, process.env[name], fallback);
+const envPathFrom = (env, name, fallback) => parseEnvPath(name, env[name], fallback);
 
 function defaultMakaWorkspaceRoot() {
   if (process.platform === 'darwin') {
@@ -559,11 +551,14 @@ async function runLocked({
   const subjectFingerprint = await buildSubjectFingerprint(
     makaRepoPath,
     process.env.MAKA_HARNESS_AB_EXPLICIT_SUBJECT_FINGERPRINT,
+    undefined,
+    'MAKA_HARNESS_AB',
   );
   const hostToolchainFingerprint = await buildToolchainFingerprint(
     process.env.MAKA_HARNESS_AB_TOOLCHAIN_FINGERPRINT,
     undefined,
     makaRepoPath,
+    'MAKA_HARNESS_AB',
   );
   const [verifierImplementationSource, composeImplementationSource] = await Promise.all([
     readFile(join(makaRepoPath, 'packages/headless/harbor/maka_verifier.py')),
@@ -625,99 +620,98 @@ async function runLocked({
     (await readFile(credentials.apiKeyFile, 'utf8')).trim().length === 0
   )
     throw new Error('harness credential is empty');
-  const controllerDir = join(runRoot, 'controller');
-  const promptsDir = join(runRoot, 'prompts');
-  const jobsDir = join(runRoot, 'jobs');
-  await mkdir(controllerDir, { recursive: true });
-  await mkdir(promptsDir, { recursive: true });
-  await mkdir(jobsDir, { recursive: true });
-  const systemPromptPath = join(promptsDir, 'default-system-prompt.txt');
-  await writeFile(systemPromptPath, DEFAULT_HEADLESS_SYSTEM_PROMPT, 'utf8');
-  const runnerOptions = {
-    makaRepoPath,
-    jobsDir,
-    model: execution.modelSpec,
-    provider: execution.provider,
-    reasoningEffort: execution.reasoningEffort,
-    ...credentials,
-    apiKeyEnvName: execution.apiKeyEnvName,
-    pricing: execution.pricing,
-    agentEnv: { MAKA_BASE_URL: execution.baseUrl },
-    timeoutMultiplier: 1,
-    dockerPlatform: 'linux/amd64',
-  };
-  const makaContextBudgetEnv = harnessMakaContextBudgetEnv();
-  const config = (id) => ({
-    id: `harness-ab-${id}`,
-    backend: 'ai-sdk',
-    llmConnectionSlug: execution.provider,
-    model: execution.model,
-    thinkingLevel: execution.reasoningEffort,
-  });
-  const summary = await runHarnessAbComparisonUnlocked({
-    runId,
+  const systemPromptPath = join(runRoot, 'prompts', 'default-system-prompt.txt');
+  const evaluatedTaskIds = new Set(evaluationTasks.map((task) => task.id));
+
+  const report = await runExperiment({
     runRoot,
-    resultsJsonlPath: join(controllerDir, 'results.jsonl'),
-    systemPromptPath,
-    resumeFingerprint: buildHarnessAbResumeFingerprint(manifest),
-    evaluationTasks,
-    arms: [
+    prompts: () => [{ path: systemPromptPath, content: DEFAULT_HEADLESS_SYSTEM_PROMPT }],
+    run: async ({ jobsDir, resultsJsonlPath }) => {
+      const runnerOptions = {
+        makaRepoPath,
+        jobsDir,
+        model: execution.modelSpec,
+        provider: execution.provider,
+        reasoningEffort: execution.reasoningEffort,
+        ...credentials,
+        pricing: execution.pricing,
+        agentEnv: { MAKA_BASE_URL: execution.baseUrl },
+        timeoutMultiplier: 1,
+        dockerPlatform: 'linux/amd64',
+      };
+      const makaContextBudgetEnv = harnessMakaContextBudgetEnv();
+      const config = (id) => ({
+        id: `harness-ab-${id}`,
+        backend: 'ai-sdk',
+        llmConnectionSlug: execution.provider,
+        model: execution.model,
+        thinkingLevel: execution.reasoningEffort,
+      });
+      const summary = await runHarnessAbComparisonUnlocked({
+        runId,
+        runRoot,
+        resultsJsonlPath,
+        systemPromptPath,
+        resumeFingerprint: buildHarnessAbResumeFingerprint(manifest),
+        evaluationTasks,
+        arms: [
+          {
+            id: 'maka',
+            config: config('maka'),
+            expectedPricingProfile: execution.pricing.source,
+            billingMode: execution.billingMode,
+            harborRunner: createHarborTaskRunner({
+              ...runnerOptions,
+              agent: 'maka',
+              agentEnv: { ...runnerOptions.agentEnv, ...makaContextBudgetEnv },
+            }),
+          },
+          {
+            id: competitorProfile.id,
+            config: config(competitorProfile.id),
+            expectedPricingProfile: execution.pricing.source,
+            billingMode: execution.billingMode,
+            harborRunner: createHarborTaskRunner({
+              ...runnerOptions,
+              agent: competitorProfile.id,
+              agentVersion: competitorProfile.version,
+              ...(competitorProfile.id === 'kimi-code'
+                ? { kimiCodeToolchainPath: competitorToolchain.path }
+                : competitorProfile.id === 'opencode'
+                  ? { opencodeToolchainPath: competitorToolchain.path }
+                  : { codexToolchainPath: competitorToolchain.path }),
+            }),
+          },
+        ],
+        pairConcurrency: manifest.maxConcurrency,
+        armExecution: manifest.metadata.execution.armExecution,
+      });
+      return buildHarnessAbReport(
+        summary,
+        {
+          ...(oracleEvidence.resolvedSnapshotFingerprint
+            ? { snapshotFingerprint: oracleEvidence.resolvedSnapshotFingerprint }
+            : {}),
+          annotations: oracleEvidence.annotations.filter((annotation) =>
+            evaluatedTaskIds.has(annotation.taskId),
+          ),
+          warnings: oracleEvidence.warnings,
+        },
+        execution.billingMode,
+      );
+    },
+    artifacts: (report) => [
       {
-        id: 'maka',
-        config: config('maka'),
-        expectedPricingProfile: execution.pricing.source,
-        billingMode: execution.billingMode,
-        harborRunner: createHarborTaskRunner({
-          ...runnerOptions,
-          agent: 'maka',
-          agentEnv: { ...runnerOptions.agentEnv, ...makaContextBudgetEnv },
-        }),
+        path: join(runRoot, 'harness-ab-report.json'),
+        content: `${JSON.stringify(report, null, 2)}\n`,
       },
+      { path: join(runRoot, 'harness-ab-report.csv'), content: renderHarnessAbReportCsv(report) },
       {
-        id: competitorProfile.id,
-        config: config(competitorProfile.id),
-        expectedPricingProfile: execution.pricing.source,
-        billingMode: execution.billingMode,
-        harborRunner: createHarborTaskRunner({
-          ...runnerOptions,
-          agent: competitorProfile.id,
-          agentVersion: competitorProfile.version,
-          ...(competitorProfile.id === 'kimi-code'
-            ? { kimiCodeToolchainPath: competitorToolchain.path }
-            : competitorProfile.id === 'opencode'
-              ? { opencodeToolchainPath: competitorToolchain.path }
-              : { codexToolchainPath: competitorToolchain.path }),
-        }),
+        path: join(runRoot, 'harness-ab-report.md'),
+        content: renderHarnessAbReportMarkdown(report),
       },
     ],
-    pairConcurrency: manifest.maxConcurrency,
-    armExecution: manifest.metadata.execution.armExecution,
   });
-  const evaluatedTaskIds = new Set(evaluationTasks.map((task) => task.id));
-  const report = buildHarnessAbReport(
-    summary,
-    {
-      ...(oracleEvidence.resolvedSnapshotFingerprint
-        ? { snapshotFingerprint: oracleEvidence.resolvedSnapshotFingerprint }
-        : {}),
-      annotations: oracleEvidence.annotations.filter((annotation) =>
-        evaluatedTaskIds.has(annotation.taskId),
-      ),
-      warnings: oracleEvidence.warnings,
-    },
-    execution.billingMode,
-  );
-  await writeFile(
-    join(runRoot, 'harness-ab-report.json'),
-    `${JSON.stringify(report, null, 2)}\n`,
-    'utf8',
-  );
-  await writeFile(join(runRoot, 'harness-ab-report.csv'), renderHarnessAbReportCsv(report), 'utf8');
-  await writeFile(
-    join(runRoot, 'harness-ab-report.md'),
-    renderHarnessAbReportMarkdown(report),
-    'utf8',
-  );
   assertHarnessAbReportCompleted(report);
   console.log(
     `${report.runStatus}: ${report.coverage.attemptedCells}/${report.coverage.scheduledCells} cells attempted; ${report.effectiveness.pairedEvaluated} paired Pass@1 outcomes -> ${runRoot}`,

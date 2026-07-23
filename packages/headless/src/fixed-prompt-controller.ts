@@ -36,6 +36,9 @@ export interface FixedPromptTask {
     juniorTimeEstimateMin?: number;
     agentTimeoutSec?: number;
     verifierTimeoutSec?: number;
+    /** Task-native environment build budget (task.toml [environment]
+     * build_timeout_sec); feeds runner wall-clock watchdog derivation. */
+    buildTimeoutSec?: number;
   };
 }
 
@@ -56,7 +59,15 @@ export interface HarborVerifierOutcome {
   attempts: HarborVerifierAttempt[];
 }
 
-export interface HarborTaskRunOutput {
+/**
+ * The provider-neutral seam the fixed-prompt controller and A/B schedulers
+ * consume: run one task attempt and return its reward plus cell artifacts. Two
+ * implementations exist: `createHarborTaskRunner` (Harbor) and
+ * `createPierTaskRunner` (Pier, for DeepSWE). The output still carries a
+ * Harbor-shaped `harbor` field; both harnesses map into it, and generalizing
+ * that payload is deferred until an implementation cannot.
+ */
+export interface TaskRunOutput {
   harbor: {
     reward: number;
     verifierFailureSummary?: string;
@@ -65,7 +76,7 @@ export interface HarborTaskRunOutput {
   cell: HarborTaskRunCellOutput;
 }
 
-export interface HarborTaskRunInput {
+export interface TaskRunInput {
   runId: string;
   roundId: string;
   task: FixedPromptTask;
@@ -74,8 +85,8 @@ export interface HarborTaskRunInput {
   agentEnv?: Record<string, string>;
 }
 
-export interface HarborTaskRunner {
-  (input: HarborTaskRunInput): Promise<HarborTaskRunOutput>;
+export interface TaskRunner {
+  (input: TaskRunInput): Promise<TaskRunOutput>;
 }
 
 export interface FixedPromptBudgetExhaustedArtifactRefs {
@@ -378,7 +389,7 @@ export interface RunFixedPromptControllerInput {
   /** Refuse resume when a model attempt was durably admitted but no terminal
    * event exists, preserving single-sample benchmark semantics. */
   protectPassAtOne?: boolean;
-  harborRunner: HarborTaskRunner;
+  taskRunner: TaskRunner;
   now?: () => number;
   newId?: () => string;
 }
@@ -589,7 +600,7 @@ export async function readFixedPromptWal(path: string): Promise<FixedPromptWalEv
 
 export async function readHarborTaskRunOutput(
   input: ReadHarborTaskRunOutputInput,
-): Promise<HarborTaskRunOutput> {
+): Promise<TaskRunOutput> {
   return {
     harbor: {
       reward: harborReward(await readJsonObject(input.harborResultPath)),
@@ -693,7 +704,7 @@ async function runTaskAndBuildEvent(input: {
     });
   }
   const runHarbor = () =>
-    input.input.harborRunner({
+    input.input.taskRunner({
       runId: input.input.runId,
       roundId: input.input.roundId,
       task: input.task,
@@ -789,7 +800,7 @@ async function runTaskAndBuildEvent(input: {
 }
 
 function taskEventFromOutput(input: {
-  output: HarborTaskRunOutput;
+  output: TaskRunOutput;
   expectedConfig: Config;
   expectedPromptHash: string;
   requireExecutionIdentity?: boolean;
@@ -848,7 +859,7 @@ function taskEventFromOutput(input: {
 }
 
 function taskCompletedEvent(input: {
-  output: HarborTaskRunOutput;
+  output: TaskRunOutput;
   taskId: string;
   runId: string;
   roundId: string;
@@ -931,7 +942,7 @@ function isUnscoredCellFailure(
 }
 
 function taskPlumbingFailedEvent(input: {
-  output: HarborTaskRunOutput;
+  output: TaskRunOutput;
   expectedPromptHash: string;
   resumeFingerprint?: string;
   taskId: string;
@@ -988,7 +999,7 @@ function taskPlumbingFailedEvent(input: {
 }
 
 function classifyPlumbingFailure(
-  output: HarborTaskRunOutput,
+  output: TaskRunOutput,
   expectedPromptHash: string,
   expectedConfig: Config,
   requireExecutionIdentity: boolean,
@@ -1110,7 +1121,7 @@ function classifyExplicitIdentityMismatch(
 
 function taskInfraFailedEvent(input: {
   error: unknown;
-  output?: HarborTaskRunOutput;
+  output?: TaskRunOutput;
   errorClass?: FixedPromptTaskInfraFailedEvent['errorClass'];
   taskId: string;
   runId: string;

@@ -1,8 +1,14 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { BackendKind, PricingConfig, ProviderType } from '@maka/core';
-import { isThinkingLevel, resolveModelVisionSupport } from '@maka/core';
+import type {
+  AgentRunHeader,
+  BackendKind,
+  PricingConfig,
+  ProviderType,
+  RuntimeEvent,
+} from '@maka/core';
+import { isTerminalRuntimeEvent, isThinkingLevel, resolveModelVisionSupport } from '@maka/core';
 import {
   AiSdkBackend,
   BackendRegistry,
@@ -18,29 +24,35 @@ import {
   loadSynthesisCacheBlocksFromArtifacts,
   persistSynthesisCacheBlocksToArtifacts,
   type InvocationResult,
+  type SynthesisCacheArtifactStore,
   type SynthesisCacheLoader,
   type SynthesisCacheWriter,
 } from '@maka/runtime';
 import {
-  createAgentRunStore,
   createAttachmentByteReader,
-  createArtifactStore,
   createReadImageSnapshotter,
-  createRuntimeEventStore,
-  createSessionStore,
   persistProviderRequestCaptureArtifact,
 } from '@maka/storage';
 import { registerFakeBackend } from './backends.js';
 import {
   buildHarborCellOutput,
+  combineInvocations,
   countRuntimeSteps,
   validateHarborCellOutput,
   type HarborCellContextBudgetPolicySnapshot,
+  type HarborCellDeadlineSettlement,
+  type HarborCellExecutionIdentity,
   type HarborCellOutput,
 } from './cell-output.js';
 import type { Config, Task } from './contracts.js';
 import { resolveHeavyTaskMode } from './heavy-task-policy.js';
 import { resolveEconomyTaskMode } from './economy-task-policy.js';
+import {
+  authenticateHeadlessStorageWriter,
+  isStorageRootAuthorityError,
+  openHeadlessStorageForWrite,
+  type HeadlessStorageWriter,
+} from './headless-storage.js';
 import type { HeadlessBackendContext, RealBackendIsolation } from './isolation.js';
 import { validateRealBackendIsolation } from './isolation.js';
 import { PiCliJsonTransport } from './pi-cli-json-transport.js';
@@ -55,6 +67,7 @@ import {
 } from './task-ledger-experiment.js';
 import {
   booleanEnv,
+  MAX_NODE_TIMER_MS,
   numericEnv,
   positiveIntEnv,
   type RunHarborCellEnv,
@@ -91,13 +104,16 @@ export {
 } from './harbor-cell-tool-executor.js';
 export {
   providerApiKeyEnvName,
+  resolveHostProviderAuthority,
   resolveHarborCellAiSdkEnv,
+  type ResolvedHostProviderAuthority,
   type ResolvedHarborCellAiSdkEnv,
 } from './provider-env.js';
 export type { RunHarborCellEnv } from './headless-run-env.js';
 
 export const HARBOR_CELL_OUTPUT_FILENAME = 'maka-cell-output.json';
 export const HARBOR_CELL_RUNTIME_EVENTS_FILENAME = 'runtime-events.jsonl';
+export const HARBOR_CELL_TRACE_EVENTS_FILENAME = 'trace-events.jsonl';
 export const HARBOR_CELL_EXECUTION_IDENTITY_FILENAME = 'maka-cell-execution-identity.json';
 export const HARBOR_CELL_USAGE_CHECKPOINT_FILENAME = 'maka-cell-usage-checkpoint.json';
 
@@ -153,6 +169,23 @@ export interface RunHarborCellResult {
   outputPath: string;
   runtimeEventsPath: string;
   settledByDeadline: boolean;
+}
+
+export interface WriteHarborCellArtifactsInput {
+  invocation: InvocationResult;
+  outputDir: string;
+  promptHash?: string;
+  executionIdentity?: HarborCellExecutionIdentity;
+  deadlineSettlement?: HarborCellDeadlineSettlement;
+  contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
+  continuationSummary?: HarborCellContinuationSummary;
+  taskToolSummaryEnabled?: boolean;
+}
+
+export interface WriteHarborCellArtifactsResult {
+  output: HarborCellOutput;
+  outputPath: string;
+  runtimeEventsPath: string;
 }
 
 export const HARBOR_CELL_DEFAULT_CONTINUATION_PROMPT =
@@ -227,6 +260,15 @@ const PI_PROVIDER_ENV_RULES = [
 ] satisfies Array<{ includes: string[]; keys?: string[]; prefixes?: string[] }>;
 
 export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarborCellResult> {
+  const storage = await openHeadlessStorageForWrite(input.storageRoot);
+  return runHarborCellWithStorage(input, storage);
+}
+
+export async function runHarborCellWithStorage(
+  input: RunHarborCellInput,
+  storage: HeadlessStorageWriter,
+): Promise<RunHarborCellResult> {
+  storage = authenticateHeadlessStorageWriter(storage);
   if (
     input.settleAfterMs !== undefined &&
     (!Number.isFinite(input.settleAfterMs) || input.settleAfterMs <= 0)
@@ -244,9 +286,9 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
 
   const now = input.now ?? Date.now;
   const newId = input.newId ?? randomId;
-  const sessionStore = createSessionStore(input.storageRoot);
-  const agentRunStore = createAgentRunStore(input.storageRoot);
-  const runtimeEventStore = createRuntimeEventStore(input.storageRoot);
+  const sessionStore = storage.executionStores.sessionStore;
+  const agentRunStore = storage.executionStores.agentRunStore;
+  const runtimeEventStore = storage.executionStores.runtimeEventStore;
   const backends = new BackendRegistry();
   const sessionCapabilities = createHeadlessSessionCapabilityBridge();
   const task: Task = {
@@ -266,6 +308,7 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
     storageRoot: input.storageRoot,
     workspaceDir: input.cwd,
     ...sessionCapabilities.capabilities,
+    artifactStore: storage.artifactStore,
     ...(backendNeedsIsolation(input.config.backend)
       ? {
           realBackendIsolation: input.realBackendIsolation,
@@ -283,12 +326,7 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
     systemPromptHash: prompt.systemPromptHash,
     pricingProfile: input.pricingProfile ?? 'unconfigured',
   };
-  await mkdir(input.outputDir, { recursive: true });
-  await writeFile(
-    join(input.outputDir, HARBOR_CELL_EXECUTION_IDENTITY_FILENAME),
-    `${JSON.stringify(executionIdentity, null, 2)}\n`,
-    { encoding: 'utf8', flush: true },
-  );
+  await writeHarborCellExecutionIdentity(input.outputDir, executionIdentity);
 
   let invocation: InvocationResult | undefined;
   const manager = new SessionManager({
@@ -351,13 +389,20 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
   let nextText = input.instruction;
   let stepCapHits = 0;
   let attemptedTurnId: string | undefined;
+  let attemptedRunId: string | undefined;
   try {
     for (let turnIndex = 0; turnIndex < continuationPolicy.maxTurns; turnIndex += 1) {
       if (deadlineReached) break;
       const turnId = newId();
+      const runId = newId();
       attemptedTurnId = turnId;
+      attemptedRunId = runId;
       invocation = undefined;
-      for await (const event of manager.sendMessage(session.id, { turnId, text: nextText })) {
+      for await (const event of manager.sendMessage(
+        session.id,
+        { turnId, text: nextText },
+        { runId },
+      )) {
         if ((event as { type?: string }).type === 'permission_request') {
           const { requestId } = event as { requestId: string };
           await manager.respondToPermission(session.id, {
@@ -378,67 +423,127 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
       nextText = continuationPolicy.prompt;
     }
   } catch (error) {
+    if (isStorageRootAuthorityError(error)) throw error;
     sendMessageError = error;
   } finally {
     if (settlementTimer) clearTimeout(settlementTimer);
   }
   await settlementAttempt;
   if (settlementError) throw settlementError;
+  const deadlineRun =
+    deadlineReached && attemptedRunId
+      ? await agentRunStore.readRun(session.id, attemptedRunId).catch((error) => {
+          if (isStorageRootAuthorityError(error)) throw error;
+          return undefined;
+        })
+      : undefined;
+  const settledByDeadline =
+    deadlineRun?.status === 'cancelled' && deadlineRun.abortSource === 'benchmark.deadline';
   if (sendMessageError) {
     invocations.push(
-      failedInvocationFromError(sendMessageError, {
-        newId,
-        now,
-        sessionId: session.id,
-        turnId: attemptedTurnId ?? newId(),
-      }),
+      settledByDeadline
+        ? failedDeadlineInvocationFromRun(
+            deadlineRun,
+            await runtimeEventStore.readRuntimeEvents(session.id, deadlineRun.runId),
+          )
+        : failedInvocationFromError(sendMessageError, {
+            newId,
+            now,
+            sessionId: session.id,
+            turnId: attemptedTurnId ?? newId(),
+          }),
     );
   } else if (invocations.length === 0) {
     throw new Error('Harbor cell finished without a runtime invocation result');
   }
   const combinedInvocation = combineInvocations(invocations);
-  const terminalRun = deadlineReached
-    ? await agentRunStore.readRun(session.id, combinedInvocation.runId).catch(() => undefined)
-    : undefined;
-  const settledByDeadline =
-    terminalRun?.status === 'cancelled' && terminalRun.abortSource === 'benchmark.deadline';
   const continuationSummary = continuationPolicy.enabled
     ? buildContinuationSummary(continuationPolicy, invocations, stepCapHits)
     : undefined;
 
+  const artifacts = await writeHarborCellArtifacts({
+    invocation: combinedInvocation,
+    outputDir: input.outputDir,
+    executionIdentity,
+    ...(settledByDeadline
+      ? {
+          deadlineSettlement: {
+            source: 'benchmark.deadline' as const,
+            mode: 'immediate' as const,
+          },
+        }
+      : {}),
+    ...(input.contextBudgetPolicy ? { contextBudgetPolicy: input.contextBudgetPolicy } : {}),
+    ...(continuationSummary ? { continuationSummary } : {}),
+    ...(input.taskToolSummaryEnabled !== undefined
+      ? { taskToolSummaryEnabled: input.taskToolSummaryEnabled }
+      : {}),
+  });
+
+  return {
+    invocation: combinedInvocation,
+    ...artifacts,
+    settledByDeadline,
+  };
+}
+
+export async function writeHarborCellExecutionIdentity(
+  outputDir: string,
+  executionIdentity: HarborCellExecutionIdentity,
+): Promise<void> {
+  await mkdir(outputDir, { recursive: true });
+  await writeHarborCellArtifact(
+    join(outputDir, HARBOR_CELL_EXECUTION_IDENTITY_FILENAME),
+    `${JSON.stringify(executionIdentity, null, 2)}\n`,
+  );
+}
+
+export async function writeHarborCellArtifacts(
+  input: WriteHarborCellArtifactsInput,
+): Promise<WriteHarborCellArtifactsResult> {
   await mkdir(input.outputDir, { recursive: true });
   const runtimeEventsPath = join(input.outputDir, HARBOR_CELL_RUNTIME_EVENTS_FILENAME);
   const outputPath = join(input.outputDir, HARBOR_CELL_OUTPUT_FILENAME);
-  await writeHarborCellArtifact(runtimeEventsPath, runtimeEventsJsonl(combinedInvocation));
+  await writeHarborCellArtifact(runtimeEventsPath, runtimeEventsJsonl(input.invocation));
   const output = validateHarborCellOutput(
     buildHarborCellOutput({
-      invocation: combinedInvocation,
+      invocation: input.invocation,
       runtimeEventsPath,
-      executionIdentity,
-      ...(settledByDeadline
-        ? {
-            deadlineSettlement: {
-              source: 'benchmark.deadline' as const,
-              mode: 'immediate' as const,
-            },
-          }
-        : {}),
+      ...(input.promptHash ? { promptHash: input.promptHash } : {}),
+      ...(input.executionIdentity ? { executionIdentity: input.executionIdentity } : {}),
+      ...(input.deadlineSettlement ? { deadlineSettlement: input.deadlineSettlement } : {}),
       ...(input.contextBudgetPolicy ? { contextBudgetPolicy: input.contextBudgetPolicy } : {}),
-      ...(continuationSummary ? { continuationSummary } : {}),
+      ...(input.continuationSummary ? { continuationSummary: input.continuationSummary } : {}),
       ...(input.taskToolSummaryEnabled !== undefined
         ? { taskToolSummaryEnabled: input.taskToolSummaryEnabled }
         : {}),
     }),
   );
   await writeHarborCellArtifact(outputPath, `${JSON.stringify(output, null, 2)}\n`);
+  return { output, outputPath, runtimeEventsPath };
+}
 
-  return {
-    invocation: combinedInvocation,
-    output,
-    outputPath,
-    runtimeEventsPath,
-    settledByDeadline,
-  };
+export async function writeHarborTaskRunTrace(input: {
+  outputDir: string;
+  storage: HeadlessStorageWriter;
+  invocations: readonly InvocationResult[];
+}): Promise<string> {
+  const storage = authenticateHeadlessStorageWriter(input.storage);
+  const eventGroups = await Promise.all(
+    input.invocations.map((invocation) =>
+      storage.executionStores.agentRunStore.readEvents(invocation.sessionId, invocation.runId),
+    ),
+  );
+  const chunks = eventGroups.map((events) =>
+    events.map((event) => JSON.stringify(event)).join('\n'),
+  );
+  const nonEmptyChunks = chunks.map((chunk) => chunk.trimEnd()).filter(Boolean);
+  const traceEventsPath = join(input.outputDir, HARBOR_CELL_TRACE_EVENTS_FILENAME);
+  await writeHarborCellArtifact(
+    traceEventsPath,
+    nonEmptyChunks.length > 0 ? `${nonEmptyChunks.join('\n')}\n` : '',
+  );
+  return traceEventsPath;
 }
 
 export async function runHarborCellFromEnv(
@@ -568,7 +673,7 @@ export async function runHarborCellFromEnv(
 export function reasoningEffortFromEnv(
   value: string | undefined,
 ): import('@maka/core').ThinkingLevel | undefined {
-  if (value === undefined) return undefined;
+  if (value === undefined || value === '') return undefined;
   if (!isThinkingLevel(value)) throw new Error(`unsupported MAKA_REASONING_EFFORT: ${value}`);
   return value;
 }
@@ -606,7 +711,11 @@ export function harborCellMaxStepsFromEnv(env: RunHarborCellEnv = process.env): 
 export function harborCellSoftTimeoutMsFromEnv(
   env: RunHarborCellEnv = process.env,
 ): number | undefined {
-  return positiveIntEnv(env.MAKA_CELL_SOFT_TIMEOUT_MS, 'MAKA_CELL_SOFT_TIMEOUT_MS');
+  const value = positiveIntEnv(env.MAKA_CELL_SOFT_TIMEOUT_MS, 'MAKA_CELL_SOFT_TIMEOUT_MS');
+  if (value !== undefined && value > MAX_NODE_TIMER_MS) {
+    throw new Error(`MAKA_CELL_SOFT_TIMEOUT_MS must not exceed ${MAX_NODE_TIMER_MS}`);
+  }
+  return value;
 }
 
 function isToolCallStepCap(invocation: InvocationResult): boolean {
@@ -614,23 +723,6 @@ function isToolCallStepCap(invocation: InvocationResult): boolean {
     invocation.failure?.class === 'tool_step_cap_reached' ||
     invocation.failure?.class === 'incomplete_tool_calls'
   );
-}
-
-function combineInvocations(invocations: readonly InvocationResult[]): InvocationResult {
-  const first = invocations[0];
-  const last = invocations[invocations.length - 1];
-  if (!first || !last) throw new Error('cannot combine empty Harbor invocations');
-  return {
-    invocationId: last.invocationId,
-    sessionId: last.sessionId,
-    runId: last.runId,
-    turnId: last.turnId,
-    status: last.status,
-    ...(last.failure ? { failure: last.failure } : {}),
-    events: invocations.flatMap((candidate) => candidate.events),
-    startedAt: first.startedAt,
-    finishedAt: last.finishedAt,
-  };
 }
 
 function buildContinuationSummary(
@@ -703,6 +795,37 @@ function failedInvocationFromError(
   };
 }
 
+function failedDeadlineInvocationFromRun(
+  run: AgentRunHeader,
+  events: RuntimeEvent[],
+): InvocationResult {
+  let terminal: RuntimeEvent | undefined;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const candidate = events[index]!;
+    if (!isTerminalRuntimeEvent(candidate)) continue;
+    terminal = candidate;
+    break;
+  }
+  const terminalStatus =
+    terminal?.status === 'completed' ? 'cancelled' : (terminal?.status ?? 'cancelled');
+  const message = terminal?.content?.kind === 'error' ? terminal.content.message : undefined;
+  return {
+    invocationId: run.invocationId ?? events[0]?.invocationId ?? run.runId,
+    runId: run.runId,
+    sessionId: run.sessionId,
+    turnId: run.turnId,
+    status: 'failed',
+    failure: {
+      class: terminalStatus,
+      ...(message ? { message } : {}),
+      terminalStatus,
+    },
+    events,
+    startedAt: run.createdAt,
+    finishedAt: run.completedAt ?? run.updatedAt,
+  };
+}
+
 export function buildAiSdkCellBackendRegistration(input: {
   provider: ProviderType;
   model: string;
@@ -734,6 +857,8 @@ export function buildAiSdkCellBackendRegistration(input: {
     input.env.MAKA_STREAM_IDLE_TIMEOUT_MS,
     'MAKA_STREAM_IDLE_TIMEOUT_MS',
   );
+  const synthesisCacheEnabled =
+    contextBudgetBackendOptions.contextBudget?.synthesisCache?.enabled === true;
   const taskLedgerExperimentPolicy = buildHarborCellTaskLedgerExperimentPolicy(input.env);
   const taskLedgerExperimentStore = taskLedgerExperimentPolicy
     ? createInMemoryTaskLedgerExperimentStore({ now: input.now, newId: input.newId })
@@ -742,12 +867,11 @@ export function buildAiSdkCellBackendRegistration(input: {
     if (!context.toolExecutor) {
       throw new Error('Harbor ai-sdk backend requires an isolated tool executor');
     }
-    // FileArtifactStore owns an in-memory metadata index, so every artifact
-    // consumer under the run's authoritative storage root shares this instance.
-    const artifactStore = createArtifactStore(context.storageRoot);
+    // Artifact consumers share the same lease-bound store and metadata index.
+    const artifactStore = context.artifactStore;
     const synthesisCacheCallbacks = buildHarborCellSynthesisCacheCallbacks(
       artifactStore,
-      contextBudgetBackendOptions.contextBudget?.synthesisCache?.enabled === true,
+      synthesisCacheEnabled,
     );
     registry.register('ai-sdk', (ctx) => {
       const subscriptionFetch = buildSubscriptionModelFetch({
@@ -891,7 +1015,7 @@ async function writeHarborCellArtifact(path: string, contents: string): Promise<
 }
 
 function buildHarborCellSynthesisCacheCallbacks(
-  artifactStore: ReturnType<typeof createArtifactStore>,
+  artifactStore: SynthesisCacheArtifactStore,
   enabled: boolean,
 ): { loadSynthesisCache?: SynthesisCacheLoader; writeSynthesisCache?: SynthesisCacheWriter } {
   if (!enabled) return {};

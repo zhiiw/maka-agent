@@ -16,16 +16,20 @@ import {
   type AgentRunHeader,
   type BackendKind,
   type RuntimeEvent,
-  type RuntimeEventStore,
   type SessionEvent,
   type SessionHeader,
 } from '@maka/core';
 import type { BackendSendInput, PermissionDecision } from '@maka/core/backend-types';
-import { createRuntimeEventStore } from '@maka/storage';
+import { StorageRootAuthorityError } from '@maka/storage/root-authority';
 import type { Config, Task } from '../contracts.js';
+import { openHeadlessStorageForWrite } from '../headless-storage.js';
 import type { HeadlessBackendContext } from '../isolation.js';
 import { commandResourceScope, hashNormalizedArgs } from '../permission-grants.js';
-import { runTaskOnce } from '../task-agent-controller.js';
+import {
+  runTaskOnce,
+  runTaskOnceWithStorage,
+  type RunTaskOnceResult,
+} from '../task-agent-controller.js';
 import type { TaskPermissionGrant } from '../task-contracts.js';
 import { buildIsolatedHeadlessTools } from '../tools.js';
 
@@ -42,6 +46,12 @@ const registerFakeBackend = (registry: BackendRegistry): void => {
     (ctx) => new FakeBackend({ sessionId: ctx.sessionId, header: ctx.header, store: ctx.store }),
   );
 };
+
+function latestInvocation(result: RunTaskOnceResult) {
+  const invocation = result.invocations.at(-1);
+  assert.ok(invocation, 'task attempt must contain at least one invocation');
+  return invocation;
+}
 
 class ReportingBackend implements AgentBackend {
   readonly kind: BackendKind = 'ai-sdk';
@@ -114,6 +124,90 @@ class ReportingBackend implements AgentBackend {
   async respondToPermission(_decision: PermissionDecision): Promise<void> {}
   async dispose(): Promise<void> {}
 }
+
+class DeadlineBackend implements AgentBackend {
+  readonly kind: BackendKind = 'fake';
+  readonly sessionId: string;
+  private release!: () => void;
+  private readonly stopped = new Promise<void>((resolve) => {
+    this.release = resolve;
+  });
+
+  constructor(sessionId: string) {
+    this.sessionId = sessionId;
+  }
+
+  async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+    await this.stopped;
+    yield {
+      type: 'complete',
+      id: 'deadline-complete',
+      turnId: input.turnId,
+      ts: Date.now(),
+      stopReason: 'user_stop',
+    };
+  }
+
+  async stop(): Promise<void> {
+    this.release();
+  }
+
+  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+class ResettingDeadlineBackend implements AgentBackend {
+  readonly kind: BackendKind = 'fake';
+
+  constructor(
+    readonly sessionId: string,
+    private readonly counters: { sendCalls: number },
+  ) {}
+
+  async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+    this.counters.sendCalls += 1;
+    yield {
+      type: 'complete',
+      id: 'resetting-deadline-complete',
+      turnId: input.turnId,
+      ts: Date.now(),
+      stopReason: 'end_turn',
+    };
+  }
+
+  async stop(): Promise<void> {}
+  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+class DeadlineRepairBackend implements AgentBackend {
+  readonly kind: BackendKind = 'ai-sdk';
+
+  constructor(
+    readonly sessionId: string,
+    private readonly state: { now: number; prompts: string[] },
+  ) {}
+
+  async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+    this.state.prompts.push(input.text);
+    if (this.state.prompts.length === 1) this.state.now = 100;
+    yield {
+      type: 'complete',
+      id: `deadline-repair-complete-${this.state.prompts.length}`,
+      turnId: input.turnId,
+      ts: this.state.now,
+      stopReason: 'end_turn',
+    };
+  }
+
+  async stop(): Promise<void> {}
+  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+const registerDeadlineBackend = (registry: BackendRegistry): void => {
+  registry.register('fake', (ctx) => new DeadlineBackend(ctx.sessionId));
+};
 
 const registerReportingBackend = (registry: BackendRegistry): void => {
   registry.register(
@@ -590,6 +684,34 @@ class GateRepairBackend implements AgentBackend {
         toolCtx,
       );
     }
+    const toolUseId = `gate-tool-${turnNumber}`;
+    yield {
+      type: 'tool_start',
+      id: `gate-tool-start-${turnNumber}`,
+      turnId: input.turnId,
+      ts,
+      toolUseId,
+      toolName: turnNumber === 1 ? 'initial_tool' : 'repair_tool',
+      args: {},
+    };
+    yield {
+      type: 'tool_result',
+      id: `gate-tool-result-${turnNumber}`,
+      turnId: input.turnId,
+      ts,
+      toolUseId,
+      isError: false,
+      content: { kind: 'text', text: 'ok' },
+    };
+    yield {
+      type: 'token_usage',
+      id: `gate-usage-${turnNumber}`,
+      turnId: input.turnId,
+      ts,
+      input: turnNumber * 10,
+      output: turnNumber,
+      total: turnNumber * 11,
+    };
     yield {
       type: 'text_complete',
       id: `gate-text-${turnNumber}`,
@@ -823,6 +945,130 @@ async function readAgentRunHeader(
 }
 
 describe('runTaskOnce', () => {
+  test('does not dispatch a runtime attempt after the benchmark deadline', async () => {
+    await withDirs(async (fixtureDir, storageRoot) => {
+      const counters = { sendCalls: 0 };
+      const task: Task = {
+        id: 'expired-benchmark-deadline',
+        instruction: 'must not start',
+        workspaceDir: fixtureDir,
+        verification: { command: 'true', protectedPaths: [] },
+      };
+
+      const result = await runTaskOnce(fakeConfig, task, {
+        storageRoot,
+        registerBackends: (registry) => {
+          registry.register('fake', (ctx) => new ResettingDeadlineBackend(ctx.sessionId, counters));
+        },
+        deadlineAtMs: Date.now() - 1,
+      });
+
+      assert.equal(counters.sendCalls, 0);
+      assert.equal(result.settledByDeadline, true);
+      const invocation = latestInvocation(result);
+      assert.equal(invocation.status, 'failed');
+      assert.equal(invocation.failure?.class, 'aborted');
+      const runtimeEvents = await readRuntimeEventLedger(
+        storageRoot,
+        invocation.sessionId,
+        invocation.runId,
+      );
+      const terminal = runtimeEvents.at(-1);
+      assert.equal(terminal?.status, 'aborted');
+      assert.equal(terminal?.actions?.endInvocation, true);
+      assert.equal(terminal?.actions?.stateDelta?.abortSource, 'benchmark.deadline');
+    });
+  });
+
+  test('rejects a benchmark deadline beyond the Node timer limit', async () => {
+    await withDirs(async (fixtureDir, storageRoot) => {
+      const task: Task = {
+        id: 'oversized-benchmark-deadline',
+        instruction: 'must not start',
+        workspaceDir: fixtureDir,
+        verification: { command: 'true', protectedPaths: [] },
+      };
+
+      await assert.rejects(
+        runTaskOnce(fakeConfig, task, {
+          storageRoot,
+          registerBackends: registerFakeBackend,
+          deadlineAtMs: 2_147_483_648,
+          now: () => 0,
+        }),
+        /deadlineAtMs exceeds the Node timer limit of 2147483647ms/,
+      );
+    });
+  });
+
+  test('settles an active runtime at the benchmark soft deadline', async () => {
+    await withDirs(async (fixtureDir, storageRoot) => {
+      const task: Task = {
+        id: 'benchmark-deadline',
+        instruction: 'wait forever',
+        workspaceDir: fixtureDir,
+        verification: { command: 'true', protectedPaths: [] },
+      };
+
+      const result = await runTaskOnce(fakeConfig, task, {
+        storageRoot,
+        registerBackends: registerDeadlineBackend,
+        deadlineAtMs: Date.now() + 25,
+      });
+
+      assert.equal(result.settledByDeadline, true);
+      assert.equal(result.projection.status, 'budget_exhausted');
+      assert.equal(result.projection.events.at(-1)?.type, 'task_run_budget_exhausted');
+      const runHeader = await readAgentRunHeader(
+        storageRoot,
+        latestInvocation(result).sessionId,
+        latestInvocation(result).runId,
+      );
+      assert.equal(runHeader.status, 'cancelled');
+      assert.equal(runHeader.abortSource, 'benchmark.deadline');
+    });
+  });
+
+  test('skips optional heavy-task work after a repair settles at the deadline', async () => {
+    await withDirs(async (fixtureDir, storageRoot) => {
+      const state = { now: 0, prompts: [] as string[] };
+      const config: Config = { ...fakeConfig, backend: 'ai-sdk', heavyTaskMode: true };
+      const task: Task = {
+        id: 'repair-deadline',
+        instruction: 'complete the heavy task',
+        workspaceDir: fixtureDir,
+        verification: { command: 'true', protectedPaths: [] },
+      };
+
+      const result = await runTaskOnce(config, task, {
+        storageRoot,
+        now: () => state.now,
+        registerBackends: (registry) => {
+          registry.register('ai-sdk', (ctx) => new DeadlineRepairBackend(ctx.sessionId, state));
+        },
+        realBackendIsolation: {
+          kind: 'external',
+          label: 'unit isolated executor',
+          toolExecutor: {
+            async exec() {
+              return { exitCode: 0, stdout: '', stderr: '' };
+            },
+          },
+        },
+        deadlineAtMs: 50,
+      });
+
+      assert.equal(state.prompts.length, 1);
+      assert.equal(result.settledByDeadline, true);
+      assert.equal(
+        result.projection.events.filter(
+          (event) => event.type === 'heavy_task_self_check_gate_recorded',
+        ).length,
+        1,
+      );
+    });
+  });
+
   test('injects the default headless system prompt before registering a backend', async () => {
     await withDirs(async (fixtureDir, storageRoot) => {
       const task: Task = {
@@ -916,12 +1162,12 @@ describe('runTaskOnce', () => {
         assert.deepEqual(tools.actualToolCallCounts, {});
         const runtimeLedger = await readRuntimeEventLedger(
           storageRoot,
-          result.invocation.sessionId,
-          result.invocation.runId,
+          latestInvocation(result).sessionId,
+          latestInvocation(result).runId,
         );
         const lineage = result.projection.attempts[0]?.executionLineage[0];
-        assert.equal(lineage?.execution?.invocationId, result.invocation.invocationId);
-        assert.equal(lineage?.execution?.agentRunId, result.invocation.runId);
+        assert.equal(lineage?.execution?.invocationId, latestInvocation(result).invocationId);
+        assert.equal(lineage?.execution?.agentRunId, latestInvocation(result).runId);
         assert.equal(lineage?.runtimeCoverage?.lowWater?.sequence, 0);
         assert.equal(lineage?.runtimeCoverage?.lowWater?.eventId, runtimeLedger[0]?.id);
         assert.equal(lineage?.runtimeCoverage?.highWater.sequence, runtimeLedger.length - 1);
@@ -929,10 +1175,10 @@ describe('runTaskOnce', () => {
         assert.equal(lineage?.runtimeCoverage?.eventCount, runtimeLedger.length);
         const runHeader = await readAgentRunHeader(
           storageRoot,
-          result.invocation.sessionId,
-          result.invocation.runId,
+          latestInvocation(result).sessionId,
+          latestInvocation(result).runId,
         );
-        assert.equal(runHeader.invocationId, result.invocation.invocationId);
+        assert.equal(runHeader.invocationId, latestInvocation(result).invocationId);
       } finally {
         SessionManager.prototype.sendMessage = original;
       }
@@ -1162,6 +1408,22 @@ describe('runTaskOnce', () => {
       assert.equal(result.projection.latestHeavyTaskSelfCheckGate?.action, 'allow_finalize');
       assert.equal(result.projection.latestVerifierResult?.passed, true);
       assert.equal(result.resultRecord.passed, true);
+      assert.equal(result.invocations.length, 2);
+      const budget = result.projection.latestScoreResult?.details?.budget as
+        | { totals?: { input?: number; output?: number; total?: number } }
+        | undefined;
+      assert.deepEqual(budget?.totals, {
+        input: 30,
+        output: 3,
+        reasoning: 0,
+        total: 33,
+        costUsd: 0,
+      });
+      const tools = result.projection.latestScoreResult?.details?.tools as
+        | { actualToolCalls?: number; actualToolNames?: string[] }
+        | undefined;
+      assert.equal(tools?.actualToolCalls, 2);
+      assert.deepEqual(tools?.actualToolNames, ['initial_tool', 'repair_tool']);
       assert.equal(result.projection.attempts[0]?.executionLineage.length, 2);
       assert.equal(
         new Set(
@@ -1480,8 +1742,8 @@ describe('runTaskOnce', () => {
       assert.equal(failed.projection.error?.class, 'backend_failed');
       const failedRuntimeEvents = await readRuntimeEventLedger(
         storageRoot,
-        failed.invocation.sessionId,
-        failed.invocation.runId,
+        latestInvocation(failed).sessionId,
+        latestInvocation(failed).runId,
       );
       assert.deepEqual(
         failedRuntimeEvents
@@ -1504,53 +1766,36 @@ describe('runTaskOnce', () => {
     });
   });
 
-  test('does not persist terminal headless run headers when terminal runtime event append fails', async () => {
+  test('rejects a copied Headless storage aggregate before execution', async () => {
     await withDirs(async (fixtureDir, storageRoot) => {
       await writeFile(join(fixtureDir, 'marker.txt'), 'present', 'utf8');
       const task: Task = {
-        id: 'terminal-append-fails',
+        id: 'forged-storage',
         instruction: 'do the thing',
         workspaceDir: fixtureDir,
         verification: { command: 'test -f marker.txt', protectedPaths: [] },
       };
-      const backingRuntimeEventStore = createRuntimeEventStore(storageRoot);
-      const runtimeEventStore: RuntimeEventStore = {
-        appendRuntimeEvent(sessionId, runId, event) {
-          if (isTerminalRuntimeEvent(event)) {
-            throw new Error('terminal append failed');
-          }
-          return backingRuntimeEventStore.appendRuntimeEvent(sessionId, runId, event);
-        },
-        ensureTerminalRuntimeEventDurable() {
-          throw new Error('terminal append failed');
-        },
-        readRuntimeEvents: (sessionId, runId) =>
-          backingRuntimeEventStore.readRuntimeEvents(sessionId, runId),
-        readSessionRuntimeEvents: (sessionId) =>
-          backingRuntimeEventStore.readSessionRuntimeEvents(sessionId),
-      };
+      const storage = await openHeadlessStorageForWrite(storageRoot);
+      let backendRegistrationCalled = false;
 
-      const result = await runTaskOnce(fakeConfig, task, {
-        storageRoot,
-        registerBackends: registerFakeBackend,
-        runtimeEventStore,
-      });
-
-      assert.equal(result.invocation.status, 'failed');
-      assert.equal(result.invocation.failure?.message, 'terminal append failed');
-      const runtimeEvents = await runtimeEventStore.readRuntimeEvents(
-        result.invocation.sessionId,
-        result.invocation.runId,
+      await assert.rejects(
+        () =>
+          runTaskOnceWithStorage(
+            fakeConfig,
+            task,
+            {
+              storageRoot,
+              registerBackends: (registry) => {
+                backendRegistrationCalled = true;
+                registerFakeBackend(registry);
+              },
+            },
+            { ...storage },
+          ),
+        (error: unknown) =>
+          error instanceof StorageRootAuthorityError && error.code === 'invalid_lease',
       );
-      assert.equal(runtimeEvents.some(isTerminalRuntimeEvent), false);
-      const runHeader = await readAgentRunHeader(
-        storageRoot,
-        result.invocation.sessionId,
-        result.invocation.runId,
-      );
-      assert.notEqual(runHeader.status, 'completed');
-      assert.notEqual(runHeader.status, 'failed');
-      assert.notEqual(runHeader.status, 'cancelled');
+      assert.equal(backendRegistrationCalled, false);
     });
   });
 
@@ -1588,8 +1833,8 @@ describe('runTaskOnce', () => {
       assert.equal(result.projection.permissionRequests[0]?.resourceScope.kind, 'command');
       const runtimeEvents = await readRuntimeEventLedger(
         storageRoot,
-        result.invocation.sessionId,
-        result.invocation.runId,
+        latestInvocation(result).sessionId,
+        latestInvocation(result).runId,
       );
       assert.equal(runtimeEvents.some(isTerminalRuntimeEvent), false);
       assert.ok(
@@ -1760,7 +2005,7 @@ describe('runTaskOnce', () => {
       assert.equal((feedback.details.isolation as { label?: string }).label, 'unit isolation');
       assert.equal(
         (feedback.details.runtimeRefs as { runId?: string }).runId,
-        result.invocation.runId,
+        latestInvocation(result).runId,
       );
       assert.ok(
         (feedback.details.runtimeRefs as { runtimeEventIds?: string[] }).runtimeEventIds?.includes(
@@ -1779,14 +2024,42 @@ describe('runTaskOnce', () => {
       const runtimeEventsPath = join(
         storageRoot,
         'sessions',
-        result.invocation.sessionId,
+        latestInvocation(result).sessionId,
         'runs',
-        result.invocation.runId,
+        latestInvocation(result).runId,
         'runtime-events.jsonl',
       );
       const runtimeEvents = await readFile(runtimeEventsPath, 'utf8');
       assert.match(runtimeEvents, /report-usage/);
       assert.match(runtimeEvents, /report-artifact/);
+    });
+  });
+
+  test('carries the configured reasoning effort into the runtime session', async () => {
+    await withDirs(async (fixtureDir, storageRoot) => {
+      let observedThinkingLevel: SessionHeader['thinkingLevel'];
+      const task: Task = {
+        id: 'thinking-level-task',
+        instruction: 'do the thing',
+        workspaceDir: fixtureDir,
+        verification: { command: 'true', protectedPaths: [] },
+      };
+
+      await runTaskOnce({ ...fakeConfig, thinkingLevel: 'xhigh' }, task, {
+        storageRoot,
+        registerBackends: (registry) => {
+          registry.register('fake', (ctx) => {
+            observedThinkingLevel = ctx.header.thinkingLevel;
+            return new FakeBackend({
+              sessionId: ctx.sessionId,
+              header: ctx.header,
+              store: ctx.store,
+            });
+          });
+        },
+      });
+
+      assert.equal(observedThinkingLevel, 'xhigh');
     });
   });
 });

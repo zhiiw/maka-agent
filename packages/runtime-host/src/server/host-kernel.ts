@@ -22,9 +22,10 @@ import {
 } from '../protocol/index.js';
 import { FramedTransport } from '../transport/framed-transport.js';
 import {
-  dispatchOperation,
-  operationFailureResponse,
-  type ConnectionContext,
+  RuntimeHostConnectionSession,
+  type ConnectionOperationLease,
+} from './connection-session.js';
+import {
   type DomainOperationHandlerMap,
   type OperationResidency,
   type OperationHandlerMap,
@@ -32,6 +33,7 @@ import {
 
 const DEFAULT_IDLE_GRACE_MS = 30_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
+const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
 const SHUTDOWN_HANDSHAKE_GRACE_MS = 1_000;
 const SHUTDOWN_OPERATION_GRACE_MS = 1_000;
 const HOST_PROTOCOL = {
@@ -40,6 +42,15 @@ const HOST_PROTOCOL = {
 } as const;
 
 export type RuntimeHostResidency = OperationResidency;
+
+export class RuntimeHostProcessTerminationRequiredError extends Error {
+  readonly code = 'process_termination_required';
+
+  constructor(readonly shutdownGraceMs: number) {
+    super(`Runtime Host did not shut down within ${shutdownGraceMs} ms`);
+    this.name = 'RuntimeHostProcessTerminationRequiredError';
+  }
+}
 
 export interface RuntimeHostCompositionContext {
   owner: InteractiveRootOwner;
@@ -61,15 +72,8 @@ export interface RuntimeHostKernelOptions {
   owner: InteractiveRootOwner;
   idleGraceMs?: number;
   handshakeTimeoutMs?: number;
+  shutdownGraceMs?: number;
   compositionFactory?: RuntimeHostCompositionFactory;
-}
-
-type AcceptedConnectionContext = Omit<ConnectionContext, 'acquireResidency'>;
-
-interface OperationLease {
-  acquireResidency(): RuntimeHostResidency;
-  seal(): void;
-  finish(): void;
 }
 
 export class RuntimeHostKernel {
@@ -84,6 +88,7 @@ export class RuntimeHostKernel {
   readonly #residencyDrainWaiters = new Set<() => void>();
   readonly #idleGraceMs: number;
   readonly #handshakeTimeoutMs: number;
+  readonly #shutdownGraceMs: number;
   #endpoint: RuntimeHostEndpoint | undefined;
   #state: HostLifecycleState = 'starting';
   #activeOperations = 0;
@@ -94,6 +99,8 @@ export class RuntimeHostKernel {
   #idleTimer: NodeJS.Timeout | undefined;
   #shutdownRequested = false;
   #shutdownTask: Promise<void> | undefined;
+  #shutdownDeadlineTimer: NodeJS.Timeout | undefined;
+  #terminationRequired: RuntimeHostProcessTerminationRequiredError | undefined;
   #resolveClosed!: () => void;
   #rejectClosed!: (error: unknown) => void;
 
@@ -104,15 +111,17 @@ export class RuntimeHostKernel {
       'handshakeTimeoutMs',
       1,
     );
+    assertDuration(options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS, 'shutdownGraceMs', 1);
     this.#idleGraceMs = options.idleGraceMs ?? DEFAULT_IDLE_GRACE_MS;
     this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
+    this.#shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.#options = options;
     this.#operationHandlers = this.#createOperationHandlers(unavailableDomainHandlers());
     this.closed = new Promise((resolve, reject) => {
       this.#resolveClosed = resolve;
       this.#rejectClosed = reject;
     });
-    this.#server = createServer((socket) => this.#accept(socket));
+    this.#server = createServer({ allowHalfOpen: true }, (socket) => this.#accept(socket));
   }
 
   static async start(options: RuntimeHostKernelOptions): Promise<RuntimeHostKernel> {
@@ -123,6 +132,7 @@ export class RuntimeHostKernel {
         owner,
         idleGraceMs: options.idleGraceMs,
         handshakeTimeoutMs: options.handshakeTimeoutMs,
+        shutdownGraceMs: options.shutdownGraceMs,
         compositionFactory: options.compositionFactory,
       });
       await host.#start();
@@ -153,8 +163,11 @@ export class RuntimeHostKernel {
   }
 
   #requestDrain(): void {
-    this.#shutdownRequested = true;
-    this.#cancelIdle();
+    if (!this.#shutdownRequested) {
+      this.#shutdownRequested = true;
+      this.#cancelIdle();
+      this.#armShutdownDeadline();
+    }
     this.#commitRequestedShutdownIfQuiescent();
   }
 
@@ -193,61 +206,41 @@ export class RuntimeHostKernel {
 
   async #serveConnection(transport: FramedTransport): Promise<void> {
     let connectionAccepted = false;
+    let connectionReleased = false;
+    const releaseConnection = () => {
+      if (!connectionAccepted || connectionReleased) return;
+      connectionReleased = true;
+      this.#releaseConnection(transport);
+    };
     try {
       const frame = decodeClientFrame(await transport.read(this.#handshakeTimeoutMs));
       if (!('kind' in frame) || frame.kind !== 'hello') {
         throw new Error('First Runtime Host frame must be a hello');
       }
       const result = await this.#admitHandshake(frame, transport);
+      connectionAccepted = result.kind === 'accepted';
       await transport.write(result);
       if (result.kind !== 'accepted') {
         transport.destroyAfterFlush();
         return;
       }
-      connectionAccepted = true;
-      await this.#serveAcceptedConnection(transport, {
-        hostEpoch: this.hostEpoch,
-        connectionId: result.connectionId,
-        surface: frame.surface,
-        principal: 'local_os_user',
+      const session = new RuntimeHostConnectionSession({
+        transport,
+        connection: {
+          hostEpoch: this.hostEpoch,
+          connectionId: result.connectionId,
+          surface: frame.surface,
+          principal: 'local_os_user',
+        },
+        resolveHandlers: () => this.#operationHandlers,
+        beginOperation: (request) => this.#beginOperation(request),
+        onTeardown: releaseConnection,
       });
+      await session.run();
     } catch {
       transport.destroy();
     } finally {
-      if (connectionAccepted) this.#releaseConnection(transport);
-    }
-  }
-
-  async #serveAcceptedConnection(
-    transport: FramedTransport,
-    connection: AcceptedConnectionContext,
-  ): Promise<void> {
-    while (true) {
-      const frame = decodeClientFrame(await transport.read(0));
-      if ('kind' in frame) throw new Error('Unexpected handshake frame after acceptance');
-      const admission = await this.#beginOperation(frame);
-      if (typeof admission === 'string') {
-        await transport.write(
-          operationFailureResponse(
-            frame,
-            admission,
-            admission === 'host_draining'
-              ? 'Runtime Host is draining'
-              : 'Runtime Host is not ready',
-          ),
-        );
-        continue;
-      }
-      try {
-        const response = await dispatchOperation(frame, this.#operationHandlers, {
-          ...connection,
-          acquireResidency: () => admission.acquireResidency(),
-        });
-        admission.seal();
-        await transport.write(response);
-      } finally {
-        admission.finish();
-      }
+      releaseConnection();
     }
   }
 
@@ -255,10 +248,10 @@ export class RuntimeHostKernel {
     hello: ClientHello,
     transport: FramedTransport,
   ): Promise<HostHandshakeResult> {
-    if (!(await this.#hasLiveOwnerOrDrain()) || this.#state === 'draining') {
+    const admittedState = await this.#readAdmissionState();
+    if (!admittedState) {
       return { kind: 'draining', hostEpoch: this.hostEpoch };
     }
-    const admittedState = this.#state;
     const selectedProtocol = negotiateProtocol(
       { min: hello.protocolMin, max: hello.protocolMax },
       HOST_PROTOCOL,
@@ -292,11 +285,10 @@ export class RuntimeHostKernel {
     this.#settleLifecycleAfterWork();
   }
 
-  async #beginOperation(frame: RequestFrame): Promise<OperationLease | HostOperationErrorCode> {
-    if (!(await this.#hasLiveOwnerOrDrain()) || this.#state === 'draining') return 'host_draining';
-    if (this.#shutdownRequested && HOST_OPERATION_SPECS[frame.operation].mode === 'command') {
-      return 'host_draining';
-    }
+  async #beginOperation(
+    frame: RequestFrame,
+  ): Promise<ConnectionOperationLease | HostOperationErrorCode> {
+    if (!(await this.#readAdmissionState())) return 'host_draining';
     if (
       HOST_OPERATION_SPECS[frame.operation].admission !== 'bootstrap' &&
       this.#state !== 'ready'
@@ -344,6 +336,13 @@ export class RuntimeHostKernel {
       return false;
     }
     return !this.#isDraining();
+  }
+
+  async #readAdmissionState(): Promise<Exclude<HostLifecycleState, 'draining'> | undefined> {
+    if (this.#shutdownRequested || this.#isDraining()) return undefined;
+    if (!(await this.#hasLiveOwnerOrDrain())) return undefined;
+    const state = this.#state;
+    return this.#shutdownRequested || state === 'draining' ? undefined : state;
   }
 
   #isDraining(): boolean {
@@ -444,19 +443,53 @@ export class RuntimeHostKernel {
   }
 
   #commitShutdown(): Promise<void> {
+    if (this.#terminationRequired) return this.closed;
     if (!this.#shutdownTask) {
-      this.#shutdownRequested = true;
+      if (!this.#shutdownRequested) {
+        this.#shutdownRequested = true;
+        this.#armShutdownDeadline();
+      }
       this.#state = 'draining';
       this.#cancelIdle();
       this.#shutdownTask = this.#closeResources();
-      void this.#shutdownTask.then(this.#resolveClosed, this.#rejectClosed);
+      void this.#shutdownTask.then(
+        () => {
+          this.#clearShutdownDeadline();
+          if (!this.#terminationRequired) this.#resolveClosed();
+        },
+        (error: unknown) => {
+          this.#clearShutdownDeadline();
+          if (!this.#terminationRequired) this.#rejectClosed(error);
+        },
+      );
     }
     return this.closed;
+  }
+
+  #armShutdownDeadline(): void {
+    if (this.#shutdownDeadlineTimer || this.#terminationRequired) return;
+    this.#shutdownDeadlineTimer = setTimeout(() => {
+      this.#shutdownDeadlineTimer = undefined;
+      const error = new RuntimeHostProcessTerminationRequiredError(this.#shutdownGraceMs);
+      this.#terminationRequired = error;
+      this.#rejectClosed(error);
+    }, this.#shutdownGraceMs);
+  }
+
+  #clearShutdownDeadline(): void {
+    if (!this.#shutdownDeadlineTimer) return;
+    clearTimeout(this.#shutdownDeadlineTimer);
+    this.#shutdownDeadlineTimer = undefined;
+  }
+
+  #assertShutdownCanContinue(): void {
+    if (this.#terminationRequired) throw this.#terminationRequired;
   }
 
   async #closeResources(): Promise<void> {
     const errors: unknown[] = [];
     await this.#publishRegistration().catch((error: unknown) => errors.push(error));
+    this.#assertShutdownCanContinue();
     const serverClosed = closeServer(this.#server).catch((error: unknown) => errors.push(error));
     const accepted = [...this.#acceptedTransports];
     const handshaking = [...this.#handshakingTransports];
@@ -465,20 +498,28 @@ export class RuntimeHostKernel {
       waitForBoundedCompletion(operationDrain, SHUTDOWN_OPERATION_GRACE_MS),
       waitForTransportClose(handshaking, SHUTDOWN_HANDSHAKE_GRACE_MS),
     ]);
+    this.#assertShutdownCanContinue();
     if (!operationsDrained) {
       for (const transport of accepted) transport.destroy();
     }
     for (const transport of handshaking) transport.destroy();
     await operationDrain;
+    this.#assertShutdownCanContinue();
     await this.#composition?.close().catch((error: unknown) => errors.push(error));
+    this.#assertShutdownCanContinue();
     await this.#waitForResidencies();
+    this.#assertShutdownCanContinue();
     for (const transport of accepted) transport.destroy();
     await serverClosed;
+    this.#assertShutdownCanContinue();
     await this.#endpoint?.cleanup().catch((error: unknown) => errors.push(error));
+    this.#assertShutdownCanContinue();
     await removeHostRegistration(this.#options.owner.controlDirectory, this.hostEpoch).catch(
       (error: unknown) => errors.push(error),
     );
+    this.#assertShutdownCanContinue();
     await this.#options.owner.close().catch((error: unknown) => errors.push(error));
+    this.#assertShutdownCanContinue();
     if (errors.length > 0)
       throw new AggregateError(
         errors,

@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { tmpdir } from 'node:os';
+import { discoverMarkedStorageRoot } from '@maka/storage/root-authority';
 import {
   getE2eFixtureState,
   resolveE2eFixture,
@@ -318,6 +319,7 @@ describe('e2e-fixture mode', () => {
         credentialStore: fakeCredentialStore(),
         now: 1_700_000_000_000,
       });
+      assert.equal((await discoverMarkedStorageRoot({ path: workspaceRoot })).kind, 'interactive');
       assert.equal(getE2eFixtureState(fixture)?.activeSessionId, 'e2e-fixture-turn');
       const tasks = JSON.parse(await readFile(
         join(workspaceRoot, 'sessions', 'e2e-fixture-turn', 'tasks.json'),
@@ -676,6 +678,27 @@ describe('e2e-fixture mode', () => {
     assert.equal(getE2eFixtureState(dailyReview)?.sidebarSection, 'daily-review');
     assert.equal(getE2eFixtureState(dailyReview)?.sidebarCollapsed, false);
     assert.equal(getE2eFixtureState(dailyReview)?.activeSessionId, 'e2e-fixture-turn');
+  });
+
+  it('composer-skill-invocation opens a real chat draft and seeds invocable Skills', async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'maka-e2e-fixture-skill-composer-'));
+    try {
+      const fixture = resolveE2eFixture('composer-skill-invocation', false);
+      assert.ok(fixture);
+      const state = getE2eFixtureState(fixture);
+      assert.equal(state?.activeSessionId, 'e2e-fixture-turn');
+      assert.equal(state?.composerText, '请整理这次会议的行动项');
+      assert.deepEqual(state?.composerSkills, [{ id: 'meeting-followup', name: '会议跟进' }]);
+      await seedE2eFixture({
+        workspaceRoot,
+        fixture,
+        credentialStore: fakeCredentialStore(),
+        now: 1_700_000_000_000,
+      });
+      await readFile(join(workspaceRoot, 'skills', 'meeting-followup', 'SKILL.md'), 'utf8');
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
   });
 
   it('module-mcp seeds a couple of installed servers so the 已安装 list renders', async () => {

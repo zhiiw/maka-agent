@@ -6,8 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, test } from 'node:test';
+import { validateHarborCellOutput } from '../cell-output.js';
 import { mapLegacyMakaHeadlessArgs } from '../cli.js';
+import { openHeadlessStorageForWrite } from '../headless-storage.js';
 import { readResults } from '../results.js';
+import type { TaskEvent } from '../task-contracts.js';
+import { taskRunLocator } from '../task-run-identity.js';
 
 const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -100,6 +104,24 @@ describe('maka-headless CLI', () => {
   test('eval without a spec path exits non-zero', async () => {
     const result = await runCli(['eval']);
     assert.equal(result.code, 1);
+  });
+
+  test('task-run readers report an actionable error for a non-Headless root', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-headless-unmarked-'));
+    const exportRoot = join(root, 'export');
+    try {
+      for (const args of [
+        ['task', 'inspect', 'missing', '--store', root],
+        ['task', 'export', 'missing', '--store', root, '--out', exportRoot],
+      ]) {
+        const result = await runCli(args);
+        assert.equal(result.code, 1);
+        assert.match(result.stderr, /Pass the <out>\/runs directory created by a task run/);
+        assert.doesNotMatch(result.stderr, /StorageRootAuthorityError|\n\s+at /);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test('rejects an unknown flag', async () => {
@@ -226,11 +248,69 @@ describe('maka-headless CLI', () => {
     }
   });
 
+  test('harbor run cell forwards its soft timeout to execution', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'maka-headless-harbor-cli-'));
+    try {
+      const fixture = join(dir, 'fixture');
+      const outDir = join(dir, 'out');
+      const storageRoot = join(dir, 'storage');
+      await mkdir(fixture, { recursive: true });
+
+      const result = await runCli(
+        [
+          'harbor',
+          'run',
+          '--mode',
+          'cell',
+          '--backend',
+          'fake',
+          '--isolation',
+          'none',
+          '--instruction',
+          'keep working',
+          '--workdir',
+          fixture,
+          '--out',
+          outDir,
+          '--storage-root',
+          storageRoot,
+        ],
+        {
+          env: {
+            MAKA_MODEL: 'fake-model',
+            MAKA_CELL_SOFT_TIMEOUT_MS: '50',
+          },
+        },
+      );
+
+      assert.equal(result.code, 1, result.stderr);
+      const cell = validateHarborCellOutput(
+        JSON.parse(await readFile(join(outDir, 'maka-cell-output.json'), 'utf8')),
+      );
+      assert.deepEqual(cell.deadlineSettlement, {
+        source: 'benchmark.deadline',
+        mode: 'immediate',
+      });
+      assert.ok(cell.runtimeRefs);
+
+      const storage = await openHeadlessStorageForWrite(storageRoot);
+      const runs = await storage.executionStores.agentRunStore.listSessionRuns(
+        cell.runtimeRefs.sessionId,
+      );
+      assert.equal(runs.length, 1);
+      assert.equal(cell.runtimeRefs.runId, runs[0]?.runId);
+      assert.equal(cell.runtimeRefs.invocationId, runs[0]?.invocationId);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('harbor run task-run writes external Harbor verifier export without fake verifier authority', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'maka-headless-harbor-cli-'));
     try {
       const fixture = join(dir, 'fixture');
       const outDir = join(dir, 'out');
+      const cellArtifactDir = join(dir, 'cell-artifacts');
       await mkdir(fixture, { recursive: true });
       await writeFile(join(fixture, 'README.txt'), 'Harbor owns the task workspace.\n', 'utf8');
 
@@ -254,7 +334,15 @@ describe('maka-headless CLI', () => {
           outDir,
           '--include-events',
         ],
-        { env: { MAKA_ECONOMY_TASK_MODE: 'true' } },
+        {
+          env: {
+            MAKA_ECONOMY_TASK_MODE: 'true',
+            MAKA_CELL_ARTIFACT_DIR: cellArtifactDir,
+            MAKA_MODEL: 'fake-model',
+            MAKA_REASONING_EFFORT: 'xhigh',
+            MAKA_TRIAL_PRICING_SOURCE: 'test-account-plan',
+          },
+        },
       );
       assert.equal(result.code, 0, result.stderr);
       const summary = JSON.parse(result.stdout);
@@ -263,9 +351,26 @@ describe('maka-headless CLI', () => {
       assert.equal(summary.scored, false);
       assert.equal(summary.authoritative, false);
 
-      const taskRunJson = JSON.parse(
-        await readFile(join(outDir, 'exports', 'harbor-run-1', 'task-run.json'), 'utf8'),
+      const cell = validateHarborCellOutput(
+        JSON.parse(await readFile(join(cellArtifactDir, 'maka-cell-output.json'), 'utf8')),
       );
+      assert.equal(cell.status, 'completed');
+      assert.equal(cell.promptHash, cell.executionIdentity?.systemPromptHash);
+      assert.equal(cell.executionIdentity?.llmConnectionSlug, 'fake');
+      assert.equal(cell.executionIdentity?.model, 'fake-model');
+      assert.equal(cell.executionIdentity?.reasoningEffort, 'xhigh');
+      assert.equal(cell.executionIdentity?.pricingProfile, 'test-account-plan');
+      assert.equal(cell.toolSummary.actualToolCalls, 0);
+      assert.equal(cell.steps, 1);
+      assert.equal(cell.runtimeEventsPath, join(cellArtifactDir, 'runtime-events.jsonl'));
+      assert.match(await readFile(cell.runtimeEventsPath, 'utf8'), /"role":"system"/);
+      const durableIdentity = JSON.parse(
+        await readFile(join(cellArtifactDir, 'maka-cell-execution-identity.json'), 'utf8'),
+      );
+      assert.deepEqual(durableIdentity, cell.executionIdentity);
+
+      const harborExport = join(outDir, 'exports', taskRunLocator('harbor-run-1'));
+      const taskRunJson = JSON.parse(await readFile(join(harborExport, 'task-run.json'), 'utf8'));
       assert.equal(taskRunJson.policy.economyTask.enabled, true);
       assert.equal(taskRunJson.policy.economyTask.triggerSource, 'config');
       assert.equal(taskRunJson.verifier.kind, 'terminal_bench');
@@ -274,20 +379,74 @@ describe('maka-headless CLI', () => {
       assert.equal(taskRunJson.verifier.benchmark.pendingExternalHarborVerifier, true);
       assert.equal(taskRunJson.verifier.authority.authoritative, false);
       assert.equal(taskRunJson.verifier.authority.label, 'external Harbor verifier pending');
-      const events = await readFile(
-        join(outDir, 'exports', 'harbor-run-1', 'events.jsonl'),
-        'utf8',
-      );
+      const events = await readFile(join(harborExport, 'events.jsonl'), 'utf8');
       assert.doesNotMatch(events, /"testCommand":"false"/);
       assert.doesNotMatch(events, /"placeholder":true/);
       assert.doesNotMatch(events, /verificationPlaceholder/);
       assert.doesNotMatch(events, /unsupported local benchmark placeholder/);
-      const resultJson = await readFile(
-        join(outDir, 'exports', 'harbor-run-1', 'result.json'),
-        'utf8',
-      );
+      const resultJson = await readFile(join(harborExport, 'result.json'), 'utf8');
       assert.doesNotMatch(resultJson, /verificationPlaceholder/);
       assert.doesNotMatch(resultJson, /unsupported local benchmark placeholder/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('harbor run task-run cell evidence covers every heavy-task invocation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'maka-headless-harbor-heavy-'));
+    try {
+      const fixture = join(dir, 'fixture');
+      const outDir = join(dir, 'out');
+      const cellArtifactDir = join(dir, 'cell-artifacts');
+      await mkdir(fixture, { recursive: true });
+      await writeFile(join(fixture, 'README.txt'), 'Harbor owns the task workspace.\n', 'utf8');
+
+      const result = await runCli(
+        [
+          'harbor',
+          'run',
+          '--backend',
+          'fake',
+          '--isolation',
+          'none',
+          '--instruction',
+          'solve it',
+          '--workdir',
+          fixture,
+          '--task-id',
+          'tb-heavy-trajectory',
+          '--task-run-id',
+          'harbor-heavy-trajectory',
+          '--out',
+          outDir,
+          '--heavy-task',
+        ],
+        { env: { MAKA_CELL_ARTIFACT_DIR: cellArtifactDir, MAKA_MODEL: 'fake-model' } },
+      );
+      assert.equal(result.code, 0, result.stderr);
+
+      const cell = validateHarborCellOutput(
+        JSON.parse(await readFile(join(cellArtifactDir, 'maka-cell-output.json'), 'utf8')),
+      );
+      const runtimeEvents = (await readFile(cell.runtimeEventsPath, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const completedModelSteps = runtimeEvents.filter(
+        (event) => event.role === 'model' && event.partial !== true,
+      );
+
+      assert.equal(cell.steps, 2);
+      assert.equal(completedModelSteps.length, 2);
+      const traceEvents = (await readFile(join(cellArtifactDir, 'trace-events.jsonl'), 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      assert.equal(
+        new Set(traceEvents.map((event) => event.runId).filter(Boolean)).size,
+        2,
+        'combined trace must retain both heavy-task runs',
+      );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -325,7 +484,7 @@ describe('maka-headless CLI', () => {
 
       const taskRunJson = JSON.parse(
         await readFile(
-          join(outDir, 'exports', 'harbor-run-custom-dataset', 'task-run.json'),
+          join(outDir, 'exports', taskRunLocator('harbor-run-custom-dataset'), 'task-run.json'),
           'utf8',
         ),
       );
@@ -369,7 +528,10 @@ describe('maka-headless CLI', () => {
       assert.equal(result.code, 0, result.stderr);
 
       const taskRunJson = JSON.parse(
-        await readFile(join(outDir, 'exports', 'harbor-remote-run-1', 'task-run.json'), 'utf8'),
+        await readFile(
+          join(outDir, 'exports', taskRunLocator('harbor-remote-run-1'), 'task-run.json'),
+          'utf8',
+        ),
       );
       assert.match(taskRunJson.workspace.lease.sourceWorkspaceDir, /host-workspace-source$/);
       assert.notEqual(taskRunJson.workspace.lease.sourceWorkspaceDir, '/app');
@@ -433,7 +595,7 @@ describe('maka-headless CLI', () => {
     }
   });
 
-  test('task run, inspect, and export operate on task-run store projections', async () => {
+  test('task run, inspect, and exports tolerate unavailable optional Session evidence', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'maka-headless-task-cli-'));
     try {
       await mkdir(join(dir, 'fixture'), { recursive: true });
@@ -526,6 +688,10 @@ describe('maka-headless CLI', () => {
         /verifier_result_recorded/,
       );
 
+      const sessionId = inspectDocument.attempts[0]?.agentRuns[0]?.identity?.sessionId;
+      assert.equal(typeof sessionId, 'string');
+      await rm(join(outDir, 'runs', 'sessions', sessionId, 'session.jsonl'), { force: true });
+
       const aheExportDir = join(dir, 'ahe-export');
       const aheExported = await runCli([
         'ahe',
@@ -549,12 +715,13 @@ describe('maka-headless CLI', () => {
       assert.equal(aheResults.results[0].taskRunId, 'task-run-1');
       assert.match(aheResults.results[0].executionLineageRef.digest, /^sha256:/);
       const aheTraceIndex = await readFile(join(aheExportDir, 'trace-index.json'), 'utf8');
-      assert.match(aheTraceIndex, /traces\/task-run-1\/result.md/);
+      const traceLocator = taskRunLocator('task-run-1');
+      assert.match(aheTraceIndex, new RegExp(`traces/${traceLocator}/result\\.md`));
       assert.match(aheTraceIndex, /task-events.jsonl/);
       assert.doesNotMatch(aheTraceIndex, /"runtimeEventsJsonl"/);
       const aheLineage = JSON.parse(
         await readFile(
-          join(aheExportDir, 'traces', 'task-run-1', 'execution-lineage.json'),
+          join(aheExportDir, 'traces', traceLocator, 'execution-lineage.json'),
           'utf8',
         ),
       );
@@ -582,6 +749,79 @@ describe('maka-headless CLI', () => {
         ),
         /"runId"/,
       );
+      const aheMessages = JSON.parse(
+        await readFile(join(aheExportDir, 'traces', traceLocator, 'messages.json'), 'utf8'),
+      );
+      assert.deepEqual(
+        aheMessages.messages.map((message: { role: string }) => message.role),
+        ['system', 'user', 'assistant'],
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('preserves a long TaskRun identity across run, inspect, result, and export', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'maka-headless-long-task-run-'));
+    try {
+      await mkdir(join(dir, 'fixture'), { recursive: true });
+      await writeFile(join(dir, 'fixture', 'marker.txt'), 'ok', 'utf8');
+      const spec = {
+        configs: [
+          { id: 'fake-cfg', backend: 'fake', llmConnectionSlug: 'fake', model: 'fake-model' },
+        ],
+        tasks: [
+          {
+            id: 'long-id-task',
+            instruction: 'complete the task',
+            workspaceDir: 'fixture',
+            verification: { command: 'test -f marker.txt', protectedPaths: [] },
+          },
+        ],
+      };
+      const specPath = join(dir, 'spec.json');
+      const outDir = join(dir, 'out');
+      const taskRunId = `long-task-run-${'x'.repeat(320)}`;
+      await writeFile(specPath, JSON.stringify(spec), 'utf8');
+
+      const run = await runCli([
+        'task',
+        'run',
+        specPath,
+        '--task',
+        'long-id-task',
+        '--config',
+        'fake-cfg',
+        '--task-run-id',
+        taskRunId,
+        '--out',
+        outDir,
+        '--include-events',
+      ]);
+      assert.equal(run.code, 0, run.stderr);
+
+      const inspect = await runCli([
+        'task',
+        'inspect',
+        taskRunId,
+        '--store',
+        join(outDir, 'runs'),
+        '--json',
+      ]);
+      assert.equal(inspect.code, 0, inspect.stderr);
+      const inspectDocument = JSON.parse(inspect.stdout);
+      assert.equal(inspectDocument.taskRun.taskRunId, taskRunId);
+      assert.equal(inspectDocument.taskRun.result.taxonomy, 'passed');
+
+      const records = await readResults(join(outDir, 'results.jsonl'));
+      assert.equal(records.length, 1);
+      assert.equal(records[0]?.passed, true);
+
+      const exportRoot = join(outDir, 'exports', taskRunLocator(taskRunId));
+      const exported = JSON.parse(await readFile(join(exportRoot, 'task-run.json'), 'utf8'));
+      assert.equal(exported.taskRun.taskRunId, taskRunId);
+      assert.equal(exported.taskRun.result.taxonomy, 'passed');
+      assert.match(await readFile(join(exportRoot, 'events.jsonl'), 'utf8'), /task_run_completed/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -610,68 +850,64 @@ describe('maka-headless CLI', () => {
       const taskRunId = 'parked-run';
       const firstAttemptId = `${taskRunId}-attempt-1`;
       await writeFile(specPath, JSON.stringify(spec), 'utf8');
-      await mkdir(join(outDir, 'runs', 'task-runs'), { recursive: true });
-      await writeFile(
-        join(outDir, 'runs', 'task-runs', `${taskRunId}.jsonl`),
-        [
-          JSON.stringify({
-            type: 'task_run_created',
-            id: 'e1',
-            taskRunId,
-            ts: 1,
-            taskId: 'approval-task',
-            configId: 'fake-cfg',
-          }),
-          JSON.stringify({
-            type: 'task_run_started',
-            id: 'e2',
-            taskRunId,
-            ts: 2,
-            startedAt: 2,
-            sessionId: 'session-1',
-            agentRunId: 'agent-1',
-          }),
-          JSON.stringify({
-            type: 'task_attempt_started',
-            id: 'e3',
-            taskRunId,
-            ts: 2,
-            attemptId: firstAttemptId,
-            startedAt: 2,
-            sessionId: 'session-1',
-            agentRunId: 'agent-1',
-          }),
-          JSON.stringify({
-            type: 'task_inbox_item_recorded',
-            id: 'e4',
-            taskRunId,
-            ts: 3,
-            item: {
-              schemaVersion: 1,
-              inboxItemId: 'inbox-1',
-              taskRunId,
-              attemptId: firstAttemptId,
-              kind: 'approval_request',
-              status: 'open',
-              title: 'Approval required',
-              reason: 'Bash requires approval',
-              createdAt: 3,
-              relatedRequestId: 'request-1',
-            },
-          }),
-          JSON.stringify({
-            type: 'task_run_needs_approval',
-            id: 'e5',
-            taskRunId,
-            ts: 3,
-            attemptId: firstAttemptId,
-            reason: 'approval',
+      const initialEvents = [
+        JSON.stringify({
+          type: 'task_run_created',
+          id: 'e1',
+          taskRunId,
+          ts: 1,
+          taskId: 'approval-task',
+          configId: 'fake-cfg',
+        }),
+        JSON.stringify({
+          type: 'task_run_started',
+          id: 'e2',
+          taskRunId,
+          ts: 2,
+          startedAt: 2,
+          sessionId: 'session-1',
+          agentRunId: 'agent-1',
+        }),
+        JSON.stringify({
+          type: 'task_attempt_started',
+          id: 'e3',
+          taskRunId,
+          ts: 2,
+          attemptId: firstAttemptId,
+          startedAt: 2,
+          sessionId: 'session-1',
+          agentRunId: 'agent-1',
+        }),
+        JSON.stringify({
+          type: 'task_inbox_item_recorded',
+          id: 'e4',
+          taskRunId,
+          ts: 3,
+          item: {
+            schemaVersion: 1,
             inboxItemId: 'inbox-1',
-          }),
-          '',
-        ].join('\n'),
-        'utf8',
-      );
+            taskRunId,
+            attemptId: firstAttemptId,
+            kind: 'approval_request',
+            status: 'open',
+            title: 'Approval required',
+            reason: 'Bash requires approval',
+            createdAt: 3,
+            relatedRequestId: 'request-1',
+          },
+        }),
+        JSON.stringify({
+          type: 'task_run_needs_approval',
+          id: 'e5',
+          taskRunId,
+          ts: 3,
+          attemptId: firstAttemptId,
+          reason: 'approval',
+          inboxItemId: 'inbox-1',
+        }),
+      ].map((line) => JSON.parse(line) as TaskEvent);
+      const { taskRunStore } = await openHeadlessStorageForWrite(join(outDir, 'runs'));
+      for (const event of initialEvents) await taskRunStore.appendEvent(taskRunId, event);
 
       const resumed = await runCli([
         'task',
@@ -703,7 +939,7 @@ describe('maka-headless CLI', () => {
       assert.equal(projected.taskRun.parked, undefined);
 
       const exported = JSON.parse(
-        await readFile(join(outDir, 'exports', taskRunId, 'task-run.json'), 'utf8'),
+        await readFile(join(outDir, 'exports', taskRunLocator(taskRunId), 'task-run.json'), 'utf8'),
       );
       assert.equal(exported.taskRun.status, 'completed');
       assert.equal(exported.inbox.items[0].status, 'resolved');
