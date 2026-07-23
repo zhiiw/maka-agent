@@ -369,6 +369,14 @@ export interface RuntimeContinuationPlannerDeps {
   newId(): string;
 }
 
+class ImmutableRuntimeLedgerReadError extends Error {
+  constructor(cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`immutable RuntimeEvent ledger read failed: ${detail}`, { cause });
+    this.name = 'ImmutableRuntimeLedgerReadError';
+  }
+}
+
 export class RuntimeContinuationPlanner {
   constructor(private readonly deps: RuntimeContinuationPlannerDeps) {}
 
@@ -435,7 +443,13 @@ export class RuntimeContinuationPlanner {
         const verification = await verifyRuntimeBoundaryCursor({
           sessionId: input.sessionId,
           cursor: input.workspaceCheckpoint.fact.coveredBoundary,
-          readImmutableRuntimeEvents: this.deps.readImmutableRuntimeEvents,
+          readImmutableRuntimeEvents: async (sessionId, runId) => {
+            try {
+              return await this.deps.readImmutableRuntimeEvents!(sessionId, runId);
+            } catch (error) {
+              throw new ImmutableRuntimeLedgerReadError(error);
+            }
+          },
         });
         if (!verification.valid) {
           return parkedPlan(
@@ -447,7 +461,8 @@ export class RuntimeContinuationPlanner {
             },
           );
         }
-      } catch {
+      } catch (error) {
+        if (!(error instanceof ImmutableRuntimeLedgerReadError)) throw error;
         return parkedPlan(
           'runtime_ledger_unreadable',
           'immutable RuntimeEvent ledger could not be read for workspace checkpoint verification',

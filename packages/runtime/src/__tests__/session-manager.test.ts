@@ -65,6 +65,11 @@ import {
 import { AGENT_TEAM_CHILD_TOOL_NAMES } from '../agent-team-tool-names.js';
 import { createSqliteRuntimeStore } from '@maka/storage';
 import { ToolRecoveryContractRegistry } from '../tool-recovery-contract.js';
+import {
+  buildRuntimeBoundaryCursor,
+  buildRuntimePrefixSegment,
+  type WorkspaceCheckpointFact,
+} from '../workspace-checkpoint.js';
 
 describe('SessionManager automatic titles', () => {
   test('starts after user persistence and does not block the turn', async () => {
@@ -992,6 +997,141 @@ describe('SessionManager permission mode updates', () => {
       backgroundOperationsSettled: true,
       availableToolNames: [],
     });
+  });
+
+  test('wires immutable RuntimeEvent reads from the host into checkpoint planning', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const workspace = {
+      workspaceInstanceIdentity: 'workspace-authoritative',
+      canonicalRoot: '/workspace',
+    };
+    let workspaceCheckpoint:
+      | {
+          fact: WorkspaceCheckpointFact;
+          validation: {
+            disposition: 'current_matches';
+            checkpointId: string;
+            observedArtifactDigest: string;
+          };
+        }
+      | undefined;
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends: new BackendRegistry(),
+      safeBoundaryResumeEnabled: true,
+      inspectContinuationSafety: async () => ({
+        workspaceIdentity: 'workspace-authoritative',
+        backgroundOperationsSettled: true,
+        availableToolNames: [],
+        workspaceCheckpoint,
+      }),
+      newId: nextId(),
+      now: nextNow(6_532),
+      runtimeSource: 'test',
+    });
+    const session = await manager.createSession(makeInput());
+    const header = await store.readHeader(session.id);
+    const sourceRunId = 'source-run-checkpoint-wiring';
+    const sourceTurnId = 'source-turn-checkpoint-wiring';
+    const sourceInvocationId = 'source-invocation-checkpoint-wiring';
+    const events = [
+      runtimeEvent({
+        id: 'source-user-checkpoint-wiring',
+        invocationId: sourceInvocationId,
+        runId: sourceRunId,
+        sessionId: session.id,
+        turnId: sourceTurnId,
+        ts: 1,
+        role: 'user',
+        author: 'user',
+        content: { kind: 'text', text: 'continue from checkpoint' },
+      }),
+      runtimeEvent({
+        id: 'source-terminal-checkpoint-wiring',
+        invocationId: sourceInvocationId,
+        runId: sourceRunId,
+        sessionId: session.id,
+        turnId: sourceTurnId,
+        ts: 2,
+        status: 'failed',
+        actions: { endInvocation: true, stateDelta: { failureClass: 'app_restarted' } },
+      }),
+    ];
+    await seedRuntimeRun(
+      runStore,
+      makeRunHeader({
+        runId: sourceRunId,
+        sessionId: session.id,
+        turnId: sourceTurnId,
+        status: 'failed',
+        cwd: header.cwd,
+        workspaceIdentity: 'workspace-authoritative',
+        createdAt: 1,
+        updatedAt: 2,
+        completedAt: 2,
+        failureClass: 'app_restarted',
+      }),
+      events,
+    );
+    const coveredBoundary = buildRuntimeBoundaryCursor([
+      buildRuntimePrefixSegment({
+        events,
+        highWater: events.length,
+        workspaceEpochId: 'epoch-1',
+        workspace,
+      }),
+    ]);
+    const fact: WorkspaceCheckpointFact = {
+      protocol: 'workspace_checkpoint_v1',
+      checkpointId: 'checkpoint-host-wiring',
+      kind: 'captured',
+      coveredBoundary,
+      workspaceEpochId: 'epoch-1',
+      workspace,
+      coverage: 'full_policy_scope',
+      capabilities: {
+        coverage: 'full_policy_scope',
+        contentRetention: 'full_snapshot',
+        validation: 'manifest_hash',
+        restore: 'isolated_directory',
+        repositoryAware: true,
+        executableMode: true,
+        symlinks: true,
+        submodules: false,
+      },
+      providerId: 'git-repository',
+      artifact: {
+        kind: 'git_repository_v1',
+        repositoryIdentity: 'repository-1',
+        objectFormat: 'sha1',
+        commitOid: '1'.repeat(40),
+        treeOid: '2'.repeat(40),
+        retentionRef: 'refs/maka/checkpoints/checkpoint-host-wiring',
+      },
+      policy: { version: 1, hash: 'sha256:policy' },
+      capturedAt: '2026-07-23T00:00:00.000Z',
+    };
+    workspaceCheckpoint = {
+      fact,
+      validation: {
+        disposition: 'current_matches',
+        checkpointId: fact.checkpointId,
+        observedArtifactDigest: 'sha256:observed',
+      },
+    };
+
+    const plan = await manager.planAuthoritativeSafeBoundaryContinuation(session.id, {
+      sourceRunId,
+    });
+
+    expect(plan.disposition).toBe('continue');
+    expect(runStore.readImmutableRuntimeEventsCalls).toBe(1);
+    expect(plan.continuation?.safetySnapshot.workspaceCheckpoint?.checkpointId).toBe(
+      fact.checkpointId,
+    );
   });
 
   test('reconciles an interrupted Write before authoritative planning and replans from durable facts', async () => {
@@ -13547,6 +13687,7 @@ class MemorySessionStore implements SessionStore {
 class MemoryAgentRunStore implements AgentRunStore, RuntimeEventStore {
   listSessionRunsCalls = 0;
   readEventsCalls = 0;
+  readImmutableRuntimeEventsCalls = 0;
   private headers = new Map<string, AgentRunHeader>();
   private events = new Map<string, AgentRunEvent[]>();
   private runtimeEvents = new Map<string, RuntimeEvent[]>();
@@ -13664,6 +13805,7 @@ class MemoryAgentRunStore implements AgentRunStore, RuntimeEventStore {
   }
 
   async readImmutableRuntimeEvents(sessionId: string, runId: string): Promise<RuntimeEvent[]> {
+    this.readImmutableRuntimeEventsCalls += 1;
     if (this.options.failRuntimeEventReads) throw new Error('runtime event read failed');
     return (this.runtimeEvents.get(key(sessionId, runId)) ?? [])
       .filter((event) => event.partial !== true)
