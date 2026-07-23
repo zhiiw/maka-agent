@@ -36,11 +36,7 @@ import type { SessionHeader } from '@maka/core/session';
 import type { ToolInvocationRecord } from '@maka/core/usage-stats/types';
 import type { EffectiveOrchestration } from '@maka/core/orchestration';
 import { redactSecrets } from '@maka/core/redaction';
-import {
-  TOOL_BOUNDARY_PROTOCOL_V1,
-  type RuntimeEvent,
-  type RuntimeFactEnvelope,
-} from '@maka/core';
+import { TOOL_BOUNDARY_PROTOCOL_V1, type RuntimeEvent, type RuntimeFactEnvelope } from '@maka/core';
 
 import type { PermissionEngine } from './permission-engine.js';
 import type { AsyncEventQueue } from './async-queue.js';

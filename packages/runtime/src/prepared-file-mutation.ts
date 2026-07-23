@@ -1,8 +1,6 @@
 import type { PreparedFileMutationFact } from './tool-recovery-facts.js';
 
-export type CurrentFileCheckpointState =
-  | { kind: 'missing' }
-  | { kind: 'file'; sha256: string };
+export type CurrentFileCheckpointState = { kind: 'missing' } | { kind: 'file'; sha256: string };
 
 export type PreparedFileMutationDisposition =
   | { disposition: 'finalize'; reasonCode: 'prepared_after_matches' }
