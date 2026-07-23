@@ -148,12 +148,18 @@ export {
   resourceScopeEquals,
   type NormalizedPermissionArgs,
 } from './permission-grants.js';
-export type { TaskEventLedgerEntry, TaskRunProjection, TaskRunStore } from './task-run-store.js';
-export {
-  createInMemoryTaskRunStore,
-  createTaskRunStore,
-  projectTaskRun,
+export type { TaskRunProjection } from './task-run-projection.js';
+export { projectTaskRun } from './task-run-projection.js';
+export type {
+  TaskEventLedgerEntry,
+  TaskRunReader,
+  TaskRunWriter,
 } from './task-run-store.js';
+export { createInMemoryTaskRunStore } from './task-run-store.js';
+export {
+  openHeadlessStorageForRead,
+  type HeadlessStorageReader,
+} from './headless-storage.js';
 export {
   TASK_RUN_INSPECT_SCHEMA_VERSION,
   inspectTaskRun,
@@ -238,6 +244,18 @@ export {
   type ExternalHarborBenchmarkFailureInput,
   type ExternalHarborBenchmarkFailureKind,
 } from './harbor-failure-policy.js';
+export {
+  buildPierRunArgs,
+  createPierTaskRunner,
+  PierInfraError,
+  PIER_PROVIDER_PROXY_DEFAULT_PORT,
+  type BuildPierRunArgsInput,
+  type PierProcessRunner,
+  type PierRunRequest,
+  type PierRunResult,
+  type PierTaskPricing,
+  type PierTaskRunnerOptions,
+} from './pier-task-runner.js';
 export type {
   BuildMakaAheTargetSnapshotOptions,
   MakaAheRunEvidence,

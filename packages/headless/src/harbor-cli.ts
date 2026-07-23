@@ -6,25 +6,39 @@ import { dirname, join, resolve } from 'node:path';
 import type { BackendKind, ProviderType } from '@maka/core';
 import { PROVIDER_DEFAULTS, normalizeProviderType } from '@maka/core';
 import type { Config, Task } from './contracts.js';
-import { runAutonomousTask } from './autonomous-agent-loop.js';
+import {
+  type HarborCellExecutionIdentity,
+  combineInvocations,
+  validateHarborCellExecutionIdentity,
+} from './cell-output.js';
+import { runAutonomousTaskWithStorage } from './autonomous-agent-loop.js';
 import type { BenchmarkAdapterRegistry } from './benchmark-adapters.js';
+import { resolveEconomyTaskMode } from './economy-task-policy.js';
 import {
   buildHarborAiSdkBackendRegistration,
   buildHarborCellContextBudgetPolicySnapshot,
   createHarborCellLocalToolExecutor,
   createHarborHttpToolExecutor,
-  runHarborCell,
+  harborCellSoftTimeoutMsFromEnv,
+  reasoningEffortFromEnv,
+  runHarborCellWithStorage,
+  writeHarborCellArtifacts,
+  writeHarborCellExecutionIdentity,
+  writeHarborTaskRunTrace,
   type RunHarborCellEnv,
   type RunHarborCellInput,
 } from './harbor-cell.js';
 import { classifyExternalHarborBenchmarkFailure } from './harbor-failure-policy.js';
+import { resolveHeavyTaskMode } from './heavy-task-policy.js';
+import { openHeadlessStorageForWrite, type HeadlessStorageWriter } from './headless-storage.js';
 import type { RealBackendIsolation } from './isolation.js';
 import { writeTaskRunExport } from './result-export.js';
 import { backendNeedsIsolation } from './runner.js';
-import { runTaskOnce } from './task-agent-controller.js';
+import { runTaskOnceWithStorage } from './task-agent-controller.js';
 import { taxonomyFromResultRecord } from './task-contracts.js';
-import { createTaskRunStore } from './task-run-store.js';
+import { taskRunLocator } from './task-run-identity.js';
 import { requireProviderCredentialEnv } from './provider-env.js';
+import { resolveHeadlessSystemPrompt } from './system-prompts.js';
 
 type HarborMode = 'cell' | 'task-run';
 type HarborIsolationMode = 'none' | 'harbor-local' | 'harbor-http';
@@ -45,6 +59,7 @@ interface HarborRunOptions {
   workdir: string;
   sourceWorkspaceDir: string;
   outDir: string;
+  cellArtifactDir: string;
   storageRoot: string;
   taskId: string;
   taskRunId: string;
@@ -56,6 +71,7 @@ interface HarborRunOptions {
   maxAttempts: number;
   maxRuntimeSteps?: number;
   maxWallTimeMs?: number;
+  softTimeoutMs?: number;
   replayPriorAttemptRuntimeContext: boolean;
   now: () => number;
   newId: () => string;
@@ -115,27 +131,37 @@ async function harborRunCommand(args: string[]): Promise<number> {
   }
 
   try {
-    if (options.mode === 'cell') return await runHarborCellMode(options);
-    return await runHarborTaskRunMode(options);
+    const storage = await openHeadlessStorageForWrite(options.storageRoot);
+    if (options.mode === 'cell') return await runHarborCellMode(options, storage);
+    return await runHarborTaskRunMode(options, storage);
   } catch (error) {
     console.error(`maka eval harbor run: ${(error as Error).message}`);
     return 1;
   }
 }
 
-async function runHarborCellMode(options: HarborRunOptions): Promise<number> {
-  const result = await runHarborCell({
-    config: options.config,
-    instruction: options.instruction,
-    cwd: options.workdir,
-    outputDir: options.outDir,
-    storageRoot: options.storageRoot,
-    ...(options.contextBudgetPolicy ? { contextBudgetPolicy: options.contextBudgetPolicy } : {}),
-    ...(options.registerBackends ? { registerBackends: options.registerBackends } : {}),
-    ...(options.realBackendIsolation ? { realBackendIsolation: options.realBackendIsolation } : {}),
-    now: options.now,
-    newId: options.newId,
-  });
+async function runHarborCellMode(
+  options: HarborRunOptions,
+  storage: HeadlessStorageWriter,
+): Promise<number> {
+  const result = await runHarborCellWithStorage(
+    {
+      config: options.config,
+      instruction: options.instruction,
+      cwd: options.workdir,
+      outputDir: options.outDir,
+      storageRoot: options.storageRoot,
+      ...(options.contextBudgetPolicy ? { contextBudgetPolicy: options.contextBudgetPolicy } : {}),
+      ...(options.softTimeoutMs !== undefined ? { settleAfterMs: options.softTimeoutMs } : {}),
+      ...(options.registerBackends ? { registerBackends: options.registerBackends } : {}),
+      ...(options.realBackendIsolation
+        ? { realBackendIsolation: options.realBackendIsolation }
+        : {}),
+      now: options.now,
+      newId: options.newId,
+    },
+    storage,
+  );
   process.stdout.write(
     `${JSON.stringify({
       mode: 'cell',
@@ -148,79 +174,134 @@ async function runHarborCellMode(options: HarborRunOptions): Promise<number> {
   return result.output.status === 'completed' ? 0 : 1;
 }
 
-async function runHarborTaskRunMode(options: HarborRunOptions): Promise<number> {
-  await mkdir(options.outDir, { recursive: true });
+async function runHarborTaskRunMode(
+  options: HarborRunOptions,
+  storage: HeadlessStorageWriter,
+): Promise<number> {
+  await Promise.all([
+    mkdir(options.outDir, { recursive: true }),
+    mkdir(options.cellArtifactDir, { recursive: true }),
+  ]);
   if (options.sourceWorkspaceDir !== options.workdir) {
     await mkdir(options.sourceWorkspaceDir, { recursive: true });
   }
-  const store = createTaskRunStore(options.storageRoot);
   const task = buildHarborTask(options);
+  const executionIdentity = await writeTaskRunExecutionIdentity(options, task);
   const common = {
     storageRoot: options.storageRoot,
-    taskRunStore: store,
     taskRunId: options.taskRunId,
     benchmarkAdapters: externalHarborBenchmarkAdapters(),
     ...(options.registerBackends ? { registerBackends: options.registerBackends } : {}),
     ...(options.realBackendIsolation ? { realBackendIsolation: options.realBackendIsolation } : {}),
     now: options.now,
     newId: options.newId,
+    ...(options.softTimeoutMs !== undefined
+      ? { deadlineAtMs: options.now() + options.softTimeoutMs }
+      : {}),
   };
   const run = options.autonomous
-    ? await runAutonomousTask(options.config, task, {
-        ...common,
-        budget: {
-          maxAttempts: options.maxAttempts,
-          ...(options.maxRuntimeSteps !== undefined
-            ? { maxRuntimeSteps: options.maxRuntimeSteps }
+    ? await runAutonomousTaskWithStorage(
+        options.config,
+        task,
+        {
+          ...common,
+          budget: {
+            maxAttempts: options.maxAttempts,
+            ...(options.maxRuntimeSteps !== undefined
+              ? { maxRuntimeSteps: options.maxRuntimeSteps }
+              : {}),
+            ...(options.maxWallTimeMs !== undefined
+              ? { maxWallTimeMs: options.maxWallTimeMs }
+              : {}),
+          },
+          ...(options.replayPriorAttemptRuntimeContext
+            ? { replayPriorAttemptRuntimeContext: true }
             : {}),
-          ...(options.maxWallTimeMs !== undefined ? { maxWallTimeMs: options.maxWallTimeMs } : {}),
+          decision: ({ attempt, budget }) => {
+            const taxonomy =
+              attempt.projection.latestScoreResult?.taxonomy ??
+              attempt.projection.result?.taxonomy ??
+              taxonomyFromResultRecord(attempt.resultRecord);
+            if (taxonomy === 'unsupported_adapter') {
+              return {
+                decision: 'stop',
+                reason: 'official Harbor verifier is external and pending',
+              };
+            }
+            if (['policy_denied', 'blocked', 'setup_failed', 'infra_failed'].includes(taxonomy)) {
+              return { decision: 'stop', reason: `${taxonomy} is not retryable` };
+            }
+            if (attempt.resultRecord.passed)
+              return { decision: 'stop', reason: 'authoritative verification passed' };
+            if (budget.attemptsUsed >= budget.maxAttempts)
+              return { decision: 'stop', reason: 'max attempts exhausted' };
+            if (
+              budget.maxRuntimeSteps !== undefined &&
+              budget.runtimeStepsUsed >= budget.maxRuntimeSteps
+            ) {
+              return { decision: 'stop', reason: 'runtime step cap reached' };
+            }
+            if (budget.maxWallTimeMs !== undefined && budget.elapsedMs >= budget.maxWallTimeMs) {
+              return { decision: 'stop', reason: 'wall time cap reached' };
+            }
+            return {
+              decision: 'continue',
+              reason: `${taxonomy} can be retried while budget remains`,
+            };
+          },
         },
-        ...(options.replayPriorAttemptRuntimeContext
-          ? { replayPriorAttemptRuntimeContext: true }
-          : {}),
-        decision: ({ attempt, budget }) => {
-          const taxonomy =
-            attempt.projection.latestScoreResult?.taxonomy ??
-            attempt.projection.result?.taxonomy ??
-            taxonomyFromResultRecord(attempt.resultRecord);
-          if (taxonomy === 'unsupported_adapter') {
-            return { decision: 'stop', reason: 'official Harbor verifier is external and pending' };
-          }
-          if (['policy_denied', 'blocked', 'setup_failed', 'infra_failed'].includes(taxonomy)) {
-            return { decision: 'stop', reason: `${taxonomy} is not retryable` };
-          }
-          if (attempt.resultRecord.passed)
-            return { decision: 'stop', reason: 'authoritative verification passed' };
-          if (budget.attemptsUsed >= budget.maxAttempts)
-            return { decision: 'stop', reason: 'max attempts exhausted' };
-          if (
-            budget.maxRuntimeSteps !== undefined &&
-            budget.runtimeStepsUsed >= budget.maxRuntimeSteps
-          ) {
-            return { decision: 'stop', reason: 'runtime step cap reached' };
-          }
-          if (budget.maxWallTimeMs !== undefined && budget.elapsedMs >= budget.maxWallTimeMs) {
-            return { decision: 'stop', reason: 'wall time cap reached' };
-          }
-          return {
-            decision: 'continue',
-            reason: `${taxonomy} can be retried while budget remains`,
-          };
-        },
-      })
-    : await runTaskOnce(options.config, task, common);
+        storage,
+      )
+    : await runTaskOnceWithStorage(options.config, task, common, storage);
 
-  const exportDir = join(options.outDir, 'exports', run.taskRunId);
+  const exportDir = join(options.outDir, 'exports', taskRunLocator(run.taskRunId));
   const exported = await writeTaskRunExport(exportDir, run.projection, {
     includeEvents: options.includeEvents,
   });
   const latestScore = run.projection.latestScoreResult;
+  const invocations =
+    'attempts' in run ? run.attempts.flatMap((attempt) => attempt.invocations) : run.invocations;
+  const invocation = invocations.length > 0 ? combineInvocations(invocations) : undefined;
+  const settledByDeadline =
+    'attempts' in run
+      ? run.attempts.some((attempt) => attempt.settledByDeadline)
+      : run.settledByDeadline;
+  const cellArtifacts = invocation
+    ? await writeHarborCellArtifacts({
+        outputDir: options.cellArtifactDir,
+        executionIdentity,
+        invocation,
+        promptHash: executionIdentity.systemPromptHash,
+        ...(settledByDeadline
+          ? {
+              deadlineSettlement: {
+                source: 'benchmark.deadline' as const,
+                mode: 'immediate' as const,
+              },
+            }
+          : {}),
+        ...(options.contextBudgetPolicy
+          ? { contextBudgetPolicy: options.contextBudgetPolicy }
+          : {}),
+      })
+    : undefined;
+  const traceEventsPath =
+    invocations.length > 0
+      ? await writeHarborTaskRunTrace({
+          outputDir: options.cellArtifactDir,
+          storage,
+          invocations,
+        })
+      : undefined;
   const taxonomy =
-    latestScore?.taxonomy ??
-    run.projection.result?.taxonomy ??
-    taxonomyFromResultRecord(run.resultRecord);
+    run.projection.status === 'budget_exhausted'
+      ? 'budget_exhausted'
+      : (latestScore?.taxonomy ??
+        run.projection.result?.taxonomy ??
+        taxonomyFromResultRecord(run.resultRecord));
   const benchmarkFailure = classifyExternalHarborBenchmarkFailure({
-    status: run.resultRecord.status,
+    status:
+      run.projection.status === 'budget_exhausted' ? 'budget_exhausted' : run.resultRecord.status,
     errorClass: run.resultRecord.errorClass,
     error: run.resultRecord.error,
     taxonomy,
@@ -230,11 +311,19 @@ async function runHarborTaskRunMode(options: HarborRunOptions): Promise<number> 
       mode: 'task-run',
       taskRunId: run.taskRunId,
       status: run.projection.status,
+      settledByDeadline,
       taxonomy,
       scored: latestScore?.scored ?? run.resultRecord.scored ?? false,
       authoritative: latestScore?.authority?.authoritative ?? false,
       benchmarkFailureKind: benchmarkFailure.kind,
       benchmarkFailureShouldThrow: benchmarkFailure.shouldThrow,
+      ...(cellArtifacts
+        ? {
+            outputPath: cellArtifacts.outputPath,
+            runtimeEventsPath: cellArtifacts.runtimeEventsPath,
+          }
+        : {}),
+      ...(traceEventsPath ? { traceEventsPath } : {}),
       exportDir,
       files: exported.files,
       result: {
@@ -245,7 +334,27 @@ async function runHarborTaskRunMode(options: HarborRunOptions): Promise<number> 
       runtimeRefs: latestScore?.details?.runtimeRefs,
     })}\n`,
   );
-  return benchmarkFailure.shouldThrow ? 1 : 0;
+  return settledByDeadline ? 124 : benchmarkFailure.shouldThrow ? 1 : 0;
+}
+
+async function writeTaskRunExecutionIdentity(
+  options: HarborRunOptions,
+  task: Task,
+): Promise<HarborCellExecutionIdentity> {
+  const prompt = resolveHeadlessSystemPrompt(options.config, {
+    heavyTaskMode: resolveHeavyTaskMode(options.config, task),
+    economyTaskMode: resolveEconomyTaskMode(options.config, task),
+  });
+  const executionIdentity = validateHarborCellExecutionIdentity({
+    llmConnectionSlug: options.config.llmConnectionSlug,
+    model: options.config.model,
+    ...(options.config.thinkingLevel ? { reasoningEffort: options.config.thinkingLevel } : {}),
+    systemPromptMode: prompt.mode,
+    systemPromptHash: prompt.systemPromptHash,
+    pricingProfile: options.env.MAKA_TRIAL_PRICING_SOURCE ?? 'unconfigured',
+  });
+  await writeHarborCellExecutionIdentity(options.cellArtifactDir, executionIdentity);
+  return executionIdentity;
 }
 
 export async function resolveHarborRunOptions(
@@ -272,6 +381,7 @@ export async function resolveHarborRunOptions(
   preflightIsolation(backend, isolation, env);
 
   const outDir = resolve(valueOf(parsed, env, 'out', 'MAKA_OUTPUT_DIR') ?? '/logs/agent');
+  const cellArtifactDir = resolve(env.MAKA_CELL_ARTIFACT_DIR ?? outDir);
   const storageRoot = resolve(
     valueOf(parsed, env, 'storage-root', 'MAKA_STORAGE_ROOT') ??
       (mode === 'task-run' ? join(outDir, 'runs') : join(outDir, 'maka-storage')),
@@ -304,6 +414,7 @@ export async function resolveHarborRunOptions(
     valueOf(parsed, env, 'max-wall-time-sec', 'MAKA_MAX_WALL_TIME_SEC'),
     '--max-wall-time-sec',
   );
+  const softTimeoutMs = harborCellSoftTimeoutMsFromEnv(env);
   const config = buildConfig({
     parsed,
     env,
@@ -322,6 +433,7 @@ export async function resolveHarborRunOptions(
     workdir,
     sourceWorkspaceDir,
     outDir,
+    cellArtifactDir,
     storageRoot,
     taskId,
     taskRunId,
@@ -336,6 +448,7 @@ export async function resolveHarborRunOptions(
     ),
     ...(maxRuntimeSteps !== undefined ? { maxRuntimeSteps } : {}),
     ...(maxWallTimeSec !== undefined ? { maxWallTimeMs: maxWallTimeSec * 1000 } : {}),
+    ...(softTimeoutMs !== undefined ? { softTimeoutMs } : {}),
     replayPriorAttemptRuntimeContext:
       parsed.bools['replay-prior-attempt-runtime-context'] ||
       truthyEnv(env.MAKA_REPLAY_PRIOR_ATTEMPT_RUNTIME_CONTEXT),
@@ -419,12 +532,14 @@ function buildConfig(input: {
   heavyTask: boolean;
   economyTask: boolean;
 }): Config {
+  const thinkingLevel = reasoningEffortFromEnv(input.env.MAKA_REASONING_EFFORT);
   if (input.backend === 'fake') {
     return {
       id: input.parsed.flags['config-id'] ?? input.env.MAKA_CONFIG_ID ?? 'harbor-fake',
       backend: 'fake',
       llmConnectionSlug: input.env.MAKA_LLM_CONNECTION_SLUG ?? 'fake',
       model: input.env.MAKA_MODEL ?? input.env.HARBOR_MODEL ?? 'fake',
+      ...(thinkingLevel ? { thinkingLevel } : {}),
       ...(input.heavyTask
         ? { heavyTaskMode: { enabled: true, reason: 'maka eval harbor run --heavy-task' } }
         : {}),
@@ -448,6 +563,7 @@ function buildConfig(input: {
     backend: 'ai-sdk',
     llmConnectionSlug: input.env.MAKA_LLM_CONNECTION_SLUG ?? modelSpec.provider,
     model: modelSpec.model,
+    ...(thinkingLevel ? { thinkingLevel } : {}),
     ...(input.env.MAKA_SYSTEM_PROMPT !== undefined
       ? { systemPrompt: input.env.MAKA_SYSTEM_PROMPT }
       : {}),

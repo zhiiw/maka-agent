@@ -1,16 +1,50 @@
 /**
- * Pure, testable env-string parsers for headless CLI entrypoints. Each parser
- * only turns the raw env string (or undefined) into a typed value and delegates
- * invariants to shared numeric guards, so script wiring cannot accidentally
- * disable a guard with `NaN`.
+ * Pure, testable parsers that turn raw environment strings (or `undefined`) into
+ * typed values for headless CLI entrypoints and the Harbor cell. Beyond numbers
+ * the module also parses filesystem paths (`envPath`), comma-separated id lists
+ * (`envIds`), and booleans (`booleanEnv`). The numeric parsers delegate their
+ * range invariants to the shared numeric guards, so script wiring cannot
+ * accidentally disable a guard with `NaN`. The tail of the file additionally
+ * hosts the `RunHarborCellEnv` bag type and the lenient Harbor-cell env helpers
+ * that must mirror the Python adapter's forgiving parsing.
  */
 
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   assertFinitePositive,
   assertNonNegativeInt,
   assertPositiveInt,
   assertRatio,
 } from './numeric-guards.js';
+
+export const MAX_NODE_TIMER_MS = 2_147_483_647;
+
+/**
+ * Resolve a required filesystem path from a raw env string. An empty/unset value
+ * falls back to `fallback`; a leading `~` expands to the home directory,
+ * otherwise the value is resolved against the current working directory. Throws
+ * with `name` when neither the value nor the fallback is present.
+ */
+export function envPath(name: string, raw: string | undefined, fallback?: string): string {
+  const value = raw && raw.length > 0 ? raw : fallback;
+  if (!value) throw new Error(`${name} is required`);
+  return value.startsWith('~') ? join(homedir(), value.slice(1)) : resolve(value);
+}
+
+/**
+ * Parse a comma-separated list of explicit ids (trimmed, blanks dropped).
+ * Returns `undefined` when unset or empty so callers can distinguish "not
+ * specified" from an explicit empty selection.
+ */
+export function envIds(raw: string | undefined): string[] | undefined {
+  if (!raw) return undefined;
+  const ids = raw
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  return ids.length > 0 ? ids : undefined;
+}
 
 /** Parse a non-negative integer; throw on a non-integer or negative value. */
 export function envNonNegativeInt(name: string, raw: string | undefined, fallback: number): number {

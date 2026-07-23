@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
   isTerminalRuntimeEvent,
-  type AgentRunStore,
   type RuntimeEvent,
   type RuntimeEventStore,
   type SessionBlockedReason,
@@ -18,16 +17,26 @@ import {
   type InvocationResult,
   type SessionStore,
 } from '@maka/runtime';
-import { createAgentRunStore, createRuntimeEventStore, createSessionStore } from '@maka/storage';
 import type { Config, ResultRecord, Task } from './contracts.js';
 import { registerFakeBackend } from './backends.js';
-import { summarizeCellTools, type HarborCellToolSummary } from './cell-output.js';
+import {
+  countRuntimeSteps,
+  summarizeCellTools,
+  type HarborCellToolSummary,
+} from './cell-output.js';
 import {
   createHeavyTaskEvidenceRecorder,
   renderHeavyTaskEvidenceForPrompt,
 } from './heavy-task-evidence.js';
 import { resolveHeavyTaskMode } from './heavy-task-policy.js';
 import { resolveEconomyTaskMode } from './economy-task-policy.js';
+import { MAX_NODE_TIMER_MS } from './headless-run-env.js';
+import {
+  authenticateHeadlessStorageWriter,
+  isStorageRootAuthorityError,
+  openHeadlessStorageForWrite,
+  type HeadlessStorageWriter,
+} from './headless-storage.js';
 import {
   createHeavyTaskProgressRecorder,
   HEAVY_TASK_PROGRESS_TOOL_NAMES,
@@ -89,17 +98,14 @@ import {
   type TaskRunResult,
   type VerifierResult,
 } from './task-contracts.js';
-import { createTaskRunStore, type TaskRunProjection, type TaskRunStore } from './task-run-store.js';
+import type { TaskRunProjection } from './task-run-projection.js';
+import type { TaskRunWriter } from './task-run-store.js';
 import { taskDefinitionFromTask } from './task-run-adapter.js';
 import { taskEvidenceRuntimeProvenanceLinks } from './task-evidence-provenance.js';
 import { taskAttemptExecutionEvidence } from './task-execution-lineage.js';
 import { bindSelfCheckEvidence } from './task-self-check-evidence.js';
 
 export interface RunTaskOnceDeps extends RunExperimentDeps {
-  taskRunStore?: TaskRunStore;
-  runtimeEventStore?: RuntimeEventStore;
-  sessionStore?: SessionStore;
-  agentRunStore?: AgentRunStore;
   taskRunId?: string;
   attemptId?: string;
   createTaskRun?: boolean;
@@ -109,6 +115,8 @@ export interface RunTaskOnceDeps extends RunExperimentDeps {
   permissionMode?: 'execute';
   interventionPolicy?: TaskInterventionPolicy;
   permissionGrants?: readonly TaskPermissionGrant[];
+  /** Absolute wall-clock deadline for settling the active runtime before its outer watchdog. */
+  deadlineAtMs?: number;
 }
 
 export interface RunTaskOnceResult {
@@ -116,7 +124,8 @@ export interface RunTaskOnceResult {
   attemptId: string;
   resultRecord: ResultRecord;
   projection: TaskRunProjection;
-  invocation: InvocationResult;
+  invocations: readonly InvocationResult[];
+  settledByDeadline: boolean;
 }
 
 export class TaskAgentController {
@@ -132,6 +141,17 @@ export async function runTaskOnce(
   task: Task,
   deps: RunTaskOnceDeps,
 ): Promise<RunTaskOnceResult> {
+  const storage = await openHeadlessStorageForWrite(deps.storageRoot);
+  return runTaskOnceWithStorage(config, task, deps, storage);
+}
+
+export async function runTaskOnceWithStorage(
+  config: Config,
+  task: Task,
+  deps: RunTaskOnceDeps,
+  storage: HeadlessStorageWriter,
+): Promise<RunTaskOnceResult> {
+  storage = authenticateHeadlessStorageWriter(storage);
   const isolationRequired = backendNeedsIsolation(config.backend);
   if (isolationRequired) {
     validateRealBackendIsolation(deps.realBackendIsolation);
@@ -150,10 +170,10 @@ export async function runTaskOnce(
   const createTaskRun = deps.createTaskRun ?? true;
   const closeTaskRun = deps.closeTaskRun ?? true;
   const interventionPolicy = deps.interventionPolicy ?? DEFAULT_INTERVENTION_POLICY;
-  const taskRunStore = deps.taskRunStore ?? createTaskRunStore(deps.storageRoot);
-  const sessionStore = deps.sessionStore ?? createSessionStore(deps.storageRoot);
-  const agentRunStore = deps.agentRunStore ?? createAgentRunStore(deps.storageRoot);
-  const runtimeEventStore = deps.runtimeEventStore ?? createRuntimeEventStore(deps.storageRoot);
+  const taskRunStore = storage.taskRunStore;
+  const sessionStore = storage.executionStores.sessionStore;
+  const agentRunStore = storage.executionStores.agentRunStore;
+  const runtimeEventStore = storage.executionStores.runtimeEventStore;
   const startedAt = now();
   const verifier = normalizeVerifier(task);
   const heavyTaskMode = resolveHeavyTaskMode(config, task);
@@ -287,6 +307,7 @@ export async function runTaskOnce(
       task,
       storageRoot: deps.storageRoot,
       workspaceDir: agentWorkspaceDir,
+      artifactStore: storage.artifactStore,
       heavyTaskMode,
       ...(heavyTaskProgress ? { heavyTaskProgress } : {}),
       ...(heavyTaskSelfCheck ? { heavyTaskSelfCheck } : {}),
@@ -304,6 +325,9 @@ export async function runTaskOnce(
       backend: config.backend,
       llmConnectionSlug: effectiveConfig.llmConnectionSlug,
       model: effectiveConfig.model,
+      ...(effectiveConfig.thinkingLevel !== undefined
+        ? { thinkingLevel: effectiveConfig.thinkingLevel }
+        : {}),
       permissionMode: deps.permissionMode ?? 'execute',
       ...(deps.orchestrationMode ? { orchestrationMode: deps.orchestrationMode } : {}),
       name: `task:${config.id}:${task.id}`,
@@ -348,8 +372,9 @@ export async function runTaskOnce(
     });
 
     let runtimeInvocation: InvocationResult;
+    let settledByDeadline = false;
     try {
-      runtimeInvocation = await runRuntimeAttempt({
+      const runtimeAttempt = await runRuntimeAttempt({
         run,
         header,
         instruction,
@@ -357,7 +382,11 @@ export async function runTaskOnce(
         requireTerminalRuntimeEventWrite: Boolean(runtimeEventStore),
         now,
         newId,
+        settleByDeadline: active.settleByDeadline,
+        ...(deps.deadlineAtMs !== undefined ? { deadlineAtMs: deps.deadlineAtMs } : {}),
       });
+      runtimeInvocation = runtimeAttempt.invocation;
+      settledByDeadline = runtimeAttempt.settledByDeadline;
     } finally {
       await active.dispose();
     }
@@ -391,14 +420,16 @@ export async function runTaskOnce(
         attemptId,
         resultRecord: permissionHandling.resultRecord,
         projection: await taskRunStore.project(taskRunId),
-        invocation: permissionHandling.invocation,
+        invocations: [permissionHandling.invocation],
+        settledByDeadline,
       };
     }
     let invocation = permissionHandling.invocation;
+    const invocations = [invocation];
 
-    let runtimeSummary = summarizeRuntime(invocation, deps.realBackendIsolation);
+    let runtimeSummary = summarizeRuntime([invocation], deps.realBackendIsolation);
     await appendRuntimeFeedback(taskRunStore, taskRunId, attemptId, now, newId, runtimeSummary);
-    if (heavyTaskMode.enabled) {
+    if (heavyTaskMode.enabled && !settledByDeadline) {
       let gateProjection = await taskRunStore.project(taskRunId);
       const workspaceObservation = await appendHeavyTaskWorkspaceObservation({
         taskRunStore,
@@ -455,7 +486,7 @@ export async function runTaskOnce(
         repairActive.bindRun(repairRun);
         let repairInvocation: InvocationResult;
         try {
-          repairInvocation = await runRuntimeAttempt({
+          const repairRuntimeAttempt = await runRuntimeAttempt({
             run: repairRun,
             header,
             instruction: gateDecision.prompt,
@@ -463,7 +494,11 @@ export async function runTaskOnce(
             requireTerminalRuntimeEventWrite: Boolean(runtimeEventStore),
             now,
             newId,
+            settleByDeadline: repairActive.settleByDeadline,
+            ...(deps.deadlineAtMs !== undefined ? { deadlineAtMs: deps.deadlineAtMs } : {}),
           });
+          repairInvocation = repairRuntimeAttempt.invocation;
+          settledByDeadline ||= repairRuntimeAttempt.settledByDeadline;
         } finally {
           await repairActive.dispose();
         }
@@ -497,53 +532,57 @@ export async function runTaskOnce(
             attemptId,
             resultRecord: repairPermissionHandling.resultRecord,
             projection: await taskRunStore.project(taskRunId),
-            invocation: repairPermissionHandling.invocation,
+            invocations: [...invocations, repairPermissionHandling.invocation],
+            settledByDeadline,
           };
         }
         invocation = repairPermissionHandling.invocation;
-        const repairSummary = summarizeRuntime(invocation, deps.realBackendIsolation);
+        invocations.push(invocation);
+        const repairSummary = summarizeRuntime([invocation], deps.realBackendIsolation);
         await appendRuntimeFeedback(taskRunStore, taskRunId, attemptId, now, newId, repairSummary);
-        runtimeSummary = mergeRuntimeSummaries(runtimeSummary, repairSummary);
+        runtimeSummary = summarizeRuntime(invocations, deps.realBackendIsolation);
 
-        let boundedProjection = await taskRunStore.project(taskRunId);
-        const repairWorkspaceObservation = await appendHeavyTaskWorkspaceObservation({
-          taskRunStore,
-          taskRunId,
-          projection: boundedProjection,
-          executor: deps.realBackendIsolation?.toolExecutor,
-          cwd: agentWorkspaceDir,
-          now,
-          newId,
-        });
-        await appendHeavyTaskSelfCheckEvidenceLinks({
-          store: taskRunStore,
-          runtimeEventStore,
-          taskRunId,
-          attemptId,
-          invocation,
-          workspaceObservation: repairWorkspaceObservation,
-          now,
-          newId,
-        });
-        boundedProjection = await taskRunStore.project(taskRunId);
-        const boundedDecision = evaluateHeavyTaskSelfCheckGate({
-          task,
-          heavyTaskMode,
-          projection: boundedProjection,
-          repairAttemptsUsed: 1,
-          maxRepairAttempts: 1,
-        });
-        await appendTaskEvent(taskRunStore, taskRunId, {
-          type: 'heavy_task_self_check_gate_recorded',
-          id: newId(),
-          taskRunId,
-          ts: now(),
-          gate: heavyTaskSelfCheckGateStateFromDecision({
-            decision: boundedDecision,
-            attempt: 1,
-            maxAttempts: 1,
-          }),
-        });
+        if (!settledByDeadline) {
+          let boundedProjection = await taskRunStore.project(taskRunId);
+          const repairWorkspaceObservation = await appendHeavyTaskWorkspaceObservation({
+            taskRunStore,
+            taskRunId,
+            projection: boundedProjection,
+            executor: deps.realBackendIsolation?.toolExecutor,
+            cwd: agentWorkspaceDir,
+            now,
+            newId,
+          });
+          await appendHeavyTaskSelfCheckEvidenceLinks({
+            store: taskRunStore,
+            runtimeEventStore,
+            taskRunId,
+            attemptId,
+            invocation,
+            workspaceObservation: repairWorkspaceObservation,
+            now,
+            newId,
+          });
+          boundedProjection = await taskRunStore.project(taskRunId);
+          const boundedDecision = evaluateHeavyTaskSelfCheckGate({
+            task,
+            heavyTaskMode,
+            projection: boundedProjection,
+            repairAttemptsUsed: 1,
+            maxRepairAttempts: 1,
+          });
+          await appendTaskEvent(taskRunStore, taskRunId, {
+            type: 'heavy_task_self_check_gate_recorded',
+            id: newId(),
+            taskRunId,
+            ts: now(),
+            gate: heavyTaskSelfCheckGateStateFromDecision({
+              decision: boundedDecision,
+              attempt: 1,
+              maxAttempts: 1,
+            }),
+          });
+        }
       }
     }
 
@@ -595,10 +634,12 @@ export async function runTaskOnce(
     });
     const finishedAt = now();
     const scoreResultId = newId();
-    const runEvidence = await agentRunStore
-      .readRun(header.id, invocation.runId)
-      .catch(() => undefined);
-    const resultRecord = resultRecordFromInvocation({
+    // The TaskRun ledger is canonical here; AgentRun metadata is optional unless authority fails.
+    const runEvidence = await agentRunStore.readRun(header.id, invocation.runId).catch((error) => {
+      if (isStorageRootAuthorityError(error)) throw error;
+      return undefined;
+    });
+    const invocationResultRecord = resultRecordFromInvocation({
       config,
       task,
       sessionId: header.id,
@@ -610,9 +651,21 @@ export async function runTaskOnce(
       startedAt,
       finishedAt,
       systemPrompt: prompt,
+      runtimeSteps: countRuntimeSteps(invocations.flatMap((candidate) => candidate.events)),
       runEvidence,
     });
-    const taxonomy = finalScore.taxonomy;
+    const resultRecord: ResultRecord = settledByDeadline
+      ? {
+          ...invocationResultRecord,
+          status: 'failed',
+          runnerCompleted: false,
+          error: 'benchmark deadline reached during attempt',
+          errorClass: 'budget_exhausted',
+        }
+      : invocationResultRecord;
+    const taxonomy: AutonomousResultTaxonomy = settledByDeadline
+      ? 'budget_exhausted'
+      : finalScore.taxonomy;
     const scoreResult: ScoreResult = {
       id: scoreResultId,
       taskRunId,
@@ -623,7 +676,11 @@ export async function runTaskOnce(
       eligible: finalScore.eligible,
       ...(finalScore.score !== undefined ? { score: finalScore.score } : {}),
       ...(finalScore.maxScore !== undefined ? { maxScore: finalScore.maxScore } : {}),
-      ...(finalScore.errorClass ? { errorClass: finalScore.errorClass } : {}),
+      ...(settledByDeadline
+        ? { errorClass: 'budget_exhausted' }
+        : finalScore.errorClass
+          ? { errorClass: finalScore.errorClass }
+          : {}),
       ...(finalScore.excludedReason ? { excludedReason: finalScore.excludedReason } : {}),
       taxonomy,
       ...(verifierResult.authority ? { authority: verifierResult.authority } : {}),
@@ -698,7 +755,8 @@ export async function runTaskOnce(
       attemptId,
       resultRecord,
       projection: await taskRunStore.project(taskRunId),
-      invocation,
+      invocations,
+      settledByDeadline,
     };
   } finally {
     await workspace.cleanup();
@@ -706,7 +764,7 @@ export async function runTaskOnce(
 }
 
 async function appendHeavyTaskWorkspaceObservation(input: {
-  taskRunStore: TaskRunStore;
+  taskRunStore: TaskRunWriter;
   taskRunId: string;
   projection: TaskRunProjection;
   executor?: NonNullable<RunTaskOnceDeps['realBackendIsolation']>['toolExecutor'];
@@ -727,7 +785,7 @@ async function appendHeavyTaskWorkspaceObservation(input: {
 }
 
 async function appendHeavyTaskSelfCheckEvidenceLinks(input: {
-  store: TaskRunStore;
+  store: TaskRunWriter;
   runtimeEventStore: RuntimeEventStore;
   taskRunId: string;
   attemptId: string;
@@ -811,7 +869,7 @@ function toolNamesForIdentity(hasIsolatedExecutor: boolean, heavyTaskEnabled: bo
 }
 
 async function appendTaskAttemptExecutionLink(input: {
-  store: TaskRunStore;
+  store: TaskRunWriter;
   runtimeEventStore: RuntimeEventStore;
   taskRunId: string;
   attemptId: string;
@@ -877,7 +935,7 @@ async function appendTaskAttemptExecutionLink(input: {
 
 interface PermissionInterventionInput {
   invocation: InvocationResult;
-  store: TaskRunStore;
+  store: TaskRunWriter;
   taskRunId: string;
   attemptId: string;
   now: () => number;
@@ -976,7 +1034,7 @@ async function handlePermissionIntervention(
         runId: input.invocation.runId,
         startedAt: input.startedAt,
         finishedAt: requestedAt,
-        steps: input.invocation.events.length,
+        steps: countRuntimeSteps(input.invocation.events),
         errorClass: 'needs_approval',
         error: `task run needs approval for ${request.toolName}`,
         systemPrompt: input.systemPrompt,
@@ -1097,9 +1155,14 @@ interface RunRuntimeAttemptInput {
   requireTerminalRuntimeEventWrite: boolean;
   now: () => number;
   newId: () => string;
+  deadlineAtMs?: number;
+  settleByDeadline(): Promise<boolean>;
 }
 
-async function runRuntimeAttempt(input: RunRuntimeAttemptInput): Promise<InvocationResult> {
+async function runRuntimeAttempt(input: RunRuntimeAttemptInput): Promise<{
+  invocation: InvocationResult;
+  settledByDeadline: boolean;
+}> {
   let begin;
   try {
     begin = await input.run.begin();
@@ -1134,21 +1197,56 @@ async function runRuntimeAttempt(input: RunRuntimeAttemptInput): Promise<Invocat
     ...(begin.backendInput.runtimeContext ?? []),
   ];
 
-  const invocation = await runner.run({
-    sessionId: input.header.id,
-    invocationId: begin.initialRuntimeEvent.invocationId,
-    runId: input.run.runId,
-    turnId: input.run.turnId,
-    text: input.instruction,
-    context: begin.backendInput.context,
-    ...(runtimeContext.length > 0 ? { runtimeContext } : {}),
-    ...(begin.backendInput.attachments ? { attachments: begin.backendInput.attachments } : {}),
-    initialRuntimeEvent: begin.initialRuntimeEvent,
-    source: 'test',
-    lineage: input.run.lineage,
-  });
+  let settledByDeadline = false;
+  let settlementError: unknown;
+  let settlementAttempt: Promise<void> | undefined;
+  const settle = () => {
+    settlementAttempt = input
+      .settleByDeadline()
+      .then((settled) => {
+        settledByDeadline = settled;
+      })
+      .catch((error) => {
+        settlementError = error;
+      });
+  };
+  const remainingMs =
+    input.deadlineAtMs === undefined ? undefined : Math.max(0, input.deadlineAtMs - input.now());
+  if (remainingMs !== undefined && remainingMs > MAX_NODE_TIMER_MS) {
+    throw new Error(`deadlineAtMs exceeds the Node timer limit of ${MAX_NODE_TIMER_MS}ms`);
+  }
+  const dispatchAbortController = remainingMs === 0 ? new AbortController() : undefined;
+  let settlementTimer: ReturnType<typeof setTimeout> | undefined;
+  if (dispatchAbortController) {
+    dispatchAbortController.abort();
+    settle();
+  } else if (remainingMs !== undefined) settlementTimer = setTimeout(settle, remainingMs);
+  let invocation: InvocationResult;
+  try {
+    invocation = await runner.run({
+      sessionId: input.header.id,
+      invocationId: begin.initialRuntimeEvent.invocationId,
+      runId: input.run.runId,
+      turnId: input.run.turnId,
+      text: input.instruction,
+      context: begin.backendInput.context,
+      ...(runtimeContext.length > 0 ? { runtimeContext } : {}),
+      ...(begin.backendInput.attachments ? { attachments: begin.backendInput.attachments } : {}),
+      initialRuntimeEvent: begin.initialRuntimeEvent,
+      source: 'test',
+      lineage: input.run.lineage,
+      ...(dispatchAbortController ? { abortSignal: dispatchAbortController.signal } : {}),
+    });
+  } finally {
+    if (settlementTimer) clearTimeout(settlementTimer);
+  }
+  await settlementAttempt;
+  if (settlementError) throw settlementError;
+  if (dispatchAbortController && invocation.events.length === 0) {
+    invocation = { ...invocation, events: [begin.initialRuntimeEvent] };
+  }
   await input.run.finalize();
-  return invocation;
+  return { invocation, settledByDeadline };
 }
 
 type AgentRunHooks = ConstructorParameters<typeof AgentRun>[0]['hooks'];
@@ -1161,6 +1259,7 @@ function createSingleRunActiveSession(
 ): {
   hooks: AgentRunHooks;
   bindRun(run: AgentRun): void;
+  settleByDeadline(): Promise<boolean>;
   dispose(): Promise<void>;
 } {
   let boundRun: AgentRun | undefined;
@@ -1170,6 +1269,19 @@ function createSingleRunActiveSession(
   };
   return {
     bindRun,
+    settleByDeadline: async () => {
+      if (!active) return false;
+      const stoppedRuns = [...active.activeRuns.values()].filter((run) =>
+        run.stop('benchmark_deadline'),
+      );
+      if (stoppedRuns.length === 0) return false;
+      try {
+        await active.backend.stop('user_stop', 'immediate');
+      } finally {
+        for (const run of stoppedRuns) run.completeStop();
+      }
+      return true;
+    },
     hooks: {
       ensureActive: async (sessionId, header) => {
         if (active) {
@@ -1268,7 +1380,10 @@ async function turnHasRetainedOutput(
   sessionId: string,
   turnId: string,
 ): Promise<boolean> {
-  const messages = await store.readMessages(sessionId).catch((): StoredMessage[] => []);
+  const messages = await store.readMessages(sessionId).catch((error): StoredMessage[] => {
+    if (isStorageRootAuthorityError(error)) throw error;
+    return [];
+  });
   return messages.some(
     (message) =>
       (message.type === 'assistant' &&
@@ -1289,6 +1404,7 @@ function resultRecordFromInvocation(input: {
   scoreResultId: string;
   startedAt: number;
   finishedAt: number;
+  runtimeSteps: number;
   systemPrompt: Pick<ResolvedHeadlessSystemPrompt, 'mode' | 'systemPromptHash'>;
   runEvidence?: Pick<
     import('@maka/core').AgentRunHeader,
@@ -1323,7 +1439,7 @@ function resultRecordFromInvocation(input: {
     scoreResultId: input.scoreResultId,
     submittedSnapshotId: input.submittedSnapshotId,
     exitCode: input.verifierResult.exitCode ?? null,
-    steps: input.invocation.events.length,
+    steps: input.runtimeSteps,
     durationMs: input.finishedAt - input.startedAt,
     startedAt: input.startedAt,
     finishedAt: input.finishedAt,
@@ -1386,51 +1502,38 @@ interface RuntimeSummary {
 }
 
 function summarizeRuntime(
-  invocation: InvocationResult,
+  invocations: readonly InvocationResult[],
   isolation: RunExperimentDeps['realBackendIsolation'],
 ): RuntimeSummary {
+  const invocation = invocations.at(-1);
+  if (!invocation) throw new Error('runtime summary requires at least one invocation');
+  const events = invocations.flatMap((candidate) => candidate.events);
+  const previousTurns = invocations.slice(0, -1).map((candidate) => ({
+    invocationId: candidate.invocationId,
+    runId: candidate.runId,
+    turnId: candidate.turnId,
+    runtimeEventIds: candidate.events.map((event) => event.id),
+  }));
   return {
     runtimeRefs: {
       invocationId: invocation.invocationId,
       sessionId: invocation.sessionId,
       runId: invocation.runId,
       turnId: invocation.turnId,
-      runtimeEventIds: invocation.events.map((event) => event.id),
+      runtimeEventIds: events.map((event) => event.id),
+      ...(previousTurns.length > 0 ? { previousTurns } : {}),
     },
-    artifactRefs: collectArtifactRefs(invocation.events),
+    artifactRefs: collectArtifactRefs(events),
     isolation: isolation
       ? { kind: isolation.kind, label: isolation.label }
       : { kind: 'inert_fake_backend' },
-    budget: summarizeBudget(invocation),
-    tools: summarizeCellTools(invocation.events),
-  };
-}
-
-function mergeRuntimeSummaries(first: RuntimeSummary, second: RuntimeSummary): RuntimeSummary {
-  return {
-    ...second,
-    runtimeRefs: {
-      ...second.runtimeRefs,
-      runtimeEventIds: uniqueStrings([
-        ...first.runtimeRefs.runtimeEventIds,
-        ...second.runtimeRefs.runtimeEventIds,
-      ]),
-      previousTurns: [
-        ...(first.runtimeRefs.previousTurns ?? []),
-        {
-          invocationId: first.runtimeRefs.invocationId,
-          runId: first.runtimeRefs.runId,
-          turnId: first.runtimeRefs.turnId,
-          runtimeEventIds: first.runtimeRefs.runtimeEventIds,
-        },
-      ],
-    },
-    artifactRefs: [...first.artifactRefs, ...second.artifactRefs],
+    budget: summarizeBudget(invocations),
+    tools: summarizeCellTools(events),
   };
 }
 
 async function appendRuntimeFeedback(
-  store: TaskRunStore,
+  store: TaskRunWriter,
   taskRunId: string,
   attemptId: string,
   now: () => number,
@@ -1477,7 +1580,7 @@ function collectArtifactRefs(events: readonly RuntimeEvent[]): Array<Record<stri
   return refs;
 }
 
-function summarizeBudget(invocation: InvocationResult): Record<string, unknown> {
+function summarizeBudget(invocations: readonly InvocationResult[]): Record<string, unknown> {
   const totals = {
     input: 0,
     output: 0,
@@ -1487,7 +1590,8 @@ function summarizeBudget(invocation: InvocationResult): Record<string, unknown> 
   };
   const contextBudget: unknown[] = [];
   const rawFinishReasons: string[] = [];
-  for (const event of invocation.events) {
+  const latestFailureClass = invocations.at(-1)?.failure?.class;
+  for (const event of invocations.flatMap((invocation) => invocation.events)) {
     const usage = event.actions?.tokenUsage;
     if (!usage) continue;
     totals.input += usage.input ?? 0;
@@ -1502,7 +1606,7 @@ function summarizeBudget(invocation: InvocationResult): Record<string, unknown> 
     totals,
     ...(contextBudget.length > 0 ? { contextBudget } : {}),
     ...(rawFinishReasons.length > 0 ? { rawFinishReasons } : {}),
-    ...(invocation.failure?.class ? { failureClass: invocation.failure.class } : {}),
+    ...(latestFailureClass ? { failureClass: latestFailureClass } : {}),
   };
 }
 
@@ -1621,12 +1725,8 @@ function errorMessageFromTaxonomy(taxonomy: AutonomousResultTaxonomy): string {
   }
 }
 
-function appendTaskEvent(store: TaskRunStore, taskRunId: string, event: TaskEvent): Promise<void> {
+function appendTaskEvent(store: TaskRunWriter, taskRunId: string, event: TaskEvent): Promise<void> {
   return store.appendEvent(taskRunId, event);
-}
-
-function uniqueStrings(values: readonly string[]): string[] {
-  return [...new Set(values)];
 }
 
 function isPermissionHandoffTerminal(event: {

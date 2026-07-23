@@ -16,13 +16,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from harbor.agents.installed.base import BaseInstalledAgent, CliFlag, with_prompt_template
-from harbor.environments.base import BaseEnvironment
-from harbor.models.agent.context import AgentContext
-from harbor.models.trajectories import Agent, FinalMetrics, Step, Trajectory
-from harbor.models.trial.paths import EnvironmentPaths
-from harbor.utils.trajectory_utils import format_trajectory_json
-
+# harness_compat picks the harbor.* tree under plain Harbor 0.13.2 and the
+# pier.* tree under Pier, whose parallel classes are type-incompatible with
+# harbor's (Pier's TrialResult only accepts Pier's AgentInfo).
+from harness_compat import (
+    Agent,
+    AgentContext,
+    BaseEnvironment,
+    BaseInstalledAgent,
+    CliFlag,
+    EnvironmentPaths,
+    FinalMetrics,
+    NetworkAllowlist as _NetworkAllowlist,
+    Step,
+    Trajectory,
+    format_trajectory_json,
+    with_prompt_template,
+)
 from process_scope import (
     COMMAND_SCOPE_ENV as _COMMAND_SCOPE_ENV,
     COMMAND_SCOPE_ROOT as _COMMAND_SCOPE_ROOT,
@@ -84,6 +94,14 @@ _HOST_NODE_ENV_ALLOWLIST = {
     "COMSPEC",
 }
 
+_HOST_PROVIDER_AUTHORITY_ENV_KEYS = (
+    "MAKA_HOST_API_KEY",
+    "MAKA_HOST_API_KEY_FILE",
+    "MAKA_HOST_NO_AUTH",
+    "MAKA_HOST_BASE_URL",
+    "MAKA_HOST_MODEL_API_PROTOCOL",
+)
+
 def _host_node_process_env(cell_env: dict[str, str]) -> dict[str, str]:
     env = {key: value for key in _HOST_NODE_ENV_ALLOWLIST if (value := os.environ.get(key))}
     env.update(cell_env)
@@ -94,6 +112,7 @@ def _host_node_process_env(cell_env: dict[str, str]) -> dict[str, str]:
 # agree on the upper bound for MAKA_CELL_TIMEOUT_SEC; an over-long digit string
 # is malformed, not a giant timeout.
 _MAX_SAFE_INTEGER = 9007199254740991
+_MAX_NODE_TIMER_MS = 2_147_483_647
 # ASCII decimal positive integer literal only; [0-9] (not \d) rejects Unicode
 # digits on both sides. Matches the TS host's lenientPositiveIntEnv.
 _POSITIVE_INT_RE = re.compile(r"[1-9][0-9]*")
@@ -107,6 +126,8 @@ class MakaAgent(BaseInstalledAgent):
     _RUN_LOG_FILENAME = "maka-run.log"
     _CELL_OUTPUT_FILENAME = "maka-cell-output.json"
     _CELL_USAGE_CHECKPOINT_FILENAME = "maka-cell-usage-checkpoint.json"
+    _RUNTIME_EVENTS_FILENAME = "runtime-events.jsonl"
+    _TRACE_EVENTS_FILENAME = "trace-events.jsonl"
 
     CLI_FLAGS = [
         CliFlag(
@@ -149,6 +170,47 @@ class MakaAgent(BaseInstalledAgent):
     @staticmethod
     def name() -> str:
         return "maka"
+
+    def install_spec(self) -> None:
+        # Maka installs at runtime inside install()/setup() (host-side Node, or
+        # the in-container Node bootstrap), not via a Pier build-time install
+        # spec. Pier declares this abstract on BaseInstalledAgent; returning
+        # None keeps the runtime-install path unchanged (Pier runs install()
+        # when no spec is preinstalled).
+        return None
+
+    def network_allowlist(self) -> _NetworkAllowlist | None:
+        # Called only under Pier; plain Harbor never calls it and harness_compat
+        # exports NetworkAllowlist = None there.
+        if _NetworkAllowlist is None:
+            return None
+        # The empty allowlist keeps a non-internet Pier task fully offline,
+        # which is correct exactly when the container makes no model calls. A
+        # configuration whose cell would call the provider from inside the
+        # container would hit opaque in-container network errors, so fail at
+        # environment creation with the fixes spelled out.
+        if self._container_makes_model_calls():
+            raise RuntimeError(
+                "MakaAgent under Pier keeps the task container offline; enable "
+                "host-side provider configuration (MAKA_HOST_API_KEY_FILE, "
+                "MAKA_HOST_API_KEY, or MAKA_HOST_NO_AUTH=true), use "
+                "backend=fake, or run MAKA_HARBOR_MODE=task-run"
+            )
+        return _NetworkAllowlist()
+
+    def _container_makes_model_calls(self) -> bool:
+        """True only when the in-container cell itself calls the model provider.
+
+        task-run mode and host-side LLM mode run the model on the host and only
+        bridge tool commands into the container via environment.exec, and
+        backend=fake makes no model calls at all; only a cell-mode ai-sdk run
+        without host-side configuration needs in-container egress.
+        """
+        return (
+            self._harbor_mode() == "cell"
+            and self._harbor_backend() != "fake"
+            and not self._host_side_llm_enabled()
+        )
 
     def _harbor_mode(self) -> str:
         """cell (default) runs a RuntimeRunner cell; task-run runs the full
@@ -193,27 +255,46 @@ class MakaAgent(BaseInstalledAgent):
                 ),
             )
             return
+        # The bootstrap downloads (apt/yum/apk packages, the nvm installer, the
+        # node tarball) are this adapter's only container-side network
+        # dependency. It cannot see the task's allow_internet setting, so an
+        # offline container (every Pier non-internet task) surfaces here as
+        # obscure curl/apt errors; name the cause and the ways out at the point
+        # of failure instead.
+        node_bootstrap = (
+            "if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y curl ca-certificates; "
+            "elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates; "
+            "elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates; "
+            "fi; "
+            "export NVM_DIR=\"/usr/local/nvm\"; "
+            "mkdir -p \"$NVM_DIR\"; "
+            "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | PROFILE=/dev/null bash; "
+            ". \"$NVM_DIR/nvm.sh\"; "
+            "nvm install 22; "
+            "nvm alias default 22; "
+            "chmod -R a+rX \"$NVM_DIR\"; "
+            "for bin in node npm npx; do "
+            "  BIN_PATH=\"$(. \"$NVM_DIR/nvm.sh\" && which \"$bin\")\"; "
+            "  ln -sf \"$BIN_PATH\" \"/usr/local/bin/$bin\"; "
+            "done"
+        )
+        bootstrap_failed = (
+            "Maka Node >= 22 bootstrap failed. It downloads packages and nvm, "
+            "which needs container network access; under Pier non-internet "
+            "tasks the container is offline. Use a task image with Node >= 22 "
+            "preinstalled or host-side LLM mode."
+        )
         await self.exec_as_root(
             environment,
             command=(
                 "set -euo pipefail; "
                 "NODE_MAJOR=$(node -p 'process.versions.node.split(\".\")[0]' 2>/dev/null || echo 0); "
                 "if [ \"$NODE_MAJOR\" -lt 22 ]; then "
-                "  if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y curl ca-certificates; "
-                "  elif command -v yum >/dev/null 2>&1; then yum install -y curl ca-certificates; "
-                "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl ca-certificates; "
-                "  fi; "
-                "  export NVM_DIR=\"/usr/local/nvm\"; "
-                "  mkdir -p \"$NVM_DIR\"; "
-                "  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | PROFILE=/dev/null bash; "
-                "  . \"$NVM_DIR/nvm.sh\"; "
-                "  nvm install 22; "
-                "  nvm alias default 22; "
-                "  chmod -R a+rX \"$NVM_DIR\"; "
-                "  for bin in node npm npx; do "
-                "    BIN_PATH=\"$(. \"$NVM_DIR/nvm.sh\" && which \"$bin\")\"; "
-                "    ln -sf \"$BIN_PATH\" \"/usr/local/bin/$bin\"; "
-                "  done; "
+                # A child shell keeps first-failure abort semantics (`||` on the
+                # same shell would suppress set -e inside the guarded commands)
+                # and lets any failure collapse into one clear diagnostic.
+                f"bash -euo pipefail -c {shlex.quote(node_bootstrap)} || "
+                f"{{ echo {shlex.quote(bootstrap_failed)} >&2; exit 1; }}; "
                 "fi"
             ),
         )
@@ -285,7 +366,7 @@ class MakaAgent(BaseInstalledAgent):
     _DEFAULT_CELL_TIMEOUT_SEC = 900
     _DEFAULT_CELL_SETTLEMENT_GRACE_SEC = 30
 
-    def _cell_timeout_sec(self) -> int:
+    def _cell_timeout_sec(self, env: dict[str, str] | None = None) -> int:
         """Wall-clock budget for the in-container cell. A hard-coded value turns
         slow-but-healthy tasks into infra failures, so the operator can raise it
         via MAKA_CELL_TIMEOUT_SEC; a malformed value falls back to the default.
@@ -297,7 +378,11 @@ class MakaAgent(BaseInstalledAgent):
         strings are valid: "1e3", "1.0", "+1800", "01800", "1٢", and over-long
         digit strings all fall back to the default.
         """
-        raw = self._get_env("MAKA_CELL_TIMEOUT_SEC")
+        raw = (
+            env.get("MAKA_CELL_TIMEOUT_SEC")
+            if env is not None
+            else self._get_env("MAKA_CELL_TIMEOUT_SEC")
+        )
         if not raw:
             return self._DEFAULT_CELL_TIMEOUT_SEC
         stripped = raw.strip()
@@ -311,8 +396,12 @@ class MakaAgent(BaseInstalledAgent):
             return self._DEFAULT_CELL_TIMEOUT_SEC
         return value if value <= _MAX_SAFE_INTEGER else self._DEFAULT_CELL_TIMEOUT_SEC
 
-    def _cell_settlement_grace_sec(self) -> int:
-        raw = self._get_env("MAKA_CELL_SETTLEMENT_GRACE_SEC")
+    def _cell_settlement_grace_sec(self, env: dict[str, str] | None = None) -> int:
+        raw = (
+            env.get("MAKA_CELL_SETTLEMENT_GRACE_SEC")
+            if env is not None
+            else self._get_env("MAKA_CELL_SETTLEMENT_GRACE_SEC")
+        )
         if not raw:
             return self._DEFAULT_CELL_SETTLEMENT_GRACE_SEC
         try:
@@ -321,14 +410,20 @@ class MakaAgent(BaseInstalledAgent):
             return self._DEFAULT_CELL_SETTLEMENT_GRACE_SEC
         return value if value > 0 else self._DEFAULT_CELL_SETTLEMENT_GRACE_SEC
 
-    def _cell_soft_timeout_ms(self) -> int:
-        timeout_sec = self._cell_timeout_sec()
-        grace_sec = self._cell_settlement_grace_sec()
+    def _cell_soft_timeout_ms(self, env: dict[str, str] | None = None) -> int:
+        timeout_sec = self._cell_timeout_sec(env)
+        grace_sec = self._cell_settlement_grace_sec(env)
         if grace_sec >= timeout_sec:
             raise RuntimeError(
                 "MAKA_CELL_SETTLEMENT_GRACE_SEC must be smaller than MAKA_CELL_TIMEOUT_SEC"
             )
-        return (timeout_sec - grace_sec) * 1000
+        soft_timeout_ms = (timeout_sec - grace_sec) * 1000
+        if soft_timeout_ms > _MAX_NODE_TIMER_MS:
+            raise RuntimeError(
+                "MAKA_CELL_SOFT_TIMEOUT_MS exceeds the Node timer limit "
+                f"of {_MAX_NODE_TIMER_MS}ms"
+            )
+        return soft_timeout_ms
 
     def _host_side_llm_enabled(self) -> bool:
         return bool(
@@ -393,7 +488,7 @@ class MakaAgent(BaseInstalledAgent):
         env["MAKA_HARBOR_TOOL_EXECUTOR_URL"] = executor.url
         env["MAKA_HARBOR_TOOL_EXECUTOR_TOKEN"] = executor.token
         env["MAKA_CELL_SOFT_TIMEOUT_MS"] = str(self._cell_soft_timeout_ms())
-        for key in ("MAKA_HOST_API_KEY", "MAKA_HOST_API_KEY_FILE", "MAKA_HOST_API_KEY_ENV_NAME", "MAKA_HOST_BASE_URL"):
+        for key in _HOST_PROVIDER_AUTHORITY_ENV_KEYS:
             value = self._get_env(key)
             if value:
                 env[key] = value
@@ -464,6 +559,20 @@ class MakaAgent(BaseInstalledAgent):
             await environment.download_file(remote.as_posix(), local)
         except Exception as exc:  # noqa: BLE001 - best-effort metadata hydration.
             self.logger.debug("Could not download Maka cell output %s: %s", remote, exc)
+        # The cell output's runtimeEventsPath/traceEventsPath contracts point at
+        # these files. Under Harbor the agent log dir is bind-mounted, so they
+        # are already host-side and are skipped; under Pier a --mounts-json run
+        # replaces the default log mounts, so without this download the paths
+        # would dangle on the host.
+        for filename in (self._RUNTIME_EVENTS_FILENAME, self._TRACE_EVENTS_FILENAME):
+            events_remote = EnvironmentPaths.agent_dir / filename
+            events_local = self.logs_dir / filename
+            if events_local.exists():
+                continue
+            try:
+                await environment.download_file(events_remote.as_posix(), events_local)
+            except Exception as exc:  # noqa: BLE001 - best-effort metadata hydration.
+                self.logger.debug("Could not download Maka agent log %s: %s", events_remote, exc)
 
     def _read_cell_output(self, *, required: bool) -> dict[str, Any] | None:
         output_path = self.logs_dir / self._CELL_OUTPUT_FILENAME
@@ -594,8 +703,8 @@ class MakaAgent(BaseInstalledAgent):
         _normalize_cli_env(env)
         env.setdefault("MAKA_REPO_DIR", str(self._host_repo_root()))
         env.setdefault("MAKA_MODEL", "deepseek-chat")
-        env.setdefault("MAKA_MAX_STEPS", "35")
         env.setdefault("MAKA_TASK_RUN_OUT_DIR", str(self.logs_dir / "maka-task-run"))
+        env.setdefault("MAKA_CELL_ARTIFACT_DIR", str(self.logs_dir))
         task_run_out_dir = Path(env["MAKA_TASK_RUN_OUT_DIR"])
         if not task_run_out_dir.is_absolute():
             task_run_out_dir = task_run_out_dir.resolve()
@@ -604,6 +713,7 @@ class MakaAgent(BaseInstalledAgent):
         # MAKA_TASK_RUN_OUT_DIR; re-apply now that the out dir is finalized.
         env.setdefault("MAKA_OUTPUT_DIR", str(task_run_out_dir))
         env.setdefault("MAKA_STORAGE_ROOT", str(task_run_out_dir / "runs"))
+        env["MAKA_CELL_SOFT_TIMEOUT_MS"] = str(self._cell_soft_timeout_ms(env))
 
         task_workdir, workdir_probe = await self._resolve_task_workdir(environment)
 
@@ -630,7 +740,7 @@ class MakaAgent(BaseInstalledAgent):
             },
         )
 
-        timeout_sec = int(env.get("MAKA_HARBOR_AGENT_TIMEOUT_SEC", "1800"))
+        timeout_sec = self._cell_timeout_sec(env)
         proc: asyncio.subprocess.Process | None = None
         async with _ToolExecutorServer(self, environment) as executor:
             env["MAKA_HARBOR_TOOL_EXECUTOR_URL"] = executor.url
@@ -729,7 +839,13 @@ class MakaAgent(BaseInstalledAgent):
         self._write_status(
             status_path,
             {
-                "status": "completed" if proc.returncode == 0 else "failed",
+                "status": (
+                    "completed"
+                    if proc.returncode == 0
+                    else "budget_exhausted"
+                    if proc.returncode == 124
+                    else "failed"
+                ),
                 "startedAt": started_at,
                 "finishedAt": _utc_now(),
                 "runnerPid": proc.pid,
@@ -779,7 +895,9 @@ class MakaAgent(BaseInstalledAgent):
             context.n_cache_tokens = _int_or_none(usage.get("cacheHitInput"))
             context.n_output_tokens = _int_or_none(usage.get("output"))
 
-        if proc.returncode != 0:
+        if proc.returncode != 0 and not (
+            proc.returncode == 124 and parsed.get("settledByDeadline") is True
+        ):
             raise RuntimeError(f"Maka Harbor task-run failed; see {stderr_path}")
 
     async def _resolve_task_workdir(
@@ -1420,11 +1538,13 @@ def _runner_env_summary(env: dict[str, str]) -> dict[str, str]:
         "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_ARCHIVE_REQUIRED",
         "MAKA_CONTEXT_ACTIVE_FULL_COMPACT_HIGH_WATER_NAME",
         "MAKA_CONTEXT_ARCHIVE_RETRIEVAL",
-        "MAKA_HARBOR_AGENT_TIMEOUT_SEC",
         "MAKA_HARBOR_MAX_ATTEMPTS",
         "MAKA_AUTONOMOUS_MAX_ATTEMPTS",
         "MAKA_AUTONOMOUS_MAX_RUNTIME_STEPS",
         "MAKA_AUTONOMOUS_MAX_WALL_TIME_MS",
+        "MAKA_CELL_TIMEOUT_SEC",
+        "MAKA_CELL_SOFT_TIMEOUT_MS",
+        "MAKA_CELL_SETTLEMENT_GRACE_SEC",
     ]
     return {key: env[key] for key in allowed_keys if key in env}
 

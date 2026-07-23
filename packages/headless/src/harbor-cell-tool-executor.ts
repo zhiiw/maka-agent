@@ -9,6 +9,7 @@ import { defaultShellPlan, runShellWithBoundedTail, type MakaTool } from '@maka/
 import { numericEnv, type RunHarborCellEnv } from './headless-run-env.js';
 import type { IsolatedCommandResult, IsolatedToolExecutor } from './isolation.js';
 import { ISOLATED_HEADLESS_TOOL_NAMES } from './isolation.js';
+import { isSensitiveEnvName } from './provider-env.js';
 import {
   buildIsolatedHeadlessTools,
   FRAMED_FILE_TOOL_MAX_TRANSPORT_BYTES,
@@ -186,17 +187,15 @@ function requiredHarborEnv(env: RunHarborCellEnv, name: string): string {
   return value;
 }
 
-/** Provider secrets the LLM backend already captured; task tool subprocesses must
- * never see them, or a candidate prompt could `cat $..._API_KEY_FILE` and exfiltrate. */
-const TOOL_CHILD_SECRET_ENV = /_API_KEY(_FILE)?$/;
-
 function childProcessEnv(env: RunHarborCellEnv): NodeJS.ProcessEnv {
   const childEnv: NodeJS.ProcessEnv = { ...process.env };
   for (const [key, value] of Object.entries(env)) {
     if (value !== undefined) childEnv[key] = value;
   }
   for (const key of Object.keys(childEnv)) {
-    if (TOOL_CHILD_SECRET_ENV.test(key)) delete childEnv[key];
+    if (isSensitiveEnvName(key)) {
+      delete childEnv[key];
+    }
   }
   return childEnv;
 }

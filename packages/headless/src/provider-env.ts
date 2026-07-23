@@ -78,6 +78,9 @@ const PROVIDER_CREDENTIAL_ENV = {
   },
 } satisfies Partial<Record<ProviderType, ProviderCredentialEnv>>;
 
+const SENSITIVE_ENV_NAME =
+  /(?:^|_)(?:API_KEY|ACCESS_KEY|PRIVATE_KEY|TOKEN|SECRET|CREDENTIALS?)(?:_|$)|PASSWORD$/i;
+
 export function providerCredentialEnv(provider: string): ProviderCredentialEnv | undefined {
   return PROVIDER_CREDENTIAL_ENV[provider as keyof typeof PROVIDER_CREDENTIAL_ENV];
 }
@@ -86,6 +89,10 @@ export function requireProviderCredentialEnv(provider: string): ProviderCredenti
   const definition = providerCredentialEnv(provider);
   if (!definition) throw new Error(`provider does not support API key files: ${provider}`);
   return definition;
+}
+
+export function isSensitiveEnvName(name: string): boolean {
+  return SENSITIVE_ENV_NAME.test(name);
 }
 
 export function providerBaseUrlFromEnv(
@@ -125,8 +132,47 @@ export interface ResolvedHarborCellAiSdkEnv {
   apiKey: string;
 }
 
+export type HostProviderAuth =
+  | { kind: 'inherit' }
+  | { kind: 'none' }
+  | { kind: 'credential'; apiKey: string };
+
+export interface ResolvedHostProviderAuthority {
+  auth: HostProviderAuth;
+  baseUrl?: string;
+  apiProtocol?: ModelInfo['apiProtocol'];
+}
+
 export function providerApiKeyEnvName(provider: string): string {
   return requireProviderCredentialEnv(provider).apiKeys[0]!;
+}
+
+export function resolveHostProviderAuthority(env: RunHarborCellEnv): ResolvedHostProviderAuthority {
+  const noAuth = env.MAKA_HOST_NO_AUTH === 'true';
+  const rawApiKey = env.MAKA_HOST_API_KEY || undefined;
+  const apiKey = rawApiKey ?? (env.MAKA_HOST_API_KEY_FILE ? readHostApiKeyFile(env) : undefined);
+  if (noAuth && apiKey !== undefined) {
+    throw new Error('MAKA_HOST_NO_AUTH cannot be combined with a host provider credential');
+  }
+  if (apiKey !== undefined && !apiKey) {
+    throw new Error('host provider credential must not be empty');
+  }
+  const apiProtocol = modelApiProtocolFromEnv(env.MAKA_HOST_MODEL_API_PROTOCOL);
+  return {
+    auth: noAuth
+      ? { kind: 'none' }
+      : apiKey !== undefined
+        ? { kind: 'credential', apiKey }
+        : { kind: 'inherit' },
+    ...(env.MAKA_HOST_BASE_URL ? { baseUrl: env.MAKA_HOST_BASE_URL } : {}),
+    ...(apiProtocol ? { apiProtocol } : {}),
+  };
+}
+
+function readHostApiKeyFile(env: RunHarborCellEnv): string {
+  const path = env.MAKA_HOST_API_KEY_FILE;
+  if (!path) throw new Error('MAKA_HOST_API_KEY_FILE is required for host-side Harbor cells');
+  return readFileSync(path, 'utf8').trim();
 }
 
 export function providerFromEnv(value: string | undefined): ProviderType {
@@ -142,10 +188,16 @@ export function resolveHarborCellAiSdkEnv(input: {
   env: RunHarborCellEnv;
   ts: number;
 }): ResolvedHarborCellAiSdkEnv {
-  const connection = connectionFromEnv(input.provider, input.model, input.env, input.ts);
+  const authority = resolveHostProviderAuthority(input.env);
+  const connection = connectionFromEnv(input.provider, input.model, input.env, input.ts, authority);
   return {
     connection,
-    apiKey: apiKeyFromEnv(input.provider, input.env, connection.slug),
+    apiKey:
+      authority.auth.kind === 'credential'
+        ? authority.auth.apiKey
+        : authority.auth.kind === 'none'
+          ? ''
+          : apiKeyFromEnv(input.provider, input.env, connection.slug),
   };
 }
 
@@ -154,9 +206,11 @@ function connectionFromEnv(
   model: string,
   values: RunHarborCellEnv,
   ts: number,
+  authority: ResolvedHostProviderAuthority,
 ): LlmConnection {
   const defaults = PROVIDER_DEFAULTS[provider];
-  const githubApiProtocol = modelApiProtocolFromEnv(values.MAKA_MODEL_API_PROTOCOL);
+  const githubApiProtocol =
+    authority.apiProtocol ?? modelApiProtocolFromEnv(values.MAKA_MODEL_API_PROTOCOL);
   if (provider === 'github-copilot' && !githubApiProtocol) {
     throw new Error('GitHub Copilot requires an account-discovered model protocol');
   }
@@ -164,7 +218,11 @@ function connectionFromEnv(
     slug: values.MAKA_LLM_CONNECTION_SLUG ?? provider,
     name: defaults.label,
     providerType: provider,
-    baseUrl: values.MAKA_BASE_URL ?? providerBaseUrlFromEnv(provider, values) ?? defaults.baseUrl,
+    baseUrl:
+      authority.baseUrl ??
+      values.MAKA_BASE_URL ??
+      providerBaseUrlFromEnv(provider, values) ??
+      defaults.baseUrl,
     defaultModel: model,
     ...(provider === 'github-copilot'
       ? { models: [{ id: model, apiProtocol: githubApiProtocol }] }

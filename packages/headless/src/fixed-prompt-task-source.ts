@@ -54,6 +54,32 @@ export async function discoverCachedHarborTasks(
   return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
+/**
+ * Pick tasks by explicit id, preserving the requested order. Throws on an
+ * unknown id (and, unless `rejectDuplicates` is false, on a duplicate id that
+ * would double-weight a task). `label` scopes the unknown-id error message for
+ * callers that select from more than one named id list.
+ */
+export function selectTasksByIds<T extends { id: string }>(
+  allTasks: readonly T[],
+  ids: readonly string[],
+  options: { label?: string; rejectDuplicates?: boolean } = {},
+): T[] {
+  const { label, rejectDuplicates = true } = options;
+  if (rejectDuplicates) {
+    const duplicates = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))];
+    if (duplicates.length > 0) throw new Error(`duplicate task id(s): ${duplicates.join(', ')}`);
+  }
+  const byId = new Map(allTasks.map((task) => [task.id, task]));
+  const missing = ids.filter((id) => !byId.has(id));
+  if (missing.length > 0) {
+    throw new Error(
+      `${label ? `${label} contains ` : ''}unknown task id(s): ${missing.join(', ')}`,
+    );
+  }
+  return ids.map((id) => byId.get(id)!);
+}
+
 export async function fingerprintFixedPromptTaskTree(
   tasks: readonly FixedPromptTask[],
 ): Promise<string> {
@@ -163,6 +189,7 @@ function parseTaskTomlMetadata(text: string): FixedPromptTask['metadata'] {
     ),
     ...numberField('agentTimeoutSec', sectionField(text, 'agent', 'timeout_sec')),
     ...numberField('verifierTimeoutSec', sectionField(text, 'verifier', 'timeout_sec')),
+    ...numberField('buildTimeoutSec', sectionField(text, 'environment', 'build_timeout_sec')),
   };
 }
 

@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_HEADLESS_SYSTEM_PROMPT } from '@maka/headless';
 import { ensureAbRunManifest } from '#ab-manifest';
-import { discoverCachedHarborTasks, resolveFixedPromptRunRoot } from '#fixed-prompt-task-source';
+import { runExperiment } from '#experiment-engine';
+import {
+  discoverCachedHarborTasks,
+  resolveFixedPromptRunRoot,
+  selectTasksByIds,
+} from '#fixed-prompt-task-source';
 import { createHarborTaskRunner } from '#harbor-task-runner';
+import { envPath as parseEnvPath } from '#headless-run-env';
 import { providerCredentialEnv } from '#provider-env';
 import { runRuntimePolicyAbLifecycle } from '#runtime-policy-ab-lifecycle';
 import { parseRuntimePolicyAbExecutionProfile } from '#runtime-policy-ab-profile';
@@ -21,21 +27,11 @@ import {
   buildSubjectFingerprint,
   buildTaskSourceFingerprint,
   buildToolchainFingerprint,
-} from './run-prompt-ab.mjs';
+} from '#experiment-fingerprint';
 
-function envPath(name, fallback) {
-  const raw = process.env[name] || fallback;
-  if (!raw) throw new Error(`${name} is required`);
-  return raw.startsWith('~') ? join(homedir(), raw.slice(1)) : resolve(raw);
-}
-
-function selectTasks(allTasks, taskIds, label) {
-  const byId = new Map(allTasks.map((task) => [task.id, task]));
-  const missing = taskIds.filter((id) => !byId.has(id));
-  if (missing.length > 0)
-    throw new Error(`${label} contains unknown task id(s): ${missing.join(', ')}`);
-  return taskIds.map((id) => byId.get(id));
-}
+const envPath = (name, fallback) => parseEnvPath(name, process.env[name], fallback);
+const selectTasks = (allTasks, taskIds, label) =>
+  selectTasksByIds(allTasks, taskIds, { label, rejectDuplicates: false });
 
 async function main() {
   const repoRoot = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
@@ -65,6 +61,8 @@ async function main() {
     subjectFingerprint: await buildSubjectFingerprint(
       makaRepoPath,
       process.env.MAKA_RUNTIME_AB_EXPLICIT_SUBJECT_FINGERPRINT,
+      undefined,
+      'MAKA_RUNTIME_AB',
     ),
     taskSourceFingerprint: await buildTaskSourceFingerprint(tasksRoot, [
       ...pilotTasks,
@@ -74,6 +72,7 @@ async function main() {
       process.env.MAKA_RUNTIME_AB_TOOLCHAIN_FINGERPRINT,
       undefined,
       makaRepoPath,
+      'MAKA_RUNTIME_AB',
     ),
     evaluationTaskIds: evaluationTasks.map((task) => task.id),
     pilotTaskIds: pilotTasks.map((task) => task.id),
@@ -96,14 +95,7 @@ async function main() {
     join(repoRoot, '.local-secrets/deepseek-key'),
   );
   await readFile(keyFile, 'utf8');
-  const controllerDir = join(runRoot, 'controller');
-  const jobsDir = join(runRoot, 'jobs');
-  const promptsDir = join(runRoot, 'prompts');
-  await mkdir(controllerDir, { recursive: true });
-  await mkdir(jobsDir, { recursive: true });
-  await mkdir(promptsDir, { recursive: true });
-  const systemPromptPath = join(promptsDir, 'shared-system-prompt.md');
-  await writeFile(systemPromptPath, systemPrompt, 'utf8');
+  const systemPromptPath = join(runRoot, 'prompts', 'shared-system-prompt.md');
   const config = {
     id: `runtime-policy-ab-${spec.id}`,
     backend: 'harbor',
@@ -115,47 +107,57 @@ async function main() {
     throw new Error(
       `runtime policy A/B provider ${executionProfile.provider} does not declare a base URL environment variable`,
     );
-  const harborRunner = createHarborTaskRunner({
-    makaRepoPath,
-    jobsDir,
-    model: executionProfile.model,
-    provider: executionProfile.provider,
-    apiKeyFile: keyFile,
-    pricing: executionProfile.pricing,
-    agentEnv: {
-      [baseUrlEnvName]: executionProfile.baseUrl,
-      MAKA_CELL_TIMEOUT_SEC: String(executionProfile.taskBudgetSec),
-    },
-    harborTimeoutMs: executionProfile.harborTimeoutMs,
-  });
-  const state = await runRuntimePolicyAbLifecycle({
-    runId,
+
+  const state = await runExperiment({
     runRoot,
-    manifestFingerprint: runManifest.fingerprint,
-    config,
-    systemPromptPath,
-    resultsJsonlPath: join(controllerDir, 'results.jsonl'),
-    pilotTasks,
-    evaluationTasks,
-    fullReps: spec.fullReps,
-    arms: spec.arms,
-    executionProfile,
-    nonInferiorityMargin: spec.nonInferiorityMargin,
-    sharedAgentEnv: spec.sharedAgentEnv,
-    resumeFingerprint: runManifest.fingerprint,
-    harborRunner,
+    prompts: () => [{ path: systemPromptPath, content: systemPrompt }],
+    run: ({ jobsDir, resultsJsonlPath }) => {
+      const harborRunner = createHarborTaskRunner({
+        makaRepoPath,
+        jobsDir,
+        model: executionProfile.model,
+        provider: executionProfile.provider,
+        apiKeyFile: keyFile,
+        pricing: executionProfile.pricing,
+        agentEnv: {
+          [baseUrlEnvName]: executionProfile.baseUrl,
+          MAKA_CELL_TIMEOUT_SEC: String(executionProfile.taskBudgetSec),
+        },
+        harborTimeoutMs: executionProfile.harborTimeoutMs,
+      });
+      return runRuntimePolicyAbLifecycle({
+        runId,
+        runRoot,
+        manifestFingerprint: runManifest.fingerprint,
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        pilotTasks,
+        evaluationTasks,
+        fullReps: spec.fullReps,
+        arms: spec.arms,
+        executionProfile,
+        nonInferiorityMargin: spec.nonInferiorityMargin,
+        sharedAgentEnv: spec.sharedAgentEnv,
+        resumeFingerprint: runManifest.fingerprint,
+        harborRunner,
+      });
+    },
+    artifacts: (state) => [
+      {
+        path: join(runRoot, 'runtime-policy-ab-result.json'),
+        content: `${JSON.stringify({ runManifest, spec, state }, null, 2)}\n`,
+      },
+      ...(state.full
+        ? [
+            {
+              path: join(runRoot, 'runtime-policy-ab-report.md'),
+              content: renderRuntimePolicyAbComparisonMarkdown(state.full),
+            },
+          ]
+        : []),
+    ],
   });
-  await writeFile(
-    join(runRoot, 'runtime-policy-ab-result.json'),
-    `${JSON.stringify({ runManifest, spec, state }, null, 2)}\n`,
-    'utf8',
-  );
-  if (state.full)
-    await writeFile(
-      join(runRoot, 'runtime-policy-ab-report.md'),
-      renderRuntimePolicyAbComparisonMarkdown(state.full),
-      'utf8',
-    );
   console.log(
     `status: ${state.status}${state.reason ? ` (${state.reason})` : ''}${state.full ? `; decision: ${state.full.decision}` : ''}`,
   );

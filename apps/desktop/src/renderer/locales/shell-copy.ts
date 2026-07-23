@@ -137,6 +137,14 @@ type ShellCopy = {
     newConversation: string;
     sendFailedTitle: string;
     sendFailedFallback: string;
+    skillInvocationBlockedTitle: string;
+    skillInvocationBlockedDescription(items: readonly string[]): string;
+    skillInvocationFailedTitle: string;
+    skillInvocationFailedDescription(items: readonly string[]): string;
+    skillInvocationFailureReason: Record<
+      'invalid_name' | 'not_found' | 'disabled' | 'host_incompatible' | 'resolution_failed',
+      string
+    >;
     responseFailedTitle: string;
     responseFailedFallback: string;
     refreshFailedTitle: string;
@@ -263,6 +271,8 @@ type ShellCopy = {
     toggleFallback: string;
     enabledTitle: string;
     disabledTitle: string;
+    pinnedTitle: string;
+    unpinnedTitle: string;
     runtimeDescription(name: string): string;
     deleteFailedTitle: string;
     deleteFallback: string;
@@ -656,6 +666,17 @@ const SHELL_COPY_BY_LOCALE = {
       newConversation: '新建对话',
       sendFailedTitle: '发送失败',
       sendFailedFallback: '消息暂时无法发送，请稍后重试。',
+      skillInvocationBlockedTitle: 'Skill 调用失败，消息未发送',
+      skillInvocationBlockedDescription: (items) => `${items.join('、')}。请调整选择后重试。`,
+      skillInvocationFailedTitle: '部分 Skill 未能调用',
+      skillInvocationFailedDescription: (items) => `${items.join('、')}。其余 Skill 已正常调用。`,
+      skillInvocationFailureReason: {
+        invalid_name: '名称无效',
+        not_found: '未找到',
+        disabled: '已停用',
+        host_incompatible: '当前环境缺少依赖',
+        resolution_failed: '解析失败',
+      },
       responseFailedTitle: '响应失败',
       responseFailedFallback: '会话操作失败，请稍后重试。',
       refreshFailedTitle: '刷新对话失败',
@@ -799,6 +820,8 @@ const SHELL_COPY_BY_LOCALE = {
       toggleFallback: '无法切换 Skill，请稍后重试。',
       enabledTitle: '已启用 Skill',
       disabledTitle: '已停用 Skill',
+      pinnedTitle: '已固定到技能上下文',
+      unpinnedTitle: '已取消固定',
       runtimeDescription: (name: string) => `${name} 已更新当前项目的运行状态。`,
       deleteFailedTitle: '无法删除 Skill',
       deleteFallback: '无法删除 Skill，请稍后重试。',
@@ -1099,6 +1122,18 @@ const SHELL_COPY_BY_LOCALE = {
       newConversation: 'New conversation',
       sendFailedTitle: 'Message not sent',
       sendFailedFallback: 'The message could not be sent. Try again later.',
+      skillInvocationBlockedTitle: 'Skill invocation failed; message not sent',
+      skillInvocationBlockedDescription: (items) => `${items.join(', ')}. Adjust the selection and try again.`,
+      skillInvocationFailedTitle: 'Some Skills were not invoked',
+      skillInvocationFailedDescription: (items) =>
+        `${items.join(', ')}. The remaining Skills were invoked.`,
+      skillInvocationFailureReason: {
+        invalid_name: 'invalid name',
+        not_found: 'not found',
+        disabled: 'disabled',
+        host_incompatible: 'required tools unavailable',
+        resolution_failed: 'resolution failed',
+      },
       responseFailedTitle: 'Response failed',
       responseFailedFallback: 'The conversation action failed. Try again later.',
       refreshFailedTitle: 'Could not refresh conversation',
@@ -1244,6 +1279,8 @@ const SHELL_COPY_BY_LOCALE = {
       toggleFallback: 'The Skill status could not be changed. Try again later.',
       enabledTitle: 'Skill enabled',
       disabledTitle: 'Skill disabled',
+      pinnedTitle: 'Skill pinned to context',
+      unpinnedTitle: 'Skill unpinned',
       runtimeDescription: (name: string) => `${name} runtime status was updated for the current project.`,
       deleteFailedTitle: 'Could not delete Skill',
       deleteFallback: 'The Skill could not be deleted. Try again later.',

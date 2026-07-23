@@ -26,6 +26,9 @@
   "imports": {
     "#fixed-prompt-task-source": "./dist/fixed-prompt-task-source.js",
     "#headless-run-env": "./dist/headless-run-env.js",
+    "#experiment-engine": "./dist/experiment-engine.js",
+    "#experiment-fingerprint": "./dist/experiment-fingerprint.js",
+    "#deepseek-pricing": "./dist/deepseek-pricing.js",
     "#prompt-optimization-env": "./dist/prompt-optimization-env.js",
     "#prompt-optimization-bootstrap": "./dist/prompt-optimization-bootstrap.js",
     "#prompt-optimization-manifest": "./dist/prompt-optimization-manifest.js",
@@ -67,6 +70,7 @@
     "@maka/core": "0.1.0",
     "@maka/runtime": "0.1.0",
     "@maka/storage": "0.1.0",
-    "ai": "^7.0.31"
+    "ai": "^7.0.31",
+    "fs-native-extensions": "^1.5.0"
   }
 }

@@ -7,7 +7,7 @@ import { dirname, resolve } from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { HARBOR_CELL_CONTEXT_ENV_KEYS } from '../harbor-cell.js';
+import { HARBOR_CELL_CONTEXT_ENV_KEYS, resolveHarborCellAiSdkEnv } from '../harbor-cell.js';
 
 const repoRoot = resolve(fileURLToPath(new URL('../../../..', import.meta.url)));
 const execFileAsync = promisify(execFile);
@@ -180,7 +180,7 @@ describe('Harbor adapter contract', () => {
     }
   });
 
-  test('run-host-cell.mjs maps direct SiliconFlow credentials to the SiliconFlow namespace', async () => {
+  test('run-host-cell.mjs resolves direct SiliconFlow credentials without materializing aliases', async () => {
     const tmp = mkdtempSync(resolve(tmpdir(), 'maka-host-cell-siliconflow-'));
     try {
       const keyFile = resolve(tmp, 'key.txt');
@@ -190,18 +190,36 @@ describe('Harbor adapter contract', () => {
       );
 
       const rawEnv = await backendEnv({ MAKA_HOST_API_KEY: 'siliconflow-raw-key' }, 'siliconflow');
-      assert.equal(rawEnv.SILICONFLOW_API_KEY, 'siliconflow-raw-key');
+      assert.equal(
+        resolveHarborCellAiSdkEnv({
+          provider: 'siliconflow',
+          model: 'test-model',
+          env: rawEnv,
+          ts: 1,
+        }).apiKey,
+        'siliconflow-raw-key',
+      );
+      assert.equal(rawEnv.SILICONFLOW_API_KEY, undefined);
       assert.equal(rawEnv.OPENAI_API_KEY, undefined);
 
       const fileEnv = await backendEnv({ MAKA_HOST_API_KEY_FILE: keyFile }, 'siliconflow');
-      assert.equal(fileEnv.SILICONFLOW_API_KEY, 'siliconflow-file-key');
+      assert.equal(
+        resolveHarborCellAiSdkEnv({
+          provider: 'siliconflow',
+          model: 'test-model',
+          env: fileEnv,
+          ts: 1,
+        }).apiKey,
+        'siliconflow-file-key',
+      );
+      assert.equal(fileEnv.SILICONFLOW_API_KEY, undefined);
       assert.equal(fileEnv.OPENAI_API_KEY, undefined);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  test('run-host-cell.mjs maps Vercel Gateway credentials only to the AI Gateway namespace', async () => {
+  test('run-host-cell.mjs resolves Vercel Gateway credentials without materializing aliases', async () => {
     const tmp = mkdtempSync(resolve(tmpdir(), 'maka-host-cell-vercel-'));
     try {
       const keyFile = resolve(tmp, 'key.txt');
@@ -211,11 +229,29 @@ describe('Harbor adapter contract', () => {
       );
 
       const rawEnv = await backendEnv({ MAKA_HOST_API_KEY: 'vercel-raw-key' }, 'vercel');
-      assert.equal(rawEnv.AI_GATEWAY_API_KEY, 'vercel-raw-key');
+      assert.equal(
+        resolveHarborCellAiSdkEnv({
+          provider: 'vercel',
+          model: 'creator/model',
+          env: rawEnv,
+          ts: 1,
+        }).apiKey,
+        'vercel-raw-key',
+      );
+      assert.equal(rawEnv.AI_GATEWAY_API_KEY, undefined);
       assert.equal(rawEnv.OPENAI_API_KEY, undefined);
 
       const fileEnv = await backendEnv({ MAKA_HOST_API_KEY_FILE: keyFile }, 'vercel');
-      assert.equal(fileEnv.AI_GATEWAY_API_KEY, 'vercel-file-key');
+      assert.equal(
+        resolveHarborCellAiSdkEnv({
+          provider: 'vercel',
+          model: 'creator/model',
+          env: fileEnv,
+          ts: 1,
+        }).apiKey,
+        'vercel-file-key',
+      );
+      assert.equal(fileEnv.AI_GATEWAY_API_KEY, undefined);
       assert.equal(fileEnv.OPENAI_API_KEY, undefined);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -235,9 +271,16 @@ describe('Harbor adapter contract', () => {
       'github-copilot',
     );
 
-    assert.equal(env.COPILOT_GITHUB_TOKEN, 'github_pat_copilot_requests');
-    assert.equal(env.MAKA_BASE_URL, 'https://api.githubcopilot.com');
-    assert.equal(env.MAKA_MODEL_API_PROTOCOL, 'openai-responses');
+    const resolved = resolveHarborCellAiSdkEnv({
+      provider: 'github-copilot',
+      model: 'gpt-test',
+      env,
+      ts: 1,
+    });
+    assert.equal(resolved.apiKey, 'github_pat_copilot_requests');
+    assert.equal(resolved.connection.baseUrl, 'https://api.githubcopilot.com');
+    assert.equal(resolved.connection.models?.[0]?.apiProtocol, 'openai-responses');
+    assert.equal(env.COPILOT_GITHUB_TOKEN, undefined);
   });
 
   test('run-host-cell.mjs accepts Ollama without provider credentials', async () => {
@@ -258,10 +301,20 @@ describe('Harbor adapter contract', () => {
     assert.deepEqual(await backendEnv({}, 'localai'), {
       MAKA_LLM_CONNECTION_SLUG: 'localai',
     });
-    assert.deepEqual(await backendEnv({ MAKA_HOST_API_KEY: 'localai-user-key' }, 'localai'), {
+    const env = await backendEnv({ MAKA_HOST_API_KEY: 'localai-user-key' }, 'localai');
+    assert.deepEqual(env, {
       MAKA_LLM_CONNECTION_SLUG: 'localai',
-      LOCALAI_API_KEY: 'localai-user-key',
+      MAKA_HOST_API_KEY: 'localai-user-key',
     });
+    assert.equal(
+      resolveHarborCellAiSdkEnv({
+        provider: 'localai',
+        model: 'local-model',
+        env,
+        ts: 1,
+      }).apiKey,
+      'localai-user-key',
+    );
   });
 
   test('run-host-cell.mjs rejects unknown context env instead of dropping it', async () => {
@@ -387,6 +440,37 @@ describe('Harbor adapter contract', () => {
     });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /bridge-contract ok/);
+  });
+
+  test('harness tree contract holds under the plain Harbor interpreter', (t: TestContext) => {
+    const python = harborPython();
+    if (!python) {
+      t.skip('Harbor 0.13.2 python is not available (CI has no harbor)');
+      return;
+    }
+    const result = spawnSync(python, [harnessCompatTestPath()], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /0 failed/);
+  });
+
+  test('harness tree contract holds under the Pier interpreter', (t: TestContext) => {
+    const python = pierPython();
+    if (!python) {
+      t.skip('Pier python is not available (no pier launcher or MAKA_PIER_PYTHON)');
+      return;
+    }
+    // The interpreter was verified to import pier, so expected-but-unavailable
+    // pier coverage inside the suite must fail rather than skip.
+    const result = spawnSync(python, [harnessCompatTestPath()], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...process.env, MAKA_HARNESS_COMPAT_EXPECT: 'pier' },
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /0 skipped, 0 failed/);
   });
 
   test('run-prompt-optimization.mjs wires the headless run API with a key file, not a raw key', async () => {
@@ -998,6 +1082,32 @@ function harborPython(): string | null {
   }
   for (const python of candidates) {
     const check = spawnSync(python, ['-c', 'import harbor'], { encoding: 'utf8' });
+    if (check.status === 0) return python;
+  }
+  return null;
+}
+
+function harnessCompatTestPath(): string {
+  return resolve(repoRoot, 'packages/headless/harbor/tests/test_harness_compat.py');
+}
+
+/* Resolve the Pier venv's python by env override or via the `pier` launcher on
+ * PATH, mirroring harborPython(). Pier is Datacurve's Harbor fork used for
+ * DeepSWE runs; it is optional on dev machines and absent in CI. */
+function pierPython(): string | null {
+  const candidates: string[] = [];
+  if (process.env.MAKA_PIER_PYTHON) candidates.push(process.env.MAKA_PIER_PYTHON);
+  const located = spawnSync('bash', ['-lc', 'command -v pier'], { encoding: 'utf8' });
+  if (located.status === 0 && located.stdout.trim()) {
+    try {
+      const binDir = dirname(realpathSync(located.stdout.trim()));
+      candidates.push(resolve(binDir, 'python'), resolve(binDir, 'python3'));
+    } catch {
+      // Unresolvable launcher — fall through to remaining candidates.
+    }
+  }
+  for (const python of candidates) {
+    const check = spawnSync(python, ['-c', 'import pier'], { encoding: 'utf8' });
     if (check.status === 0) return python;
   }
   return null;
@@ -1752,6 +1862,37 @@ with tempfile.TemporaryDirectory() as tmp:
     assert hydrated_deadline_output["tokenSummary"] == deadline_usage, hydrated_deadline_output
     assert json.loads(deadline_output_path.read_text(encoding="utf-8"))["tokenSummary"] == deadline_usage
 
+    class DownloadEnvironment:
+        def __init__(self):
+            self.downloads = []
+
+        async def download_file(self, remote, local):
+            self.downloads.append(remote)
+            Path(local).write_text("{}", encoding="utf-8")
+
+    # Pier (--mounts-json replaces the default log mounts): nothing is host-side
+    # yet, so the adapter must download runtime-events.jsonl and trace-events.jsonl
+    # alongside the cell output or the cell output's runtimeEventsPath /
+    # traceEventsPath dangle.
+    with tempfile.TemporaryDirectory() as pier_logs:
+        pier_environment = DownloadEnvironment()
+        asyncio.run(MakaAgent(Path(pier_logs))._download_cell_output(pier_environment))
+        assert "/logs/agent/maka-cell-output.json" in pier_environment.downloads, pier_environment.downloads
+        assert "/logs/agent/runtime-events.jsonl" in pier_environment.downloads, pier_environment.downloads
+        assert "/logs/agent/trace-events.jsonl" in pier_environment.downloads, pier_environment.downloads
+
+    # Harbor (agent log dir bind-mounted): the agent logs already exist
+    # host-side, so the adapter must not race the mount with a re-download; the
+    # cell output download itself stays unchanged.
+    with tempfile.TemporaryDirectory() as harbor_logs:
+        (Path(harbor_logs) / "runtime-events.jsonl").write_text("", encoding="utf-8")
+        (Path(harbor_logs) / "trace-events.jsonl").write_text("", encoding="utf-8")
+        mounted_environment = DownloadEnvironment()
+        asyncio.run(MakaAgent(Path(harbor_logs))._download_cell_output(mounted_environment))
+        assert "/logs/agent/maka-cell-output.json" in mounted_environment.downloads, mounted_environment.downloads
+        assert "/logs/agent/runtime-events.jsonl" not in mounted_environment.downloads, mounted_environment.downloads
+        assert "/logs/agent/trace-events.jsonl" not in mounted_environment.downloads, mounted_environment.downloads
+
     context = AgentContext()
     agent._apply_cell_output(context, {
         "status": "completed",
@@ -1913,6 +2054,14 @@ with tempfile.TemporaryDirectory() as tmp:
         "MAKA_CELL_TIMEOUT_SEC": "1800",
         "MAKA_CELL_SETTLEMENT_GRACE_SEC": "60",
     })._cell_soft_timeout_ms() == 1740000
+    try:
+        MakaAgent(Path(tmp), extra_env={
+            "MAKA_CELL_TIMEOUT_SEC": "2147514",
+        })._cell_soft_timeout_ms()
+    except RuntimeError as exc:
+        assert "Node timer limit" in str(exc), str(exc)
+    else:
+        raise AssertionError("expected an oversized soft timeout to raise")
 
     host_deadline_env = MakaAgent(Path(tmp), extra_env={
         "MAKA_BACKEND": "fake",
@@ -1922,6 +2071,18 @@ with tempfile.TemporaryDirectory() as tmp:
         token="test-token",
     ))
     assert host_deadline_env["MAKA_CELL_SOFT_TIMEOUT_MS"] == "870000", host_deadline_env
+
+    copilot_host_env = MakaAgent(Path(tmp), extra_env={
+        "MAKA_HOST_API_KEY": "copilot-token",
+        "MAKA_HOST_BASE_URL": "https://api.githubcopilot.com",
+        "MAKA_HOST_MODEL_API_PROTOCOL": "openai-responses",
+        "MAKA_PROVIDER": "github-copilot",
+        "MAKA_MODEL": "gpt-test",
+    })._host_cell_env(Path("/tmp/instruction.txt"), "/workspace", types.SimpleNamespace(
+        url="http://127.0.0.1:1",
+        token="test-token",
+    ))
+    assert copilot_host_env["MAKA_HOST_MODEL_API_PROTOCOL"] == "openai-responses", copilot_host_env
 
     # The default model must not be the deprecated deepseek-chat alias.
     default_model_env = MakaAgent(Path(tmp), extra_env={"MAKA_HOST_API_KEY_FILE": "/host/deepseek-key"})._cell_env(Path("/logs/agent/instruction.txt"))
@@ -2006,6 +2167,7 @@ with tempfile.TemporaryDirectory() as tmp:
             self.reclaim_scoped_processes = True
 
     class FakeHostProcess:
+        pid = 123
         returncode = 0
 
         async def communicate(self):
@@ -2054,6 +2216,110 @@ with tempfile.TemporaryDirectory() as tmp:
         })
         host_process_environment = types.SimpleNamespace(root_commands=[], agent_commands=[])
         asyncio.run(host_process_agent._run_host_cell(host_process_environment, Path(tmp) / "instruction.txt"))
+        host_cell_process = dict(captured_host_process)
+
+        task_run_agent = MakaAgent(Path(tmp), extra_env={
+            "MAKA_BACKEND": "fake",
+            "MAKA_HARBOR_MODE": "task-run",
+            "MAKA_CELL_TIMEOUT_SEC": "7200",
+        })
+        task_run_context = AgentContext()
+        task_run_timeouts = []
+
+        async def resolve_task_workdir(environment):
+            return ("/app", [])
+
+        async def communicate_task_run(**kwargs):
+            task_run_timeouts.append(kwargs["timeout_sec"])
+            return (b'{"status":"completed","benchmarkFailureShouldThrow":false}\n', b"")
+
+        task_run_agent._resolve_task_workdir = resolve_task_workdir
+        task_run_agent._communicate_streaming = communicate_task_run
+        asyncio.run(
+            task_run_agent._run_task_run_host(
+                "finish the task",
+                host_process_environment,
+                task_run_context,
+            )
+        )
+        task_run_env = captured_host_process["kwargs"]["env"]
+        assert "MAKA_MAX_STEPS" not in task_run_env, task_run_env.get("MAKA_MAX_STEPS")
+        assert task_run_timeouts[-1] == 7200, task_run_timeouts
+
+        runner_env_path = Path(tmp) / "task-run.env"
+        runner_env_path.write_text("MAKA_CELL_TIMEOUT_SEC=4321\n", encoding="utf-8")
+        original_runner_env = maka_agent_mod._DEFAULT_RUNNER_ENV
+        maka_agent_mod._DEFAULT_RUNNER_ENV = runner_env_path
+        try:
+            env_file_task_run_agent = MakaAgent(Path(tmp), extra_env={
+                "MAKA_BACKEND": "fake",
+                "MAKA_HARBOR_MODE": "task-run",
+            })
+            env_file_task_run_agent._resolve_task_workdir = resolve_task_workdir
+            env_file_task_run_agent._communicate_streaming = communicate_task_run
+            asyncio.run(
+                env_file_task_run_agent._run_task_run_host(
+                    "finish the task",
+                    host_process_environment,
+                    AgentContext(),
+                )
+            )
+        finally:
+            maka_agent_mod._DEFAULT_RUNNER_ENV = original_runner_env
+        assert task_run_timeouts[-1] == 4321, task_run_timeouts
+
+        capped_task_run_agent = MakaAgent(Path(tmp), extra_env={
+            "MAKA_BACKEND": "fake",
+            "MAKA_HARBOR_MODE": "task-run",
+            "MAKA_MAX_STEPS": "64",
+        })
+        capped_task_run_agent._resolve_task_workdir = resolve_task_workdir
+        capped_task_run_agent._communicate_streaming = communicate_task_run
+        asyncio.run(
+            capped_task_run_agent._run_task_run_host(
+                "finish the task",
+                host_process_environment,
+                AgentContext(),
+            )
+        )
+        capped_task_run_env = captured_host_process["kwargs"]["env"]
+        assert capped_task_run_env["MAKA_MAX_STEPS"] == "64", capped_task_run_env.get("MAKA_MAX_STEPS")
+
+        class DeadlineSettledTaskRunProcess(FakeHostProcess):
+            returncode = 124
+
+        async def fake_task_run_deadline_subprocess_exec(*args, **kwargs):
+            captured_host_process["args"] = args
+            captured_host_process["kwargs"] = kwargs
+            return DeadlineSettledTaskRunProcess()
+
+        async def communicate_task_run_deadline(**kwargs):
+            return (
+                b'{"status":"budget_exhausted","settledByDeadline":true,"benchmarkFailureShouldThrow":false}\n',
+                b"",
+            )
+
+        asyncio.create_subprocess_exec = fake_task_run_deadline_subprocess_exec
+        deadline_task_run_agent = MakaAgent(Path(tmp), extra_env={
+            "MAKA_BACKEND": "fake",
+            "MAKA_HARBOR_MODE": "task-run",
+            "MAKA_CELL_TIMEOUT_SEC": "60",
+            "MAKA_CELL_SETTLEMENT_GRACE_SEC": "10",
+        })
+        deadline_task_run_agent._resolve_task_workdir = resolve_task_workdir
+        deadline_task_run_agent._communicate_streaming = communicate_task_run_deadline
+        asyncio.run(
+            deadline_task_run_agent._run_task_run_host(
+                "finish the task",
+                host_process_environment,
+                AgentContext(),
+            )
+        )
+        assert captured_host_process["kwargs"]["env"]["MAKA_CELL_SOFT_TIMEOUT_MS"] == "50000"
+        assert FakeToolExecutor.instances[-1].reclaim_scoped_processes
+
+        captured_host_process.clear()
+        captured_host_process.update(host_cell_process)
 
         class DeadlineSettledHostProcess(FakeHostProcess):
             returncode = 124
@@ -2527,6 +2793,7 @@ class BaseInstalledAgent:
         self._extra_env = extra_env or {}
         self._version = version
         self.model_name = model_name
+        self.logger = types.SimpleNamespace(debug=lambda *args, **kwargs: None)
 
     def _get_env(self, key):
         return self._extra_env.get(key) or os.environ.get(key)
@@ -2560,6 +2827,9 @@ with tempfile.TemporaryDirectory() as tmp:
     commands = []
 
     class Environment:
+        def __init__(self):
+            self.downloads = []
+
         async def exec(self, command, env=None, **kwargs):
             commands.append((command, env or {}))
             if "--output-format stream-json" in command:
@@ -2574,6 +2844,9 @@ with tempfile.TemporaryDirectory() as tmp:
                     encoding="utf-8",
                 )
             return types.SimpleNamespace(return_code=0, stdout="", stderr="")
+
+        async def download_file(self, remote, local):
+            self.downloads.append(remote)
 
     agent = MakaKimiCodeAgent(
         logs,
@@ -2599,6 +2872,9 @@ with tempfile.TemporaryDirectory() as tmp:
     assert "/opt/maka-kimi-code-toolchain/bin/node" in install_command, install_command
     assert install_env["MAKA_EXPECTED_TOOLCHAIN_FINGERPRINT"] == "sha256:" + "a" * 64, install_env
     asyncio.run(agent.run("hi", environment, object()))
+    # Harbor mounted path: the stream-json already landed host-side, so the
+    # adapter must not race the mount with a re-download.
+    assert environment.downloads == [], environment.downloads
     run_command, run_env = commands[-1]
     assert "--output-format stream-json --prompt" in run_command, run_command
     assert "config.toml" in run_command, run_command
@@ -2710,7 +2986,51 @@ with tempfile.TemporaryDirectory() as tmp:
         if timeout_environment.process is not None and timeout_environment.process.poll() is None:
             os.killpg(timeout_environment.process.pid, signal.SIGKILL)
             timeout_environment.process.wait()
-    print("kimi-code adapter ok")
+
+# Pier custom-mounts path: --mounts-json replaces the default log mounts while
+# capabilities.mounted stays true, so pier's own log download never runs and
+# the CLI's stream-json exists only in the container. The adapter must download
+# it itself, or _events(require_assistant=True) raises and a real
+# token-burning run is misclassified as infra.
+with tempfile.TemporaryDirectory() as pier_tmp:
+    pier_logs = Path(pier_tmp)
+
+    class PierEnvironment:
+        def __init__(self):
+            self.downloads = []
+
+        async def exec(self, command, env=None, **kwargs):
+            # The CLI writes only the in-container /logs/agent/kimi-code.jsonl;
+            # nothing appears under the host logs_dir.
+            return types.SimpleNamespace(return_code=0, stdout="", stderr="")
+
+        async def download_file(self, remote, local):
+            self.downloads.append(remote)
+            Path(local).write_text(
+                json.dumps({"role": "assistant", "content": "done"}) + "\n",
+                encoding="utf-8",
+            )
+
+    pier_agent = MakaKimiCodeAgent(
+        pier_logs,
+        version="0.26.0",
+        model_name="k3",
+        extra_env={
+            "MAKA_PROVIDER_PROXY_URL": "http://host.docker.internal:43210",
+            "MAKA_PROVIDER_PROXY_TOKEN": "ephemeral-token",
+            "MAKA_MODEL": "k3",
+            "MAKA_SYSTEM_PROMPT": "",
+        },
+    )
+    pier_environment = PierEnvironment()
+    asyncio.run(pier_agent.run("hi", pier_environment, object()))
+    assert "/logs/agent/kimi-code.jsonl" in pier_environment.downloads, pier_environment.downloads
+    pier_agent.populate_context_post_run(object())
+    pier_cell = json.loads((pier_logs / "maka-cell-output.json").read_text(encoding="utf-8"))
+    assert pier_cell["status"] == "completed", pier_cell
+    assert pier_cell["steps"] == 1, pier_cell
+
+print("kimi-code adapter ok")
 `;
 }
 
