@@ -14904,9 +14904,7 @@ class MemorySessionStore implements SessionStore {
   }
 }
 
-class MemoryAgentRunStore
-  implements AgentRunStore, RuntimeEventStore, ContinuationAdmissionStore
-{
+class MemoryAgentRunStore implements AgentRunStore, RuntimeEventStore, ContinuationAdmissionStore {
   listSessionRunsCalls = 0;
   readEventsCalls = 0;
   private headers = new Map<string, AgentRunHeader>();

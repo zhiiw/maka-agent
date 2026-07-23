@@ -183,9 +183,7 @@ async function openExecutionStoresForWrite<K extends StorageRootKind>(
         run(() => agentRunStore.repairEventProjection(sessionId, type, event, options)),
       admitRootTurn: (input: AdmitRootTurnInput): Promise<AdmitRootTurnResult> =>
         run(() => agentRunStore.admitRootTurn(input)),
-      admitContinuation: (
-        input: AdmitContinuationInput,
-      ): Promise<AdmitContinuationResult> =>
+      admitContinuation: (input: AdmitContinuationInput): Promise<AdmitContinuationResult> =>
         run(() => agentRunStore.admitContinuation(input)),
       readContinuationAdmission: (sessionId, sourceRunId, sourceRuntimeEventHighWater) =>
         run(() =>

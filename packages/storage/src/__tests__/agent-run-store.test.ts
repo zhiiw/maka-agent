@@ -36,10 +36,7 @@ describe('AgentRunStore', () => {
         }),
       ]);
 
-      assert.deepEqual(
-        [first.kind, second.kind].sort(),
-        ['admitted', 'existing'],
-      );
+      assert.deepEqual([first.kind, second.kind].sort(), ['admitted', 'existing']);
       assert.deepEqual(first.admission, second.admission);
       assert.equal(
         [first.admission.runId, second.admission.runId].every(

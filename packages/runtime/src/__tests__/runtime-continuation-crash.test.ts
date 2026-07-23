@@ -100,11 +100,7 @@ if (process.env[CRASH_CHILD_ENV] === '1') {
             ),
         );
         assert.equal(claimConflicts.length, 1, resultSummary);
-        assert.equal(
-          providerCalls,
-          1,
-          resultSummary,
-        );
+        assert.equal(providerCalls, 1, resultSummary);
         assert.equal(continuations.length, 1);
       } finally {
         for (const close of closeStores.reverse()) close();

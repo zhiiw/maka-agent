@@ -308,11 +308,7 @@ describe('RecoveryResolver', () => {
                 operationId: 'operation-1',
                 disposition: 'completed',
                 reasonCode: 'reconcile_applied',
-                evidenceEventIds: [
-                  'function-call-1',
-                  'dispatch-1',
-                  'reconcile-result-1',
-                ],
+                evidenceEventIds: ['function-call-1', 'dispatch-1', 'reconcile-result-1'],
               },
             },
           },
