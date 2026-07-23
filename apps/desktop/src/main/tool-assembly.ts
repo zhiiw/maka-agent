@@ -13,6 +13,7 @@ import {
   createSandboxDiagnosticsProvider,
   createFilesystemWorkerLaunchSpecProvider,
   FilesystemWorkerClient,
+  WorkerBackedFileCheckpointCarrier,
   type PreparedFileMutationCarrier,
   resolveSkillDiscoveryPaths,
   ShellRunProcessManager,
@@ -117,6 +118,10 @@ export function assembleDesktopTools(deps: DesktopToolAssemblyDeps) {
         getLaunchSpec: filesystemWorkerLaunchSpecProvider,
       })
     : undefined;
+  const effectiveFileMutationCheckpointCarrier =
+    fileMutationCheckpointCarrier && filesystemWorker
+      ? new WorkerBackedFileCheckpointCarrier(fileMutationCheckpointCarrier, filesystemWorker)
+      : fileMutationCheckpointCarrier;
   const sandboxDiagnosticsProvider = createSandboxDiagnosticsProvider({
     ...(sandboxManager ? { sandboxManager } : {}),
     ...(filesystemWorkerLaunchSpecProvider
@@ -211,7 +216,9 @@ export function assembleDesktopTools(deps: DesktopToolAssemblyDeps) {
       backgroundTasks: shellRuns,
       ptyControls: shellRuns,
       snapshotImage: snapshotReadImage,
-      ...(fileMutationCheckpointCarrier ? { fileMutationCheckpointCarrier } : {}),
+      ...(effectiveFileMutationCheckpointCarrier
+        ? { fileMutationCheckpointCarrier: effectiveFileMutationCheckpointCarrier }
+        : {}),
       ...(sandboxManager ? { sandboxManager } : {}),
       ...(filesystemWorker ? {
         filesystemWorker,
@@ -283,7 +290,9 @@ export function assembleDesktopTools(deps: DesktopToolAssemblyDeps) {
   const childAgentTools = buildChildAgentTools([
     ...buildBuiltinTools({
       snapshotImage: snapshotReadImage,
-      ...(fileMutationCheckpointCarrier ? { fileMutationCheckpointCarrier } : {}),
+      ...(effectiveFileMutationCheckpointCarrier
+        ? { fileMutationCheckpointCarrier: effectiveFileMutationCheckpointCarrier }
+        : {}),
       ...(sandboxManager ? { sandboxManager } : {}),
       ...(filesystemWorker ? {
         filesystemWorker,
@@ -308,5 +317,6 @@ export function assembleDesktopTools(deps: DesktopToolAssemblyDeps) {
     toolAvailability,
     childAgentTools,
     sandboxDiagnosticsProvider,
+    fileMutationCheckpointCarrier: effectiveFileMutationCheckpointCarrier,
   };
 }

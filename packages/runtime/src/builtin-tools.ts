@@ -68,6 +68,7 @@ import {
   type AdditionalPermissionPlanResult,
 } from './additional-permissions.js';
 import type { FilesystemWorkerClient } from './filesystem-worker/client.js';
+import { applyPreparedFileThroughWorker } from './worker-backed-file-checkpoint-carrier.js';
 import {
   assertSandboxEscalationGrantForExecution,
   planDeclaredBashSandboxEscalation,
@@ -397,7 +398,26 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
                 return {
                   runtimeFacts: [preparedFileMutationEnvelope(fact)],
                   execute: async () => {
-                    await options.fileMutationCheckpointCarrier!.apply(fact, expectedContent);
+                    if (options.filesystemWorker) {
+                      await applyPreparedFileThroughWorker(
+                        options.filesystemWorker,
+                        fact,
+                        expectedContent,
+                        {
+                          cwd: canonicalCwd,
+                          mode: context.permissionMode ?? 'ask',
+                          ...(options.permissionProfile
+                            ? { permissionProfile: options.permissionProfile }
+                            : {}),
+                          ...(context.permissionContext?.additionalGrant
+                            ? { additionalGrant: context.permissionContext.additionalGrant }
+                            : {}),
+                          ...(context.abortSignal ? { abortSignal: context.abortSignal } : {}),
+                        },
+                      );
+                    } else {
+                      await options.fileMutationCheckpointCarrier!.apply(fact, expectedContent);
+                    }
                     return {
                       ok: true as const,
                       path: fact.canonicalPath,
@@ -515,7 +535,26 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
                 return {
                   runtimeFacts: [preparedFileMutationEnvelope(fact)],
                   execute: async () => {
-                    await options.fileMutationCheckpointCarrier!.apply(fact, preparedContent);
+                    if (options.filesystemWorker) {
+                      await applyPreparedFileThroughWorker(
+                        options.filesystemWorker,
+                        fact,
+                        preparedContent,
+                        {
+                          cwd: canonicalCwd,
+                          mode: context.permissionMode ?? 'ask',
+                          ...(options.permissionProfile
+                            ? { permissionProfile: options.permissionProfile }
+                            : {}),
+                          ...(context.permissionContext?.additionalGrant
+                            ? { additionalGrant: context.permissionContext.additionalGrant }
+                            : {}),
+                          ...(context.abortSignal ? { abortSignal: context.abortSignal } : {}),
+                        },
+                      );
+                    } else {
+                      await options.fileMutationCheckpointCarrier!.apply(fact, preparedContent);
+                    }
                     return {
                       ok: true as const,
                       path: fact.canonicalPath,

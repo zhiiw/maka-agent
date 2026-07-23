@@ -29,6 +29,7 @@ import {
   type FilesystemWorkerRequest,
   type FilesystemWorkerResult,
 } from '../filesystem-worker/protocol.js';
+import { preparedFileMutationAuxiliaryPaths } from '../local-file-checkpoint-carrier.js';
 import { MacosSeatbeltBackend } from '../sandbox/macos-seatbelt.js';
 import { SandboxManager } from '../sandbox/sandbox-manager.js';
 import type { SandboxTransformRequest, SandboxTransformResult } from '../sandbox/types.js';
@@ -230,6 +231,72 @@ describe('filesystem worker operation-scoped Seatbelt profile', () => {
       ['.git', '.agents', '.codex'],
     );
   });
+
+  test('grants a prepared mutation only its deterministic transaction paths', async () => {
+    const workspace = await temporaryDirectory('maka-worker-client-prepared-profile-');
+    const target = join(workspace, 'target.txt');
+    const sibling = join(workspace, 'sibling.txt');
+    await writeFile(target, 'before');
+    const fact = {
+      protocol: 'prepared_file_mutation_v1' as const,
+      operationId: 'operation-prepared-profile',
+      workspaceRoot: workspace,
+      canonicalPath: target,
+      relativePath: 'target.txt',
+      before: {
+        kind: 'file' as const,
+        sha256: 'a'.repeat(64),
+        byteLength: 6,
+        mode: 0o600,
+      },
+      expectedAfter: {
+        kind: 'file' as const,
+        sha256: 'b'.repeat(64),
+        byteLength: 5,
+        mode: 0o600,
+      },
+      transform: {
+        id: 'maka.write.utf8',
+        version: 1,
+        argsHash: 'c'.repeat(64),
+      },
+    };
+    const auxiliary = preparedFileMutationAuxiliaryPaths(fact);
+    const { client, requests, transforms } = fakeClient();
+
+    await client.execute({
+      operation: {
+        kind: 'prepared_file_apply',
+        path: target,
+        fact,
+        expectedContentBase64: Buffer.from('after').toString('base64'),
+      },
+      cwd: workspace,
+      mode: 'execute',
+    });
+
+    const transform = transforms[0];
+    assert.ok(transform);
+    for (const path of [
+      target,
+      auxiliary.tempPath,
+      auxiliary.beforeBackupPath,
+      auxiliary.parentDirectory,
+    ]) {
+      assert.equal(
+        canWritePath(transform.command.profile, path, transform.command.pathContext),
+        true,
+      );
+    }
+    assert.equal(
+      canWritePath(transform.command.profile, sibling, transform.command.pathContext),
+      false,
+    );
+    assert.deepEqual(
+      requests[0]?.operationPermission.fileSystem?.entries.map((entry) => entry.path),
+      [target, auxiliary.tempPath, auxiliary.beforeBackupPath, auxiliary.parentDirectory],
+    );
+  });
 });
 
 function fakeClient(): {
@@ -296,6 +363,8 @@ function fakeResult(request: FilesystemWorkerRequest): FilesystemWorkerResult {
         path: request.operation.path,
         bytes: Buffer.byteLength(request.operation.content, 'utf8'),
       };
+    case 'prepared_file_apply':
+      return { kind: 'prepared_file_apply', ok: true };
     case 'grep':
       return { kind: 'grep', matches: ['file.ts:1:value'] };
     default:

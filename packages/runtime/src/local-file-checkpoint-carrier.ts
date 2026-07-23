@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
 import { lstat, open, readFile, realpath, rename, unlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import type { PermissionMode, PermissionProfile } from '@maka/core';
+import type { AdditionalPermissionGrant } from './additional-permissions.js';
 
 import {
   decidePreparedFileMutation,
   type CurrentFileCheckpointState,
 } from './prepared-file-mutation.js';
+import { DurableToolExecutionUnsettledError } from './durable-tool-execution.js';
 import type { PreparedFileBeforeState, PreparedFileMutationFact } from './tool-recovery-facts.js';
 
 interface PrepareFileMutationBaseInput {
@@ -33,13 +36,31 @@ export interface PreparedFileMutationCarrier {
   prepare(input: PrepareFileMutationInput): Promise<PreparedFileMutationFact>;
   inspect(fact: PreparedFileMutationFact): Promise<CurrentFileCheckpointState>;
   readCurrentContent(fact: PreparedFileMutationFact): Promise<Uint8Array | undefined>;
-  apply(fact: PreparedFileMutationFact, expectedContent: Uint8Array): Promise<void>;
+  apply(
+    fact: PreparedFileMutationFact,
+    expectedContent: Uint8Array,
+    context?: PreparedFileMutationExecutionContext,
+  ): Promise<void>;
+}
+
+export interface PreparedFileMutationExecutionContext {
+  cwd: string;
+  mode: PermissionMode;
+  permissionProfile?: PermissionProfile;
+  additionalGrant?: AdditionalPermissionGrant;
+  abortSignal?: AbortSignal;
 }
 
 export interface LocalFileCheckpointCarrierOptions {
   failpoint?: (point: LocalFileCheckpointFailpoint, detail?: { tempPath?: string }) => void;
   /** Hard safety/performance limit for either side of a prepared file transaction. */
   maxFileBytes?: number;
+  /** Test/platform override; production uses the current process platform. */
+  platform?: NodeJS.Platform;
+  /** Test seam for Windows' replace behavior. */
+  replaceFile?: (source: string, target: string) => Promise<void>;
+  /** Test seam for parent-directory durability failures. */
+  syncDirectory?: (path: string) => Promise<void>;
 }
 
 export const DEFAULT_PREPARED_FILE_MAX_BYTES = 32 * 1024 * 1024;
@@ -54,9 +75,11 @@ export type LocalFileCheckpointFailpoint =
 
 export class LocalFileCheckpointCarrier implements PreparedFileMutationCarrier {
   private readonly maxFileBytes: number;
+  private readonly platform: NodeJS.Platform;
 
   constructor(private readonly options: LocalFileCheckpointCarrierOptions = {}) {
     this.maxFileBytes = options.maxFileBytes ?? DEFAULT_PREPARED_FILE_MAX_BYTES;
+    this.platform = options.platform ?? process.platform;
     if (!Number.isSafeInteger(this.maxFileBytes) || this.maxFileBytes < 0) {
       throw new TypeError('Prepared file checkpoint maxFileBytes must be a non-negative integer');
     }
@@ -83,18 +106,17 @@ export class LocalFileCheckpointCarrier implements PreparedFileMutationCarrier {
 
     let before: PreparedFileBeforeState;
     let beforeContent: Buffer | undefined;
-    let mode = 0o100644;
+    let mode = this.platform === 'win32' ? 0o666 : 0o666 & ~process.umask();
     try {
-      const info = await lstat(canonicalPath);
-      if (!info.isFile() || info.isSymbolicLink()) {
-        throw new Error('Prepared file mutation target must be a regular non-symlink file');
+      const snapshot = await readBoundedFile(canonicalPath, this.maxFileBytes, 'before');
+      if (snapshot.nlink > 1) {
+        throw new Error('Prepared file mutation target must not be hard-linked');
       }
-      this.assertWithinLimit(info.size, 'before');
-      beforeContent = await readFile(canonicalPath);
-      mode = info.mode & 0o111 ? 0o100755 : 0o100644;
+      beforeContent = snapshot.content;
+      mode = this.platform === 'win32' ? 0o666 : snapshot.mode & 0o7777;
       before = {
         kind: 'file',
-        sha256: sha256(beforeContent),
+        sha256: snapshot.sha256,
         byteLength: beforeContent.byteLength,
         mode,
       };
@@ -132,25 +154,31 @@ export class LocalFileCheckpointCarrier implements PreparedFileMutationCarrier {
   async inspect(fact: PreparedFileMutationFact): Promise<CurrentFileCheckpointState> {
     await validateFactPath(fact);
     try {
-      const info = await lstat(fact.canonicalPath);
-      if (!info.isFile() || info.isSymbolicLink()) {
-        throw new Error('Prepared file mutation target is no longer a regular file');
+      const snapshot = await readBoundedFile(fact.canonicalPath, this.maxFileBytes, 'current');
+      if (snapshot.nlink > 1) {
+        throw new LocalFileMutationConflictError('prepared_file_became_hard_linked');
       }
-      return { kind: 'file', sha256: sha256(await readFile(fact.canonicalPath)) };
+      return {
+        kind: 'file',
+        sha256: snapshot.sha256,
+        ...(this.platform === 'win32' ? {} : { mode: snapshot.mode & 0o7777 }),
+      };
     } catch (error) {
-      if (isNodeError(error) && error.code === 'ENOENT') return { kind: 'missing' };
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        return await this.inspectMissingState(fact);
+      }
       throw error;
     }
   }
 
   async readCurrentContent(fact: PreparedFileMutationFact): Promise<Uint8Array | undefined> {
-    const state = await this.inspect(fact);
-    if (state.kind === 'missing') return undefined;
-    const content = await readFile(fact.canonicalPath);
-    if (sha256(content) !== state.sha256) {
-      throw new LocalFileMutationConflictError('prepared_file_changed_while_reading');
+    await validateFactPath(fact);
+    try {
+      return (await readBoundedFile(fact.canonicalPath, this.maxFileBytes, 'current')).content;
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') return undefined;
+      throw error;
     }
-    return content;
   }
 
   async apply(fact: PreparedFileMutationFact, expectedContentInput: Uint8Array): Promise<void> {
@@ -163,20 +191,31 @@ export class LocalFileCheckpointCarrier implements PreparedFileMutationCarrier {
       throw new Error('Regenerated after image does not match its durable checkpoint identity');
     }
     const tempPath = operationTempPath(fact);
+    const beforeBackupPath = operationBeforeBackupPath(fact);
     // A process crash bypasses finally blocks. A deterministic per-operation name lets the
     // authoritative retry remove exactly its own orphan without scanning or guessing in the
     // user's workspace, and bounds repeated crashes to one temp file per operation.
     await removeIfPresent(tempPath);
-    const initial = decidePreparedFileMutation(fact, await this.inspect(fact));
-    if (initial.disposition === 'finalize') return;
+    const initialState = await this.inspect(fact);
+    const recoveringFromBeforeBackup =
+      initialState.kind === 'missing' &&
+      fact.before.kind === 'file' &&
+      initialState.recoverableBeforeBackupSha256 === fact.before.sha256;
+    const initial = decidePreparedFileMutation(fact, initialState);
+    if (initial.disposition === 'finalize') {
+      await removeIfPresent(beforeBackupPath);
+      return;
+    }
     if (initial.disposition === 'park') {
       throw new LocalFileMutationConflictError(initial.reasonCode);
     }
 
     const targetDir = dirname(fact.canonicalPath);
     let tempExists = false;
+    let replaceAttempted = false;
+    let replaceCompleted = false;
     try {
-      const temp = await open(tempPath, 'wx+', fact.expectedAfter.mode & 0o777);
+      const temp = await open(tempPath, 'wx+', fact.expectedAfter.mode & 0o7777);
       tempExists = true;
       try {
         await temp.writeFile(expectedContent);
@@ -188,7 +227,7 @@ export class LocalFileCheckpointCarrier implements PreparedFileMutationCarrier {
         ) {
           throw new Error('Prepared temporary file does not match its durable after identity');
         }
-        await temp.chmod(fact.expectedAfter.mode & 0o777);
+        await temp.chmod(fact.expectedAfter.mode & 0o7777);
         await temp.sync();
         this.options.failpoint?.('after_temp_fsync', { tempPath });
       } finally {
@@ -200,23 +239,94 @@ export class LocalFileCheckpointCarrier implements PreparedFileMutationCarrier {
       if (revalidated.disposition !== 'redo') {
         throw new LocalFileMutationConflictError('prepared_file_drifted_before_replace');
       }
+      if (this.platform === 'win32' && fact.before.kind === 'file') {
+        await this.ensureBeforeBackup(fact, beforeBackupPath);
+        const backedUpState = decidePreparedFileMutation(fact, await this.inspect(fact));
+        if (backedUpState.disposition !== 'redo') {
+          throw new LocalFileMutationConflictError('prepared_file_drifted_after_backup');
+        }
+      }
       this.options.failpoint?.('before_replace', { tempPath });
-      await rename(tempPath, fact.canonicalPath);
+      replaceAttempted = true;
+      await (this.options.replaceFile ?? rename)(tempPath, fact.canonicalPath);
+      replaceCompleted = true;
       tempExists = false;
       this.options.failpoint?.('after_replace');
-      await fsyncDirectory(targetDir);
+      await (this.options.syncDirectory ?? fsyncDirectory)(targetDir);
       this.options.failpoint?.('after_parent_fsync');
+      await removeIfPresent(beforeBackupPath);
       // The temp bytes were verified before rename. A successful same-directory rename installs
       // that exact inode; rereading the full target here would add another hash pass without
       // closing the external-writer race that exists after any observation.
+    } catch (error) {
+      if (replaceAttempted) {
+        throw new DurableToolExecutionUnsettledError(
+          replaceCompleted ? 'effect_applied_not_durable' : 'effect_may_have_started',
+          error,
+        );
+      }
+      if (!recoveringFromBeforeBackup) await removeIfPresent(beforeBackupPath);
+      throw error;
     } finally {
       if (tempExists) await unlink(tempPath).catch(() => undefined);
     }
   }
 
-  private assertWithinLimit(byteLength: number, side: 'before' | 'expected-after'): void {
+  private assertWithinLimit(
+    byteLength: number,
+    side: 'before' | 'current' | 'expected-after',
+  ): void {
     if (byteLength > this.maxFileBytes) {
       throw new PreparedFileCheckpointLimitError(side, byteLength, this.maxFileBytes);
+    }
+  }
+
+  private async inspectMissingState(
+    fact: PreparedFileMutationFact,
+  ): Promise<CurrentFileCheckpointState> {
+    if (this.platform !== 'win32' || fact.before.kind !== 'file') return { kind: 'missing' };
+    try {
+      const backup = await readBoundedFile(
+        operationBeforeBackupPath(fact),
+        this.maxFileBytes,
+        'current',
+      );
+      return {
+        kind: 'missing',
+        recoverableBeforeBackupSha256: backup.sha256,
+        recoverableBeforeBackupMode: 0o666,
+      };
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') return { kind: 'missing' };
+      throw error;
+    }
+  }
+
+  private async ensureBeforeBackup(
+    fact: PreparedFileMutationFact,
+    backupPath: string,
+  ): Promise<void> {
+    if (fact.before.kind !== 'file') return;
+    try {
+      const current = await readBoundedFile(fact.canonicalPath, this.maxFileBytes, 'current');
+      if (current.sha256 !== fact.before.sha256) {
+        throw new LocalFileMutationConflictError('prepared_file_drifted_before_backup');
+      }
+      await removeIfPresent(backupPath);
+      const backup = await open(backupPath, 'wx+', 0o600);
+      try {
+        await backup.writeFile(current.content);
+        await backup.sync();
+      } finally {
+        await backup.close();
+      }
+      await (this.options.syncDirectory ?? fsyncDirectory)(dirname(backupPath));
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        const backup = await readBoundedFile(backupPath, this.maxFileBytes, 'current');
+        if (backup.sha256 === fact.before.sha256) return;
+      }
+      throw error;
     }
   }
 }
@@ -234,7 +344,7 @@ export class PreparedFileCheckpointLimitError extends Error {
   readonly reasonCode = 'prepared_file_checkpoint_size_limit_exceeded';
 
   constructor(
-    readonly side: 'before' | 'expected-after',
+    readonly side: 'before' | 'current' | 'expected-after',
     readonly byteLength: number,
     readonly maxFileBytes: number,
   ) {
@@ -244,11 +354,31 @@ export class PreparedFileCheckpointLimitError extends Error {
   }
 }
 
+export function preparedFileMutationAuxiliaryPaths(fact: PreparedFileMutationFact): {
+  tempPath: string;
+  beforeBackupPath: string;
+  parentDirectory: string;
+} {
+  return {
+    tempPath: operationTempPath(fact),
+    beforeBackupPath: operationBeforeBackupPath(fact),
+    parentDirectory: dirname(fact.canonicalPath),
+  };
+}
+
 function operationTempPath(fact: PreparedFileMutationFact): string {
   const operationKey = createHash('sha256').update(fact.operationId).digest('hex').slice(0, 32);
   return join(
     dirname(fact.canonicalPath),
     `.${basename(fact.canonicalPath)}.maka-${operationKey}.tmp`,
+  );
+}
+
+function operationBeforeBackupPath(fact: PreparedFileMutationFact): string {
+  const operationKey = createHash('sha256').update(fact.operationId).digest('hex').slice(0, 32);
+  return join(
+    dirname(fact.canonicalPath),
+    `.${basename(fact.canonicalPath)}.maka-before-${operationKey}.bak`,
   );
 }
 
@@ -318,6 +448,52 @@ async function fsyncDirectory(path: string): Promise<void> {
 
 function sha256(content: Uint8Array): string {
   return createHash('sha256').update(content).digest('hex');
+}
+
+async function readBoundedFile(
+  path: string,
+  maxFileBytes: number,
+  side: 'before' | 'current',
+): Promise<{
+  content: Buffer;
+  sha256: string;
+  mode: number;
+  nlink: number;
+}> {
+  const file = await open(path, 'r');
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) {
+      throw new Error('Prepared file mutation target must be a regular file');
+    }
+    if (info.size > maxFileBytes) {
+      throw new PreparedFileCheckpointLimitError(side, info.size, maxFileBytes);
+    }
+    const hash = createHash('sha256');
+    const chunks: Buffer[] = [];
+    let byteLength = 0;
+    while (true) {
+      const remaining = maxFileBytes - byteLength;
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining + 1));
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      byteLength += bytesRead;
+      if (byteLength > maxFileBytes) {
+        throw new PreparedFileCheckpointLimitError(side, byteLength, maxFileBytes);
+      }
+      const bytes = chunk.subarray(0, bytesRead);
+      hash.update(bytes);
+      chunks.push(Buffer.from(bytes));
+    }
+    return {
+      content: Buffer.concat(chunks, byteLength),
+      sha256: hash.digest('hex'),
+      mode: info.mode,
+      nlink: info.nlink,
+    };
+  } finally {
+    await file.close();
+  }
 }
 
 function normalizePath(path: string): string {

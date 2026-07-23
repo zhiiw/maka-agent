@@ -90,6 +90,8 @@ describe('builtin file tools use the sandboxed worker', () => {
                 startLine: 1,
                 endLine: 1,
               };
+            case 'prepared_file_apply':
+              return { kind: 'prepared_file_apply', ok: true };
             case 'format_json':
               return {
                 kind: 'format_json',

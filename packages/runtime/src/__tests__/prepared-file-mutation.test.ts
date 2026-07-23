@@ -73,6 +73,21 @@ describe('prepared file mutation runtime fact', () => {
     );
   });
 
+  it('parks when content matches but POSIX permission bits drift', () => {
+    const parsed = preparedMutation();
+    assert.equal(parsed.status, 'prepared_file_mutation');
+    if (parsed.status !== 'prepared_file_mutation') return;
+
+    assert.deepEqual(
+      decidePreparedFileMutation(parsed.fact, {
+        kind: 'file',
+        sha256: 'b'.repeat(64),
+        mode: 0o600,
+      }),
+      { disposition: 'park', reasonCode: 'prepared_file_mode_drifted' },
+    );
+  });
+
   it('prepares immutable before/after Git blobs without changing the working file or index', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-git-file-checkpoint-'));
     try {

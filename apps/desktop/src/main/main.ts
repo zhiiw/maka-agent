@@ -220,11 +220,8 @@ const runtimePersistence = await openRuntimeEventPersistence({
   sqliteCanonical: process.env.MAKA_RUNTIME_SQLITE_CANONICAL === '1',
 });
 const runtimeEventStore = runtimePersistence.runtimeEventStore;
-const fileMutationCheckpointCarrier = runtimePersistence.runtimeCommitStore
+const localFileMutationCheckpointCarrier = runtimePersistence.runtimeCommitStore
   ? new LocalFileCheckpointCarrier()
-  : undefined;
-const recoveryContracts = fileMutationCheckpointCarrier
-  ? createPreparedWriteEditRecoveryContractRegistry(fileMutationCheckpointCarrier)
   : undefined;
 const shellRunStore = createShellRunStore(workspaceRoot);
 const connectionStore = createConnectionStore(workspaceRoot);
@@ -602,6 +599,7 @@ const {
   toolAvailability,
   childAgentTools,
   sandboxDiagnosticsProvider,
+  fileMutationCheckpointCarrier,
 } = assembleDesktopTools({
   isComputerUseRealModelE2e,
   workspaceRoot,
@@ -615,8 +613,13 @@ const {
   snapshotReadImage,
   getWorkspacePrivacyContext,
   resolveDesktopSkillHost,
-  ...(fileMutationCheckpointCarrier ? { fileMutationCheckpointCarrier } : {}),
+  ...(localFileMutationCheckpointCarrier
+    ? { fileMutationCheckpointCarrier: localFileMutationCheckpointCarrier }
+    : {}),
 });
+const recoveryContracts = fileMutationCheckpointCarrier
+  ? createPreparedWriteEditRecoveryContractRegistry(fileMutationCheckpointCarrier)
+  : undefined;
 // Cursor-overlay teardown assigns a module-scoped `let`, so it stays in main.ts.
 onMainWindowClose = () => computerUseOverlay.destroyAll();
 const systemPromptService = createSystemPromptMainService({

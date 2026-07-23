@@ -68,6 +68,7 @@ import {
 } from './runtime-commit-sink.js';
 import { ChildAgentRunLimiter } from './child-agent-run-limiter.js';
 import { serializeSandboxError } from './sandbox/errors.js';
+import { DurableToolExecutionUnsettledError } from './durable-tool-execution.js';
 
 export type ToolModelOutputPart =
   | { type: 'text'; text: string }
@@ -1497,6 +1498,23 @@ export class ToolRuntime {
         pauseTarget?.resume();
       }
     } catch (err) {
+      if (err instanceof DurableToolExecutionUnsettledError) {
+        output.flush();
+        trace?.emit(
+          'tool',
+          'tool_failed',
+          'Tool execution stopped with an unsettled durable outcome',
+          {
+            toolUseId,
+            toolName: tool.name,
+            durationMs: Math.max(0, this.input.now() - startedAt),
+            status: 'error',
+            errorClass: err.name,
+            effectState: err.effectState,
+          },
+        );
+        throw err;
+      }
       if (err instanceof RuntimeCommitBoundaryError) throw err;
       output.flush();
       const sandboxError = serializeSandboxError(err);

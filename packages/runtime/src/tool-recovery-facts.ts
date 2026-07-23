@@ -108,6 +108,13 @@ export function parseToolRecoveryFact(envelope: RuntimeFactEnvelope): ParsedTool
   return parseReconcileResult(envelope.payload);
 }
 
+export function parsePreparedFileMutationFact(
+  payload: unknown,
+): PreparedFileMutationFact | undefined {
+  const parsed = parsePreparedFileMutation(payload);
+  return parsed.status === 'prepared_file_mutation' ? parsed.fact : undefined;
+}
+
 function parsePreparedFileMutation(payload: unknown): ParsedToolRecoveryFact {
   if (
     !hasExactKeys(

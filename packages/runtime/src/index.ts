@@ -129,6 +129,10 @@ export type {
   ProviderRequestUsage,
 } from './provider-request-telemetry.js';
 export type { MakaTool, MakaToolContext } from './tool-runtime.js';
+export {
+  DurableToolExecutionUnsettledError,
+  type DurableToolEffectState,
+} from './durable-tool-execution.js';
 export { buildMcpTools, mcpProxyToolName } from './mcp-tools.js';
 export type { McpToolProvider, BuildMcpToolsOptions } from './mcp-tools.js';
 export { buildAskUserQuestionTool } from './ask-user-question-tool.js';
@@ -1134,7 +1138,12 @@ export {
   type LocalFileCheckpointFailpoint,
   type PrepareFileMutationInput,
   type PreparedFileMutationCarrier,
+  type PreparedFileMutationExecutionContext,
 } from './local-file-checkpoint-carrier.js';
+export {
+  WorkerBackedFileCheckpointCarrier,
+  applyPreparedFileThroughWorker,
+} from './worker-backed-file-checkpoint-carrier.js';
 
 export {
   GitFileCheckpointCarrier,

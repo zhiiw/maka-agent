@@ -25,6 +25,7 @@ import {
   createLocalContinuationSafetyInspector,
   createPreparedWriteEditRecoveryContractRegistry,
   LocalFileCheckpointCarrier,
+  WorkerBackedFileCheckpointCarrier,
   FilesystemWorkerClient,
   buildDefaultContextBudgetPolicy,
   buildSkillAgentTool,
@@ -184,11 +185,8 @@ export async function createMakaCliRuntimeContext(
     sqliteCanonical: process.env.MAKA_RUNTIME_SQLITE_CANONICAL === '1',
   });
   const runtimeEventStore = runtimePersistence.runtimeEventStore;
-  const fileMutationCheckpointCarrier = runtimePersistence.runtimeCommitStore
+  const localFileMutationCheckpointCarrier = runtimePersistence.runtimeCommitStore
     ? new LocalFileCheckpointCarrier()
-    : undefined;
-  const recoveryContracts = fileMutationCheckpointCarrier
-    ? createPreparedWriteEditRecoveryContractRegistry(fileMutationCheckpointCarrier)
     : undefined;
   const shellRunStore = createShellRunStore(input.workspaceRoot);
   const artifactStore = createArtifactStore(input.workspaceRoot);
@@ -248,6 +246,13 @@ export async function createMakaCliRuntimeContext(
           getLaunchSpec: filesystemWorkerLaunchSpecProvider,
         })
       : undefined;
+  const fileMutationCheckpointCarrier =
+    localFileMutationCheckpointCarrier && filesystemWorker
+      ? new WorkerBackedFileCheckpointCarrier(localFileMutationCheckpointCarrier, filesystemWorker)
+      : localFileMutationCheckpointCarrier;
+  const recoveryContracts = fileMutationCheckpointCarrier
+    ? createPreparedWriteEditRecoveryContractRegistry(fileMutationCheckpointCarrier)
+    : undefined;
   const sandboxDiagnosticsProvider = createSandboxDiagnosticsProvider({
     ...(sandboxManager ? { sandboxManager } : {}),
     ...(filesystemWorkerLaunchSpecProvider

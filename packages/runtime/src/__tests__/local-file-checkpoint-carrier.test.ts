@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
-import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  link,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -14,6 +25,112 @@ import { decidePreparedFileMutation } from '../prepared-file-mutation.js';
 import { parseToolRecoveryFact } from '../tool-recovery-facts.js';
 
 describe('local file transaction checkpoint carrier', () => {
+  for (const mode of [0o600, 0o700, 0o660] as const) {
+    test(`preserves exact POSIX mode ${mode.toString(8)} across atomic replacement`, {
+      skip: process.platform === 'win32',
+    }, async () => {
+      const root = await mkdtemp(join(tmpdir(), `maka-local-mode-${mode.toString(8)}-`));
+      try {
+        const path = join(root, 'notes.txt');
+        await writeFile(path, 'before image');
+        await chmod(path, mode);
+        const carrier = new LocalFileCheckpointCarrier();
+        const fact = await carrier.prepare({
+          operationId: `operation-mode-${mode.toString(8)}`,
+          workspaceRoot: root,
+          targetPath: 'notes.txt',
+          expectedContent: Buffer.from('after image'),
+          transform: { id: 'maka.write.utf8', version: 1, argsHash: '9'.repeat(64) },
+        });
+
+        await carrier.apply(fact, Buffer.from('after image'));
+
+        assert.equal((await stat(path)).mode & 0o7777, mode);
+        assert.equal((await carrier.inspect(fact)).kind, 'file');
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test('rejects hard-linked targets instead of silently breaking inode sharing', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-local-hard-link-'));
+    try {
+      const path = join(root, 'notes.txt');
+      await writeFile(path, 'before image');
+      await link(path, join(root, 'alias.txt'));
+
+      await assert.rejects(
+        new LocalFileCheckpointCarrier().prepare({
+          operationId: 'operation-hard-link',
+          workspaceRoot: root,
+          targetPath: 'notes.txt',
+          expectedContent: Buffer.from('after image'),
+          transform: { id: 'maka.write.utf8', version: 1, argsHash: '8'.repeat(64) },
+        }),
+        /hard-linked/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('recovers a Windows split replace from its durable before backup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-local-windows-backup-'));
+    try {
+      const path = join(root, 'notes.txt');
+      await writeFile(path, 'before image');
+      const preparer = new LocalFileCheckpointCarrier({ platform: 'win32' });
+      const fact = await preparer.prepare({
+        operationId: 'operation-windows-split-replace',
+        workspaceRoot: root,
+        targetPath: 'notes.txt',
+        expectedContent: Buffer.from('after image'),
+        transform: { id: 'maka.write.utf8', version: 1, argsHash: '6'.repeat(64) },
+      });
+      const interrupted = new LocalFileCheckpointCarrier({
+        platform: 'win32',
+        replaceFile: async (_source, target) => {
+          await unlink(target);
+          throw new Error('simulated split replace interruption');
+        },
+      });
+
+      await assert.rejects(
+        interrupted.apply(fact, Buffer.from('after image')),
+        (error: unknown) =>
+          error instanceof Error && error.name === 'DurableToolExecutionUnsettledError',
+      );
+      await assert.rejects(readFile(path), { code: 'ENOENT' });
+
+      const restarted = new LocalFileCheckpointCarrier({ platform: 'win32' });
+      assert.equal(
+        decidePreparedFileMutation(fact, await restarted.inspect(fact)).disposition,
+        'redo',
+      );
+      const interruptedAgain = new LocalFileCheckpointCarrier({
+        platform: 'win32',
+        failpoint: (point) => {
+          if (point === 'before_replace') throw new Error('second interruption');
+        },
+      });
+      await assert.rejects(
+        interruptedAgain.apply(fact, Buffer.from('after image')),
+        /second interruption/,
+      );
+      assert.equal(
+        decidePreparedFileMutation(fact, await restarted.inspect(fact)).disposition,
+        'redo',
+      );
+      await restarted.apply(fact, Buffer.from('after image'));
+      assert.equal(await readFile(path, 'utf8'), 'after image');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('prepares before/after identities without Git or storing file contents in the fact', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-local-checkpoint-'));
     try {
@@ -67,18 +184,33 @@ describe('local file transaction checkpoint carrier', () => {
           },
         });
 
-        await assert.rejects(
-          interrupted.apply(fact, Buffer.from('after image')),
-          new RegExp(`crash:${failpoint}`),
-        );
+        await assert.rejects(interrupted.apply(fact, Buffer.from('after image')), (error) => {
+          if (failpoint !== 'after_replace' && failpoint !== 'after_parent_fsync') {
+            return error instanceof Error && error.message === `crash:${failpoint}`;
+          }
+          return (
+            error instanceof Error &&
+            error.name === 'DurableToolExecutionUnsettledError' &&
+            error.cause instanceof Error &&
+            error.cause.message === `crash:${failpoint}`
+          );
+        });
         const state = decidePreparedFileMutation(fact, await interrupted.inspect(fact));
         assert.equal(
           state.disposition,
           failpoint === 'after_replace' || failpoint === 'after_parent_fsync' ? 'finalize' : 'redo',
         );
-        assert.deepEqual(
-          (await readdir(root)).filter((name) => name.includes('.maka-')),
-          [],
+        const transactionArtifacts = (await readdir(root)).filter((name) =>
+          name.includes('.maka-'),
+        );
+        assert.equal(
+          transactionArtifacts.some((name) => name.endsWith('.tmp')),
+          false,
+        );
+        assert.equal(
+          transactionArtifacts.some((name) => name.includes('.maka-before-')),
+          process.platform === 'win32' &&
+            (failpoint === 'after_replace' || failpoint === 'after_parent_fsync'),
         );
 
         await new LocalFileCheckpointCarrier().apply(fact, Buffer.from('after image'));
@@ -188,6 +320,34 @@ describe('local file transaction checkpoint carrier', () => {
           error.side === 'before',
       );
       assert.equal(await readFile(join(root, 'large.txt'), 'utf8'), '12345');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects an oversized current image during recovery observation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-local-inspect-limit-'));
+    try {
+      const path = join(root, 'notes.txt');
+      await writeFile(path, 'old');
+      const carrier = new LocalFileCheckpointCarrier({ maxFileBytes: 4 });
+      const fact = await carrier.prepare({
+        operationId: 'operation-inspect-too-large',
+        workspaceRoot: root,
+        targetPath: 'notes.txt',
+        expectedContent: Buffer.from('new'),
+        transform: { id: 'maka.write.utf8', version: 1, argsHash: '7'.repeat(64) },
+      });
+      await writeFile(path, '12345');
+
+      await assert.rejects(
+        carrier.inspect(fact),
+        (error: unknown) =>
+          error instanceof Error &&
+          error.name === 'PreparedFileCheckpointLimitError' &&
+          'side' in error &&
+          error.side === 'current',
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -13,8 +13,60 @@ import { LocalFileCheckpointCarrier } from '../local-file-checkpoint-carrier.js'
 import type { CurrentFileCheckpointState } from '../prepared-file-mutation.js';
 import type { DurableToolPreparationContext } from '../tool-runtime.js';
 import type { PreparedFileMutationFact } from '../tool-recovery-facts.js';
+import { WorkerBackedFileCheckpointCarrier } from '../worker-backed-file-checkpoint-carrier.js';
 
 describe('builtin prepared file mutations', () => {
+  test('routes prepared file application through the filesystem worker when both are installed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-prepared-worker-'));
+    const carrier = new FakeCarrier();
+    carrier.rejectHostApply = true;
+    const workerCalls: unknown[] = [];
+    const write = buildBuiltinTools({
+      fileMutationCheckpointCarrier: carrier,
+      filesystemWorker: {
+        execute: async (input) => {
+          workerCalls.push(input);
+          return { kind: 'write', ok: true, path: join(root, 'created.txt'), bytes: 5 };
+        },
+      },
+    }).find((candidate) => candidate.name === 'Write');
+    assert.ok(write?.prepareDurableExecution);
+
+    const preparation = await write.prepareDurableExecution(
+      { path: 'created.txt', content: 'hello' },
+      preparationContext(root),
+    );
+    assert.ok(preparation);
+
+    await preparation.execute();
+    assert.equal(workerCalls.length, 1);
+    assert.equal(
+      (workerCalls[0] as { operation?: { kind?: string } }).operation?.kind,
+      'prepared_file_apply',
+    );
+    assert.deepEqual(carrier.redone, []);
+  });
+
+  test('keeps recovery redo on the worker without a host-local fallback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-prepared-recovery-worker-'));
+    const local = new FakeCarrier();
+    local.rejectHostApply = true;
+    const calls: unknown[] = [];
+    const carrier = new WorkerBackedFileCheckpointCarrier(local, {
+      execute: async (input) => {
+        calls.push(input);
+        return { kind: 'prepared_file_apply', ok: true };
+      },
+    });
+    const checkpoint = fact('operation-1', root, 'created.txt');
+
+    await carrier.apply(checkpoint, Buffer.from('hello'));
+
+    assert.equal(calls.length, 1);
+    assert.equal((calls[0] as { mode?: string }).mode, 'ask');
+    assert.deepEqual(local.redone, []);
+  });
+
   test('Write prepares its exact UTF-8 after image before durable dispatch', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-prepared-write-'));
     const carrier = new FakeCarrier();
@@ -107,6 +159,7 @@ describe('builtin prepared file mutations', () => {
 class FakeCarrier implements PreparedFileMutationCarrier {
   readonly prepared: PrepareFileMutationInput[] = [];
   readonly redone: string[] = [];
+  rejectHostApply = false;
 
   constructor(readonly beforeContent?: Uint8Array) {}
 
@@ -125,6 +178,7 @@ class FakeCarrier implements PreparedFileMutationCarrier {
   }
 
   async apply(input: PreparedFileMutationFact): Promise<void> {
+    if (this.rejectHostApply) throw new Error('host-local prepared apply was invoked');
     this.redone.push(input.operationId);
   }
 }
