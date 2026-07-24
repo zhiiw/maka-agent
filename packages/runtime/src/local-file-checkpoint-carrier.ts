@@ -109,7 +109,7 @@ export class LocalFileCheckpointCarrier implements PreparedFileMutationCarrier {
 
   async resolveTargetIdentity(workspaceRoot: string, targetPath: string): Promise<string> {
     const canonicalRoot = await this.resolveWorkspaceIdentity(workspaceRoot);
-    return await resolvePreparedTarget(canonicalRoot, targetPath);
+    return await resolvePreparedTargetIdentity(canonicalRoot, targetPath);
   }
 
   async prepare(input: PrepareFileMutationInput): Promise<PreparedFileMutationFact> {
@@ -467,6 +467,25 @@ async function resolvePreparedTarget(workspaceRoot: string, targetPath: string):
     }
     return join(canonicalParent, basename(candidate));
   }
+}
+
+async function resolvePreparedTargetIdentity(
+  workspaceRoot: string,
+  targetPath: string,
+): Promise<string> {
+  const candidate = resolve(workspaceRoot, targetPath);
+  if (!isPathWithin(workspaceRoot, candidate)) {
+    throw new Error('Prepared file mutation target escapes the workspace');
+  }
+  const canonicalParent = await realpath(dirname(candidate));
+  if (!isPathWithin(workspaceRoot, canonicalParent)) {
+    throw new Error('Prepared file mutation target escapes the workspace');
+  }
+  // The durable identity is the canonical parent plus the final path component.
+  // Do not dereference the final component here: recovery must keep the prepared
+  // target identity stable when that component is replaced by a symlink, then
+  // let bounded observation reject the symlink with its explicit diagnostic.
+  return join(canonicalParent, basename(candidate));
 }
 
 async function validateFactPath(fact: PreparedFileMutationFact): Promise<void> {
