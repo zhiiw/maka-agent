@@ -264,6 +264,29 @@ export interface SessionSummary {
   orchestrationMode?: OrchestrationMode;
 }
 
+/**
+ * Host-facing projection of linked subagent Sessions.
+ *
+ * The flat Session list remains the storage/read authority. Hosts use this
+ * projection to nest a linked child beneath its durable parent without
+ * confusing ordinary branch lineage with subagent ownership. Missing-parent
+ * and cyclic relations fail open into roots so an inspectable child can never
+ * disappear from the product surface.
+ */
+export interface LinkedSessionTree {
+  roots: SessionSummary[];
+  childrenByParentId: ReadonlyMap<string, readonly SessionSummary[]>;
+}
+
+export interface LinkedSessionTreeProjectionOptions {
+  /**
+   * Read-model aliases from durable physical parent ids to visible logical
+   * Session ids. Revision projection uses this to keep a child attached when
+   * its spawning parent revision is no longer the selected representative.
+   */
+  parentSessionIdAliases?: ReadonlyMap<string, string>;
+}
+
 const SUBAGENT_SESSION_PARENT_SHAPE = defineObjectShape<SubagentSessionParent>()(
   ['kind', 'parentSessionId', 'spawnedBy', 'lifecycle'],
   ['swarm'],
@@ -384,6 +407,101 @@ export function childSessionsForParent(
       isSubagentSessionParent(session.subagentParent) &&
       session.subagentParent.parentSessionId === parentSessionId,
   );
+}
+
+/** Read-model projection; input order is preserved at every tree level. */
+export function projectLinkedSessionTree(
+  sessions: readonly SessionSummary[],
+  options: LinkedSessionTreeProjectionOptions = {},
+): LinkedSessionTree {
+  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+  const nestedParentByChildId = new Map<string, string>();
+  const linkedParentId = (session: SessionSummary): string | undefined => {
+    const relation = session.subagentParent;
+    if (!isSubagentSessionParent(relation)) return undefined;
+    return (
+      options.parentSessionIdAliases?.get(relation.parentSessionId) ?? relation.parentSessionId
+    );
+  };
+
+  for (const session of sessions) {
+    const parentSessionId = linkedParentId(session);
+    if (!parentSessionId) continue;
+    if (!sessionsById.has(parentSessionId)) continue;
+    if (parentSessionId === session.id) continue;
+    if (linkedParentChainContainsCycle(session.id, sessionsById, linkedParentId)) continue;
+    nestedParentByChildId.set(session.id, parentSessionId);
+  }
+
+  const roots: SessionSummary[] = [];
+  const mutableChildren = new Map<string, SessionSummary[]>();
+  for (const session of sessions) {
+    const parentSessionId = nestedParentByChildId.get(session.id);
+    if (!parentSessionId) {
+      roots.push(session);
+      continue;
+    }
+    const children = mutableChildren.get(parentSessionId) ?? [];
+    children.push(session);
+    mutableChildren.set(parentSessionId, children);
+  }
+
+  return {
+    roots,
+    childrenByParentId: mutableChildren,
+  };
+}
+
+/**
+ * Filter a linked tree without leaking non-matching descendants through a
+ * matching parent. Matching descendants whose ancestors do not match are
+ * promoted to the nearest matching ancestor, or to a root when none exists.
+ */
+export function filterLinkedSessionTree(
+  tree: LinkedSessionTree,
+  include: (session: SessionSummary) => boolean,
+): LinkedSessionTree {
+  const roots: SessionSummary[] = [];
+  const mutableChildren = new Map<string, SessionSummary[]>();
+
+  const visit = (session: SessionSummary, visibleParentId?: string): void => {
+    const included = include(session);
+    const nextVisibleParentId = included ? session.id : visibleParentId;
+    if (included) {
+      if (visibleParentId) {
+        const children = mutableChildren.get(visibleParentId) ?? [];
+        children.push(session);
+        mutableChildren.set(visibleParentId, children);
+      } else {
+        roots.push(session);
+      }
+    }
+    for (const child of tree.childrenByParentId.get(session.id) ?? []) {
+      visit(child, nextVisibleParentId);
+    }
+  };
+
+  for (const root of tree.roots) visit(root);
+  return { roots, childrenByParentId: mutableChildren };
+}
+
+function linkedParentChainContainsCycle(
+  startSessionId: string,
+  sessionsById: ReadonlyMap<string, SessionSummary>,
+  linkedParentId: (session: SessionSummary) => string | undefined,
+): boolean {
+  const visited = new Set<string>();
+  let sessionId: string | undefined = startSessionId;
+  while (sessionId) {
+    if (visited.has(sessionId)) return true;
+    visited.add(sessionId);
+    const session = sessionsById.get(sessionId);
+    if (!session) return false;
+    const parentSessionId = linkedParentId(session);
+    if (!parentSessionId || !sessionsById.has(parentSessionId)) return false;
+    sessionId = parentSessionId;
+  }
+  return false;
 }
 
 function isSessionLineageId(value: unknown): value is string {
@@ -572,6 +690,7 @@ export interface TokenUsageMessage {
   cacheCreation?: number;
   costUsd?: number;
   systemPromptHash?: string;
+  contextRemaining?: number;
   prefixHash?: string;
   prefixChangeReason?: PrefixChangeReason;
   requestShapeHash?: string;
@@ -668,6 +787,7 @@ const TOKEN_USAGE_MESSAGE_SHAPE = defineObjectShape<TokenUsageMessage>()(
     'cacheCreation',
     'costUsd',
     'systemPromptHash',
+    'contextRemaining',
     'prefixHash',
     'prefixChangeReason',
     'requestShapeHash',

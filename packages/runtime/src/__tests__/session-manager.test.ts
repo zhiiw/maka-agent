@@ -773,6 +773,105 @@ describe('SessionManager child-session runtime primitive', () => {
     while (!(await parentTurn.next()).done) {}
   });
 
+  test('reopens after restart with isolated history, tool activity, usage, and compaction', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    const parentGate = makeGate();
+    const compactCalls: Array<{ turnId: string; runtimeContextCount: number }> = [];
+    const childBackends: LifecycleChildBackend[] = [];
+    backends.register('fake', (ctx) => {
+      if (!ctx.header.subagentRuntime) return new TestBackend(ctx, parentGate);
+      const backend = new LifecycleChildBackend(ctx, compactCalls);
+      childBackends.push(backend);
+      return backend;
+    });
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      newId: nextId(),
+      now: nextNow(186),
+      runtimeSource: 'test',
+    });
+    const parent = await manager.createSession(makeInput());
+    const parentTurn = manager
+      .sendMessage(parent.id, { turnId: 'parent-turn', text: 'private parent context' })
+      [Symbol.asyncIterator]();
+    await parentTurn.next();
+    const [parentRun] = await runStore.listSessionRuns(parent.id);
+    if (!parentRun) throw new Error('parent run was not recorded');
+
+    const child = await manager.spawnChildSession(parent.id, {
+      spawnedBy: {
+        parentRunId: parentRun.runId,
+        parentTurnId: parentRun.turnId,
+        toolCallId: 'restart-observation-tool',
+      },
+      agentProfile: LOCAL_READ_AGENT_PROFILE,
+      prompt: 'inspect README before restart',
+    });
+
+    // A new manager represents a restarted Runtime Host. It must activate the
+    // child through the durable Session header and replay only child history.
+    const restarted = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      newId: nextId(),
+      now: nextNow(196),
+      runtimeSource: 'test',
+    });
+    await drain(
+      restarted.sendMessage(child.childSessionId, {
+        turnId: 'child-follow-up',
+        text: 'inspect it again after restart',
+      }),
+    );
+    const restartedBackend = childBackends.at(-1);
+    const followUpContext = restartedBackend?.sendInputs.at(-1)?.runtimeContext ?? [];
+    expect(followUpContext.some((event) => event.runId === child.runId)).toBe(true);
+    expect(
+      followUpContext.some(
+        (event) =>
+          event.content?.kind === 'text' && event.content.text.includes('private parent context'),
+      ),
+    ).toBe(false);
+
+    await drain(restarted.compactSession(child.childSessionId, { turnId: 'child-compact' }));
+    expect(compactCalls).toHaveLength(1);
+    expect(compactCalls[0]?.turnId).toBe('child-compact');
+
+    const childMessages = await restarted.getMessages(child.childSessionId);
+    expect(childMessages.some((message) => message.type === 'tool_call')).toBe(true);
+    expect(childMessages.some((message) => message.type === 'tool_result')).toBe(true);
+    expect(childMessages.some((message) => message.type === 'token_usage')).toBe(true);
+    expect(
+      childMessages.some(
+        (message) =>
+          message.type === 'turn_state' &&
+          message.turnId === 'child-compact' &&
+          message.status === 'completed',
+      ),
+    ).toBe(true);
+    const parentMessages = await restarted.getMessages(parent.id);
+    expect(
+      parentMessages.some(
+        (message) =>
+          message.turnId === child.turnId ||
+          message.turnId === 'child-follow-up' ||
+          message.turnId === 'child-compact',
+      ),
+    ).toBe(false);
+
+    parentGate.release();
+    while (!(await parentTurn.next()).done) {}
+  });
+
   test('refuses to activate a linked legacy child without a runtime snapshot', async () => {
     const store = new MemorySessionStore();
     const backends = new BackendRegistry();
@@ -960,6 +1059,56 @@ describe('SessionManager child-session runtime primitive', () => {
       /parent run is not active/,
     );
     expect(await manager.listChildSessions(parent.id)).toEqual([]);
+  });
+
+  test('admits child work through an external parent-run authority', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    backends.register('fake', (ctx) => new TestBackend(ctx));
+    let externalParent:
+      | {
+          sessionId: string;
+          runId: string;
+          turnId: string;
+        }
+      | undefined;
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      isParentRunActive: (sessionId, runId, turnId) =>
+        externalParent !== undefined &&
+        externalParent.sessionId === sessionId &&
+        externalParent.runId === runId &&
+        externalParent.turnId === turnId,
+      newId: nextId(),
+      now: nextNow(250),
+    });
+    const parent = await manager.createSession(makeInput());
+    await drain(manager.sendMessage(parent.id, { turnId: 'parent-turn', text: 'parent' }));
+    const [parentRun] = await runStore.listSessionRuns(parent.id);
+    if (!parentRun) throw new Error('parent run was not recorded');
+    externalParent = {
+      sessionId: parent.id,
+      runId: parentRun.runId,
+      turnId: parentRun.turnId,
+    };
+
+    const child = await manager.spawnChildSession(parent.id, {
+      spawnedBy: {
+        parentRunId: parentRun.runId,
+        parentTurnId: parentRun.turnId,
+        toolCallId: 'tool-call-1',
+      },
+      agentProfile: LOCAL_READ_AGENT_PROFILE,
+      prompt: 'inspect',
+    });
+
+    expect(child.status).toBe('completed');
+    expect(child.childSessionId === parent.id).toBe(false);
   });
 
   test('child stop is isolated while parent stop reaches every foreground child session', async () => {
@@ -4260,7 +4409,7 @@ describe('SessionManager permission mode updates', () => {
     );
   });
 
-  test('sendMessage backfills an empty prior runtime ledger for model context', async () => {
+  test('sendMessage preserves token usage fields while resuming from an empty prior runtime ledger', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
     const backends = new BackendRegistry();
@@ -4269,13 +4418,15 @@ describe('SessionManager permission mode updates', () => {
       backend = new TestBackend(ctx);
       return backend;
     });
+    const newId = nextId();
+    const now = nextNow(7_000);
     const manager = new SessionManager({
       store,
       runStore,
       runtimeEventStore: runStore,
       backends,
-      newId: nextId(),
-      now: nextNow(7_000),
+      newId,
+      now,
       runtimeSource: 'test',
     });
     const session = await manager.createSession(makeInput());
@@ -4290,10 +4441,21 @@ describe('SessionManager permission mode updates', () => {
         modelId: 'fake-model',
       },
       {
+        type: 'token_usage',
+        id: 'legacy-usage',
+        turnId: 'turn-1',
+        ts: 103,
+        input: 100,
+        output: 25,
+        runtimeSteps: 3,
+        contextRemaining: 9000,
+        providerRequestTraceId: 'provider-trace-1',
+      },
+      {
         type: 'turn_state',
         id: 'legacy-state',
         turnId: 'turn-1',
-        ts: 103,
+        ts: 104,
         status: 'completed',
         partialOutputRetained: true,
       },
@@ -4305,35 +4467,53 @@ describe('SessionManager permission mode updates', () => {
         turnId: 'turn-1',
         status: 'completed',
         createdAt: 100,
-        updatedAt: 103,
-        completedAt: 103,
+        updatedAt: 104,
+        completedAt: 104,
       }),
     );
 
+    const restarted = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      newId,
+      now,
+      runtimeSource: 'test',
+    });
     const sessionEvents = await collectSessionEvents(
-      manager.sendMessage(session.id, { turnId: 'turn-2', text: 'follow up' }),
+      restarted.sendMessage(session.id, { turnId: 'turn-2', text: 'follow up' }),
     );
 
     expect(sessionEvents.map((event) => event.type)).toEqual(['text_delta', 'complete']);
     expect(backend?.sendInputs[0]?.context.map((message) => message.type)).toEqual([
       'user',
       'assistant',
+      'token_usage',
       'turn_state',
     ]);
     expect(
       backend?.sendInputs[0]?.context.map((message) =>
         'text' in message ? message.text : message.type,
       ),
-    ).toEqual(['prior question', 'prior answer', 'turn_state']);
+    ).toEqual(['prior question', 'prior answer', 'token_usage', 'turn_state']);
     expect(backend?.sendInputs[0]?.runtimeContext?.map((event) => event.runId)).toEqual([
       'run-1',
       'run-1',
       'run-1',
+      'run-1',
     ]);
+    const resumedUsage = backend?.sendInputs[0]?.runtimeContext?.find(
+      (event) => event.actions?.tokenUsage,
+    );
+    expect(resumedUsage?.actions?.tokenUsage?.runtimeSteps).toBe(3);
+    expect(resumedUsage?.actions?.tokenUsage?.contextRemaining).toBe(9000);
+    expect(resumedUsage?.refs?.providerRequestTraceId).toBe('provider-trace-1');
     const repairedRuntimeEvents = await runStore.readRuntimeEvents(session.id, 'run-1');
     expect(repairedRuntimeEvents.map((event) => event.refs?.storedMessageId)).toEqual([
       'legacy-user',
       'legacy-assistant',
+      'legacy-usage',
       'legacy-state',
     ]);
     expect(repairedRuntimeEvents.at(-1)?.status).toBe('completed');
@@ -13494,6 +13674,46 @@ class CompactingTestBackend extends TestBackend {
       runtimeContextCount: input.runtimeContext.length,
     });
     return compactHistoryResult();
+  }
+}
+
+class LifecycleChildBackend extends CompactingTestBackend {
+  override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+    this.sendInputs.push(input);
+    yield {
+      type: 'tool_start',
+      id: `${input.turnId}-tool-start`,
+      turnId: input.turnId,
+      ts: 1,
+      toolUseId: `${input.turnId}-read`,
+      toolName: 'Read',
+      args: { path: 'README.md' },
+    };
+    yield {
+      type: 'tool_result',
+      id: `${input.turnId}-tool-result`,
+      turnId: input.turnId,
+      ts: 2,
+      toolUseId: `${input.turnId}-read`,
+      isError: false,
+      content: { kind: 'text', text: 'README body' },
+    };
+    yield {
+      type: 'token_usage',
+      id: `${input.turnId}-usage`,
+      turnId: input.turnId,
+      ts: 3,
+      input: 10,
+      output: 5,
+      total: 15,
+    };
+    yield {
+      type: 'complete',
+      id: `${input.turnId}-complete`,
+      turnId: input.turnId,
+      ts: 4,
+      stopReason: 'end_turn',
+    };
   }
 }
 
