@@ -50,7 +50,7 @@ describe('SqliteSessionMetadataStore', () => {
     const runtime = createSqliteRuntimeStore(path);
     const metadata = createSqliteSessionMetadataStore(path);
     try {
-      assert.equal(runtime.schemaVersion(), 4);
+      assert.equal(runtime.schemaVersion(), 5);
       assert.equal(metadata.schemaVersion(), 7);
       await metadata.create(fullHeader());
       await runtime.appendRuntimeEvent('session-1', 'run-1', {

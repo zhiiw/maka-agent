@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import type { RuntimeEvent } from '@maka/core';
 import {
@@ -13,7 +14,9 @@ import {
 describe('SqliteRuntimeStore', () => {
   it('applies versioned migrations and reopens the same database without rewriting schema', async () => {
     await withStore(async (store, dbPath) => {
+      assert.equal(SQLITE_RUNTIME_SCHEMA_VERSION, 5);
       assert.equal(store.schemaVersion(), SQLITE_RUNTIME_SCHEMA_VERSION);
+      assert.equal(store.recoveryBundleCapability, 'tool_recovery_bundle_v1');
       assert.equal(store.journalMode(), 'wal');
       assert.equal(store.foreignKeysEnabled(), true);
       store.close();
@@ -89,6 +92,253 @@ describe('SqliteRuntimeStore', () => {
         toolDispatchEvent(),
       ]);
       assert.equal((await store.readToolOperation('operation-1'))?.currentState, 'prepared');
+    });
+  });
+
+  it('upgrades a populated schema 4 database without losing immutable events', async () => {
+    await withStore(async (store, dbPath) => {
+      const event = functionCallEvent();
+      await store.appendRuntimeEvent('session-1', 'run-1', event);
+      store.close();
+
+      const legacy = new DatabaseSync(dbPath);
+      try {
+        legacy.exec('DROP TABLE runtime_capabilities');
+        legacy.exec('PRAGMA user_version = 4');
+      } finally {
+        legacy.close();
+      }
+
+      const upgraded = createSqliteRuntimeStore(dbPath);
+      try {
+        assert.equal(upgraded.schemaVersion(), 5);
+        assert.equal(upgraded.recoveryBundleCapability, 'tool_recovery_bundle_v1');
+        assert.deepEqual(await upgraded.readImmutableRuntimeEvents('session-1', 'run-1'), [event]);
+      } finally {
+        upgraded.close();
+      }
+    });
+  });
+
+  it('fails closed when schema 5 does not declare the recovery bundle capability', async () => {
+    await withStore(async (store, dbPath) => {
+      store.close();
+      const database = new DatabaseSync(dbPath);
+      try {
+        database.exec("DELETE FROM runtime_capabilities WHERE capability = 'tool_recovery_bundle'");
+      } finally {
+        database.close();
+      }
+
+      assert.throws(
+        () => createSqliteRuntimeStore(dbPath),
+        /runtime recovery capability tool_recovery_bundle@1 is unavailable/i,
+      );
+    });
+  });
+
+  it('rejects canonical recovery facts through the generic RuntimeEvent append path', async () => {
+    await withStore(async (store) => {
+      const recoveryFact = reconcileResultEvent();
+      await assert.rejects(
+        store.appendRuntimeEvent('session-1', 'run-1', recoveryFact),
+        /recovery bundle writer/i,
+      );
+      await assert.rejects(
+        store.importRuntimeEventsBatch({
+          sessionId: 'session-1',
+          runId: 'run-1',
+          events: [recoveryFact],
+        }),
+        /recovery bundle writer/i,
+      );
+      await assert.rejects(
+        store.ensureTerminalRuntimeEventDurable('session-1', 'run-1', {
+          ...recoveryFact,
+          id: 'terminal-recovery-event-1',
+          status: 'completed',
+          actions: {
+            ...recoveryFact.actions,
+            endInvocation: true,
+          },
+        }),
+        /recovery bundle writer/i,
+      );
+
+      assert.deepEqual(await store.readImmutableRuntimeEvents('session-1', 'run-1'), []);
+    });
+  });
+
+  it('atomically commits reconcile, matching outcome, and completed decision as one bundle', async () => {
+    await withStore(async (store) => {
+      await commitPrepared(store);
+      const recoveryStore = store as Store & {
+        commitToolRecoveryBundle(input: {
+          operationId: string;
+          reconcileRuntimeEvent: RuntimeEvent;
+          outcomeRuntimeEvent: RuntimeEvent;
+          decisionRuntimeEvent: RuntimeEvent;
+        }): Promise<void>;
+      };
+      const reconcile = reconcileResultEvent();
+      const outcome = functionResponseEvent({ ts: 21 });
+      const decision = recoveryDecisionEvent();
+
+      await recoveryStore.commitToolRecoveryBundle({
+        operationId: 'operation-1',
+        reconcileRuntimeEvent: reconcile,
+        outcomeRuntimeEvent: outcome,
+        decisionRuntimeEvent: decision,
+      });
+
+      assert.deepEqual(
+        (await store.readImmutableRuntimeEvents('session-1', 'run-1')).map((event) => event.id),
+        [
+          'call-event-1',
+          'dispatch-event-1',
+          'reconcile-event-1',
+          'response-event-1',
+          'recovery-decision-event-1',
+        ],
+      );
+      assert.deepEqual(
+        (await store.readToolJournal('operation-1')).map((event) => event.state),
+        ['prepared', 'reconcile_recorded', 'outcome_committed', 'recovery_decided'],
+      );
+      assert.equal(
+        (await store.readToolOperation('operation-1'))?.currentState,
+        'outcome_committed',
+      );
+      assert.equal(
+        (await store.readToolOperation('operation-1'))?.resultEventId,
+        'response-event-1',
+      );
+    });
+  });
+
+  it('rolls back every recovery fact and outcome when the bundle fails after outcome', async () => {
+    await withStore(async (store, _dbPath, setFailpoint) => {
+      await commitPrepared(store);
+      setFailpoint('after_recovery_outcome');
+
+      await assert.rejects(
+        store.commitToolRecoveryBundle({
+          operationId: 'operation-1',
+          reconcileRuntimeEvent: reconcileResultEvent(),
+          outcomeRuntimeEvent: functionResponseEvent({ ts: 21 }),
+          decisionRuntimeEvent: recoveryDecisionEvent(),
+        }),
+        /sqlite runtime failpoint: after_recovery_outcome/,
+      );
+
+      assert.deepEqual(
+        (await store.readImmutableRuntimeEvents('session-1', 'run-1')).map((event) => event.id),
+        ['call-event-1', 'dispatch-event-1'],
+      );
+      assert.deepEqual(
+        (await store.readToolJournal('operation-1')).map((event) => event.state),
+        ['prepared'],
+      );
+      assert.equal((await store.readToolOperation('operation-1'))?.currentState, 'prepared');
+    });
+  });
+
+  it('rejects completed recovery without an outcome and leaves only the prepared boundary', async () => {
+    await withStore(async (store) => {
+      await commitPrepared(store);
+
+      await assert.rejects(
+        store.commitToolRecoveryBundle({
+          operationId: 'operation-1',
+          reconcileRuntimeEvent: reconcileResultEvent(),
+          decisionRuntimeEvent: recoveryDecisionEvent(),
+        }),
+        /requires a persisted outcome/i,
+      );
+
+      assert.deepEqual(
+        (await store.readImmutableRuntimeEvents('session-1', 'run-1')).map((event) => event.id),
+        ['call-event-1', 'dispatch-event-1'],
+      );
+      assert.deepEqual(
+        (await store.readToolJournal('operation-1')).map((event) => event.state),
+        ['prepared'],
+      );
+    });
+  });
+
+  it('deduplicates an exact recovery bundle retry after the first commit succeeded', async () => {
+    await withStore(async (store) => {
+      await commitPrepared(store);
+      const bundle = {
+        operationId: 'operation-1',
+        reconcileRuntimeEvent: reconcileResultEvent(),
+        outcomeRuntimeEvent: functionResponseEvent({ ts: 21 }),
+        decisionRuntimeEvent: recoveryDecisionEvent(),
+      } as const;
+
+      await store.commitToolRecoveryBundle(bundle);
+      await store.commitToolRecoveryBundle(bundle);
+
+      assert.equal((await store.readToolJournal('operation-1')).length, 4);
+      assert.equal((await store.readImmutableRuntimeEvents('session-1', 'run-1')).length, 5);
+    });
+  });
+
+  it('atomically parks an operation and deduplicates the exact parked bundle', async () => {
+    await withStore(async (store) => {
+      await commitPrepared(store);
+      const bundle = {
+        operationId: 'operation-1',
+        reconcileRuntimeEvent: reconcileResultEvent({
+          actions: {
+            toolRecovery: {
+              kind: 'maka.tool.reconcile_result',
+              version: 1,
+              payload: {
+                protocol: 'tool_reconcile_v1',
+                operationId: 'operation-1',
+                result: 'conflict',
+                observationDigest: 'sha256:conflict',
+                observedAt: '2026-07-25T00:00:00.000Z',
+                nextAction: 'park',
+              },
+            },
+          },
+        }),
+        decisionRuntimeEvent: recoveryDecisionEvent({
+          actions: {
+            toolRecovery: {
+              kind: 'maka.tool.recovery_decision',
+              version: 1,
+              payload: {
+                protocol: 'tool_recovery_v1',
+                operationId: 'operation-1',
+                disposition: 'parked',
+                reasonCode: 'reconcile_conflict',
+                evidenceEventIds: ['call-event-1', 'dispatch-event-1', 'reconcile-event-1'],
+              },
+            },
+          },
+        }),
+      } as const;
+
+      await store.commitToolRecoveryBundle(bundle);
+      await store.commitToolRecoveryBundle(bundle);
+
+      assert.equal((await store.readToolOperation('operation-1'))?.currentState, 'recovery_parked');
+      assert.deepEqual(await store.listUnsettledToolOperations(), []);
+      assert.deepEqual(
+        (await store.readToolJournal('operation-1')).map((event) => event.state),
+        ['prepared', 'reconcile_recorded', 'recovery_decided'],
+      );
+
+      assert.deepEqual(await store.rebuildToolProjectionsFromRuntimeEvents(), {
+        operations: 1,
+        journalEvents: 3,
+      });
+      assert.equal((await store.readToolOperation('operation-1'))?.currentState, 'recovery_parked');
+      assert.deepEqual(await store.listUnsettledToolOperations(), []);
     });
   });
 
@@ -284,6 +534,65 @@ describe('SqliteRuntimeStore', () => {
     });
   });
 
+  it('rebuilds the recovery journal tail in canonical RuntimeEvent sequence order', async () => {
+    await withStore(async (store) => {
+      await commitPrepared(store);
+      await store.commitToolRecoveryBundle({
+        operationId: 'operation-1',
+        reconcileRuntimeEvent: reconcileResultEvent({ ts: 100 }),
+        outcomeRuntimeEvent: functionResponseEvent({ ts: 100 }),
+        decisionRuntimeEvent: recoveryDecisionEvent({ ts: 100 }),
+      });
+
+      const result = await store.rebuildToolProjectionsFromRuntimeEvents();
+
+      assert.deepEqual(result, { operations: 1, journalEvents: 4 });
+      assert.deepEqual(
+        (await store.readToolJournal('operation-1')).map((event) => ({
+          state: event.state,
+          runtimeEventId: event.runtimeEventId,
+        })),
+        [
+          { state: 'prepared', runtimeEventId: 'dispatch-event-1' },
+          { state: 'reconcile_recorded', runtimeEventId: 'reconcile-event-1' },
+          { state: 'outcome_committed', runtimeEventId: 'response-event-1' },
+          { state: 'recovery_decided', runtimeEventId: 'recovery-decision-event-1' },
+        ],
+      );
+    });
+  });
+
+  it('rejects projection rebuild when recovery facts violate physical event order', async () => {
+    await withStore(async (store, dbPath) => {
+      await commitPrepared(store);
+      await store.commitToolRecoveryBundle({
+        operationId: 'operation-1',
+        reconcileRuntimeEvent: reconcileResultEvent(),
+        outcomeRuntimeEvent: functionResponseEvent(),
+        decisionRuntimeEvent: recoveryDecisionEvent(),
+      });
+
+      const database = new DatabaseSync(dbPath);
+      try {
+        database.exec(`
+          UPDATE runtime_events SET event_seq = event_seq + 100
+          WHERE event_id IN ('response-event-1', 'recovery-decision-event-1');
+          UPDATE runtime_events SET event_seq = 4
+          WHERE event_id = 'recovery-decision-event-1';
+          UPDATE runtime_events SET event_seq = 5
+          WHERE event_id = 'response-event-1';
+        `);
+      } finally {
+        database.close();
+      }
+
+      await assert.rejects(
+        store.rebuildToolProjectionsFromRuntimeEvents(),
+        /canonical RuntimeEvent causal order/i,
+      );
+    });
+  });
+
   it('coalesces stream chunks outside the immutable high-water ledger', async () => {
     await withStore(async (store) => {
       for (const [index, text] of ['hel', 'lo', '!'].entries()) {
@@ -455,6 +764,71 @@ function toolDispatchEvent(overrides: Partial<RuntimeEvent> = {}): RuntimeEvent 
         toolName: 'Read',
         canonicalArgsHash: 'sha256:args-1',
         recoveryMode: 'replay_safe',
+      },
+    },
+    refs: { operationId: 'operation-1', toolCallId: 'provider-call-1' },
+    ...overrides,
+  };
+}
+
+function reconcileResultEvent(overrides: Partial<RuntimeEvent> = {}): RuntimeEvent {
+  return {
+    id: 'reconcile-event-1',
+    invocationId: 'invocation-1',
+    runId: 'run-1',
+    sessionId: 'session-1',
+    turnId: 'turn-1',
+    ts: 20,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      toolRecovery: {
+        kind: 'maka.tool.reconcile_result',
+        version: 1,
+        payload: {
+          protocol: 'tool_reconcile_v1',
+          operationId: 'operation-1',
+          result: 'applied',
+          observationDigest: 'sha256:observation-1',
+          observedAt: '2026-07-25T00:00:00.000Z',
+          nextAction: 'synthesize_response',
+        },
+      },
+    },
+    refs: { operationId: 'operation-1', toolCallId: 'provider-call-1' },
+    ...overrides,
+  };
+}
+
+function recoveryDecisionEvent(overrides: Partial<RuntimeEvent> = {}): RuntimeEvent {
+  return {
+    id: 'recovery-decision-event-1',
+    invocationId: 'invocation-1',
+    runId: 'run-1',
+    sessionId: 'session-1',
+    turnId: 'turn-1',
+    ts: 22,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      toolRecovery: {
+        kind: 'maka.tool.recovery_decision',
+        version: 1,
+        payload: {
+          protocol: 'tool_recovery_v1',
+          operationId: 'operation-1',
+          disposition: 'completed',
+          reasonCode: 'reconcile_applied',
+          outcomeEventId: 'response-event-1',
+          evidenceEventIds: [
+            'call-event-1',
+            'dispatch-event-1',
+            'reconcile-event-1',
+            'response-event-1',
+          ],
+        },
       },
     },
     refs: { operationId: 'operation-1', toolCallId: 'provider-call-1' },

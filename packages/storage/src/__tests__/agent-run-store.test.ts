@@ -594,6 +594,66 @@ describe('AgentRunStore', () => {
     });
   });
 
+  it('rejects recovery facts because the JSONL store has no atomic projection writer', async () => {
+    await withStores(async (runStore, runtimeEventStore) => {
+      await runStore.createRun(makeHeader());
+
+      await assert.rejects(
+        runtimeEventStore.appendRuntimeEvent(
+          'session-1',
+          'run-1',
+          makeRuntimeEvent({
+            id: 'recovery-fact-1',
+            actions: {
+              toolRecovery: {
+                kind: 'maka.tool.reconcile_result',
+                version: 1,
+                payload: {
+                  protocol: 'tool_reconcile_v1',
+                  operationId: 'operation-1',
+                  result: 'applied',
+                  observationDigest: 'sha256:observation-1',
+                  observedAt: '2026-07-25T00:00:00.000Z',
+                  nextAction: 'synthesize_response',
+                },
+              },
+            },
+          }),
+        ),
+        /recovery bundle writer/i,
+      );
+      await assert.rejects(
+        runtimeEventStore.ensureTerminalRuntimeEventDurable(
+          'session-1',
+          'run-1',
+          makeRuntimeEvent({
+            id: 'terminal-recovery-fact-1',
+            status: 'completed',
+            content: undefined,
+            actions: {
+              endInvocation: true,
+              toolRecovery: {
+                kind: 'maka.tool.reconcile_result',
+                version: 1,
+                payload: {
+                  protocol: 'tool_reconcile_v1',
+                  operationId: 'operation-1',
+                  result: 'applied',
+                  observationDigest: 'sha256:observation-1',
+                  observedAt: '2026-07-25T00:00:00.000Z',
+                  nextAction: 'synthesize_response',
+                },
+              },
+            },
+          }),
+        ),
+        /recovery bundle writer/i,
+      );
+
+      assert.deepEqual(await runtimeEventStore.readRuntimeEvents('session-1', 'run-1'), []);
+    });
+  });
+
   it('returns an empty runtime event list when the runtime ledger is missing', async () => {
     await withStores(async (runStore, runtimeEventStore) => {
       await runStore.createRun(makeHeader());
