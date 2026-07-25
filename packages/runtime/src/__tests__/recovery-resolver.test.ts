@@ -226,6 +226,52 @@ describe('RecoveryResolver', () => {
     assert.equal(resolution.decisions[0]?.responseRuntimeEventId, 'function-response-1');
     assert.equal(resolution.hasCorruption, true);
   });
+
+  it('rejects a completed recovery decision without its matching persisted outcome', () => {
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      functionCallEvent(),
+      toolDispatchEvent(),
+      reconcileResultEvent(),
+      recoveryDecisionEvent(),
+    ]);
+
+    assert.equal(resolution.decisions[0]?.status, 'corruption');
+    assert.equal(resolution.decisions[0]?.reason, 'recovery_fact_corruption');
+    assert.equal(resolution.hasCorruption, true);
+    assert.equal(resolution.requiresReconciliation, false);
+  });
+
+  it('accepts a completed recovery decision only with the matching outcome and evidence chain', () => {
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      functionCallEvent(),
+      toolDispatchEvent(),
+      reconcileResultEvent(),
+      functionResponseEvent(false, 'operation-1'),
+      recoveryDecisionEvent(),
+    ]);
+
+    assert.equal(resolution.decisions[0]?.status, 'completed');
+    assert.equal(resolution.decisions[0]?.reason, 'matching_response');
+    assert.equal(resolution.hasCorruption, false);
+  });
+
+  it('keeps earlier corruption sticky when later recovery facts are otherwise valid', () => {
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      functionCallEvent(),
+      toolDispatchEvent(),
+      { ...toolDispatchEvent(), id: 'dispatch-duplicate' },
+      reconcileResultEvent(),
+      functionResponseEvent(false, 'operation-1'),
+      recoveryDecisionEvent(),
+    ]);
+
+    assert.equal(resolution.decisions[0]?.status, 'corruption');
+    assert.equal(resolution.decisions[0]?.reason, 'duplicate_dispatch');
+    assert.equal(resolution.hasCorruption, true);
+  });
 });
 
 function initialEvent(toolBoundary?: 't1_after_preflight_v1'): RuntimeEvent {
@@ -277,6 +323,50 @@ function functionResponseEvent(isError = false, operationId?: string): RuntimeEv
       ...(isError ? { isError: true } : {}),
     },
     ...(operationId ? { refs: { operationId, toolCallId: 'call-1' } } : {}),
+  });
+}
+
+function reconcileResultEvent(): RuntimeEvent {
+  return event({
+    id: 'reconcile-1',
+    ts: 2,
+    actions: {
+      toolRecovery: {
+        kind: 'maka.tool.reconcile_result',
+        version: 1,
+        payload: {
+          protocol: 'tool_reconcile_v1',
+          operationId: 'operation-1',
+          result: 'applied',
+          observationDigest: 'sha256:observation',
+          observedAt: '2026-07-25T00:00:00.000Z',
+          nextAction: 'synthesize_response',
+        },
+      },
+    },
+    refs: { operationId: 'operation-1', toolCallId: 'call-1' },
+  });
+}
+
+function recoveryDecisionEvent(): RuntimeEvent {
+  return event({
+    id: 'decision-1',
+    ts: 4,
+    actions: {
+      toolRecovery: {
+        kind: 'maka.tool.recovery_decision',
+        version: 1,
+        payload: {
+          protocol: 'tool_recovery_v1',
+          operationId: 'operation-1',
+          disposition: 'completed',
+          reasonCode: 'reconcile_applied',
+          outcomeEventId: 'function-response-1',
+          evidenceEventIds: ['function-call-1', 'dispatch-1', 'reconcile-1', 'function-response-1'],
+        },
+      },
+    },
+    refs: { operationId: 'operation-1', toolCallId: 'call-1' },
   });
 }
 

@@ -3,6 +3,7 @@ import {
   type RuntimeEvent,
   type ToolBoundaryProtocol,
 } from '@maka/core/runtime-event';
+import { validateToolRecoveryEventBundle } from '@maka/core/tool-recovery-bundle';
 
 export type ToolRecoveryDecisionStatus =
   | 'completed'
@@ -20,7 +21,8 @@ export type ToolRecoveryDecisionReason =
   | 'duplicate_dispatch'
   | 'duplicate_response'
   | 'identity_conflict'
-  | 'protocol_marker_invalid';
+  | 'protocol_marker_invalid'
+  | 'recovery_fact_corruption';
 
 export interface ToolRecoveryDecision {
   toolCallId: string;
@@ -66,6 +68,10 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
   );
   const decisions: ToolRecoveryDecision[] = [];
   const decisionsByToolCallId = new Map<string, ToolRecoveryDecision>();
+  const decisionsByOperationId = new Map<string, ToolRecoveryDecision>();
+  const callEventsByToolCallId = new Map<string, RuntimeEvent>();
+  const dispatchEventsByOperationId = new Map<string, RuntimeEvent>();
+  const responseEventsByOperationId = new Map<string, RuntimeEvent>();
   for (const event of events) {
     if (event.partial || event.content?.kind !== 'function_call') continue;
     const decision: ToolRecoveryDecision = {
@@ -77,21 +83,27 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
     };
     decisions.push(decision);
     decisionsByToolCallId.set(decision.toolCallId, decision);
+    callEventsByToolCallId.set(decision.toolCallId, event);
   }
   for (const event of events) {
     if (event.partial) continue;
     const dispatch = event.actions?.toolDispatch;
     if (!dispatch) continue;
+    if (!dispatchEventsByOperationId.has(dispatch.operationId)) {
+      dispatchEventsByOperationId.set(dispatch.operationId, event);
+    }
     const decision = decisionsByToolCallId.get(dispatch.providerToolCallId);
     if (!decision) {
-      decisions.push({
+      const orphanDecision: ToolRecoveryDecision = {
         toolCallId: dispatch.providerToolCallId,
         toolName: dispatch.toolName,
         operationId: dispatch.operationId,
         status: 'corruption',
         reason: 'orphan_dispatch',
         dispatchRuntimeEventId: event.id,
-      });
+      };
+      decisions.push(orphanDecision);
+      decisionsByOperationId.set(dispatch.operationId, orphanDecision);
       continue;
     }
     if (decision.dispatchRuntimeEventId !== undefined) {
@@ -100,6 +112,7 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
       continue;
     }
     decision.operationId = dispatch.operationId;
+    decisionsByOperationId.set(dispatch.operationId, decision);
     decision.dispatchRuntimeEventId = event.id;
     if (
       decision.toolName !== dispatch.toolName ||
@@ -134,6 +147,9 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
     }
     decision.responseRuntimeEventId = event.id;
     decision.responseIsError = event.content.isError === true;
+    if (event.refs?.operationId) {
+      responseEventsByOperationId.set(event.refs.operationId, event);
+    }
     if (decision.status === 'corruption') continue;
     if (
       decision.toolName !== event.content.name ||
@@ -147,6 +163,78 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
     decision.status = 'completed';
     decision.reason = 'matching_response';
   }
+  const recoveryFactsByOperationId = new Map<string, RuntimeEvent[]>();
+  for (const event of events) {
+    const fact = event.actions?.toolRecovery;
+    if (!fact) continue;
+    const facts = recoveryFactsByOperationId.get(fact.payload.operationId) ?? [];
+    facts.push(event);
+    recoveryFactsByOperationId.set(fact.payload.operationId, facts);
+  }
+  const eventIndex = new Map(events.map((event, index) => [event.id, index]));
+  for (const [operationId, facts] of recoveryFactsByOperationId) {
+    const decision = decisionsByOperationId.get(operationId);
+    const dispatchEvent = dispatchEventsByOperationId.get(operationId);
+    const callEvent = decision ? callEventsByToolCallId.get(decision.toolCallId) : undefined;
+    const reconcileEvent = facts.find(
+      (event) => event.actions?.toolRecovery?.kind === 'maka.tool.reconcile_result',
+    );
+    const decisionEvent = facts.find(
+      (event) => event.actions?.toolRecovery?.kind === 'maka.tool.recovery_decision',
+    );
+    const outcomeEvent = responseEventsByOperationId.get(operationId);
+    const validShape =
+      facts.length === 2 &&
+      decision !== undefined &&
+      dispatchEvent !== undefined &&
+      callEvent !== undefined &&
+      reconcileEvent !== undefined &&
+      decisionEvent !== undefined;
+    const validation = validShape
+      ? validateToolRecoveryEventBundle({
+          operation: {
+            operationId,
+            invocationId: dispatchEvent.invocationId,
+            runId: dispatchEvent.runId,
+            turnId: dispatchEvent.turnId,
+            providerToolCallId: decision.toolCallId,
+            toolName: decision.toolName ?? dispatchEvent.actions?.toolDispatch?.toolName ?? '',
+            canonicalArgsHash: dispatchEvent.actions?.toolDispatch?.canonicalArgsHash ?? '',
+            recoveryMode: dispatchEvent.actions?.toolDispatch?.recoveryMode ?? 'never_auto_retry',
+            callEventId: callEvent.id,
+            dispatchEventId: dispatchEvent.id,
+          },
+          callEvent,
+          dispatchEvent,
+          reconcileEvent,
+          outcomeEvent,
+          decisionEvent,
+        })
+      : undefined;
+    if (
+      !validation?.ok ||
+      !isCanonicalRecoveryOrder({
+        eventIndex,
+        callEvent,
+        dispatchEvent,
+        reconcileEvent,
+        outcomeEvent,
+        decisionEvent,
+      })
+    ) {
+      if (decision) {
+        decision.status = 'corruption';
+        decision.reason = 'recovery_fact_corruption';
+      } else {
+        decisions.push({
+          toolCallId: facts[0]?.refs?.toolCallId ?? operationId,
+          operationId,
+          status: 'corruption',
+          reason: 'recovery_fact_corruption',
+        });
+      }
+    }
+  }
   return {
     ...(toolBoundaryProtocol ? { toolBoundaryProtocol } : {}),
     decisions,
@@ -155,4 +243,28 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
       issues.length > 0 || decisions.some((decision) => decision.status === 'corruption'),
     requiresReconciliation: decisions.some((decision) => decision.status === 'indeterminate'),
   };
+}
+
+function isCanonicalRecoveryOrder(input: {
+  eventIndex: ReadonlyMap<string, number>;
+  callEvent?: RuntimeEvent;
+  dispatchEvent?: RuntimeEvent;
+  reconcileEvent?: RuntimeEvent;
+  outcomeEvent?: RuntimeEvent;
+  decisionEvent?: RuntimeEvent;
+}): boolean {
+  if (!input.callEvent || !input.dispatchEvent || !input.reconcileEvent || !input.decisionEvent) {
+    return false;
+  }
+  const ordered = [
+    input.callEvent,
+    input.dispatchEvent,
+    input.reconcileEvent,
+    ...(input.outcomeEvent ? [input.outcomeEvent] : []),
+    input.decisionEvent,
+  ].map((event) => input.eventIndex.get(event.id));
+  return ordered.every(
+    (index, position) =>
+      index !== undefined && (position === 0 || index > (ordered[position - 1] ?? -1)),
+  );
 }

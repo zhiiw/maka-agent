@@ -776,6 +776,37 @@ describe('projectRuntimeEventsToStoredMessages', () => {
     expect(out.diagnostics).toEqual([]);
   });
 
+  test('tool recovery results are accepted without creating legacy message rows', () => {
+    const out = projectRuntimeEventsToStoredMessages(
+      [
+        ev({
+          id: 'toolop-1-reconcile',
+          role: 'system',
+          author: 'system',
+          actions: {
+            toolRecovery: {
+              kind: 'maka.tool.reconcile_result',
+              version: 1,
+              payload: {
+                protocol: 'tool_reconcile_v1',
+                operationId: 'toolop-1',
+                result: 'applied',
+                observationDigest: 'sha256:observation',
+                observedAt: '2026-07-25T00:00:00.000Z',
+                nextAction: 'synthesize_response',
+              },
+            },
+          },
+          refs: { toolCallId: 'tool-1', operationId: 'toolop-1' },
+        }),
+      ],
+      { runHeaders: [header] },
+    );
+
+    expect(out.messages).toEqual([]);
+    expect(out.diagnostics).toEqual([]);
+  });
+
   test('continuation-start recovery facts are accepted without creating legacy message rows', () => {
     const out = projectRuntimeEventsToStoredMessages(
       [
