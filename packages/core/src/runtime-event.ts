@@ -38,6 +38,25 @@ import {
   isUserQuestionRequest,
 } from './interaction-record-schema.js';
 import { isTokenUsageFields } from './usage-record-schema.js';
+import { isToolRecoveryFactEnvelope, type ToolRecoveryFactEnvelope } from './tool-recovery-fact.js';
+
+export type {
+  ToolReconcileResult,
+  ToolReconcileResultFact,
+  ToolRecoveryCompletedDecisionFact,
+  ToolRecoveryDecisionFact,
+  ToolRecoveryFactEnvelope,
+  ToolRecoveryParkedDecisionFact,
+  ToolRecoveryParkReason,
+} from './tool-recovery-fact.js';
+export {
+  TOOL_RECONCILE_RESULT_FACT_KIND,
+  TOOL_RECOVERY_DECISION_FACT_KIND,
+  TOOL_RECOVERY_FACT_VERSION,
+  isToolReconcileResultFact,
+  isToolRecoveryDecisionFact,
+  isToolRecoveryFactEnvelope,
+} from './tool-recovery-fact.js';
 
 // ============================================================================
 // Role / Author / Status
@@ -285,6 +304,8 @@ export interface RuntimeEventActions {
   toolDispatch?: RuntimeEventToolDispatch;
   /** Protocols that were actually active from the first event of this run. */
   runtimeProtocol?: RuntimeEventProtocolMarker;
+  /** Canonical recovery fact; invisible to provider/model-history projections. */
+  toolRecovery?: ToolRecoveryFactEnvelope;
 }
 
 // ============================================================================
@@ -411,6 +432,7 @@ const RUNTIME_ACTIONS_SHAPE = defineObjectShape<RuntimeEventActions>()(
     'tokenUsage',
     'toolDispatch',
     'runtimeProtocol',
+    'toolRecovery',
   ],
 );
 const RUNTIME_TOOL_DISPATCH_SHAPE = defineObjectShape<RuntimeEventToolDispatch>()(
@@ -558,7 +580,8 @@ function isRuntimeEventActions(value: unknown): value is RuntimeEventActions {
     (value.endInvocation === undefined || typeof value.endInvocation === 'boolean') &&
     (value.tokenUsage === undefined || isRuntimeTokenUsage(value.tokenUsage)) &&
     (value.toolDispatch === undefined || isRuntimeToolDispatch(value.toolDispatch)) &&
-    (value.runtimeProtocol === undefined || isRuntimeProtocolMarker(value.runtimeProtocol))
+    (value.runtimeProtocol === undefined || isRuntimeProtocolMarker(value.runtimeProtocol)) &&
+    (value.toolRecovery === undefined || isToolRecoveryFactEnvelope(value.toolRecovery))
   );
 }
 

@@ -193,6 +193,69 @@ describe('RuntimeEvent actions', () => {
     expect(actions.stateDelta?.retries).toBe(1);
     expect(actions.artifactDelta?.['out.md']).toBe(2048);
   });
+
+  test('decodes the minimal canonical tool-recovery facts', () => {
+    const reconcile = decodeRuntimeEvent({
+      ...baseEvent(),
+      actions: {
+        toolRecovery: {
+          kind: 'maka.tool.reconcile_result',
+          version: 1,
+          payload: {
+            protocol: 'tool_reconcile_v1',
+            operationId: 'operation-1',
+            result: 'applied',
+            observationDigest: 'sha256:observation-1',
+            observedAt: '2026-07-25T00:00:00.000Z',
+            nextAction: 'synthesize_response',
+          },
+        },
+      },
+    });
+    const completed = decodeRuntimeEvent({
+      ...baseEvent({ id: 'decision-1' }),
+      actions: {
+        toolRecovery: {
+          kind: 'maka.tool.recovery_decision',
+          version: 1,
+          payload: {
+            protocol: 'tool_recovery_v1',
+            operationId: 'operation-1',
+            disposition: 'completed',
+            reasonCode: 'reconcile_applied',
+            outcomeEventId: 'outcome-1',
+            evidenceEventIds: ['call-1', 'dispatch-1', 'reconcile-1', 'outcome-1'],
+          },
+        },
+      },
+    });
+
+    assert.equal(reconcile.actions?.toolRecovery?.kind, 'maka.tool.reconcile_result');
+    assert.equal(completed.actions?.toolRecovery?.kind, 'maka.tool.recovery_decision');
+  });
+
+  test('rejects a completed recovery decision without an outcome reference', () => {
+    assert.throws(
+      () =>
+        decodeRuntimeEvent({
+          ...baseEvent(),
+          actions: {
+            toolRecovery: {
+              kind: 'maka.tool.recovery_decision',
+              version: 1,
+              payload: {
+                protocol: 'tool_recovery_v1',
+                operationId: 'operation-1',
+                disposition: 'completed',
+                reasonCode: 'reconcile_applied',
+                evidenceEventIds: ['call-1', 'dispatch-1', 'reconcile-1'],
+              },
+            },
+          },
+        }),
+      /Invalid RuntimeEvent schema/,
+    );
+  });
 });
 
 describe('isTerminalRuntimeEvent', () => {

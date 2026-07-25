@@ -114,6 +114,13 @@ export type {
   RuntimeEventRefs,
   ToolBoundaryProtocol,
   ToolRecoveryMode,
+  ToolReconcileResult,
+  ToolReconcileResultFact,
+  ToolRecoveryCompletedDecisionFact,
+  ToolRecoveryDecisionFact,
+  ToolRecoveryFactEnvelope,
+  ToolRecoveryParkedDecisionFact,
+  ToolRecoveryParkReason,
 } from './runtime-event.js';
 export {
   RUNTIME_EVENT_ROLES,
@@ -131,6 +138,12 @@ export {
   isPartialRuntimeEvent,
   runtimeEventHasModelVisibleContent,
   createRuntimeEventId,
+  TOOL_RECONCILE_RESULT_FACT_KIND,
+  TOOL_RECOVERY_DECISION_FACT_KIND,
+  TOOL_RECOVERY_FACT_VERSION,
+  isToolReconcileResultFact,
+  isToolRecoveryDecisionFact,
+  isToolRecoveryFactEnvelope,
 } from './runtime-event.js';
 
 // execution-evidence.ts — shared cross-ledger identity and source coverage.
@@ -161,8 +174,27 @@ export {
 } from './execution-evidence.js';
 
 // runtime-event-store.ts
-export type { RuntimeEventStore } from './runtime-event-store.js';
-export { DurableStoreWriteError } from './runtime-event-store.js';
+export type {
+  RuntimeEventStore,
+  RuntimeRecoveryBundleCommit,
+  RuntimeRecoveryBundleStore,
+} from './runtime-event-store.js';
+export {
+  DurableStoreWriteError,
+  TOOL_RECOVERY_BUNDLE_CAPABILITY_V1,
+} from './runtime-event-store.js';
+
+export type {
+  ToolRecoveryBundleValidationCode,
+  ToolRecoveryBundleValidationResult,
+  ToolRecoveryEventBundle,
+  ToolRecoveryOperationIdentity,
+} from './tool-recovery-bundle.js';
+export {
+  assertToolRecoveryEventBundle,
+  ToolRecoveryBundleValidationError,
+  validateToolRecoveryEventBundle,
+} from './tool-recovery-bundle.js';
 
 // session.ts
 export type {
