@@ -88,6 +88,86 @@ describe('runtime resume phase 0 projection', () => {
     assert.match(indeterminate.directive, /read-only/i);
   });
 
+  test('keeps a canonically parked recovery operation blocked without requesting reconciliation', () => {
+    const call = callEvent('parked-call', 'parked-tool', 'Write', {
+      path: 'notes.txt',
+      content: 'hello',
+    });
+    const dispatch = base({
+      id: 'parked-dispatch',
+      role: 'system',
+      author: 'system',
+      actions: {
+        toolDispatch: {
+          protocol: 't1_after_preflight_v1',
+          operationId: 'parked-operation',
+          providerToolCallId: 'parked-tool',
+          toolName: 'Write',
+          canonicalArgsHash: 'parked-args-hash',
+          recoveryMode: 'reconcile',
+        },
+      },
+      refs: { operationId: 'parked-operation', toolCallId: 'parked-tool' },
+    });
+    const reconcile = base({
+      id: 'parked-reconcile',
+      ts: 2,
+      role: 'system',
+      author: 'system',
+      actions: {
+        toolRecovery: {
+          kind: 'maka.tool.reconcile_result',
+          version: 1,
+          payload: {
+            protocol: 'tool_reconcile_v1',
+            operationId: 'parked-operation',
+            result: 'not_applied',
+            observationDigest: 'sha256:parked-observation',
+            observedAt: '2026-07-27T00:00:00.000Z',
+          },
+        },
+      },
+      refs: { operationId: 'parked-operation', toolCallId: 'parked-tool' },
+    });
+    const decision = base({
+      id: 'parked-decision',
+      ts: 3,
+      role: 'system',
+      author: 'system',
+      actions: {
+        toolRecovery: {
+          kind: 'maka.tool.recovery_decision',
+          version: 1,
+          payload: {
+            protocol: 'tool_recovery_v1',
+            operationId: 'parked-operation',
+            disposition: 'parked',
+            reasonCode: 'reconcile_not_applied',
+            evidenceEventIds: ['parked-call', 'parked-dispatch', 'parked-reconcile'],
+          },
+        },
+      },
+      refs: { operationId: 'parked-operation', toolCallId: 'parked-tool' },
+    });
+
+    const plan = buildResumePlanFromRuntimeEvents([
+      textEvent('parked-user', 'user', 'write the note'),
+      call,
+      dispatch,
+      reconcile,
+      decision,
+    ]);
+
+    assert.equal(plan.operations[0]?.status, 'parked');
+    assert.equal(plan.disposition, 'blocked');
+    assert.equal(plan.requiresVerification, false);
+    assert.deepEqual(
+      plan.diagnostics.map((diagnostic) => diagnostic.code),
+      ['tool_recovery_parked'],
+    );
+    assert.deepEqual(plan.rejectionReasons, ['dangling_tool_state']);
+  });
+
   test('excludes unresolved tool calls from provider replay history', () => {
     const events = [
       textEvent('user-1', 'user', 'hello'),

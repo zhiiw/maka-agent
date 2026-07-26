@@ -10,7 +10,6 @@ export interface ToolReconcileResultFact {
   result: ToolReconcileResult;
   observationDigest: string;
   observedAt: string;
-  nextAction: 'synthesize_response' | 'park';
 }
 
 export type ToolRecoveryParkReason =
@@ -71,14 +70,7 @@ export function isToolRecoveryFactEnvelope(value: unknown): value is ToolRecover
 
 export function isToolReconcileResultFact(value: unknown): value is ToolReconcileResultFact {
   if (
-    !hasExactKeys(value, [
-      'protocol',
-      'operationId',
-      'result',
-      'observationDigest',
-      'observedAt',
-      'nextAction',
-    ])
+    !hasExactKeys(value, ['protocol', 'operationId', 'result', 'observationDigest', 'observedAt'])
   ) {
     return false;
   }
@@ -90,11 +82,7 @@ export function isToolReconcileResultFact(value: unknown): value is ToolReconcil
   ) {
     return false;
   }
-  if (value.result === 'applied') return value.nextAction === 'synthesize_response';
-  return (
-    ['not_applied', 'conflict', 'still_running'].includes(String(value.result)) &&
-    value.nextAction === 'park'
-  );
+  return ['applied', 'not_applied', 'conflict', 'still_running'].includes(String(value.result));
 }
 
 export function isToolRecoveryDecisionFact(value: unknown): value is ToolRecoveryDecisionFact {

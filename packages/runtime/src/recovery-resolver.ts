@@ -7,6 +7,7 @@ import { validateToolRecoveryEventBundle } from '@maka/core/tool-recovery-bundle
 
 export type ToolRecoveryDecisionStatus =
   | 'completed'
+  | 'parked'
   | 'definitely_not_dispatched'
   | 'indeterminate'
   | 'corruption';
@@ -22,7 +23,10 @@ export type ToolRecoveryDecisionReason =
   | 'duplicate_response'
   | 'identity_conflict'
   | 'protocol_marker_invalid'
-  | 'recovery_fact_corruption';
+  | 'recovery_fact_corruption'
+  | 'reconcile_not_applied'
+  | 'reconcile_conflict'
+  | 'reconcile_still_running';
 
 export interface ToolRecoveryDecision {
   toolCallId: string;
@@ -233,6 +237,13 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
           reason: 'recovery_fact_corruption',
         });
       }
+    } else if (
+      decision &&
+      decision.status !== 'corruption' &&
+      validation.decision.disposition === 'parked'
+    ) {
+      decision.status = 'parked';
+      decision.reason = validation.decision.reasonCode;
     }
   }
   return {

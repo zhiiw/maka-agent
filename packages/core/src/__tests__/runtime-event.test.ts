@@ -207,7 +207,6 @@ describe('RuntimeEvent actions', () => {
             result: 'applied',
             observationDigest: 'sha256:observation-1',
             observedAt: '2026-07-25T00:00:00.000Z',
-            nextAction: 'synthesize_response',
           },
         },
       },

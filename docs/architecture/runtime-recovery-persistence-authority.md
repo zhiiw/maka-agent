@@ -22,7 +22,9 @@ Version 1 deliberately contains only two fact kinds:
 - `maka.tool.recovery_decision`
 
 A reconcile result records one bounded observation and whether it proved
-`applied`, `not_applied`, `conflict`, or `still_running`.
+`applied`, `not_applied`, `conflict`, or `still_running`. It does not prescribe
+the next action. Synthesis, parking, or a future conditional retry are policy
+decisions derived from the observation, not durable observation fields.
 
 A recovery decision is either:
 
@@ -46,10 +48,12 @@ The writer commits, in one SQLite transaction:
 The transaction either commits all rows or none. An exact retry is idempotent.
 A different retry for an already settled operation is rejected.
 
-Generic RuntimeEvent append, batch import, terminal durability, and the JSONL
-store reject reserved recovery facts. Import or copy support must therefore
-provide an identity-rewriting canonical bundle path in a later slice; it may
-not bypass this authority.
+Generic RuntimeEvent append, batch import, terminal durability, ordinary T1
+prepare/dispatch, ordinary T2 outcome, and the JSONL store reject reserved
+recovery facts. Even the outcome contained in a recovery bundle may not carry
+a reserved fact; only the bundle's dedicated reconcile and decision events may
+do so. Import or copy support must therefore provide an identity-rewriting
+canonical bundle path in a later slice; it may not bypass this authority.
 
 ## Causal and identity invariants
 
@@ -75,8 +79,18 @@ All facts must agree on:
 - tool name, canonical argument hash, and recovery mode;
 - call, dispatch, outcome, and evidence RuntimeEvent IDs.
 
+Version 1 bundles are restricted to operations whose durable dispatch selected
+`recoveryMode: reconcile`. A replay-safe, manual-only, Bash, remote API, or
+otherwise non-reconcile operation cannot be made complete by presenting a
+syntactically valid recovery bundle.
+
 Corruption is monotonic: later facts cannot restore automatic eligibility after
 an earlier identity, duplication, or ordering violation.
+
+A valid parked bundle is also terminal for the resolver: it yields
+`status: parked` and `requiresReconciliation: false`. Hosts may ask a human to
+choose a later action, but they must not repeatedly feed that operation back
+into automatic reconciliation.
 
 ## Disposable projections
 
@@ -91,6 +105,11 @@ reconstruct the journal tail. It fails closed on:
 - completed decisions without a matching outcome;
 - non-canonical physical event order.
 
+SQLite reads decode every stored RuntimeEvent through the canonical RuntimeEvent
+schema before the event can participate in replay, resolver decisions, or
+projection rebuild. A JSON payload with an unknown recovery fact version is
+invalid data, not an older fact that may be interpreted as version 1.
+
 ## Schema capability
 
 SQLite runtime schema 5 adds:
@@ -101,7 +120,15 @@ runtime_capabilities(tool_recovery_bundle, version=1)
 
 The store exposes `tool_recovery_bundle_v1` only after verifying that row.
 Missing or incompatible capability data fails store construction. A populated
-schema-4 database is migrated in place without rewriting immutable events.
+schema-4 database from the official mainline is migrated in place without
+rewriting immutable events.
+
+The experimental SQLite format produced by PR #1346 has no compatibility,
+migration, import, downgrade, or mixed-reader guarantee. It had no production
+users and is intentionally treated as disposable test data. A developer who
+still has such a database must back it up if desired and remove it before using
+this implementation. This exclusion does not remove the supported migration
+from the official pre-recovery schema described above.
 
 ## Explicit exclusions
 

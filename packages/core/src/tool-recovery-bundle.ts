@@ -1,7 +1,6 @@
 import type { RuntimeEvent } from './runtime-event.js';
 import {
-  isToolReconcileResultFact,
-  isToolRecoveryDecisionFact,
+  isToolRecoveryFactEnvelope,
   type ToolReconcileResultFact,
   type ToolRecoveryDecisionFact,
 } from './tool-recovery-fact.js';
@@ -35,6 +34,7 @@ export type ToolRecoveryBundleValidationCode =
   | 'decision_fact_invalid'
   | 'recovery_fact_identity_conflict'
   | 'operation_identity_conflict'
+  | 'recovery_mode_unsupported'
   | 'outcome_required'
   | 'outcome_for_parked'
   | 'outcome_identity_conflict'
@@ -82,6 +82,7 @@ export function validateToolRecoveryEventBundle(
     call.name !== operation.toolName ||
     input.callEvent.role !== 'model' ||
     input.callEvent.author !== 'agent' ||
+    input.callEvent.actions?.toolRecovery !== undefined ||
     !hasExecutionIdentity(input.callEvent, operation)
   ) {
     return invalid('call_identity_conflict', 'Recovery bundle call identity conflict');
@@ -108,11 +109,14 @@ export function validateToolRecoveryEventBundle(
   ) {
     return invalid('dispatch_identity_conflict', 'Recovery bundle dispatch identity conflict');
   }
+  if (operation.recoveryMode !== 'reconcile') {
+    return invalid('recovery_mode_unsupported', 'Recovery bundle requires reconcile recovery mode');
+  }
 
   const reconcileEnvelope = input.reconcileEvent.actions?.toolRecovery;
   if (
-    reconcileEnvelope?.kind !== 'maka.tool.reconcile_result' ||
-    !isToolReconcileResultFact(reconcileEnvelope.payload)
+    !isToolRecoveryFactEnvelope(reconcileEnvelope) ||
+    reconcileEnvelope.kind !== 'maka.tool.reconcile_result'
   ) {
     return invalid(
       'reconcile_fact_invalid',
@@ -121,8 +125,8 @@ export function validateToolRecoveryEventBundle(
   }
   const decisionEnvelope = input.decisionEvent.actions?.toolRecovery;
   if (
-    decisionEnvelope?.kind !== 'maka.tool.recovery_decision' ||
-    !isToolRecoveryDecisionFact(decisionEnvelope.payload)
+    !isToolRecoveryFactEnvelope(decisionEnvelope) ||
+    decisionEnvelope.kind !== 'maka.tool.recovery_decision'
   ) {
     return invalid(
       'decision_fact_invalid',
@@ -268,6 +272,7 @@ function isMatchingOutcome(event: RuntimeEvent, operation: ToolRecoveryOperation
     content.name === operation.toolName &&
     event.role === 'tool' &&
     event.author === 'tool' &&
+    event.actions?.toolRecovery === undefined &&
     event.refs?.operationId === operation.operationId &&
     event.refs?.toolCallId === operation.providerToolCallId
   );

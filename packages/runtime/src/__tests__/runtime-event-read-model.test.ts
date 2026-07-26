@@ -793,7 +793,6 @@ describe('projectRuntimeEventsToStoredMessages', () => {
                 result: 'applied',
                 observationDigest: 'sha256:observation',
                 observedAt: '2026-07-25T00:00:00.000Z',
-                nextAction: 'synthesize_response',
               },
             },
           },

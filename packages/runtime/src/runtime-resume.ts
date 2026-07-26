@@ -12,6 +12,7 @@ export type ToolOperationStatus =
   | 'succeeded'
   | 'failed'
   | 'indeterminate'
+  | 'parked'
   | 'not_dispatched'
   | 'corruption';
 
@@ -78,6 +79,7 @@ export type ResumePlanDiagnosticCode =
   | 'resume_feature_disabled'
   | 'resume_candidate_missing'
   | 'tool_not_dispatched'
+  | 'tool_recovery_parked'
   | 'tool_recovery_corruption'
   | 'protocol_marker_invalid';
 
@@ -827,6 +829,14 @@ function collectResumeDiagnostics(
         toolCallId: operation.toolCallId,
         toolName: operation.toolName,
       });
+    } else if (operation.status === 'parked') {
+      diagnostics.push({
+        code: 'tool_recovery_parked',
+        message: 'tool recovery reached a deliberate parked terminal state',
+        eventId: operation.callRuntimeEventId,
+        toolCallId: operation.toolCallId,
+        toolName: operation.toolName,
+      });
     } else if (operation.status === 'corruption') {
       diagnostics.push({
         code: 'tool_recovery_corruption',
@@ -906,6 +916,7 @@ function deriveRejectionReasons(
         break;
       case 'pending_tool_result':
       case 'tool_not_dispatched':
+      case 'tool_recovery_parked':
       case 'tool_recovery_corruption':
       case 'protocol_marker_invalid':
       case 'unmatched_tool_result':

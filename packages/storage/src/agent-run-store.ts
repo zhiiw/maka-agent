@@ -626,7 +626,7 @@ function shouldPreserveCheckpointProjectionDuringAppend(
   );
 }
 
-function assertNotRecoveryFactAppend(event: RuntimeEvent): void {
+function assertNoReservedRecoveryFact(event: RuntimeEvent): void {
   if (event.actions?.toolRecovery !== undefined) {
     throw new Error('Tool recovery facts require the canonical recovery bundle writer');
   }
@@ -689,7 +689,7 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
   ): Promise<void> {
     assertSafeId(sessionId, 'Invalid session id');
     assertSafeId(runId, 'Invalid run id');
-    assertNotRecoveryFactAppend(event);
+    assertNoReservedRecoveryFact(event);
     await this.withQueue(sessionId, runId, async () => {
       await mkdir(this.runDir(sessionId, runId), { recursive: true });
       const partial = partialRuntimeStream(event);
@@ -750,7 +750,7 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
   ): Promise<void> {
     assertSafeId(sessionId, 'Invalid session id');
     assertSafeId(runId, 'Invalid run id');
-    assertNotRecoveryFactAppend(event);
+    assertNoReservedRecoveryFact(event);
     if (event.partial || !isTerminalRuntimeEvent(event)) {
       throw new Error(
         'Only a final terminal RuntimeEvent can cross the terminal durability barrier',

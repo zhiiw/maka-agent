@@ -6,6 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import {
   assertToolRecoveryEventBundle,
+  decodeRuntimeEvent,
   isPartialRuntimeEvent,
   isTerminalRuntimeEvent,
   TOOL_RECOVERY_BUNDLE_CAPABILITY_V1,
@@ -181,7 +182,7 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
     runId: string,
     event: RuntimeEvent,
   ): Promise<void> {
-    assertNotRecoveryFactAppend(event);
+    assertNoReservedRecoveryFact(event);
     if (isPartialRuntimeEvent(event) || !isTerminalRuntimeEvent(event)) {
       throw new Error(
         'Only a final terminal RuntimeEvent can cross the terminal durability barrier',
@@ -210,7 +211,7 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
     runId: string,
     event: RuntimeEvent,
   ): Promise<boolean> {
-    assertNotRecoveryFactAppend(event);
+    assertNoReservedRecoveryFact(event);
     if (sessionId !== event.sessionId || runId !== event.runId) {
       throw new Error(`RuntimeEvent store identity does not match event ${event.id}`);
     }
@@ -224,7 +225,7 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
     source?: { path: string; fingerprint: string };
   }): Promise<RuntimeEventBatchImportResult> {
     for (const event of input.events) {
-      assertNotRecoveryFactAppend(event);
+      assertNoReservedRecoveryFact(event);
       if (event.sessionId !== input.sessionId || event.runId !== input.runId) {
         throw new Error(`RuntimeEvent store identity does not match event ${event.id}`);
       }
@@ -282,7 +283,7 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
     return mergeRuntimePartialSnapshots(
       immutable,
       partials.map((row) => {
-        const event = JSON.parse(row.payload_json) as RuntimeEvent;
+        const event = decodeStoredRuntimeEvent(row.payload_json);
         if (event.content?.kind === 'text' || event.content?.kind === 'thinking') {
           event.content = { ...event.content, text: row.text_content };
         }
@@ -303,7 +304,7 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
       ORDER BY event_seq ASC, event_id ASC
     `)
       .all(sessionId, runId) as Array<{ payload_json: string }>;
-    return rows.map((row) => JSON.parse(row.payload_json) as RuntimeEvent);
+    return rows.map((row) => decodeStoredRuntimeEvent(row.payload_json));
   }
 
   async readSessionRuntimeEvents(sessionId: string): Promise<RuntimeEvent[]> {
@@ -407,6 +408,9 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
   }
 
   async commitToolRecoveryBundle(input: CommitToolRecoveryBundleInput): Promise<void> {
+    if (input.outcomeRuntimeEvent) {
+      assertNoReservedRecoveryFact(input.outcomeRuntimeEvent);
+    }
     this.transaction(() => {
       const operation = this.readToolOperationSync(input.operationId);
       if (!operation) throw new Error(`Unknown tool operation ${input.operationId}`);
@@ -501,7 +505,7 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
         ORDER BY invocation_id ASC, event_seq ASC, event_id ASC
       `)
         .all() as Array<{ payload_json: string; committed_at: number; event_seq: number }>;
-      const events = runtimeRows.map((row) => JSON.parse(row.payload_json) as RuntimeEvent);
+      const events = runtimeRows.map((row) => decodeStoredRuntimeEvent(row.payload_json));
       const committedAtByEventId = new Map(
         runtimeRows.map((row, index) => [events[index]!.id, row.committed_at] as const),
       );
@@ -904,6 +908,7 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
   }
 
   private importRuntimeEventSync(event: RuntimeEvent): boolean {
+    decodeRuntimeEvent(event);
     const partial = partialRuntimeStream(event);
     if (partial) return this.upsertRuntimePartial(event, partial);
     const existing = this.readRuntimeEventJson(event.id) !== undefined;
@@ -916,6 +921,7 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
     committedAt: number,
     allowExactDuplicate: boolean,
   ): number {
+    decodeRuntimeEvent(event);
     assertRuntimeEventIdentity(event);
     const existingJson = this.readRuntimeEventJson(event.id);
     if (existingJson !== undefined) {
@@ -1010,8 +1016,7 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
       .all(sessionId, runId) as Array<{ payload_json: string }>;
     return rows.some(
       (row) =>
-        completedPartialRuntimeStreamKey(JSON.parse(row.payload_json) as RuntimeEvent) ===
-        streamKey,
+        completedPartialRuntimeStreamKey(decodeStoredRuntimeEvent(row.payload_json)) === streamKey,
     );
   }
 
@@ -1048,7 +1053,7 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
   private readRequiredRuntimeEvent(eventId: string): RuntimeEvent {
     const stored = this.readRuntimeEventJson(eventId);
     if (stored === undefined) throw new Error(`Missing RuntimeEvent ${eventId}`);
-    return JSON.parse(stored) as RuntimeEvent;
+    return decodeStoredRuntimeEvent(stored);
   }
 
   private readToolOperationSync(operationId: string): ToolOperationRecord | undefined {
@@ -1132,6 +1137,8 @@ function toolJournalRecordFromRow(row: ToolJournalRow): ToolJournalEventRecord {
 }
 
 function assertPreparedInput(input: CommitToolPreparedInput): void {
+  assertNoReservedRecoveryFact(input.runtimeEvent);
+  assertNoReservedRecoveryFact(input.dispatchRuntimeEvent);
   const content = input.runtimeEvent.content;
   if (content?.kind !== 'function_call')
     throw new Error('T1 requires a function_call RuntimeEvent');
@@ -1155,6 +1162,7 @@ function assertPreparedInput(input: CommitToolPreparedInput): void {
 }
 
 function assertOutcomeInput(input: CommitToolOutcomeInput): void {
+  assertNoReservedRecoveryFact(input.runtimeEvent);
   const content = input.runtimeEvent.content;
   if (content?.kind !== 'function_response') {
     throw new Error('T2 requires a function_response RuntimeEvent');
@@ -1267,7 +1275,7 @@ function assertRuntimeEventIdentity(event: RuntimeEvent): void {
   }
 }
 
-function assertNotRecoveryFactAppend(event: RuntimeEvent): void {
+function assertNoReservedRecoveryFact(event: RuntimeEvent): void {
   if (event.actions?.toolRecovery !== undefined) {
     throw new Error('Tool recovery facts require the canonical recovery bundle writer');
   }
@@ -1286,10 +1294,14 @@ function assertRecoveryBundleCapability(db: DatabaseSync): void {
 
 function assertStoredRuntimeEventEquals(event: RuntimeEvent, storedJson: string | undefined): void {
   if (storedJson === undefined) return;
-  const stored = JSON.parse(storedJson) as RuntimeEvent;
+  const stored = decodeStoredRuntimeEvent(storedJson);
   if (!isDeepStrictEqual(stored, event)) {
     throw new Error(`RuntimeEvent identity conflict for ${event.id}`);
   }
+}
+
+function decodeStoredRuntimeEvent(storedJson: string): RuntimeEvent {
+  return decodeRuntimeEvent(JSON.parse(storedJson));
 }
 
 function runtimeEventKind(event: RuntimeEvent): string {

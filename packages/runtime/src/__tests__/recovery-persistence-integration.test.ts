@@ -22,9 +22,9 @@ describe('recovery persistence integration', () => {
         runtimeEvent: functionCallEvent(),
         dispatchRuntimeEvent: toolDispatchEvent(),
         providerToolCallId: 'provider-call-1',
-        toolName: 'Read',
+        toolName: 'Write',
         canonicalArgsHash: 'sha256:args-1',
-        recoveryMode: 'replay_safe',
+        recoveryMode: 'reconcile',
         committedAt: 3,
       });
       await writer.commitToolRecoveryBundle({
@@ -58,7 +58,7 @@ describe('recovery persistence integration', () => {
       assert.deepEqual(resolution.decisions, [
         {
           toolCallId: 'provider-call-1',
-          toolName: 'Read',
+          toolName: 'Write',
           operationId: 'operation-1',
           status: 'completed',
           reason: 'matching_response',
@@ -106,8 +106,8 @@ function functionCallEvent(): RuntimeEvent {
     content: {
       kind: 'function_call',
       id: 'provider-call-1',
-      name: 'Read',
-      args: { path: 'README.md' },
+      name: 'Write',
+      args: { path: 'notes.txt', content: 'after' },
     },
   });
 }
@@ -121,9 +121,9 @@ function toolDispatchEvent(): RuntimeEvent {
         protocol: 't1_after_preflight_v1',
         operationId: 'operation-1',
         providerToolCallId: 'provider-call-1',
-        toolName: 'Read',
+        toolName: 'Write',
         canonicalArgsHash: 'sha256:args-1',
-        recoveryMode: 'replay_safe',
+        recoveryMode: 'reconcile',
       },
     },
     refs: { operationId: 'operation-1', toolCallId: 'provider-call-1' },
@@ -144,7 +144,6 @@ function reconcileResultEvent(): RuntimeEvent {
           result: 'applied',
           observationDigest: 'sha256:observation-1',
           observedAt: '2026-07-27T00:00:00.000Z',
-          nextAction: 'synthesize_response',
         },
       },
     },
@@ -161,8 +160,8 @@ function functionResponseEvent(): RuntimeEvent {
     content: {
       kind: 'function_response',
       id: 'provider-call-1',
-      name: 'Read',
-      result: 'contents',
+      name: 'Write',
+      result: 'Wrote notes.txt',
     },
     refs: { operationId: 'operation-1', toolCallId: 'provider-call-1' },
   });

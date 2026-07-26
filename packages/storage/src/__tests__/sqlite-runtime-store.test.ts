@@ -169,9 +169,60 @@ describe('SqliteRuntimeStore', () => {
     });
   });
 
+  it('rejects a reserved recovery fact hidden in the T1 function call', async () => {
+    await withStore(async (store) => {
+      await assert.rejects(
+        store.commitToolPrepared({
+          operationId: 'operation-1',
+          journalEventId: 'journal-prepared-1',
+          runtimeEvent: functionCallEvent({
+            actions: { toolRecovery: reconcileResultEvent().actions!.toolRecovery! },
+          }),
+          dispatchRuntimeEvent: toolDispatchEvent(),
+          providerToolCallId: 'provider-call-1',
+          toolName: 'Read',
+          canonicalArgsHash: 'sha256:args-1',
+          recoveryMode: 'replay_safe',
+          committedAt: 10,
+        }),
+        /recovery bundle writer/i,
+      );
+
+      assert.deepEqual(await store.readImmutableRuntimeEvents('session-1', 'run-1'), []);
+      assert.equal(await store.readToolOperation('operation-1'), undefined);
+    });
+  });
+
+  it('rejects a reserved recovery fact hidden in the T1 dispatch', async () => {
+    await withStore(async (store) => {
+      await assert.rejects(
+        store.commitToolPrepared({
+          operationId: 'operation-1',
+          journalEventId: 'journal-prepared-1',
+          runtimeEvent: functionCallEvent(),
+          dispatchRuntimeEvent: toolDispatchEvent({
+            actions: {
+              toolDispatch: toolDispatchEvent().actions!.toolDispatch!,
+              toolRecovery: reconcileResultEvent().actions!.toolRecovery!,
+            },
+          }),
+          providerToolCallId: 'provider-call-1',
+          toolName: 'Read',
+          canonicalArgsHash: 'sha256:args-1',
+          recoveryMode: 'replay_safe',
+          committedAt: 10,
+        }),
+        /recovery bundle writer/i,
+      );
+
+      assert.deepEqual(await store.readImmutableRuntimeEvents('session-1', 'run-1'), []);
+      assert.equal(await store.readToolOperation('operation-1'), undefined);
+    });
+  });
+
   it('atomically commits reconcile, matching outcome, and completed decision as one bundle', async () => {
     await withStore(async (store) => {
-      await commitPrepared(store);
+      await commitReconcilePrepared(store);
       const recoveryStore = store as Store & {
         commitToolRecoveryBundle(input: {
           operationId: string;
@@ -216,9 +267,34 @@ describe('SqliteRuntimeStore', () => {
     });
   });
 
+  it('rejects a reserved recovery fact hidden in a recovery bundle outcome', async () => {
+    await withStore(async (store) => {
+      await commitReconcilePrepared(store);
+
+      await assert.rejects(
+        store.commitToolRecoveryBundle({
+          operationId: 'operation-1',
+          reconcileRuntimeEvent: reconcileResultEvent(),
+          outcomeRuntimeEvent: functionResponseEvent({
+            ts: 21,
+            actions: { toolRecovery: reconcileResultEvent().actions!.toolRecovery! },
+          }),
+          decisionRuntimeEvent: recoveryDecisionEvent(),
+        }),
+        /recovery bundle writer/i,
+      );
+
+      assert.deepEqual(
+        (await store.readImmutableRuntimeEvents('session-1', 'run-1')).map((event) => event.id),
+        ['call-event-1', 'dispatch-event-1'],
+      );
+      assert.equal((await store.readToolOperation('operation-1'))?.currentState, 'prepared');
+    });
+  });
+
   it('rolls back every recovery fact and outcome when the bundle fails after outcome', async () => {
     await withStore(async (store, _dbPath, setFailpoint) => {
-      await commitPrepared(store);
+      await commitReconcilePrepared(store);
       setFailpoint('after_recovery_outcome');
 
       await assert.rejects(
@@ -245,7 +321,7 @@ describe('SqliteRuntimeStore', () => {
 
   it('rolls back the reconcile fact when the recovery bundle fails immediately after it', async () => {
     await withStore(async (store, _dbPath, setFailpoint) => {
-      await commitPrepared(store);
+      await commitReconcilePrepared(store);
       setFailpoint('after_recovery_reconcile');
 
       await assert.rejects(
@@ -277,7 +353,7 @@ describe('SqliteRuntimeStore', () => {
 
   it('rejects completed recovery without an outcome and leaves only the prepared boundary', async () => {
     await withStore(async (store) => {
-      await commitPrepared(store);
+      await commitReconcilePrepared(store);
 
       await assert.rejects(
         store.commitToolRecoveryBundle({
@@ -301,7 +377,7 @@ describe('SqliteRuntimeStore', () => {
 
   it('deduplicates an exact recovery bundle retry after the first commit succeeded', async () => {
     await withStore(async (store) => {
-      await commitPrepared(store);
+      await commitReconcilePrepared(store);
       const bundle = {
         operationId: 'operation-1',
         reconcileRuntimeEvent: reconcileResultEvent(),
@@ -319,7 +395,7 @@ describe('SqliteRuntimeStore', () => {
 
   it('atomically parks an operation and deduplicates the exact parked bundle', async () => {
     await withStore(async (store) => {
-      await commitPrepared(store);
+      await commitReconcilePrepared(store);
       const bundle = {
         operationId: 'operation-1',
         reconcileRuntimeEvent: reconcileResultEvent({
@@ -333,7 +409,6 @@ describe('SqliteRuntimeStore', () => {
                 result: 'conflict',
                 observationDigest: 'sha256:conflict',
                 observedAt: '2026-07-25T00:00:00.000Z',
-                nextAction: 'park',
               },
             },
           },
@@ -456,6 +531,30 @@ describe('SqliteRuntimeStore', () => {
     });
   });
 
+  it('rejects a reserved recovery fact hidden in the normal T2 outcome', async () => {
+    await withStore(async (store) => {
+      await commitPrepared(store);
+
+      await assert.rejects(
+        store.commitToolOutcome({
+          operationId: 'operation-1',
+          journalEventId: 'journal-outcome-1',
+          runtimeEvent: functionResponseEvent({
+            actions: { toolRecovery: reconcileResultEvent().actions!.toolRecovery! },
+          }),
+          committedAt: 20,
+        }),
+        /recovery bundle writer/i,
+      );
+
+      assert.deepEqual(
+        (await store.readImmutableRuntimeEvents('session-1', 'run-1')).map((event) => event.id),
+        ['call-event-1', 'dispatch-event-1'],
+      );
+      assert.equal((await store.readToolOperation('operation-1'))?.currentState, 'prepared');
+    });
+  });
+
   it('rolls back T2 without hiding the previously committed prepared boundary', async () => {
     await withStore(async (store, _dbPath, setFailpoint) => {
       await commitPrepared(store);
@@ -568,7 +667,7 @@ describe('SqliteRuntimeStore', () => {
 
   it('rebuilds the recovery journal tail in canonical RuntimeEvent sequence order', async () => {
     await withStore(async (store) => {
-      await commitPrepared(store);
+      await commitReconcilePrepared(store);
       await store.commitToolRecoveryBundle({
         operationId: 'operation-1',
         reconcileRuntimeEvent: reconcileResultEvent({ ts: 100 }),
@@ -596,7 +695,7 @@ describe('SqliteRuntimeStore', () => {
 
   it('rejects projection rebuild when recovery facts violate physical event order', async () => {
     await withStore(async (store, dbPath) => {
-      await commitPrepared(store);
+      await commitReconcilePrepared(store);
       await store.commitToolRecoveryBundle({
         operationId: 'operation-1',
         reconcileRuntimeEvent: reconcileResultEvent(),
@@ -621,6 +720,43 @@ describe('SqliteRuntimeStore', () => {
       await assert.rejects(
         store.rebuildToolProjectionsFromRuntimeEvents(),
         /canonical RuntimeEvent causal order/i,
+      );
+    });
+  });
+
+  it('rejects an unsupported recovery fact version read from SQLite', async () => {
+    await withStore(async (store, dbPath) => {
+      await commitReconcilePrepared(store);
+      await store.commitToolRecoveryBundle({
+        operationId: 'operation-1',
+        reconcileRuntimeEvent: reconcileResultEvent(),
+        outcomeRuntimeEvent: functionResponseEvent({ ts: 21 }),
+        decisionRuntimeEvent: recoveryDecisionEvent(),
+      });
+
+      const database = new DatabaseSync(dbPath);
+      try {
+        const row = database
+          .prepare('SELECT payload_json FROM runtime_events WHERE event_id = ?')
+          .get('reconcile-event-1') as { payload_json: string };
+        const malformed = JSON.parse(row.payload_json) as {
+          actions: { toolRecovery: { version: number } };
+        };
+        malformed.actions.toolRecovery.version = 999;
+        database
+          .prepare('UPDATE runtime_events SET payload_json = ? WHERE event_id = ?')
+          .run(JSON.stringify(malformed), 'reconcile-event-1');
+      } finally {
+        database.close();
+      }
+
+      await assert.rejects(
+        store.readImmutableRuntimeEvents('session-1', 'run-1'),
+        /Invalid RuntimeEvent schema/,
+      );
+      await assert.rejects(
+        store.rebuildToolProjectionsFromRuntimeEvents(),
+        /Invalid RuntimeEvent schema/,
       );
     });
   });
@@ -824,7 +960,6 @@ function reconcileResultEvent(overrides: Partial<RuntimeEvent> = {}): RuntimeEve
           result: 'applied',
           observationDigest: 'sha256:observation-1',
           observedAt: '2026-07-25T00:00:00.000Z',
-          nextAction: 'synthesize_response',
         },
       },
     },
@@ -878,6 +1013,27 @@ function commitPrepared(store: Store) {
     toolName: 'Read',
     canonicalArgsHash: 'sha256:args-1',
     recoveryMode: 'replay_safe',
+    committedAt: 10,
+  });
+}
+
+function commitReconcilePrepared(store: Store) {
+  return store.commitToolPrepared({
+    operationId: 'operation-1',
+    journalEventId: 'journal-prepared-1',
+    runtimeEvent: functionCallEvent(),
+    dispatchRuntimeEvent: toolDispatchEvent({
+      actions: {
+        toolDispatch: {
+          ...toolDispatchEvent().actions!.toolDispatch!,
+          recoveryMode: 'reconcile',
+        },
+      },
+    }),
+    providerToolCallId: 'provider-call-1',
+    toolName: 'Read',
+    canonicalArgsHash: 'sha256:args-1',
+    recoveryMode: 'reconcile',
     committedAt: 10,
   });
 }

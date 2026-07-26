@@ -231,7 +231,7 @@ describe('RecoveryResolver', () => {
     const resolution = resolveRuntimeRecovery([
       initialEvent('t1_after_preflight_v1'),
       functionCallEvent(),
-      toolDispatchEvent(),
+      toolDispatchEvent({ recoveryMode: 'reconcile' }),
       reconcileResultEvent(),
       recoveryDecisionEvent(),
     ]);
@@ -246,7 +246,7 @@ describe('RecoveryResolver', () => {
     const resolution = resolveRuntimeRecovery([
       initialEvent('t1_after_preflight_v1'),
       functionCallEvent(),
-      toolDispatchEvent(),
+      toolDispatchEvent({ recoveryMode: 'reconcile' }),
       reconcileResultEvent(),
       functionResponseEvent(false, 'operation-1'),
       recoveryDecisionEvent(),
@@ -257,12 +257,27 @@ describe('RecoveryResolver', () => {
     assert.equal(resolution.hasCorruption, false);
   });
 
+  it('treats a valid parked recovery decision as a settled terminal state', () => {
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      functionCallEvent(),
+      toolDispatchEvent({ recoveryMode: 'reconcile' }),
+      reconcileNotAppliedEvent(),
+      recoveryParkedDecisionEvent(),
+    ]);
+
+    assert.equal(resolution.decisions[0]?.status, 'parked');
+    assert.equal(resolution.decisions[0]?.reason, 'reconcile_not_applied');
+    assert.equal(resolution.hasCorruption, false);
+    assert.equal(resolution.requiresReconciliation, false);
+  });
+
   it('keeps earlier corruption sticky when later recovery facts are otherwise valid', () => {
     const resolution = resolveRuntimeRecovery([
       initialEvent('t1_after_preflight_v1'),
       functionCallEvent(),
-      toolDispatchEvent(),
-      { ...toolDispatchEvent(), id: 'dispatch-duplicate' },
+      toolDispatchEvent({ recoveryMode: 'reconcile' }),
+      { ...toolDispatchEvent({ recoveryMode: 'reconcile' }), id: 'dispatch-duplicate' },
       reconcileResultEvent(),
       functionResponseEvent(false, 'operation-1'),
       recoveryDecisionEvent(),
@@ -293,7 +308,9 @@ function functionCallEvent(): RuntimeEvent {
   });
 }
 
-function toolDispatchEvent(overrides: { toolName?: string } = {}): RuntimeEvent {
+function toolDispatchEvent(
+  overrides: { toolName?: string; recoveryMode?: 'never_auto_retry' | 'reconcile' } = {},
+): RuntimeEvent {
   return event({
     id: 'dispatch-1',
     actions: {
@@ -303,7 +320,7 @@ function toolDispatchEvent(overrides: { toolName?: string } = {}): RuntimeEvent 
         providerToolCallId: 'call-1',
         toolName: overrides.toolName ?? 'Bash',
         canonicalArgsHash: 'args-hash-1',
-        recoveryMode: 'never_auto_retry',
+        recoveryMode: overrides.recoveryMode ?? 'never_auto_retry',
       },
     },
     refs: { operationId: 'operation-1', toolCallId: 'call-1' },
@@ -340,7 +357,48 @@ function reconcileResultEvent(): RuntimeEvent {
           result: 'applied',
           observationDigest: 'sha256:observation',
           observedAt: '2026-07-25T00:00:00.000Z',
-          nextAction: 'synthesize_response',
+        },
+      },
+    },
+    refs: { operationId: 'operation-1', toolCallId: 'call-1' },
+  });
+}
+
+function reconcileNotAppliedEvent(): RuntimeEvent {
+  return event({
+    id: 'reconcile-not-applied-1',
+    ts: 2,
+    actions: {
+      toolRecovery: {
+        kind: 'maka.tool.reconcile_result',
+        version: 1,
+        payload: {
+          protocol: 'tool_reconcile_v1',
+          operationId: 'operation-1',
+          result: 'not_applied',
+          observationDigest: 'observation-hash-1',
+          observedAt: '2026-07-27T00:00:00.000Z',
+        },
+      },
+    },
+    refs: { operationId: 'operation-1', toolCallId: 'call-1' },
+  });
+}
+
+function recoveryParkedDecisionEvent(): RuntimeEvent {
+  return event({
+    id: 'recovery-parked-1',
+    ts: 3,
+    actions: {
+      toolRecovery: {
+        kind: 'maka.tool.recovery_decision',
+        version: 1,
+        payload: {
+          protocol: 'tool_recovery_v1',
+          operationId: 'operation-1',
+          disposition: 'parked',
+          reasonCode: 'reconcile_not_applied',
+          evidenceEventIds: ['function-call-1', 'dispatch-1', 'reconcile-not-applied-1'],
         },
       },
     },
