@@ -26,6 +26,8 @@ This page is the authority map for Maka documentation. Code and contract tests r
 - [Deep Research durable workspace](./deep-research-durable-workspace.md)
 - [Session task ledger lifecycle](./session-task-ledger-lifecycle.md)
 - [Execution identity and evidence spine](./execution-evidence-spine.md)
+- [Runtime Resume Phase 3–4 implementation architecture (中文)](./architecture/runtime-resume-phase3-phase4-workspace-checkpoint-design.zh-CN.md)
+- [Runtime Resume #1346 extraction ledger (中文)](./architecture/runtime-resume-extraction-ledger.zh-CN.md)
 - [AHE target protocol and evidence export](./ahe-target-protocol.md)
 - [Skill catalog policy](./skill-catalog-policy.md)
 - [Agent Swarm](./agent-swarm.md)
