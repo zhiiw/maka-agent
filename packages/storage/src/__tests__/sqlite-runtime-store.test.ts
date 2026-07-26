@@ -243,6 +243,38 @@ describe('SqliteRuntimeStore', () => {
     });
   });
 
+  it('rolls back the reconcile fact when the recovery bundle fails immediately after it', async () => {
+    await withStore(async (store, _dbPath, setFailpoint) => {
+      await commitPrepared(store);
+      setFailpoint('after_recovery_reconcile');
+
+      await assert.rejects(
+        store.commitToolRecoveryBundle({
+          operationId: 'operation-1',
+          reconcileRuntimeEvent: reconcileResultEvent(),
+          outcomeRuntimeEvent: functionResponseEvent({ ts: 21 }),
+          decisionRuntimeEvent: recoveryDecisionEvent(),
+        }),
+        /sqlite runtime failpoint: after_recovery_reconcile/,
+      );
+
+      assert.deepEqual(
+        (await store.readImmutableRuntimeEvents('session-1', 'run-1')).map((event) => event.id),
+        ['call-event-1', 'dispatch-event-1'],
+      );
+      assert.deepEqual(
+        (await store.readToolJournal('operation-1')).map((event) => event.state),
+        ['prepared'],
+      );
+      assert.deepEqual(
+        (await store.listUnsettledToolOperations()).map((operation) => operation.operationId),
+        ['operation-1'],
+      );
+      assert.equal((await store.readToolOperation('operation-1'))?.currentState, 'prepared');
+      assert.equal((await store.readToolOperation('operation-1'))?.version, 1);
+    });
+  });
+
   it('rejects completed recovery without an outcome and leaves only the prepared boundary', async () => {
     await withStore(async (store) => {
       await commitPrepared(store);
