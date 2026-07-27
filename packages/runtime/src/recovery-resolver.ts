@@ -19,14 +19,16 @@ export type ToolRecoveryDecisionReason =
   | 'legacy_dispatch_unknown'
   | 'orphan_dispatch'
   | 'orphan_response'
+  | 'duplicate_call'
+  | 'duplicate_operation'
   | 'duplicate_dispatch'
   | 'duplicate_response'
   | 'identity_conflict'
   | 'protocol_marker_invalid'
   | 'recovery_fact_corruption'
-  | 'reconcile_not_applied'
-  | 'reconcile_conflict'
-  | 'reconcile_still_running';
+  | 'reconcile_matches_prior_state'
+  | 'reconcile_diverged'
+  | 'reconcile_unreadable';
 
 export interface ToolRecoveryDecision {
   toolCallId: string;
@@ -44,7 +46,7 @@ export interface RuntimeRecoveryResolution {
   toolBoundaryProtocol?: ToolBoundaryProtocol;
   decisions: ToolRecoveryDecision[];
   issues: Array<{
-    code: 'protocol_marker_invalid';
+    code: 'protocol_marker_invalid' | 'duplicate_event_id';
     eventId: string;
   }>;
   hasCorruption: boolean;
@@ -70,6 +72,23 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
       .filter((event) => event.actions?.runtimeProtocol !== undefined)
       .map((event) => ({ code: 'protocol_marker_invalid' as const, eventId: event.id })),
   );
+  const seenEventIds = new Set<string>();
+  for (const event of events) {
+    if (seenEventIds.has(event.id)) {
+      issues.push({ code: 'duplicate_event_id', eventId: event.id });
+    } else {
+      seenEventIds.add(event.id);
+    }
+  }
+  if (issues.some((issue) => issue.code === 'duplicate_event_id')) {
+    return {
+      ...(toolBoundaryProtocol ? { toolBoundaryProtocol } : {}),
+      decisions: [],
+      issues,
+      hasCorruption: true,
+      requiresReconciliation: false,
+    };
+  }
   const decisions: ToolRecoveryDecision[] = [];
   const decisionsByToolCallId = new Map<string, ToolRecoveryDecision>();
   const decisionsByOperationId = new Map<string, ToolRecoveryDecision>();
@@ -78,6 +97,12 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
   const responseEventsByOperationId = new Map<string, RuntimeEvent>();
   for (const event of events) {
     if (event.partial || event.content?.kind !== 'function_call') continue;
+    const existing = decisionsByToolCallId.get(event.content.id);
+    if (existing) {
+      existing.status = 'corruption';
+      existing.reason = 'duplicate_call';
+      continue;
+    }
     const decision: ToolRecoveryDecision = {
       toolCallId: event.content.id,
       toolName: event.content.name,
@@ -110,14 +135,23 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
       decisionsByOperationId.set(dispatch.operationId, orphanDecision);
       continue;
     }
+    if (decision.status === 'corruption') continue;
     if (decision.dispatchRuntimeEventId !== undefined) {
       decision.status = 'corruption';
       decision.reason = 'duplicate_dispatch';
       continue;
     }
     decision.operationId = dispatch.operationId;
-    decisionsByOperationId.set(dispatch.operationId, decision);
     decision.dispatchRuntimeEventId = event.id;
+    const existingOperationDecision = decisionsByOperationId.get(dispatch.operationId);
+    if (existingOperationDecision && existingOperationDecision !== decision) {
+      existingOperationDecision.status = 'corruption';
+      existingOperationDecision.reason = 'duplicate_operation';
+      decision.status = 'corruption';
+      decision.reason = 'duplicate_operation';
+      continue;
+    }
+    decisionsByOperationId.set(dispatch.operationId, decision);
     if (
       decision.toolName !== dispatch.toolName ||
       event.refs?.operationId !== dispatch.operationId ||
@@ -144,6 +178,7 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
       });
       continue;
     }
+    if (decision.status === 'corruption') continue;
     if (decision.responseRuntimeEventId !== undefined) {
       decision.status = 'corruption';
       decision.reason = 'duplicate_response';
@@ -154,7 +189,6 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
     if (event.refs?.operationId) {
       responseEventsByOperationId.set(event.refs.operationId, event);
     }
-    if (decision.status === 'corruption') continue;
     if (
       decision.toolName !== event.content.name ||
       (decision.operationId !== undefined && event.refs?.operationId !== decision.operationId) ||
@@ -227,8 +261,10 @@ export function resolveRuntimeRecovery(events: readonly RuntimeEvent[]): Runtime
       })
     ) {
       if (decision) {
-        decision.status = 'corruption';
-        decision.reason = 'recovery_fact_corruption';
+        if (decision.status !== 'corruption') {
+          decision.status = 'corruption';
+          decision.reason = 'recovery_fact_corruption';
+        }
       } else {
         decisions.push({
           toolCallId: facts[0]?.refs?.toolCallId ?? operationId,

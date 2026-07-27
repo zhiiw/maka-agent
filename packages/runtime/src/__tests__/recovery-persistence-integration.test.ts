@@ -23,7 +23,8 @@ describe('recovery persistence integration', () => {
         dispatchRuntimeEvent: toolDispatchEvent(),
         providerToolCallId: 'provider-call-1',
         toolName: 'Write',
-        canonicalArgsHash: 'sha256:args-1',
+        canonicalArgsHash:
+          'sha256:763712445cbfb7feebe3bd4ba14e29425f05e40b8cd14aef0896853dca24b4d9',
         recoveryMode: 'reconcile',
         committedAt: 3,
       });
@@ -122,7 +123,8 @@ function toolDispatchEvent(): RuntimeEvent {
         operationId: 'operation-1',
         providerToolCallId: 'provider-call-1',
         toolName: 'Write',
-        canonicalArgsHash: 'sha256:args-1',
+        canonicalArgsHash:
+          'sha256:763712445cbfb7feebe3bd4ba14e29425f05e40b8cd14aef0896853dca24b4d9',
         recoveryMode: 'reconcile',
       },
     },
@@ -141,9 +143,10 @@ function reconcileResultEvent(): RuntimeEvent {
         payload: {
           protocol: 'tool_reconcile_v1',
           operationId: 'operation-1',
-          result: 'applied',
-          observationDigest: 'sha256:observation-1',
-          observedAt: '2026-07-27T00:00:00.000Z',
+          observation: 'matches_expected_state',
+          observationSchema: 'state_identity_v1',
+          observationDigest:
+            'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         },
       },
     },
@@ -179,7 +182,7 @@ function recoveryDecisionEvent(): RuntimeEvent {
           protocol: 'tool_recovery_v1',
           operationId: 'operation-1',
           disposition: 'completed',
-          reasonCode: 'reconcile_applied',
+          reasonCode: 'reconcile_matches_expected_state',
           outcomeEventId: 'response-event-1',
           evidenceEventIds: [
             'call-event-1',

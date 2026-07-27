@@ -21,15 +21,26 @@ Version 1 deliberately contains only two fact kinds:
 - `maka.tool.reconcile_result`
 - `maka.tool.recovery_decision`
 
-A reconcile result records one bounded observation and whether it proved
-`applied`, `not_applied`, `conflict`, or `still_running`. It does not prescribe
-the next action. Synthesis, parking, or a future conditional retry are policy
-decisions derived from the observation, not durable observation fields.
+A reconcile result records one bounded state observation:
+
+- `matches_expected_state`;
+- `matches_prior_state`;
+- `diverged`; or
+- `unreadable`.
+
+The fact includes `observationSchema: state_identity_v1` and a schema-bound
+`sha256:<64-lowercase-hex>` observation digest. It deliberately does not carry
+an observation timestamp, `still_running`, or a proposed next action. A wall
+clock does not establish causal order, and a transient process status is not a
+durable state-identity observation. Synthesis, parking, or a future live
+conditional mutation are policy decisions derived from the observation.
 
 A recovery decision is either:
 
-- `completed`, which must cite a matching persisted tool outcome; or
-- `parked`, whose reason must agree with the non-applied reconcile result.
+- `completed`, which must cite a matching, successful persisted tool outcome
+  and a `matches_expected_state` observation; or
+- `parked`, whose reason must agree with `matches_prior_state`, `diverged`, or
+  `unreadable`.
 
 The facts are system RuntimeEvents with no model-visible content. Message
 projection recognizes them as audit facts and does not create chat rows.
@@ -79,6 +90,17 @@ All facts must agree on:
 - tool name, canonical argument hash, and recovery mode;
 - call, dispatch, outcome, and evidence RuntimeEvent IDs.
 
+The argument identity is not self-authenticating. The validator recomputes the
+canonical argument hash from the actual provider function call and rejects a
+bundle whose operation, dispatch, or recovery fact merely agree with each other
+on the wrong hash.
+
+Provider tool-call IDs, operation IDs, and immutable RuntimeEvent IDs are
+unique within the resolved ledger. Duplicate or conflicting identities are
+corruption, not last-writer-wins input. Once corruption is observed for an
+operation, later dispatch, response, reconcile, or decision facts cannot restore
+automatic recovery eligibility.
+
 Version 1 bundles are restricted to operations whose durable dispatch selected
 `recoveryMode: reconcile`. A replay-safe, manual-only, Bash, remote API, or
 otherwise non-reconcile operation cannot be made complete by presenting a
@@ -105,6 +127,10 @@ reconstruct the journal tail. It fails closed on:
 - completed decisions without a matching outcome;
 - non-canonical physical event order.
 
+The canonical bundle writer validates the same envelope and causal order before
+starting projection writes. A completed decision cannot settle against an
+error outcome (`isError: true`).
+
 SQLite reads decode every stored RuntimeEvent through the canonical RuntimeEvent
 schema before the event can participate in replay, resolver decisions, or
 projection rebuild. A JSON payload with an unknown recovery fact version is
@@ -129,6 +155,44 @@ users and is intentionally treated as disposable test data. A developer who
 still has such a database must back it up if desired and remove it before using
 this implementation. This exclusion does not remove the supported migration
 from the official pre-recovery schema described above.
+
+## Concurrency and crash guarantee
+
+SQLite is the serialization authority for the bundle, not a process-local
+mutex. Two connections or two OS processes may race to submit the same exact
+bundle; they converge idempotently on one canonical ledger. If they race with
+different terminal decisions, only one transaction wins and the loser fails
+closed.
+
+Failpoint and real-process tests cover interruption:
+
+- after reconcile insertion;
+- after optional outcome insertion;
+- after decision insertion;
+- after transaction commit.
+
+Every pre-commit interruption reopens as the original prepared T1 operation;
+the complete bundle appears only after commit.
+
+This is a **process-crash** guarantee. It does not claim that every acknowledged
+commit survives sudden power loss or storage-controller failure. That stronger
+durability claim would require an explicit SQLite synchronous policy, filesystem
+contract, and platform crash matrix in a separate slice.
+
+## Acceptance tests
+
+PR A is complete only when production-shaped tests prove:
+
+- all non-bundle writers reject reserved recovery facts;
+- `completed` and `parked` converge identically in resolver, SQLite projection,
+  reopen, and projection rebuild;
+- kind, version, execution identity, canonical call-argument hash, causal order,
+  successful outcome, and evidence references are validated;
+- duplicate call, operation, and immutable event identities fail closed;
+- exact multi-process retries converge and conflicting multi-process decisions
+  produce a single winner;
+- transaction failure at each bundle insertion boundary leaves no partial
+  recovery fact or projection.
 
 ## Explicit exclusions
 

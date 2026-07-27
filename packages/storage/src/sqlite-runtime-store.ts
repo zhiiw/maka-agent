@@ -5,7 +5,6 @@ import { dirname } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import {
-  assertToolRecoveryEventBundle,
   decodeRuntimeEvent,
   isPartialRuntimeEvent,
   isTerminalRuntimeEvent,
@@ -16,6 +15,7 @@ import {
   type ToolRecoveryDecisionFact,
   type ToolRecoveryMode,
 } from '@maka/core';
+import { assertToolRecoveryEventBundle } from '@maka/core/tool-recovery-bundle';
 import {
   configureSqliteRuntimeDatabase,
   migrateSqliteRuntimeDatabase,
@@ -44,7 +44,8 @@ export type SqliteRuntimeStoreFailpoint =
   | 'after_runtime_event_insert'
   | 'after_journal_event_insert'
   | 'after_recovery_reconcile'
-  | 'after_recovery_outcome';
+  | 'after_recovery_outcome'
+  | 'after_recovery_decision';
 
 export interface SqliteRuntimeStoreOptions {
   failpoint?: (point: SqliteRuntimeStoreFailpoint) => void;
@@ -450,6 +451,7 @@ export class SqliteRuntimeStore implements RuntimeRecoveryBundleStore {
         'recovery_decided',
         facts.decision,
       );
+      this.options.failpoint?.('after_recovery_decision');
     });
   }
 

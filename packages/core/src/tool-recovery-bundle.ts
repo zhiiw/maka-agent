@@ -1,4 +1,5 @@
 import type { RuntimeEvent } from './runtime-event.js';
+import { canonicalToolArgsHash } from './tool-args-identity.js';
 import {
   isToolRecoveryFactEnvelope,
   type ToolReconcileResultFact,
@@ -29,6 +30,7 @@ export interface ToolRecoveryEventBundle {
 
 export type ToolRecoveryBundleValidationCode =
   | 'call_identity_conflict'
+  | 'canonical_args_hash_conflict'
   | 'dispatch_identity_conflict'
   | 'reconcile_fact_invalid'
   | 'decision_fact_invalid'
@@ -38,6 +40,7 @@ export type ToolRecoveryBundleValidationCode =
   | 'outcome_required'
   | 'outcome_for_parked'
   | 'outcome_identity_conflict'
+  | 'outcome_not_successful'
   | 'outcome_reference_conflict'
   | 'reconcile_decision_conflict'
   | 'evidence_order_conflict';
@@ -86,6 +89,12 @@ export function validateToolRecoveryEventBundle(
     !hasExecutionIdentity(input.callEvent, operation)
   ) {
     return invalid('call_identity_conflict', 'Recovery bundle call identity conflict');
+  }
+  if (canonicalToolArgsHash(call.name, call.args) !== operation.canonicalArgsHash) {
+    return invalid(
+      'canonical_args_hash_conflict',
+      'Recovery bundle argument hash does not match its canonical function call',
+    );
   }
 
   const dispatch = input.dispatchEvent.actions?.toolDispatch;
@@ -175,16 +184,25 @@ export function validateToolRecoveryEventBundle(
         'Completed recovery outcome execution identity conflict',
       );
     }
+    if (
+      input.outcomeEvent.content?.kind === 'function_response' &&
+      input.outcomeEvent.content.isError
+    ) {
+      return invalid(
+        'outcome_not_successful',
+        'Completed recovery decision requires a successful synthesized outcome',
+      );
+    }
     if (decision.outcomeEventId !== input.outcomeEvent.id) {
       return invalid(
         'outcome_reference_conflict',
         'Completed recovery decision outcome reference conflict',
       );
     }
-    if (reconcile.result !== 'applied') {
+    if (reconcile.observation !== 'matches_expected_state') {
       return invalid(
         'reconcile_decision_conflict',
-        'Completed recovery decision requires an applied reconcile result',
+        'Completed recovery decision requires a matching expected-state observation',
       );
     }
     expectedEvidence.push(input.outcomeEvent.id);
@@ -196,8 +214,8 @@ export function validateToolRecoveryEventBundle(
       );
     }
     if (
-      reconcile.result === 'applied' ||
-      decision.reasonCode !== parkedReasonFor(reconcile.result)
+      reconcile.observation === 'matches_expected_state' ||
+      decision.reasonCode !== parkedReasonFor(reconcile.observation)
     ) {
       return invalid(
         'reconcile_decision_conflict',
@@ -286,14 +304,14 @@ function invalid(
 }
 
 function parkedReasonFor(
-  result: Exclude<ToolReconcileResultFact['result'], 'applied'>,
-): 'reconcile_not_applied' | 'reconcile_conflict' | 'reconcile_still_running' {
-  switch (result) {
-    case 'not_applied':
-      return 'reconcile_not_applied';
-    case 'conflict':
-      return 'reconcile_conflict';
-    case 'still_running':
-      return 'reconcile_still_running';
+  observation: Exclude<ToolReconcileResultFact['observation'], 'matches_expected_state'>,
+): 'reconcile_matches_prior_state' | 'reconcile_diverged' | 'reconcile_unreadable' {
+  switch (observation) {
+    case 'matches_prior_state':
+      return 'reconcile_matches_prior_state';
+    case 'diverged':
+      return 'reconcile_diverged';
+    case 'unreadable':
+      return 'reconcile_unreadable';
   }
 }

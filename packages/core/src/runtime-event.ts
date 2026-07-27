@@ -41,7 +41,7 @@ import { isTokenUsageFields } from './usage-record-schema.js';
 import { isToolRecoveryFactEnvelope, type ToolRecoveryFactEnvelope } from './tool-recovery-fact.js';
 
 export type {
-  ToolReconcileResult,
+  ToolReconcileObservation,
   ToolReconcileResultFact,
   ToolRecoveryCompletedDecisionFact,
   ToolRecoveryDecisionFact,

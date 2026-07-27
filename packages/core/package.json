@@ -11,6 +11,7 @@
     "./runtime-event": "./dist/runtime-event.js",
     "./tool-recovery-fact": "./dist/tool-recovery-fact.js",
     "./tool-recovery-bundle": "./dist/tool-recovery-bundle.js",
+    "./tool-args-identity": "./dist/tool-args-identity.js",
     "./runtime-policy": "./dist/runtime-policy.js",
     "./execution-evidence": "./dist/execution-evidence.js",
     "./events": "./dist/events.js",

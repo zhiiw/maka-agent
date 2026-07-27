@@ -35,5 +35,9 @@ describe('RuntimeCommitSink identities', () => {
       canonicalToolArgsHash('Read', { path: '/workspace/a' }),
       canonicalToolArgsHash('Write', { path: '/workspace/a' }),
     );
+    assert.notEqual(
+      canonicalToolArgsHash('Choose', { enum: ['first', 'second'] }),
+      canonicalToolArgsHash('Choose', { enum: ['second', 'first'] }),
+    );
   });
 });

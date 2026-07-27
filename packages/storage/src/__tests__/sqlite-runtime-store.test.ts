@@ -11,6 +11,8 @@ import {
   type SqliteRuntimeStoreFailpoint,
 } from '../sqlite-runtime-store.js';
 
+const READ_ARGS_HASH = 'sha256:1b4cb19cef75d202dd6a879afe97efe24a38baab70a1a8a889daec398af0aa1c';
+
 describe('SqliteRuntimeStore', () => {
   it('applies versioned migrations and reopens the same database without rewriting schema', async () => {
     await withStore(async (store, dbPath) => {
@@ -43,7 +45,7 @@ describe('SqliteRuntimeStore', () => {
         dispatchRuntimeEvent: dispatch,
         providerToolCallId: 'provider-call-1',
         toolName: 'Read',
-        canonicalArgsHash: 'sha256:args-1',
+        canonicalArgsHash: READ_ARGS_HASH,
         recoveryMode: 'replay_safe',
         committedAt: 10,
       } as const;
@@ -59,7 +61,7 @@ describe('SqliteRuntimeStore', () => {
         turnId: 'turn-1',
         providerToolCallId: 'provider-call-1',
         toolName: 'Read',
-        canonicalArgsHash: 'sha256:args-1',
+        canonicalArgsHash: READ_ARGS_HASH,
         recoveryMode: 'replay_safe',
         currentState: 'prepared',
         callEventId: 'call-event-1',
@@ -181,7 +183,7 @@ describe('SqliteRuntimeStore', () => {
           dispatchRuntimeEvent: toolDispatchEvent(),
           providerToolCallId: 'provider-call-1',
           toolName: 'Read',
-          canonicalArgsHash: 'sha256:args-1',
+          canonicalArgsHash: READ_ARGS_HASH,
           recoveryMode: 'replay_safe',
           committedAt: 10,
         }),
@@ -208,7 +210,7 @@ describe('SqliteRuntimeStore', () => {
           }),
           providerToolCallId: 'provider-call-1',
           toolName: 'Read',
-          canonicalArgsHash: 'sha256:args-1',
+          canonicalArgsHash: READ_ARGS_HASH,
           recoveryMode: 'replay_safe',
           committedAt: 10,
         }),
@@ -351,6 +353,33 @@ describe('SqliteRuntimeStore', () => {
     });
   });
 
+  it('rolls back the complete bundle when failure occurs after the recovery decision insert', async () => {
+    await withStore(async (store, _dbPath, setFailpoint) => {
+      await commitReconcilePrepared(store);
+      setFailpoint('after_recovery_decision');
+
+      await assert.rejects(
+        store.commitToolRecoveryBundle({
+          operationId: 'operation-1',
+          reconcileRuntimeEvent: reconcileResultEvent(),
+          outcomeRuntimeEvent: functionResponseEvent({ ts: 21 }),
+          decisionRuntimeEvent: recoveryDecisionEvent(),
+        }),
+        /sqlite runtime failpoint: after_recovery_decision/,
+      );
+
+      assert.deepEqual(
+        (await store.readImmutableRuntimeEvents('session-1', 'run-1')).map((event) => event.id),
+        ['call-event-1', 'dispatch-event-1'],
+      );
+      assert.deepEqual(
+        (await store.readToolJournal('operation-1')).map((event) => event.state),
+        ['prepared'],
+      );
+      assert.equal((await store.readToolOperation('operation-1'))?.currentState, 'prepared');
+    });
+  });
+
   it('rejects completed recovery without an outcome and leaves only the prepared boundary', async () => {
     await withStore(async (store) => {
       await commitReconcilePrepared(store);
@@ -406,9 +435,10 @@ describe('SqliteRuntimeStore', () => {
               payload: {
                 protocol: 'tool_reconcile_v1',
                 operationId: 'operation-1',
-                result: 'conflict',
-                observationDigest: 'sha256:conflict',
-                observedAt: '2026-07-25T00:00:00.000Z',
+                observation: 'diverged',
+                observationSchema: 'state_identity_v1',
+                observationDigest:
+                  'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
               },
             },
           },
@@ -422,7 +452,7 @@ describe('SqliteRuntimeStore', () => {
                 protocol: 'tool_recovery_v1',
                 operationId: 'operation-1',
                 disposition: 'parked',
-                reasonCode: 'reconcile_conflict',
+                reasonCode: 'reconcile_diverged',
                 evidenceEventIds: ['call-event-1', 'dispatch-event-1', 'reconcile-event-1'],
               },
             },
@@ -515,7 +545,7 @@ describe('SqliteRuntimeStore', () => {
         turnId: 'turn-1',
         providerToolCallId: 'provider-call-1',
         toolName: 'Read',
-        canonicalArgsHash: 'sha256:args-1',
+        canonicalArgsHash: READ_ARGS_HASH,
         recoveryMode: 'replay_safe',
         currentState: 'outcome_committed',
         callEventId: 'call-event-1',
@@ -930,7 +960,7 @@ function toolDispatchEvent(overrides: Partial<RuntimeEvent> = {}): RuntimeEvent 
         operationId: 'operation-1',
         providerToolCallId: 'provider-call-1',
         toolName: 'Read',
-        canonicalArgsHash: 'sha256:args-1',
+        canonicalArgsHash: READ_ARGS_HASH,
         recoveryMode: 'replay_safe',
       },
     },
@@ -957,9 +987,10 @@ function reconcileResultEvent(overrides: Partial<RuntimeEvent> = {}): RuntimeEve
         payload: {
           protocol: 'tool_reconcile_v1',
           operationId: 'operation-1',
-          result: 'applied',
-          observationDigest: 'sha256:observation-1',
-          observedAt: '2026-07-25T00:00:00.000Z',
+          observation: 'matches_expected_state',
+          observationSchema: 'state_identity_v1',
+          observationDigest:
+            'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         },
       },
     },
@@ -987,7 +1018,7 @@ function recoveryDecisionEvent(overrides: Partial<RuntimeEvent> = {}): RuntimeEv
           protocol: 'tool_recovery_v1',
           operationId: 'operation-1',
           disposition: 'completed',
-          reasonCode: 'reconcile_applied',
+          reasonCode: 'reconcile_matches_expected_state',
           outcomeEventId: 'response-event-1',
           evidenceEventIds: [
             'call-event-1',
@@ -1011,7 +1042,7 @@ function commitPrepared(store: Store) {
     dispatchRuntimeEvent: toolDispatchEvent(),
     providerToolCallId: 'provider-call-1',
     toolName: 'Read',
-    canonicalArgsHash: 'sha256:args-1',
+    canonicalArgsHash: READ_ARGS_HASH,
     recoveryMode: 'replay_safe',
     committedAt: 10,
   });
@@ -1032,7 +1063,7 @@ function commitReconcilePrepared(store: Store) {
     }),
     providerToolCallId: 'provider-call-1',
     toolName: 'Read',
-    canonicalArgsHash: 'sha256:args-1',
+    canonicalArgsHash: READ_ARGS_HASH,
     recoveryMode: 'reconcile',
     committedAt: 10,
   });

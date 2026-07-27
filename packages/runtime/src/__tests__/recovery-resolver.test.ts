@@ -149,6 +149,74 @@ describe('RecoveryResolver', () => {
     assert.equal(resolution.requiresReconciliation, false);
   });
 
+  it('classifies repeated provider tool-call identity as monotonic corruption', () => {
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      functionCallEvent(),
+      { ...functionCallEvent(), id: 'function-call-2' },
+      toolDispatchEvent(),
+      functionResponseEvent(false, 'operation-1'),
+    ]);
+
+    assert.deepEqual(resolution.decisions, [
+      {
+        toolCallId: 'call-1',
+        toolName: 'Bash',
+        status: 'corruption',
+        reason: 'duplicate_call',
+        callRuntimeEventId: 'function-call-1',
+      },
+    ]);
+    assert.equal(resolution.hasCorruption, true);
+    assert.equal(resolution.requiresReconciliation, false);
+  });
+
+  it('classifies one operation bound to multiple tool calls as monotonic corruption', () => {
+    const secondCall = functionCallEvent();
+    secondCall.id = 'function-call-2';
+    if (secondCall.content?.kind === 'function_call') secondCall.content.id = 'call-2';
+    const secondDispatch = toolDispatchEvent();
+    secondDispatch.id = 'dispatch-2';
+    secondDispatch.actions!.toolDispatch!.providerToolCallId = 'call-2';
+    secondDispatch.refs!.toolCallId = 'call-2';
+
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      functionCallEvent(),
+      secondCall,
+      toolDispatchEvent(),
+      secondDispatch,
+    ]);
+
+    assert.deepEqual(
+      resolution.decisions.map((decision) => ({
+        toolCallId: decision.toolCallId,
+        operationId: decision.operationId,
+        status: decision.status,
+        reason: decision.reason,
+        dispatchRuntimeEventId: decision.dispatchRuntimeEventId,
+      })),
+      [
+        {
+          toolCallId: 'call-1',
+          operationId: 'operation-1',
+          status: 'corruption',
+          reason: 'duplicate_operation',
+          dispatchRuntimeEventId: 'dispatch-1',
+        },
+        {
+          toolCallId: 'call-2',
+          operationId: 'operation-1',
+          status: 'corruption',
+          reason: 'duplicate_operation',
+          dispatchRuntimeEventId: 'dispatch-2',
+        },
+      ],
+    );
+    assert.equal(resolution.hasCorruption, true);
+    assert.equal(resolution.requiresReconciliation, false);
+  });
+
   it('classifies repeated response for one operation as corruption', () => {
     const resolution = resolveRuntimeRecovery([
       initialEvent('t1_after_preflight_v1'),
@@ -192,6 +260,23 @@ describe('RecoveryResolver', () => {
     ]);
     assert.equal(resolution.toolBoundaryProtocol, undefined);
     assert.equal(resolution.hasCorruption, true);
+  });
+
+  it('rejects duplicate immutable RuntimeEvent identity before projecting recovery state', () => {
+    const resolution = resolveRuntimeRecovery([
+      initialEvent('t1_after_preflight_v1'),
+      functionCallEvent(),
+      { ...toolDispatchEvent(), id: 'function-call-1' },
+    ]);
+
+    assert.deepEqual(resolution.issues, [
+      {
+        code: 'duplicate_event_id',
+        eventId: 'function-call-1',
+      },
+    ]);
+    assert.equal(resolution.hasCorruption, true);
+    assert.equal(resolution.requiresReconciliation, false);
   });
 
   it('rejects an unknown protocol marker on the first canonical event', () => {
@@ -267,7 +352,7 @@ describe('RecoveryResolver', () => {
     ]);
 
     assert.equal(resolution.decisions[0]?.status, 'parked');
-    assert.equal(resolution.decisions[0]?.reason, 'reconcile_not_applied');
+    assert.equal(resolution.decisions[0]?.reason, 'reconcile_matches_prior_state');
     assert.equal(resolution.hasCorruption, false);
     assert.equal(resolution.requiresReconciliation, false);
   });
@@ -319,7 +404,8 @@ function toolDispatchEvent(
         operationId: 'operation-1',
         providerToolCallId: 'call-1',
         toolName: overrides.toolName ?? 'Bash',
-        canonicalArgsHash: 'args-hash-1',
+        canonicalArgsHash:
+          'sha256:83f3a7d12c96b30b1e7b8e8afc4e13829dc19a0fa0f893647a0e31375b0a0669',
         recoveryMode: overrides.recoveryMode ?? 'never_auto_retry',
       },
     },
@@ -354,9 +440,10 @@ function reconcileResultEvent(): RuntimeEvent {
         payload: {
           protocol: 'tool_reconcile_v1',
           operationId: 'operation-1',
-          result: 'applied',
-          observationDigest: 'sha256:observation',
-          observedAt: '2026-07-25T00:00:00.000Z',
+          observation: 'matches_expected_state',
+          observationSchema: 'state_identity_v1',
+          observationDigest:
+            'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         },
       },
     },
@@ -375,9 +462,10 @@ function reconcileNotAppliedEvent(): RuntimeEvent {
         payload: {
           protocol: 'tool_reconcile_v1',
           operationId: 'operation-1',
-          result: 'not_applied',
-          observationDigest: 'observation-hash-1',
-          observedAt: '2026-07-27T00:00:00.000Z',
+          observation: 'matches_prior_state',
+          observationSchema: 'state_identity_v1',
+          observationDigest:
+            'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
         },
       },
     },
@@ -397,7 +485,7 @@ function recoveryParkedDecisionEvent(): RuntimeEvent {
           protocol: 'tool_recovery_v1',
           operationId: 'operation-1',
           disposition: 'parked',
-          reasonCode: 'reconcile_not_applied',
+          reasonCode: 'reconcile_matches_prior_state',
           evidenceEventIds: ['function-call-1', 'dispatch-1', 'reconcile-not-applied-1'],
         },
       },
@@ -418,7 +506,7 @@ function recoveryDecisionEvent(): RuntimeEvent {
           protocol: 'tool_recovery_v1',
           operationId: 'operation-1',
           disposition: 'completed',
-          reasonCode: 'reconcile_applied',
+          reasonCode: 'reconcile_matches_expected_state',
           outcomeEventId: 'function-response-1',
           evidenceEventIds: ['function-call-1', 'dispatch-1', 'reconcile-1', 'function-response-1'],
         },

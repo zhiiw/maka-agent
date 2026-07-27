@@ -103,7 +103,8 @@ describe('runtime resume phase 0 projection', () => {
           operationId: 'parked-operation',
           providerToolCallId: 'parked-tool',
           toolName: 'Write',
-          canonicalArgsHash: 'parked-args-hash',
+          canonicalArgsHash:
+            'sha256:72ee86461c91e271cc32378715d3be3fe8caf17316d9393664571db6d1d45cd8',
           recoveryMode: 'reconcile',
         },
       },
@@ -121,9 +122,10 @@ describe('runtime resume phase 0 projection', () => {
           payload: {
             protocol: 'tool_reconcile_v1',
             operationId: 'parked-operation',
-            result: 'not_applied',
-            observationDigest: 'sha256:parked-observation',
-            observedAt: '2026-07-27T00:00:00.000Z',
+            observation: 'matches_prior_state',
+            observationSchema: 'state_identity_v1',
+            observationDigest:
+              'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
           },
         },
       },
@@ -142,7 +144,7 @@ describe('runtime resume phase 0 projection', () => {
             protocol: 'tool_recovery_v1',
             operationId: 'parked-operation',
             disposition: 'parked',
-            reasonCode: 'reconcile_not_applied',
+            reasonCode: 'reconcile_matches_prior_state',
             evidenceEventIds: ['parked-call', 'parked-dispatch', 'parked-reconcile'],
           },
         },

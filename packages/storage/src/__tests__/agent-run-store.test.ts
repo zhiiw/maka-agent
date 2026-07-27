@@ -611,9 +611,10 @@ describe('AgentRunStore', () => {
                 payload: {
                   protocol: 'tool_reconcile_v1',
                   operationId: 'operation-1',
-                  result: 'applied',
-                  observationDigest: 'sha256:observation-1',
-                  observedAt: '2026-07-25T00:00:00.000Z',
+                  observation: 'matches_expected_state',
+                  observationSchema: 'state_identity_v1',
+                  observationDigest:
+                    'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                 },
               },
             },
@@ -637,9 +638,10 @@ describe('AgentRunStore', () => {
                 payload: {
                   protocol: 'tool_reconcile_v1',
                   operationId: 'operation-1',
-                  result: 'applied',
-                  observationDigest: 'sha256:observation-1',
-                  observedAt: '2026-07-25T00:00:00.000Z',
+                  observation: 'matches_expected_state',
+                  observationSchema: 'state_identity_v1',
+                  observationDigest:
+                    'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                 },
               },
             },

@@ -2,26 +2,30 @@ export const TOOL_RECONCILE_RESULT_FACT_KIND = 'maka.tool.reconcile_result' as c
 export const TOOL_RECOVERY_DECISION_FACT_KIND = 'maka.tool.recovery_decision' as const;
 export const TOOL_RECOVERY_FACT_VERSION = 1 as const;
 
-export type ToolReconcileResult = 'applied' | 'not_applied' | 'conflict' | 'still_running';
+export type ToolReconcileObservation =
+  | 'matches_expected_state'
+  | 'matches_prior_state'
+  | 'diverged'
+  | 'unreadable';
 
 export interface ToolReconcileResultFact {
   protocol: 'tool_reconcile_v1';
   operationId: string;
-  result: ToolReconcileResult;
-  observationDigest: string;
-  observedAt: string;
+  observation: ToolReconcileObservation;
+  observationSchema: 'state_identity_v1';
+  observationDigest: `sha256:${string}`;
 }
 
 export type ToolRecoveryParkReason =
-  | 'reconcile_not_applied'
-  | 'reconcile_conflict'
-  | 'reconcile_still_running';
+  | 'reconcile_matches_prior_state'
+  | 'reconcile_diverged'
+  | 'reconcile_unreadable';
 
 export interface ToolRecoveryCompletedDecisionFact {
   protocol: 'tool_recovery_v1';
   operationId: string;
   disposition: 'completed';
-  reasonCode: 'reconcile_applied';
+  reasonCode: 'reconcile_matches_expected_state';
   outcomeEventId: string;
   evidenceEventIds: string[];
 }
@@ -51,9 +55,9 @@ export type ToolRecoveryFactEnvelope =
     };
 
 const PARK_REASONS = new Set<ToolRecoveryParkReason>([
-  'reconcile_not_applied',
-  'reconcile_conflict',
-  'reconcile_still_running',
+  'reconcile_matches_prior_state',
+  'reconcile_diverged',
+  'reconcile_unreadable',
 ]);
 
 export function isToolRecoveryFactEnvelope(value: unknown): value is ToolRecoveryFactEnvelope {
@@ -70,19 +74,27 @@ export function isToolRecoveryFactEnvelope(value: unknown): value is ToolRecover
 
 export function isToolReconcileResultFact(value: unknown): value is ToolReconcileResultFact {
   if (
-    !hasExactKeys(value, ['protocol', 'operationId', 'result', 'observationDigest', 'observedAt'])
+    !hasExactKeys(value, [
+      'protocol',
+      'operationId',
+      'observation',
+      'observationSchema',
+      'observationDigest',
+    ])
   ) {
     return false;
   }
   if (
     value.protocol !== 'tool_reconcile_v1' ||
     !isNonEmptyString(value.operationId) ||
-    !isNonEmptyString(value.observationDigest) ||
-    !isNonEmptyString(value.observedAt)
+    value.observationSchema !== 'state_identity_v1' ||
+    !isSha256Digest(value.observationDigest)
   ) {
     return false;
   }
-  return ['applied', 'not_applied', 'conflict', 'still_running'].includes(String(value.result));
+  return ['matches_expected_state', 'matches_prior_state', 'diverged', 'unreadable'].includes(
+    String(value.observation),
+  );
 }
 
 export function isToolRecoveryDecisionFact(value: unknown): value is ToolRecoveryDecisionFact {
@@ -104,7 +116,7 @@ export function isToolRecoveryDecisionFact(value: unknown): value is ToolRecover
         'outcomeEventId',
         'evidenceEventIds',
       ]) &&
-      value.reasonCode === 'reconcile_applied' &&
+      value.reasonCode === 'reconcile_matches_expected_state' &&
       isNonEmptyString(value.outcomeEventId)
     );
   }
@@ -137,6 +149,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+function isSha256Digest(value: unknown): value is `sha256:${string}` {
+  return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
 function isDistinctNonEmptyStringArray(value: unknown): value is string[] {

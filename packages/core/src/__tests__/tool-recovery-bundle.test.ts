@@ -4,19 +4,32 @@ import type { RuntimeEvent } from '../runtime-event.js';
 import { isToolReconcileResultFact } from '../tool-recovery-fact.js';
 import { validateToolRecoveryEventBundle } from '../tool-recovery-bundle.js';
 
+const OBSERVATION_DIGEST =
+  'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
+const CANONICAL_ARGS_HASH =
+  'sha256:763712445cbfb7feebe3bd4ba14e29425f05e40b8cd14aef0896853dca24b4d9';
+
 describe('validateToolRecoveryEventBundle', () => {
-  it('keeps reconcile observations free of policy actions', () => {
+  it('accepts only truthful, policy-free state observations', () => {
     const observation = {
       protocol: 'tool_reconcile_v1',
       operationId: 'operation-1',
-      result: 'applied',
-      observationDigest: 'sha256:observation',
-      observedAt: '2026-07-25T00:00:00.000Z',
+      observation: 'matches_expected_state',
+      observationSchema: 'state_identity_v1',
+      observationDigest: OBSERVATION_DIGEST,
     };
 
     assert.equal(isToolReconcileResultFact(observation), true);
     assert.equal(
       isToolReconcileResultFact({ ...observation, nextAction: 'synthesize_response' }),
+      false,
+    );
+    assert.equal(
+      isToolReconcileResultFact({ ...observation, observation: 'still_running' }),
+      false,
+    );
+    assert.equal(
+      isToolReconcileResultFact({ ...observation, observationDigest: 'sha256:short' }),
       false,
     );
   });
@@ -32,6 +45,25 @@ describe('validateToolRecoveryEventBundle', () => {
     });
 
     assert.equal(result.ok, true);
+  });
+
+  it('rejects a dispatch hash that was not derived from the canonical function call', () => {
+    const dispatch = dispatchEvent();
+    dispatch.actions!.toolDispatch!.canonicalArgsHash = 'sha256:wrong';
+    const result = validateToolRecoveryEventBundle({
+      operation: { ...operationIdentity(), canonicalArgsHash: 'sha256:wrong' },
+      callEvent: callEvent(),
+      dispatchEvent: dispatch,
+      reconcileEvent: reconcileEvent(),
+      outcomeEvent: outcomeEvent(),
+      decisionEvent: decisionEvent(),
+    });
+
+    assert.deepEqual(result, {
+      ok: false,
+      code: 'canonical_args_hash_conflict',
+      message: 'Recovery bundle argument hash does not match its canonical function call',
+    });
   });
 
   it('rejects completed when the referenced outcome does not match the bundle', () => {
@@ -51,6 +83,26 @@ describe('validateToolRecoveryEventBundle', () => {
     });
   });
 
+  it('rejects a completed recovery decision whose synthesized outcome is an error', () => {
+    const outcome = outcomeEvent();
+    if (outcome.content?.kind === 'function_response') outcome.content.isError = true;
+
+    const result = validateToolRecoveryEventBundle({
+      operation: operationIdentity(),
+      callEvent: callEvent(),
+      dispatchEvent: dispatchEvent(),
+      reconcileEvent: reconcileEvent(),
+      outcomeEvent: outcome,
+      decisionEvent: decisionEvent(),
+    });
+
+    assert.deepEqual(result, {
+      ok: false,
+      code: 'outcome_not_successful',
+      message: 'Completed recovery decision requires a successful synthesized outcome',
+    });
+  });
+
   it('rejects a parked decision whose reason contradicts the reconcile result', () => {
     const reconcile = reconcileEvent();
     reconcile.actions = {
@@ -60,9 +112,9 @@ describe('validateToolRecoveryEventBundle', () => {
         payload: {
           protocol: 'tool_reconcile_v1',
           operationId: 'operation-1',
-          result: 'conflict',
-          observationDigest: 'sha256:observation',
-          observedAt: '2026-07-25T00:00:00.000Z',
+          observation: 'diverged',
+          observationSchema: 'state_identity_v1',
+          observationDigest: OBSERVATION_DIGEST,
         },
       },
     };
@@ -75,7 +127,7 @@ describe('validateToolRecoveryEventBundle', () => {
           protocol: 'tool_recovery_v1',
           operationId: 'operation-1',
           disposition: 'parked',
-          reasonCode: 'reconcile_not_applied',
+          reasonCode: 'reconcile_matches_prior_state',
           evidenceEventIds: ['call-event-1', 'dispatch-event-1', 'reconcile-event-1'],
         },
       },
@@ -185,7 +237,7 @@ function operationIdentity() {
     turnId: 'turn-1',
     providerToolCallId: 'provider-call-1',
     toolName: 'Write',
-    canonicalArgsHash: 'sha256:args',
+    canonicalArgsHash: CANONICAL_ARGS_HASH,
     recoveryMode: 'reconcile' as const,
     callEventId: 'call-event-1',
     dispatchEventId: 'dispatch-event-1',
@@ -230,7 +282,7 @@ function dispatchEvent(): RuntimeEvent {
         operationId: 'operation-1',
         providerToolCallId: 'provider-call-1',
         toolName: 'Write',
-        canonicalArgsHash: 'sha256:args',
+        canonicalArgsHash: CANONICAL_ARGS_HASH,
         recoveryMode: 'reconcile',
       },
     },
@@ -249,9 +301,9 @@ function reconcileEvent(): RuntimeEvent {
         payload: {
           protocol: 'tool_reconcile_v1',
           operationId: 'operation-1',
-          result: 'applied',
-          observationDigest: 'sha256:observation',
-          observedAt: '2026-07-25T00:00:00.000Z',
+          observation: 'matches_expected_state',
+          observationSchema: 'state_identity_v1',
+          observationDigest: OBSERVATION_DIGEST,
         },
       },
     },
@@ -289,7 +341,7 @@ function decisionEvent(): RuntimeEvent {
           protocol: 'tool_recovery_v1',
           operationId: 'operation-1',
           disposition: 'completed',
-          reasonCode: 'reconcile_applied',
+          reasonCode: 'reconcile_matches_expected_state',
           outcomeEventId: 'outcome-event-1',
           evidenceEventIds: [
             'call-event-1',

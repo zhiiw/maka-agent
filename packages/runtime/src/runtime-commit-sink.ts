@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { RuntimeEvent, ToolRecoveryMode } from '@maka/core';
-import { stableHash } from './request-shape.js';
+export { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 
 export type { ToolRecoveryMode } from '@maka/core';
 
@@ -51,9 +51,4 @@ export function buildToolOperationId(input: ToolOperationIdInput): string {
     .digest('hex')
     .slice(0, 32);
   return `toolop_${digest}`;
-}
-
-export function canonicalToolArgsHash(toolName: string, normalizedArgs: unknown): string {
-  if (!toolName) throw new Error('Tool argument identity requires a tool name');
-  return stableHash({ toolName, args: normalizedArgs });
 }

@@ -114,7 +114,7 @@ export type {
   RuntimeEventRefs,
   ToolBoundaryProtocol,
   ToolRecoveryMode,
-  ToolReconcileResult,
+  ToolReconcileObservation,
   ToolReconcileResultFact,
   ToolRecoveryCompletedDecisionFact,
   ToolRecoveryDecisionFact,
@@ -190,12 +190,6 @@ export type {
   ToolRecoveryEventBundle,
   ToolRecoveryOperationIdentity,
 } from './tool-recovery-bundle.js';
-export {
-  assertToolRecoveryEventBundle,
-  ToolRecoveryBundleValidationError,
-  validateToolRecoveryEventBundle,
-} from './tool-recovery-bundle.js';
-
 // session.ts
 export type {
   SessionHeader,
