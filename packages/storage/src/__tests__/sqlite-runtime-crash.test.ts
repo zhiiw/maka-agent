@@ -51,6 +51,31 @@ if (childMode?.startsWith('race_')) {
         );
       });
     });
+
+    it('serializes projection rebuild against a concurrent recovery bundle commit', {
+      timeout: 30_000,
+    }, async () => {
+      await withRecoveryRace(['race_completed', 'race_rebuild'], async (results, store) => {
+        assert.deepEqual(
+          results.map((result) => result.code),
+          [0, 0],
+        );
+        assert.deepEqual(
+          (await store.readImmutableRuntimeEvents('session-1', 'run-1')).map((event) => event.id),
+          [
+            'call-event-1',
+            'dispatch-event-1',
+            'reconcile-event-1',
+            'response-event-1',
+            'recovery-decision-event-1',
+          ],
+        );
+        assert.equal(
+          (await store.readToolOperation('operation-1'))?.currentState,
+          'outcome_committed',
+        );
+      });
+    });
   });
 
   describe('SqliteRuntimeStore real-process crash boundaries', {
@@ -127,6 +152,18 @@ if (childMode?.startsWith('race_')) {
       });
     });
 
+    it('rolls back a process killed after the recovery outcome insert', {
+      timeout: 30_000,
+    }, async () => {
+      await withKilledChild('inside_recovery_outcome', async (store) => {
+        assert.deepEqual(
+          (await store.readRuntimeEvents('session-1', 'run-1')).map((event) => event.id),
+          ['call-event-1', 'dispatch-event-1'],
+        );
+        assert.equal((await store.readToolOperation('operation-1'))?.currentState, 'prepared');
+      });
+    });
+
     it('retains a complete recovery bundle after process death', { timeout: 30_000 }, async () => {
       await withKilledChild('after_recovery_bundle', async (store) => {
         assert.deepEqual(
@@ -149,7 +186,7 @@ if (childMode?.startsWith('race_')) {
 }
 
 async function withRecoveryRace(
-  modes: readonly ['race_completed' | 'race_parked', 'race_completed' | 'race_parked'],
+  modes: readonly [RecoveryRaceMode, RecoveryRaceMode],
   inspect: (
     results: Array<{ code: number | null; signal: NodeJS.Signals | null; stderr: string }>,
     store: ReturnType<typeof createSqliteRuntimeStore>,
@@ -191,6 +228,8 @@ async function withRecoveryRace(
     await rm(root, { recursive: true, force: true });
   }
 }
+
+type RecoveryRaceMode = 'race_completed' | 'race_parked' | 'race_rebuild';
 
 async function withKilledChild(
   mode: string,
@@ -269,9 +308,13 @@ async function runRaceChild(mode: string): Promise<void> {
   });
   const store = createSqliteRuntimeStore(requiredEnv('MAKA_SQLITE_CRASH_DB'));
   try {
-    await store.commitToolRecoveryBundle(
-      mode === 'race_completed' ? completedRecoveryBundle() : parkedRecoveryBundle(),
-    );
+    if (mode === 'race_rebuild') {
+      await store.rebuildToolProjectionsFromRuntimeEvents();
+    } else {
+      await store.commitToolRecoveryBundle(
+        mode === 'race_completed' ? completedRecoveryBundle() : parkedRecoveryBundle(),
+      );
+    }
   } finally {
     store.close();
   }
@@ -288,6 +331,9 @@ async function runCrashChild(mode: string): Promise<void> {
     if (mode === 'inside_recovery_decision' && point === 'after_recovery_decision') {
       blockUntilKilled();
     }
+    if (mode === 'inside_recovery_outcome' && point === 'after_recovery_outcome') {
+      blockUntilKilled();
+    }
     if (point !== 'after_runtime_event_insert') return;
     runtimeInsertCount += 1;
     if (mode === 'inside_t1' && runtimeInsertCount === 1) blockUntilKilled();
@@ -296,6 +342,7 @@ async function runCrashChild(mode: string): Promise<void> {
   const store = createSqliteRuntimeStore(dbPath, { failpoint });
   if (
     mode === 'inside_recovery_bundle' ||
+    mode === 'inside_recovery_outcome' ||
     mode === 'inside_recovery_decision' ||
     mode === 'after_recovery_bundle'
   ) {
