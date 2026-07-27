@@ -27,6 +27,46 @@ host plane:
 
 这四个平面不能在同一 PR 一起证明。#1346 作为集成实验和设计记录保留，但生产落地改为平铺 PR。
 
+### 1.1 权威边界
+
+“RuntimeEvent 是唯一事实源”只适用于语义事实，不能代替执行所有权的原子仲裁。后续设计统一使用
+以下术语：
+
+| 层级 | 权威 | 职责 |
+|---|---|---|
+| semantic recovery authority | immutable RuntimeEvents | call、dispatch、outcome、observation、decision、checkpoint acceptance |
+| execution ownership authority | admission/claim record | root turn 或 continuation source boundary 只能由一个执行者取得 |
+| query/index state | SQLite projection | 可从 immutable RuntimeEvents 删除并重建 |
+| artifact carrier | Git object/ref 或 fake provider | 保存 workspace artifact；不能单独宣称恢复已被接受 |
+
+continuation claim 必须先通过 admission CAS 决出唯一 owner，再创建 target run 并写
+`continuation-start` RuntimeEvent，把控制平面决定接回语义账本。
+
+### 1.2 崩溃保证
+
+Phase 3A 首版只承诺 host/worker **进程级崩溃**：
+
+- T1 已 durable、T2 未提交时，重启后可以根据受约束 evidence 观察并收敛或 park；
+- worker transport loss、worker crash、执行开始后的 abort 默认视为副作用未知；
+- 在文件及父目录 fsync、平台 crash matrix 完成前，不承诺 OS reboot、断电或磁盘写缓存丢失后的
+  power-loss durability。
+
+任何产品文案、测试名称和 telemetry 都必须使用这个保证范围，不能把“进程崩溃恢复”扩写成
+“断电级文件事务”。
+
+### 1.3 版本与兼容决策
+
+#1346 从未发布且没有用户，其 SQLite 数据是一次性实验数据：
+
+- 不迁移 #1346 schema/fact；
+- 不支持 #1346 binary downgrade 或 mixed-version reader/writer；
+- 不引入仅为旧 reader soft-skip 服务的通用 `runtimeFact` PR0；
+- 旧实验数据库按 capability/format fail closed，由开发者备份后清理。
+
+这不降低新协议自身的完整性要求。新 fact 仍必须有精确 kind/version/schema，未知版本 hard park；
+新 dispatch wire shape 必须使用显式新 protocol version，不能把字段悄悄塞进 v1。官方 mainline
+schema 的受支持迁移与 #1346 兼容是两件事，仍保留独立测试。
+
 ```mermaid
 flowchart LR
     Provider["Provider / model loop"]
@@ -42,7 +82,7 @@ flowchart LR
     Runtime -->|"PR1 canonical bundle writes"| Events
     Events --> Projection
     Events -->|"PR2 immutable cursor + replay"| Provider
-    Runtime -->|"PR3 prepare evidence"| Worker
+    Runtime -->|"PR3 prepare attempt"| Worker
     Worker --> Workspace
     Workspace -->|"PR3 bounded observation"| Worker
     Events -->|"Phase 3B accepted boundary"| Snapshot
@@ -74,7 +114,8 @@ flowchart TD
     PR7 --> PR8
     PR8 --> PR9
     PR8 --> PR10
-    PR4 -.->|"可独立审查；生产启用前完成"| PR8
+    PR4 -.->|"PR3 可先交付机制；生产接线前完成"| PR3
+    PR4 --> PR8
 ```
 
 ## 2. 最终能力边界
@@ -120,12 +161,14 @@ old checkpoint
 
 | Recovery observation | 自动动作 |
 |---|---|
-| `current == expected-after` | finalize cleanup，合成 outcome，提交 recovery bundle |
-| `current == before` | 持久化 `reconcile_not_applied`；planner/UI park：`redo_disabled_pending_cas` |
-| 其他状态 | park：drift/conflict |
+| `matches_expected_state` | finalize cleanup，合成 outcome，提交 recovery bundle |
+| `matches_prior_state` | park；不能据此声称“历史上从未执行” |
+| `diverged` / `unreadable` | park：drift/conflict/unverifiable |
 
 未来只有在目标平台具备可证明的 conditional replace，或执行发生在隔离 workspace 中时，才单独设计
-auto redo。它不属于 PR1–4，也不从 #1346 移植。
+auto redo。任何未来 redo 都必须重新进行 live observation，并在同一个 conditional mutation 中验证
+identity；旧的 `matches_prior_state` observation 永远不能独立授权写入。它不属于 PR1–4，也不从
+#1346 移植。
 
 ## 4. Phase 3A 平铺 PR
 
@@ -146,6 +189,31 @@ auto redo。它不属于 PR1–4，也不从 #1346 移植。
 6. resolver 遇到非法 fact 标记 monotonic corruption；
 7. read model 接受 audit fact，但不创建消息行。
 
+PR1 v1 事实语义：
+
+```ts
+type ReconcileObservation =
+  | 'matches_expected_state'
+  | 'matches_prior_state'
+  | 'diverged'
+  | 'unreadable';
+```
+
+- observation 只描述本次读取证明的状态关系，不携带 `nextAction`；
+- `still_running` 不属于一次性 recovery bundle，留给未来可重复追加的 durable-handle 协议；
+- completed outcome 必须是成功 response，并引用 matching persisted observation/outcome；
+- `canonicalArgsHash` 必须从 canonical function call 的 `toolName + args` 重新计算，不能只比较
+  operation/dispatch/projection 三个副本；
+- duplicate tool-call/operation identity 一律形成 monotonic corruption。
+
+明确不做：
+
+- #1346 数据迁移、downgrade、mixed binary；
+- 通用 `runtimeFact` envelope；
+- contract registry、filesystem evidence、continuation 或 host wiring；
+- 为尚不存在的 tool contract 预埋 contract ID/version。实际 contract identity 在 PR3 的
+  per-attempt preparation 协议中定义。
+
 测试：
 
 - atomic rollback；
@@ -157,6 +225,15 @@ auto redo。它不属于 PR1–4，也不从 #1346 移植。
 - populated schema migration；
 - writer bypass。
 
+PR1 Ready 前补充：
+
+- 两个 SQLite connection 的 completed/parked/exact/divergent 竞争；
+- rebuild 与 bundle commit 竞争；
+- 子进程在 reconcile/outcome/decision/COMMIT 前后退出，reopen WAL 后只能看到完整 bundle 或零
+  bundle；
+- export 含 recovery fact 时明确标记 audit-only；restore/import 在写入任何一行前以 stable code
+  拒绝，直到 typed bundle-aware importer 落地。
+
 当前实现分支：`codex/runtime-recovery-authority`。
 
 ### PR2：Continuation correctness
@@ -166,10 +243,10 @@ auto redo。它不属于 PR1–4，也不从 #1346 移植。
 > continuation 只建立在 immutable ledger cursor 上；同一 source boundary 至多一个 claim；
 > 多代 replay 不会重新引入先前被裁掉的 provider suffix。
 
-数据结构：
+store-owned boundary：
 
 ```ts
-interface ContinuationBoundary {
+interface RuntimePrefixSegment {
   sourceSessionId: string;
   sourceInvocationId: string;
   sourceRunId: string;
@@ -178,8 +255,19 @@ interface ContinuationBoundary {
   immutablePrefixDigest: string;
 }
 
+interface RuntimeBoundaryCursorV1 {
+  source: RuntimePrefixSegment;
+  ancestors: readonly RuntimePrefixSegment[];
+  lineageManifestDigest: string;
+}
+
+interface ImmutableRuntimeBoundary {
+  events: readonly RuntimeEvent[];
+  cursor: RuntimeBoundaryCursorV1;
+}
+
 interface ContinuationClaim {
-  boundary: ContinuationBoundary;
+  boundary: RuntimeBoundaryCursorV1;
   continuationInvocationId: string;
   continuationRunId: string;
   claimedAt: number;
@@ -188,16 +276,32 @@ interface ContinuationClaim {
 
 实施步骤：
 
-1. planner 只调用 `readImmutableRuntimeEvents`；
+1. store 提供唯一的 `readImmutableRuntimeBoundary()`，同时返回 events、canonical position 与
+   prefix/lineage digest；
 2. partial snapshot 仅供 UI，不进入 high-water/digest；
-3. 抽取唯一 `buildContinuationReplaySegment()`；
-4. immediate source 与每个 ancestor 都使用该函数；
-5. suffix trimming 只影响 provider replay view，不删除 immutable event；
-6. SQLite 以 source boundary identity 建唯一 claim；
-7. SessionManager 的 precheck 只做优化，数据库 claim 才是裁判；
-8. runner revalidation 重读 immutable prefix 并验证 digest；
-9. conversation clone 建立 old→new event/run/invocation map；
-10. 对 recovery evidence typed rewrite；暂不支持的 fact 明确拒绝 clone。
+3. 调用者禁止用 `events.length` 自行制造 durable cursor；
+4. 抽取唯一 `buildContinuationReplaySegment()`；
+5. immediate source 与每个 ancestor 都使用该函数；
+6. suffix trimming 只影响 provider replay view，不删除 immutable event；
+7. SQLite 以 source boundary identity 建唯一 claim；
+8. SessionManager 的 precheck 只做优化，数据库 claim 才是裁判；
+9. runner revalidation 重读 immutable prefix 并验证 digest；
+10. conversation clone 建立 old→new event/run/invocation map；
+11. 对 recovery evidence typed rewrite；暂不支持的 fact 明确拒绝 clone。
+
+所有 lineage 消费者必须共用 store boundary 与 segment builder：
+
+- 普通 resume；
+- child-agent resume；
+- child-agent retry；
+- conversation branch；
+- regenerate/revise；
+- runtime-host root execution；
+- CLI resume。
+
+provider projection、compaction artifact 与 projection version 属于短命 plan，不进入 canonical cursor；
+执行前重新 materialize 并 revalidate。修改任意 ancestor 的 high-water、digest 或顺序，都必须使整个
+lineage validation 失败。
 
 拒绝：
 
@@ -229,18 +333,60 @@ interface PreparedFileEvidenceV1 {
     size: number;
   };
   transformVersion: string;
+  preparedResult:
+    | { tool: 'Write'; path: string; bytes: number }
+    | {
+        tool: 'Edit';
+        path: string;
+        replacements: number;
+        matchedVia: 'exact' | 'line-trimmed' | 'whitespace' | 'escape';
+        startLine: number;
+        endLine: number;
+      };
 }
 ```
 
-它不是新的顶层 recovery fact。建议把它作为 canonical dispatch 的受校验扩展，并仍由
-`commitToolPrepared` 这个唯一 T1 writer 提交：
+它不是可由 generic append 写入的新顶层 recovery fact。PR3 定义新的 exact dispatch protocol
+`t1_after_preflight_v2`，并仍由 `commitToolPrepared` 这个唯一 T1 writer 与 call 同事务提交。不能
+给 v1 dispatch 静默增加 optional 字段：
 
 ```ts
-interface RuntimeEventToolDispatch {
-  // Existing canonical T1 identity and recovery mode...
-  preparedFileEvidence?: PreparedFileEvidenceV1;
+interface RuntimeEventToolDispatchV2 {
+  protocol: 't1_after_preflight_v2';
+  // canonical operation identity...
+  preparedEvidence: PreparedFileEvidenceV1;
 }
 ```
+
+恢复 contract identity 来自 `protocol + evidence.protocol + transformVersion`。planning 与 execution
+必须使用同一 registry 实例；未知版本 park。PR1 不提前发明没有生产 contract 的
+`recoveryContractId`。
+
+每次 attempt 动态决定 recovery mode：
+
+```ts
+type PreparedDurableAttempt<R> =
+  | {
+      kind: 'prepared';
+      recoveryMode: 'reconcile';
+      evidence: PreparedFileEvidenceV1;
+      execute(): Promise<R>;
+      close(): Promise<void>;
+    }
+  | {
+      kind: 'unreconciled';
+      recoveryMode: 'never_auto_retry';
+      reason: string;
+    }
+  | {
+      kind: 'tool_error';
+      result: unknown;
+    };
+```
+
+`execute()` 仍调用 filesystem worker 的 production implementation；`close()` 幂等释放跨越
+prepare→T1→execute→T2 的 per-file lease。T1 失败、abort、worker error 和 T2 failure 都必须经过
+同一个 finally owner。
 
 T1 校验规则：
 
@@ -250,6 +396,8 @@ T1 校验规则：
 - evidence 与 call、dispatch、operation projection 在一个 SQLite transaction 中提交；
 - generic RuntimeEvent append、importer 和独立 fact writer 不能补造或覆盖它；
 - 无法准备 evidence 时必须在 T1 前返回标准 tool error，不能先提交 reconcile dispatch 再静默走旧路径。
+- trusted workspace 外的一次性 grant 首版固定为 `never_auto_retry`/manual-only；旧 grant 不能在
+  重启后自动变成永久读取权限。
 
 正常执行时序：
 
@@ -257,8 +405,12 @@ T1 校验规则：
 host acquires per-file in-process lock
   → worker validates trusted workspace and reads bounded before state
   → production Write/Edit transform derives expected-after
-  → validated evidence is embedded in canonical dispatch and made durable with T1
+  → production result factory derives preparedResult
+  → validated evidence is embedded in v2 dispatch and made durable with T1
+  → Edit worker revalidates current hash == prepared before hash
   → the existing filesystem worker executes the normal tool implementation
+  → worker reports final content hash + effect disposition
+  → Runtime verifies final hash == expected-after
   → normal T2 outcome
   → release lock
 ```
@@ -272,12 +424,12 @@ sequenceDiagram
 
     R->>W: prepare(trusted cwd, args)
     W->>F: bounded read / no-follow validation
-    W-->>R: before + expected-after evidence
+    W-->>R: before + expected-after + preparedResult
     R->>S: atomic T1(call + dispatch + evidence)
     S-->>R: durable
-    R->>W: execute normal Write/Edit
+    R->>W: execute normal Write/Edit with prepared precondition
     W->>F: existing permission/sandboxed mutation
-    W-->>R: normal tool result
+    W-->>R: normal result + final hash + effect disposition
     R->>S: normal T2(outcome)
 ```
 
@@ -290,9 +442,22 @@ sequenceDiagram
 - canonical target 用 trusted `operation.workspaceCwd` 计算，不能由 fact 自我认证；
 - inspect 不跟随 symlink，读取有 size/UTF-8 bounds；
 - normal Write/Edit transform 只有一个 owner；
+- preparedResult 与正常 result 使用同一个 production result factory；recovery 不手写第二套 Edit
+  response；
 - 不用 `countOccurrences` 推断 causality；
 - 不用 temp rename 替代原 implementation，避免 ACL/xattr/owner/hard-link 语义漂移；
 - per-file lock 只保证 Maka 进程内排序，不声称外部 CAS。
+
+worker protocol 必须升级版本并显式返回：
+
+```ts
+type FilesystemEffectDisposition = 'none' | 'unknown' | 'applied_unconfirmed';
+```
+
+- `none`：T1 后仍可提交标准 error T2；
+- `unknown` / `applied_unconfirmed`：不得提交 function response，operation 保持 T1-only；
+- worker crash、transport loss、执行开始后的 abort 默认 `unknown`；
+- 路径、Edit 匹配、大小、UTF-8 等 T1 前业务错误保持标准 tool error，不制造 unsettled operation。
 
 这里的 `current == expected-after` 证明的是“文件状态已经等价于该 operation 的目标状态”，
 不是证明某个具体进程一定执行过 `write(2)`。对 Write/Edit 这种以文件状态变换为契约的工具，
@@ -315,11 +480,12 @@ resolver finds T1 without T2
        finalize cleanup
        synthesize response
        PR1 atomic bundle commit
-     before:
-       commit reconcile_not_applied
+     matches_prior_state:
+       commit observation + parked decision
        park with planner/UI diagnostic redo_disabled_pending_cas
-     other:
-       park drift/conflict
+     diverged/unreadable:
+       commit observation + parked decision
+       park drift/conflict/unverifiable
   → replan from fresh immutable events
   → execution revalidation uses the same registry instance
 ```
@@ -355,25 +521,38 @@ sequenceDiagram
         W-->>H: state-equivalent completion
         H->>S: atomic reconcile + synthesized outcome + completed
         H->>P: replan from fresh immutable events
-    else current equals before
-        W-->>H: not applied
-        H->>S: durable reconcile_not_applied
+    else current matches prior state
+        W-->>H: matches_prior_state
+        H->>S: durable observation + parked decision
         H-->>P: park (redo_disabled_pending_cas)
-    else missing / drift / unsupported
-        W-->>H: conflict or unverifiable
+    else drift / unsupported / unreadable
+        W-->>H: diverged or unreadable
+        H->>S: durable observation + parked decision
         H-->>P: park without writing workspace
     end
 ```
 
 `redo_disabled_pending_cas` 是 planner/UI diagnostic，不是 PR1 的持久化 recovery-decision
-枚举。持久层只记录事实 `reconcile_not_applied`；这样未来启用平台级 CAS 时不需要篡改旧事实，
-只需改变当前 policy 对这个事实允许的动作。
+枚举。持久层记录本次 observation 与 parked decision；未来启用平台级 CAS 时仍必须重新观察，
+不能直接重用旧 observation 授权写入。
 
 ### PR4：Host owner 与资源生命周期
 
 目标不变量：
 
 > 一个 host 只有一个明确 owner；所有资源在初始化失败、取消和退出时恰好释放一次。
+
+生产接线前必须先完成 Authority Map：
+
+- 下一生产版本的 root execution owner 是 Desktop embedded adapter 还是 `runtime-host`；
+- 同一个 storage root 只能由哪个 composition 取得 write lease；
+- semantic RuntimeEvent writer、recovery bundle writer、continuation admission writer 分别由谁持有；
+- JSONL host 缺少 recovery bundle capability 时在初始化阶段如何显式失败；
+- SQLite sticky migration、关闭顺序和 background recovery rejection 由谁负责。
+
+PR1 可以先交付没有生产消费者的 storage primitive；PR3 也可以先交付 worker/preparation mechanism。
+但真正启用 resume/file finalize 前，Desktop、runtime-host、CLI/Headless 必须经过同一套
+composition contract test，不能靠 duck typing 在恢复现场发现能力缺失。
 
 建议 owner：
 
@@ -405,6 +584,20 @@ PR4 不改变 resolver、continuation 或文件判定；它可以在 PR1–3 后
 ## 5. Phase 3B：Workspace checkpoint semantics
 
 Phase 3B 只定义 workspace boundary 和 validation，不写 Git。
+
+在 workspace checkpoint 进入生产 capture 前，必须先有 workspace effect registry：
+
+```ts
+interface ToolEffectDescriptor {
+  workspace: 'none' | 'single_file' | 'may_write' | 'unknown';
+  external: 'none' | 'queryable' | 'unknown';
+}
+```
+
+首版 required mode 全局串行化所有 workspace mutator；mutation 与 checkpoint capture 共用同一个
+barrier。`FormatJson`、Bash 和未知工具不能漏出 registry：未知/Bash 默认 `may_write`。active
+ShellRun 是 unsettled external mutator，在 durable handle 或确定 terminal 前阻止 checkpoint
+acceptance。
 
 ### PR5：Checkpoint contracts + fake provider
 
@@ -471,10 +664,11 @@ sequenceDiagram
     participant C as Checkpoint provider
     participant P as Continuation planner
 
-    R->>E: commit immutable boundary
-    R->>C: capture(boundary cursor, workspace epoch)
+    R->>R: prepare T2 envelope in memory
+    R->>C: capture(after mutation, under workspace barrier)
     C-->>R: snapshotId + policyHash
-    R->>E: atomic checkpoint acceptance fact
+    R->>C: verify snapshot identity and quiescence
+    R->>E: atomic T2 + checkpoint acceptance fact
     P->>E: read immutable prefix + checkpoint fact
     P->>C: verify(snapshotId, current workspace)
     alt prefix and workspace both match
@@ -485,6 +679,9 @@ sequenceDiagram
         P-->>R: park with stable diagnostic
     end
 ```
+
+只有最后一步形成 accepted boundary。不能先提交 mutating T2，再在另一个事务接受 checkpoint。
+Session 中途 cwd 变化必须写 workspace transition/epoch；缺少 transition fact 时 fail closed。
 
 ## 6. Phase 4A：Git workspace snapshot carrier
 
@@ -501,6 +698,21 @@ sequenceDiagram
 - 不修改 HEAD、branch、用户 index、stash；
 - 不执行 `git init`；
 - submodule/filter/LFS/ignored path 限制显式 park。
+
+Git carrier 安全边界：
+
+- 首版默认只 capture tracked files；untracked capture 必须显式 opt-in，并披露 blob 会在 Git object
+  database 中长期存在；
+- incognito 禁止 capture；
+- reject external filters、dirty submodules 和不受支持的 LFS/attributes；
+- 固定/限制 Git config，restore 不执行 hook、credential helper 或任意外部程序；
+- linked worktree 只提供 checkout 文件隔离，不宣称 refs/config/remotes 隔离；
+- Git tree 只证明 policy 覆盖的 bytes、mode 与 symlink target，不证明 ACL、xattr、owner 或完整
+  inode metadata；
+- capture 只承诺经过 quiescence verification 的一致 tree，不宣称 filesystem atomic snapshot。
+
+capture 对每个文件执行 `fstat-before → read → fstat-after`，检查 dev/ino/size/mtime/ctime；完成
+tree 后再做 bounded manifest sweep，最好连续两次得到同一 tree OID。超过重试预算仍变化则 park。
 
 测试使用真实临时 repository，覆盖 dirty worktree、staged changes、untracked policy、linked worktree 和
 crash orphan ref。
@@ -551,6 +763,15 @@ GC 只能删除不再被任何 active/recoverable boundary 引用的 Maka artifa
 
 默认 Bash/未知远程副作用仍 park，不盲重试。
 
+ShellRun durable handle 与 Git observe-only 并行推进，不等待 isolated restore。广泛启用 production
+checkpoint/restore 前必须至少具备：
+
+- `workspaceEffect` 分类与 active ShellRun barrier；
+- pid + process-start identity；
+- output spool 与 terminal result；
+- reattach/terminal observation；
+- 无法证明时 park。
+
 ## 9. 分支与 PR 工程实践
 
 每个 PR：
@@ -565,6 +786,10 @@ GC 只能删除不再被任何 active/recoverable boundary 引用的 Maka artifa
 8. PR body 列出明确 exclusions；
 9. 不使用 merge commit，不整体 cherry-pick 跨边界 commit。
 
+当前 PR1 分支创建后 upstream 继续前进，因此 Ready 前需基于最新 `upstream/main` 做受控
+rebase/移植，并用 `git range-diff` 与 owned-path diff 证明没有把新 main 的 RuntimeEvent exact
+schema 或 host changes 覆盖掉；不因此重新引入 #1346 跨边界 commit。
+
 PR1–3 合并后关闭 #1346，保留其 Draft discussion 作为历史。PR4、Phase 3B 和 Phase 4 不应继续堆到
 #1346。
 
@@ -576,6 +801,9 @@ PR1–3 合并后关闭 #1346，保留其 Draft discussion 作为历史。PR4、
 - 新 recovery writer 先 dogfood，再灰度；
 - park reason 映射为用户文案，机器 code 保留在详情/日志；
 - 任何 capability 缺失或证据冲突都 fail closed。
+- UI 必须区分 proof level：`operation_settled`、`workspace_checkpoint_verified`、
+  `legacy_identity_only`、`workspace_unverified`；只有第二种可以称为 workspace-continuous safe
+  resume。
 
 ## 11. 验收总表
 

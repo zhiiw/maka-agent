@@ -75,7 +75,7 @@
 - checkpoint 绑定 trusted workspace、canonical target、operation identity 和 transform version；
 - observer 有 workspace、regular-file、symlink、大小、编码边界；
 - `current == expected-after`：cleanup/finalize 后原子提交 recovery bundle；
-- `current == before`：持久化 `reconcile_not_applied`，planner/UI 输出
+- `current == before`：持久化 `matches_prior_state` observation，planner/UI 输出
   `redo_disabled_pending_cas` 并 park；
 - 其他：drift/conflict，park。
 
@@ -106,6 +106,8 @@ PR4 不改变 recovery 判定语义，不阻塞 PR1–3 替代 #1346。
 - `34805553 feat(core): define recovery fact bundle authority`
 - `68ee74de feat(storage): make recovery bundle writes authoritative`
 - `f464cfb1 feat(runtime): enforce recovery fact causality`
+- `5f2b0ae5 test(runtime): cover recovery persistence restart boundaries`
+- `4de05393 fix(runtime): close recovery authority bypasses`
 
 影响判断：**中等、可控，不需要推翻。**
 
@@ -157,18 +159,30 @@ production-shaped RED test。迁移旧 helper、旧 fixture 或旧 API 不是验
 - projection rebuild、同毫秒事实按 physical `event_seq` 重放；
 - schema 4 populated database 升级与 capability fail-closed；
 - resolver 对 completed-without-outcome 与 corruption sticky 的拒绝。
+- `after_recovery_reconcile` 与 `after_recovery_outcome` 两个 bundle failpoint rollback；
+- public bundle API → close/reopen → projection rebuild → resolver 结论一致；
+- T1/T2/bundle outcome reserved-fact smuggling 被拒绝；
+- fact envelope kind/version 与 SQLite stored-event decode；
+- `recoveryMode: reconcile` gate；
+- parked bundle 在 resolver/planner 中是终态；
+- observation 已删除 `nextAction`。
 
-PR A 发布前仍需补两条，不从旧测试文件机械迁移：
+PR A Ready 前仍需补：
 
-1. `after_recovery_reconcile` failpoint：证明仅写入 reconcile 后崩溃时，fact、journal 和
-   operation projection 全部回滚；
-2. public bundle API 提交成功 → close → reopen → 删除/重建 projection → resolver 仍从
-   immutable RuntimeEvents 得到同一 completed/parked 结论。
+1. 删除一次性 bundle 中的 `still_running`；将 observation 改为
+   `matches_expected_state | matches_prior_state | diverged | unreadable`；
+2. duplicate provider tool-call/operation identity 的 monotonic corruption；
+3. validator 从 function call 重新计算 `canonicalArgsHash`；
+4. completed synthesized outcome 必须成功；
+5. digest domain/schema 与 event timestamp 规范；
+6. 两个 SQLite connections 的竞争矩阵；
+7. 子进程在 bundle transaction 各边界退出后的 WAL reopen；
+8. export/import 明确 audit-only 与 typed-restore 前置拒绝。
 
 PR1 的 production-shaped 边界是公开 storage capability 与 RuntimeEvent consumer，不是
 SessionManager、Desktop 或真实 Write/Edit。把后者塞进 PR A 会重新扩大不变量边界。
 
-### Schema 5 碰撞
+### 实验格式断代
 
 #1346 的未合并 schema 5 capability 是：
 
@@ -183,14 +197,18 @@ tool_recovery_bundle@1
 ```
 
 两者不能互相解释。PR A 构造时校验 capability，因此旧 Draft/dogfood DB 会 fail closed，而不是被
-静默误读。这是正确的安全行为，但不是数据迁移。
+静默误读。这是明确断代，不是数据迁移。
 
 处理策略：
 
 - `main` 的 schema 4 → PR1 schema 5：正式支持并有 populated migration test；
-- #1346 schema 5/6 dogfood DB：不承诺就地兼容，测试时使用备份或新 profile；
+- #1346 schema 5/6 dogfood DB：完全不兼容、不迁移、不支持 downgrade/mixed process；需要时备份后
+  清理或使用新 profile；
 - 合并前在 PR 描述明确说明该限制；
 - 不为了兼容未合并 Draft schema 引入双协议 reader。
+
+同理，不恢复仅用于旧 reader soft-skip 的通用 `runtimeFact` PR0。新协议仍须 exact
+kind/version/schema；后续 prepared dispatch 使用显式 v2，而不是原地扩展 v1。
 
 ## 4. Commit extraction ledger
 
@@ -297,18 +315,18 @@ tool_recovery_bundle@1
 | `packages/runtime/src/tool-recovery-coordinator.ts` | PR3 | 串行 reconcile；只消费 PR1 bundle store |
 | `packages/runtime/src/file-tool-recovery.ts` | PR3 | after-finalize / otherwise park |
 | `packages/runtime/src/file-mutation-transform.ts` | PR3 | 正常执行与 evidence 共用 transform |
-| `packages/runtime/src/prepared-file-mutation.ts` | PR3 | 收缩成 evidence preparation，不拥有 replace |
-| `packages/runtime/src/local-file-checkpoint-carrier.ts` | PR3 | 收缩成 bounded observer/evidence carrier |
+| `packages/runtime/src/prepared-file-mutation.ts` | PR3 | 收缩成 per-attempt evidence + preparedResult，不拥有 replace |
+| `packages/runtime/src/local-file-checkpoint-carrier.ts` | PR3 | 收缩成 bounded observer；返回 state relation，不猜 causality |
 | `packages/runtime/src/worker-backed-file-checkpoint-carrier.ts` | PR3 | worker-owned inspect/prepare；无 host fallback |
 | `packages/runtime/src/durable-tool-execution.ts` | PR3 | 仅保留 effect-aware unsettled boundary 所需部分 |
-| `packages/runtime/src/builtin-tools.ts` | PR3 | Write/Edit production recovery mode 与 transform |
+| `packages/runtime/src/builtin-tools.ts` | PR3 | Write/Edit dynamic preparation hook、production transform/result factory |
 | `packages/runtime/src/edit-replace.ts` | PR3 | 唯一 Edit transform owner |
-| `packages/runtime/src/file-write-lock.ts` | PR3 | 同进程排序；文档明确不是外部 CAS |
-| `packages/runtime/src/tool-runtime.ts` | PR3 | T1 前 evidence、T1 后原 worker execution |
-| `packages/runtime/src/runtime-commit-sink.ts` | PR3 | 将受校验 evidence 内嵌 canonical dispatch，并与 T1 原子提交 |
+| `packages/runtime/src/file-write-lock.ts` | PR3 | prepared execution lease；跨 prepare/T1/execute/T2 持有，同进程排序而非外部 CAS |
+| `packages/runtime/src/tool-runtime.ts` | PR3 | dynamic attempt、v2 T1 evidence、effect-aware settlement |
+| `packages/runtime/src/runtime-commit-sink.ts` | PR3 | v2 prepared dispatch 与 T1 原子提交；v1 不原地扩字段 |
 | `packages/runtime/src/filesystem-worker/client.ts` | PR3/PR4 | operation 属 PR3；process owner 属 PR4 |
-| `packages/runtime/src/filesystem-worker/operations.ts` | PR3 | bounded inspect/transform 请求 |
-| `packages/runtime/src/filesystem-worker/protocol.ts` | PR3 | 最小 request/response schema |
+| `packages/runtime/src/filesystem-worker/operations.ts` | PR3 | bounded inspect/transform、Edit before precondition、final hash |
+| `packages/runtime/src/filesystem-worker/protocol.ts` | PR3 | 升级 protocol；显式 effect none/unknown/applied_unconfirmed |
 | `packages/runtime/src/filesystem-worker/worker-entry.ts` | PR3/PR4 | handler 属 PR3；shutdown 属 PR4 |
 | `packages/runtime/src/index.ts` | PR1/PR2/PR3 | 每个 PR 分别追加导出 |
 
@@ -365,18 +383,18 @@ helper/implementation，再让旧测试适配它。
 |---|---|
 | `packages/runtime/src/__tests__/tool-recovery-contract.test.ts` | 提取 registry/identity/mode mismatch 黑盒 case |
 | `packages/runtime/src/__tests__/tool-recovery-coordinator.test.ts` | 重写串行、部分成功、park、atomic bundle |
-| `packages/runtime/src/__tests__/file-tool-recovery.test.ts` | 重写 after→finalize，before/other→park |
+| `packages/runtime/src/__tests__/file-tool-recovery.test.ts` | 重写 matches-expected→finalize，prior/diverged/unreadable→park |
 | `packages/runtime/src/__tests__/restricted-verification.test.ts` | DEFER |
-| `packages/runtime/src/__tests__/prepared-file-mutation.test.ts` | 重写 evidence preparation；删除 replace/redo 假设 |
+| `packages/runtime/src/__tests__/prepared-file-mutation.test.ts` | 重写 dynamic attempt/evidence/preparedResult；删除 replace/redo 假设 |
 | `packages/runtime/src/__tests__/prepared-file-recovery.test.ts` | 重写 finalize-only crash matrix |
 | `packages/runtime/src/__tests__/prepared-file-t2-crash.test.ts` | 保留 replace/执行后、T2 前崩溃的 reopen 收敛 |
 | `packages/runtime/src/__tests__/prepared-file-runtime-resume-e2e.test.ts` | 重写真实 builtin→T1→crash→reopen→resume |
-| `packages/runtime/src/__tests__/builtin-tools-prepared-file.test.ts` | 保留生产 definition/transform/return shape |
+| `packages/runtime/src/__tests__/builtin-tools-prepared-file.test.ts` | 正常与 synthesized result 深度相等；Edit before precondition |
 | `packages/runtime/src/__tests__/builtin-tools-file-worker.test.ts` | worker ownership、permission profile、abort signal |
 | `packages/runtime/src/__tests__/tool-runtime-durable-boundary.test.ts` | T1 前业务错误走正常 tool result；T1 后未知保持 unsettled |
 | `packages/runtime/src/__tests__/tool-runtime-sqlite-boundary.test.ts` | real builtin recovery mode + SQLite evidence |
 | `packages/runtime/src/__tests__/local-file-checkpoint-carrier.test.ts` | bounds、symlink、trusted workspace、metadata observation |
-| `packages/runtime/src/__tests__/filesystem-worker-client.test.ts` | worker protocol 与 process failure |
+| `packages/runtime/src/__tests__/filesystem-worker-client.test.ts` | versioned worker protocol、effect classification 与 process failure |
 | `packages/runtime/src/__tests__/file-write-lock.test.ts` | 同进程 per-file serialization；不声称外部 CAS |
 | `packages/runtime/src/__tests__/session-manager-tool-recovery.test.ts` | resume 入口真实 reconcile/replan |
 | `packages/runtime/src/__tests__/session-manager.test.ts` | 只提取 PR3 wiring cases |
@@ -436,7 +454,7 @@ git range-diff --stat \
 结果：
 
 - 39 个旧 non-merge commit 均显示为 removed；
-- 3 个 PR A commit 均显示为 added；
+- 5 个 PR A commit 均显示为 added；
 - 没有 commit 被伪装成等价 cherry-pick。
 
 这证明 PR A 是重写，不证明语义无丢失。因此还必须做路径和测试场景审计。
@@ -487,8 +505,15 @@ git log --no-merges --name-only upstream/main..<new-pr-head>
 - same-timestamp facts use `event_seq`；
 - JSONL/generic import/terminal writer bypass attempts。
 
-PR A 当前差额：上述 `after_recovery_reconcile` 与 close/reopen→rebuild→resolve 两项未完成；
-在两项通过前不得把 ledger 标为 extracted。
+PR A 原有 crash/reopen 差额已经补齐。Ready 前剩余 gate：
+
+- 两个 SQLite connection 的 completed/parked/exact/divergent 竞争；
+- rebuild 与 bundle commit 竞争；
+- 子进程在 reconcile/outcome/decision/COMMIT 边界退出后 reopen WAL；
+- duplicate tool-call/operation identity；
+- function-call args hash 重算；
+- completed error outcome 拒绝；
+- truthful observation schema（无 `still_running`、无 causal overclaim）。
 
 ### PR2
 
@@ -505,12 +530,16 @@ PR A 当前差额：上述 `after_recovery_reconcile` 与 close/reopen→rebuild
 - `recoveryMode=reconcile` 但 T1 缺少/伪造 prepared evidence → 整个 T1 拒绝；
 - normal worker execution 后、T2 前崩溃；
 - restart observe expected-after → finalize；
-- restart observe before → durable `reconcile_not_applied` + `redo_disabled_pending_cas` park，
+- restart observe prior state → durable `matches_prior_state` + `redo_disabled_pending_cas` park，
   证明不会 redo；
 - external drift/symlink/oversize/invalid UTF-8 → park；
 - permission/preflight 业务错误 → 标准 tool error result；
 - Write 的 before 与 expected-after 相同 → T1 前按确定性 no-op 正常结算；
 - Edit 的 `old_string === new_string` → 保持生产 Edit 的标准 preflight error；
+- Edit prepare 与 execute 之间 drift → worker 在副作用前返回 `effect:none`；
+- truncate/partial write/worker transport loss → 不提交 error T2，保持 T1-only；
+- workspace 外 one-call grant 重启后不自动复用；
+- synthesized Write/Edit result 与正常 result 深度相等；
 - real builtin + worker + SQLite + SessionManager reopen。
 
 ### PR4
