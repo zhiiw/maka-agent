@@ -204,7 +204,10 @@ type ReconcileObservation =
 - completed outcome 必须是成功 response，并引用 matching persisted observation/outcome；
 - `canonicalArgsHash` 必须从 canonical function call 的 `toolName + args` 重新计算，不能只比较
   operation/dispatch/projection 三个副本；
-- duplicate tool-call/operation identity 一律形成 monotonic corruption。
+- duplicate tool-call/operation/immutable-event identity 一律形成 monotonic corruption；
+- observation 使用 `state_identity_v1` + `sha256:<64 hex>` 定域，不使用 wall clock 建立因果；
+- 工具参数 object key 规范排序，但所有 array 顺序都保留；不能因为参数字段碰巧叫 `enum` 或
+  `required` 就改变 provider-visible 参数身份。
 
 明确不做：
 
@@ -216,23 +219,26 @@ type ReconcileObservation =
 
 测试：
 
-- atomic rollback；
+- reconcile/outcome/decision 各插入点的 atomic rollback；
 - exact retry；
 - completed missing outcome；
+- completed error outcome；
 - parked mismatch；
 - event order；
 - rebuild；
 - populated schema migration；
-- writer bypass。
+- writer bypass；
+- 两个真实 writer 进程的 exact retry、completed-vs-parked 和 rebuild-vs-commit；
+- POSIX 子进程在 reconcile/outcome/decision/COMMIT 边界退出后 reopen WAL。
 
-PR1 Ready 前补充：
+PR1 import/export 边界：
 
-- 两个 SQLite connection 的 completed/parked/exact/divergent 竞争；
-- rebuild 与 bundle commit 竞争；
-- 子进程在 reconcile/outcome/decision/COMMIT 前后退出，reopen WAL 后只能看到完整 bundle 或零
-  bundle；
-- export 含 recovery fact 时明确标记 audit-only；restore/import 在写入任何一行前以 stable code
-  拒绝，直到 typed bundle-aware importer 落地。
+- 当前 export 只可用于审计，不承诺可直接 restore recovery state；
+- generic/batch/JSONL import 在写入任何 reserved recovery fact 前拒绝；
+- typed bundle-aware importer/clone 必须重写 execution/event identity，属于后续独立不变量。
+
+PR1 crash 承诺仅覆盖进程退出与 SQLite transaction atomicity，不从 WAL 测试推导断电 durability。
+断电保证需要单独定义 `synchronous`、filesystem、storage controller 与平台 crash matrix。
 
 当前实现分支：`codex/runtime-recovery-authority`。
 

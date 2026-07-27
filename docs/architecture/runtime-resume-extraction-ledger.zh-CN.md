@@ -108,6 +108,8 @@ PR4 不改变 recovery 判定语义，不阻塞 PR1–3 替代 #1346。
 - `f464cfb1 feat(runtime): enforce recovery fact causality`
 - `5f2b0ae5 test(runtime): cover recovery persistence restart boundaries`
 - `4de05393 fix(runtime): close recovery authority bypasses`
+- `b36486b7 fix(runtime): harden recovery evidence identity`
+- `b0683358 test(storage): cover recovery rebuild races`
 
 影响判断：**中等、可控，不需要推翻。**
 
@@ -165,19 +167,35 @@ production-shaped RED test。迁移旧 helper、旧 fixture 或旧 API 不是验
 - fact envelope kind/version 与 SQLite stored-event decode；
 - `recoveryMode: reconcile` gate；
 - parked bundle 在 resolver/planner 中是终态；
-- observation 已删除 `nextAction`。
+- observation 已删除 `nextAction`、`still_running` 和 observation wall clock，只保留
+  `matches_expected_state | matches_prior_state | diverged | unreadable`；
+- observation 由 `state_identity_v1` 与 `sha256:<64 hex>` digest 共同定域；
+- duplicate provider tool-call、operation 与 immutable RuntimeEvent identity 均为 monotonic
+  corruption，后续事实不能洗白；
+- validator 从真实 function call 重新计算 `canonicalArgsHash`，不能让 dispatch/fact
+  自证；
+- completed synthesized outcome 必须是匹配的成功 response；
+- 两个真实 OS 进程的 exact bundle、completed-vs-parked 与 rebuild-vs-commit 竞争；
+- reconcile、outcome、decision、COMMIT 各边界的事务 failpoint/process-crash fixture；
+- renderer 生产构建不会因 recovery hash 引入 Node-only `crypto` 根导出。
 
-PR A Ready 前仍需补：
+### PR A gate 收口结论
 
-1. 删除一次性 bundle 中的 `still_running`；将 observation 改为
-   `matches_expected_state | matches_prior_state | diverged | unreadable`；
-2. duplicate provider tool-call/operation identity 的 monotonic corruption；
-3. validator 从 function call 重新计算 `canonicalArgsHash`；
-4. completed synthesized outcome 必须成功；
-5. digest domain/schema 与 event timestamp 规范；
-6. 两个 SQLite connections 的竞争矩阵；
-7. 子进程在 bundle transaction 各边界退出后的 WAL reopen；
-8. export/import 明确 audit-only 与 typed-restore 前置拒绝。
+此前列出的八项 Ready gate 已全部归档到实现或显式边界：
+
+1. truthful observation schema、duplicate identity、call args hash、successful outcome 和
+   digest schema 已由 core/resolver tests 锁定；
+2. SQLite 多连接/多进程竞争已证明 exact retry 收敛、冲突 decision 单赢家、
+   rebuild 与 bundle commit 串行；
+3. bundle 各插入点的失败均回滚到原 T1；真实进程 crash matrix 在 Linux/macOS 执行，
+   Windows 有同事务 failpoint 覆盖但不宣称等价的进程 kill 语义；
+4. PR1 不提供 typed recovery import/clone。generic append、batch import、terminal
+   durability、T1/T2 与 JSONL 均前置拒绝 reserved recovery fact；现有导出只具审计含义，
+   未来若支持恢复态复制，必须走重写 execution/event identity 的新 authority。
+
+PR A 对外承诺是 process-crash transaction atomicity，不承诺断电后每个已确认 COMMIT
+必然落到稳定介质；后者需要单独的 SQLite synchronous/filesystem/platform durability
+契约，不能从 WAL 测试外推。
 
 PR1 的 production-shaped 边界是公开 storage capability 与 RuntimeEvent consumer，不是
 SessionManager、Desktop 或真实 Write/Edit。把后者塞进 PR A 会重新扩大不变量边界。
@@ -454,7 +472,7 @@ git range-diff --stat \
 结果：
 
 - 39 个旧 non-merge commit 均显示为 removed；
-- 5 个 PR A commit 均显示为 added；
+- 7 个 PR A commit 均显示为 added；
 - 没有 commit 被伪装成等价 cherry-pick。
 
 这证明 PR A 是重写，不证明语义无丢失。因此还必须做路径和测试场景审计。
@@ -505,15 +523,15 @@ git log --no-merges --name-only upstream/main..<new-pr-head>
 - same-timestamp facts use `event_seq`；
 - JSONL/generic import/terminal writer bypass attempts。
 
-PR A 原有 crash/reopen 差额已经补齐。Ready 前剩余 gate：
+PR A 的 crash/reopen 差额已经补齐：
 
-- 两个 SQLite connection 的 completed/parked/exact/divergent 竞争；
-- rebuild 与 bundle commit 竞争；
-- 子进程在 reconcile/outcome/decision/COMMIT 边界退出后 reopen WAL；
-- duplicate tool-call/operation identity；
-- function-call args hash 重算；
-- completed error outcome 拒绝；
-- truthful observation schema（无 `still_running`、无 causal overclaim）。
+- 两个真实 SQLite writer 进程覆盖 exact retry、completed-vs-parked 冲突与
+  rebuild-vs-bundle commit；
+- 子进程 fixture 覆盖 reconcile/outcome/decision/COMMIT 边界退出后 reopen WAL；
+- duplicate tool-call/operation/event identity、function-call args hash 重算、
+  completed error outcome 拒绝和 truthful observation schema 均有独立回归测试；
+- Windows 本地执行多进程 writer race；POSIX process-kill crash matrix 由 Linux/macOS
+  测试环境执行。
 
 ### PR2
 
