@@ -24,6 +24,7 @@ import { syncDirectory, syncDirectoryChain, syncFile } from './stable-storage.js
 import { chainWrite } from './write-queue.js';
 import {
   DurableStoreWriteError,
+  decodeRuntimeEvent as decodeCanonicalRuntimeEvent,
   isTerminalRuntimeEvent,
   type AgentRunEvent,
   type AgentRunEventType,
@@ -689,6 +690,7 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
   ): Promise<void> {
     assertSafeId(sessionId, 'Invalid session id');
     assertSafeId(runId, 'Invalid run id');
+    decodeCanonicalRuntimeEvent(event);
     assertNoReservedRecoveryFact(event);
     await this.withQueue(sessionId, runId, async () => {
       await mkdir(this.runDir(sessionId, runId), { recursive: true });
@@ -750,6 +752,7 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
   ): Promise<void> {
     assertSafeId(sessionId, 'Invalid session id');
     assertSafeId(runId, 'Invalid run id');
+    decodeCanonicalRuntimeEvent(event);
     assertNoReservedRecoveryFact(event);
     if (event.partial || !isTerminalRuntimeEvent(event)) {
       throw new Error(

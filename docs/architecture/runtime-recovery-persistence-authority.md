@@ -59,12 +59,25 @@ The writer commits, in one SQLite transaction:
 The transaction either commits all rows or none. An exact retry is idempotent.
 A different retry for an already settled operation is rejected.
 
+Each operation admits at most one terminal recovery bundle. `parked` is an
+immutable terminal recovery decision, not a provisional observation that may
+later be replaced by `completed`. A later human intervention must create a new
+operation/continuation or use a separately designed human-resolution protocol.
+Consequently, a canonical completed operation has exactly one reconcile fact
+and one decision fact (plus its outcome), while a canonical parked operation
+has exactly one reconcile fact and one decision fact. Additional recovery facts
+for the same operation are corruption unless they are an exact idempotent retry
+that adds no new RuntimeEvent.
+
 Generic RuntimeEvent append, batch import, terminal durability, ordinary T1
 prepare/dispatch, ordinary T2 outcome, and the JSONL store reject reserved
 recovery facts. Even the outcome contained in a recovery bundle may not carry
 a reserved fact; only the bundle's dedicated reconcile and decision events may
 do so. Import or copy support must therefore provide an identity-rewriting
 canonical bundle path in a later slice; it may not bypass this authority.
+The JSONL writer validates the complete RuntimeEvent schema before writing any
+bytes, so an unknown action/envelope is rejected as malformed input rather than
+persisted as an unrecognized semantic fact.
 
 ## Causal and identity invariants
 

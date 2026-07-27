@@ -425,40 +425,7 @@ describe('SqliteRuntimeStore', () => {
   it('atomically parks an operation and deduplicates the exact parked bundle', async () => {
     await withStore(async (store) => {
       await commitReconcilePrepared(store);
-      const bundle = {
-        operationId: 'operation-1',
-        reconcileRuntimeEvent: reconcileResultEvent({
-          actions: {
-            toolRecovery: {
-              kind: 'maka.tool.reconcile_result',
-              version: 1,
-              payload: {
-                protocol: 'tool_reconcile_v1',
-                operationId: 'operation-1',
-                observation: 'diverged',
-                observationSchema: 'state_identity_v1',
-                observationDigest:
-                  'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
-              },
-            },
-          },
-        }),
-        decisionRuntimeEvent: recoveryDecisionEvent({
-          actions: {
-            toolRecovery: {
-              kind: 'maka.tool.recovery_decision',
-              version: 1,
-              payload: {
-                protocol: 'tool_recovery_v1',
-                operationId: 'operation-1',
-                disposition: 'parked',
-                reasonCode: 'reconcile_diverged',
-                evidenceEventIds: ['call-event-1', 'dispatch-event-1', 'reconcile-event-1'],
-              },
-            },
-          },
-        }),
-      } as const;
+      const bundle = parkedRecoveryBundle();
 
       await store.commitToolRecoveryBundle(bundle);
       await store.commitToolRecoveryBundle(bundle);
@@ -476,6 +443,57 @@ describe('SqliteRuntimeStore', () => {
       });
       assert.equal((await store.readToolOperation('operation-1'))?.currentState, 'recovery_parked');
       assert.deepEqual(await store.listUnsettledToolOperations(), []);
+    });
+  });
+
+  it('rejects a different recovery bundle after an operation is parked', async () => {
+    await withStore(async (store) => {
+      await commitReconcilePrepared(store);
+      await store.commitToolRecoveryBundle(parkedRecoveryBundle());
+
+      await assert.rejects(
+        store.commitToolRecoveryBundle({
+          operationId: 'operation-1',
+          reconcileRuntimeEvent: reconcileResultEvent({
+            id: 'reconcile-event-2',
+            ts: 30,
+          }),
+          outcomeRuntimeEvent: functionResponseEvent({
+            id: 'response-event-2',
+            ts: 31,
+          }),
+          decisionRuntimeEvent: recoveryDecisionEvent({
+            id: 'recovery-decision-event-2',
+            ts: 32,
+            actions: {
+              toolRecovery: {
+                kind: 'maka.tool.recovery_decision',
+                version: 1,
+                payload: {
+                  protocol: 'tool_recovery_v1',
+                  operationId: 'operation-1',
+                  disposition: 'completed',
+                  reasonCode: 'reconcile_matches_expected_state',
+                  outcomeEventId: 'response-event-2',
+                  evidenceEventIds: [
+                    'call-event-1',
+                    'dispatch-event-1',
+                    'reconcile-event-2',
+                    'response-event-2',
+                  ],
+                },
+              },
+            },
+          }),
+        }),
+        /already settled/i,
+      );
+
+      assert.equal((await store.readToolOperation('operation-1'))?.currentState, 'recovery_parked');
+      assert.deepEqual(
+        (await store.readImmutableRuntimeEvents('session-1', 'run-1')).map((event) => event.id),
+        ['call-event-1', 'dispatch-event-1', 'reconcile-event-1', 'recovery-decision-event-1'],
+      );
     });
   });
 
@@ -1032,6 +1050,43 @@ function recoveryDecisionEvent(overrides: Partial<RuntimeEvent> = {}): RuntimeEv
     refs: { operationId: 'operation-1', toolCallId: 'provider-call-1' },
     ...overrides,
   };
+}
+
+function parkedRecoveryBundle() {
+  return {
+    operationId: 'operation-1',
+    reconcileRuntimeEvent: reconcileResultEvent({
+      actions: {
+        toolRecovery: {
+          kind: 'maka.tool.reconcile_result',
+          version: 1,
+          payload: {
+            protocol: 'tool_reconcile_v1',
+            operationId: 'operation-1',
+            observation: 'diverged',
+            observationSchema: 'state_identity_v1',
+            observationDigest:
+              'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+          },
+        },
+      },
+    }),
+    decisionRuntimeEvent: recoveryDecisionEvent({
+      actions: {
+        toolRecovery: {
+          kind: 'maka.tool.recovery_decision',
+          version: 1,
+          payload: {
+            protocol: 'tool_recovery_v1',
+            operationId: 'operation-1',
+            disposition: 'parked',
+            reasonCode: 'reconcile_diverged',
+            evidenceEventIds: ['call-event-1', 'dispatch-event-1', 'reconcile-event-1'],
+          },
+        },
+      },
+    }),
+  } as const;
 }
 
 function commitPrepared(store: Store) {

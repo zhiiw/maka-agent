@@ -654,6 +654,71 @@ describe('AgentRunStore', () => {
     });
   });
 
+  it('rejects unknown RuntimeEvent actions before writing malformed JSONL', async () => {
+    await withStores(async (runStore, runtimeEventStore, root) => {
+      await runStore.createRun(makeHeader());
+      const malformed = makeRuntimeEvent({
+        id: 'unknown-action-1',
+        actions: {
+          runtimeFact: {
+            kind: 'maka.tool.recovery_decision',
+            version: 1,
+            legacyProjection: 'invisible',
+            payload: {},
+          },
+        },
+      } as never);
+
+      await assert.rejects(
+        runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', malformed),
+        /Invalid RuntimeEvent schema/i,
+      );
+      await assert.rejects(
+        readFile(
+          join(root, 'sessions', 'session-1', 'runs', 'run-1', 'runtime-events.jsonl'),
+          'utf8',
+        ),
+        { code: 'ENOENT' },
+      );
+    });
+  });
+
+  it('rejects unknown RuntimeEvent actions before terminal durability writes', async () => {
+    await withStores(async (runStore, runtimeEventStore, root) => {
+      await runStore.createRun(makeHeader());
+      const malformedTerminal = makeRuntimeEvent({
+        id: 'unknown-terminal-action-1',
+        status: 'completed',
+        content: undefined,
+        actions: {
+          endInvocation: true,
+          runtimeFact: {
+            kind: 'maka.tool.recovery_decision',
+            version: 1,
+            legacyProjection: 'invisible',
+            payload: {},
+          },
+        },
+      } as never);
+
+      await assert.rejects(
+        runtimeEventStore.ensureTerminalRuntimeEventDurable(
+          'session-1',
+          'run-1',
+          malformedTerminal,
+        ),
+        /Invalid RuntimeEvent schema/i,
+      );
+      await assert.rejects(
+        readFile(
+          join(root, 'sessions', 'session-1', 'runs', 'run-1', 'runtime-events.jsonl'),
+          'utf8',
+        ),
+        { code: 'ENOENT' },
+      );
+    });
+  });
+
   it('returns an empty runtime event list when the runtime ledger is missing', async () => {
     await withStores(async (runStore, runtimeEventStore) => {
       await runStore.createRun(makeHeader());
