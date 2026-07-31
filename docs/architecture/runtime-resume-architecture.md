@@ -4,10 +4,10 @@ title: "Chapter 8: Resume Is Not Retry—How Maka Continues Safely from Crash Fa
 language: en
 source_language: zh-CN
 counterpart: ./runtime-resume-architecture.zh-CN.md
-implementation_status: phase_0_2_and_phase_3a_authority_current
+implementation_status: recovery_and_continuation_authority_current
 document_status: current
 translation_status: synced
-last_verified: 2026-07-28
+last_verified: 2026-07-31
 owners:
   - maka-backend
 ---
@@ -16,14 +16,15 @@ owners:
 
 > This chapter answers a deceptively dangerous question: when Maka crashes while a model is calling a tool, how can a restart tell what happened, what may continue, and what must stop for human attention? The answer is: **recover facts from immutable RuntimeEvents, let one RecoveryResolver classify tool state, and create a new Run only when history, execution, and workspace boundaries are all provably safe. Resume never resurrects the old process or disguises “try again” as recovery.**
 
-This chapter is for engineers entering Maka Runtime for the first time. The first half builds intuition with an interrupted file write. The second half explains Phases 0–4, Desktop and CLI integration, T1/T2, recovery decisions, workspace checkpoints, and the recommended implementation sequence.
+This chapter is for engineers entering Maka Runtime for the first time. The first half builds intuition with an interrupted file write. The second half explains Phases 0–4, Desktop and CLI integration, T1/T2, recovery decisions, workspace versions, and the recommended implementation sequence.
 
-It describes `main` as verified on 2026-07-28:
+It describes `main` as verified on 2026-07-31:
 
 - Phases 0–2 are implemented.
 - Phase 3A recovery-fact atomic write authority and the Resolver are implemented.
-- The production Phase 3 reconciler, file evidence, and complete host-owner lifecycle remain future work.
-- Phase 4 Git checkpoints, isolated restore, and durable rebaseline are not implemented.
+- Immutable continuation boundaries, durable claims, and provider-call T1 are implemented.
+- The production workspace mutation coordinator, effect reconciler, and complete host-owner lifecycle remain future work.
+- Git-native managed workspaces, workspace versions, isolated restore, and durable rebaseline are not implemented.
 
 Roadmap documents describe targets. Code and contract tests remain the authority for current behavior. This chapter always separates implemented behavior from planned work.
 
@@ -130,7 +131,7 @@ The phases are not five separate implementations. Each one adds a kind of fact t
 | Phase 2 | Can T1 be guaranteed before tool execution and T2 before returning the result? | Implemented in SQLite canonical mode |
 | Phase 2.5 / 3A PR A | Who owns recovery facts, how do conflicts fail closed, and how is a bundle atomic? | Implemented |
 | Later Phase 3 | Can tool-specific evidence settle an unknown side effect? | Designed; no production reconciler wiring |
-| Phase 4 | Can a Runtime boundary bind to a workspace snapshot for restore or rebaseline? | Designed |
+| Workspace plane | Can a Runtime boundary bind to an accepted Git workspace version for restore or rebaseline? | Designed |
 
 ```mermaid
 flowchart LR
@@ -138,7 +139,7 @@ flowchart LR
   P1 --> P2["Phase 2<br/>T1/T2 bound the side-effect window"]
   P2 --> P3A["Phase 3A foundation<br/>single recovery authority + atomic bundle"]
   P3A --> P3["Phase 3 recovery<br/>tool-specific evidence / reconcile"]
-  P3 --> P4["Phase 4 workspace continuity<br/>checkpoint / restore / rebaseline"]
+  P3 --> P4["Git-native workspace continuity<br/>version / restore / rebaseline"]
 ```
 
 Phase 2 does not replace Phases 0 and 1. Their replay and continuation gates remain active. Phase 2 gives those gates better evidence about whether execution crossed the tool-dispatch boundary.
@@ -496,7 +497,7 @@ The local safety inspector:
 4. returns `workspace:v1:<uuid>`;
 5. checks available tools and pending background operations.
 
-A path move is diagnostic; marker identity mismatch is a hard gate. This proves the logical workspace identity, not its contents. Content continuity requires a Phase 4 checkpoint.
+A path move is diagnostic; marker identity mismatch is a hard gate. This proves the logical workspace identity, not its contents. Content continuity requires an accepted Git-native workspace version.
 
 ## Phase 2: SQLite is the durable RuntimeEvent store
 
@@ -588,6 +589,12 @@ Atomic rename prevents torn files but does not provide conditional replacement. 
 Generic Bash, arbitrary remote APIs, send, publish, pay, and delete continue to park without a dedicated protocol.
 
 ## Phase 4: bind Runtime history to the workspace
+
+> This section preserves the earlier checkpoint model to explain why a workspace boundary is needed.
+> The current implementation route is the
+> [Git-native Managed Workspace roadmap](./runtime-resume-git-native-workspace-roadmap.zh-CN.md):
+> Git commit/tree becomes the managed-mode workspace artifact, while RuntimeEvent remains the sole
+> acceptance authority.
 
 Phase 1 proves history completeness. Phase 3 may settle one operation. Long tasks also need workspace-wide continuity.
 
@@ -924,6 +931,7 @@ The two most important follow-ups are:
 - [Runtime Resume Phase 1 Safe-Boundary Contract](./runtime-resume-phase1-safe-boundary-contract.md)
 - [RecoveryResolver ADR](./runtime-recovery-resolver-adr.zh-CN.md)
 - [Runtime Resume Phase 3–4 implementation route](./runtime-resume-phase3-phase4-workspace-checkpoint-design.zh-CN.md)
+- [Git-native Managed Workspace implementation roadmap](./runtime-resume-git-native-workspace-roadmap.zh-CN.md)
 - [Runtime Resume extraction ledger](./runtime-resume-extraction-ledger.zh-CN.md)
 - [Runtime Resume and Tool Journal design draft](../runtime-resume-tool-journal-design-draft.zh-CN.md)
 - [Chapter 1: Log Is the Runtime](./runtime-core-architecture-draft.md)

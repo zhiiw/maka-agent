@@ -1,10 +1,15 @@
-# Runtime Resume Phase 3–4 实施路线
+# Runtime Resume Phase 3–4 实施路线（部分被取代）
 
-- 状态：Implementation tracked
-- 更新日期：2026-07-27
+- 状态：Recovery/Continuation 历史与提取账本；workspace 主线已被取代
+- 更新日期：2026-07-31
 - 事实权威：immutable RuntimeEvents
 - 主要平台：Linux、macOS；Windows 有限支持
 - 拆分审计：`runtime-resume-extraction-ledger.zh-CN.md`
+
+> 2026-07-31 更新：本文的 PR A / PR B 记录仍用于解释已经合入主线的 Recovery Authority
+> 与 Continuation Authority。PR C–H 的 per-file evidence → generic checkpoint → Git carrier
+> 路线不再是当前 workspace 实施主线。新的决策、能力边界与 PR 顺序见
+> [`runtime-resume-git-native-workspace-roadmap.zh-CN.md`](./runtime-resume-git-native-workspace-roadmap.zh-CN.md)。
 
 ## 1. 四个正交平面
 

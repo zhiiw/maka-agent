@@ -4,10 +4,10 @@ title: "第八章：Resume 不是重试——Maka 如何从崩溃事实安全继
 language: zh-CN
 source_language: zh-CN
 counterpart: ./runtime-resume-architecture.md
-implementation_status: phase_0_2_and_phase_3a_authority_current
+implementation_status: recovery_and_continuation_authority_current
 document_status: current
 translation_status: synced
-last_verified: 2026-07-28
+last_verified: 2026-07-31
 owners:
   - maka-backend
 ---
@@ -16,14 +16,15 @@ owners:
 
 > 本章回答一个看起来简单、实际上很危险的问题：Maka 在模型调用工具时崩溃，重启后怎样知道哪些事情已经发生、哪些事情可以继续、哪些事情必须停下来等人处理？核心答案是：**先从不可变的 RuntimeEvent 恢复事实，再由唯一的 RecoveryResolver 判定工具状态；只有历史、执行和 workspace 三条边界都能证明安全时，才创建新的 Run 继续。Resume 从不复活旧进程，也不把“再试一次”伪装成恢复。**
 
-本文面向第一次接触 Maka Runtime 的工程师。前半部分用一个文件写入例子建立直觉，后半部分说明 Phase 0–4、Desktop/CLI 接线、T1/T2、恢复判定、workspace checkpoint 和工程实施顺序。
+本文面向第一次接触 Maka Runtime 的工程师。前半部分用一个文件写入例子建立直觉，后半部分说明 Phase 0–4、Desktop/CLI 接线、T1/T2、恢复判定、workspace version 和工程实施顺序。
 
-本文描述截至 2026-07-28 的 `main`：
+本文描述截至 2026-07-31 的 `main`：
 
 - Phase 0–2 已落地；
 - Phase 3A 的 recovery fact 原子写入权威与 Resolver 已落地；
-- Phase 3 的生产 reconciler、文件 evidence 和完整 host owner lifecycle 仍在后续路线中；
-- Phase 4 的 Git checkpoint、隔离恢复和 durable rebaseline 尚未落地。
+- immutable continuation boundary、durable claim 与 provider-call T1 已落地；
+- production workspace mutation coordinator、effect reconciler 和完整 host owner lifecycle 仍在后续路线中；
+- Git-native managed workspace、workspace version、隔离恢复和 durable rebaseline 尚未落地。
 
 路线文档写的是目标，代码和 contract tests 才是当前事实。本文会始终把“已经实现”和“计划实现”分开。
 
@@ -130,7 +131,7 @@ Phase 不是五套实现，而是逐层增加“可以证明的事实”。
 | Phase 2 | 能否保证工具执行前有 T1、结果返回模型前有 T2？ | 已实现，SQLite canonical 模式 |
 | Phase 2.5 / 3A PR A | 谁拥有恢复事实？冲突怎样 fail closed？恢复 bundle 怎样原子提交？ | 已实现 |
 | Phase 3 后续 | 能否用专属 evidence 判断未知副作用，并完成或永久 park？ | 设计中，生产 reconciler 未接线 |
-| Phase 4 | 能否把 Runtime 边界绑定到 workspace snapshot，并隔离恢复或 rebaseline？ | 设计中 |
+| Workspace plane | 能否把 Runtime 边界绑定到 accepted Git workspace version，并隔离恢复或 rebaseline？ | 设计中 |
 
 从能力上看，它们形成一条递进关系：
 
@@ -140,7 +141,7 @@ flowchart LR
   P1 --> P2["Phase 2<br/>T1/T2 固化副作用窗口"]
   P2 --> P3A["Phase 3A foundation<br/>唯一恢复权威与原子 bundle"]
   P3A --> P3["Phase 3 recovery<br/>专属 evidence / reconcile"]
-  P3 --> P4["Phase 4 workspace continuity<br/>checkpoint / restore / rebaseline"]
+  P3 --> P4["Git-native workspace continuity<br/>version / restore / rebaseline"]
 ```
 
 Phase 0 和 Phase 1 并没有因为 Phase 2 出现而失效。它们仍是 replay 和 continuation 的安全闸门；Phase 2 只是让闸门获得了更精确的“是否跨过工具派发边界”证据。
@@ -514,7 +515,7 @@ CLI/TUI 的 `/resume` 走同一个 `SessionManager` plan/execute seam，只是�
 
 > “workspace 里的每一个文件仍然和 source RuntimeEvent high-water 时相同吗？”
 
-后一个问题必须由 Phase 4 checkpoint/carrier 解决。当前 safe-boundary continuation 不能被描述成 workspace snapshot restore。
+后一个问题必须由 Git-native managed workspace 与 accepted workspace version 解决。当前 safe-boundary continuation 不能被描述成 workspace restore。
 
 ## Phase 2：SQLite 是 RuntimeEvent 的 durable store
 
@@ -612,6 +613,10 @@ flowchart TD
 通用 Bash、任意远程 API、发送、发布、付款和删除等没有专属协议的副作用继续默认 park。恢复覆盖范围不是越大越好；错误地自动执行一次，通常比明确停车更危险。
 
 ## Phase 4：Runtime history 还要绑定 workspace
+
+> 本节保留旧 checkpoint 模型用于解释 workspace boundary 的必要性；当前实施主线已经改为
+> [Git-native Managed Workspace](./runtime-resume-git-native-workspace-roadmap.zh-CN.md)：
+> Git commit/tree 提前成为 managed mode 的 workspace artifact，RuntimeEvent 仍是唯一接受权威。
 
 Phase 1 证明模型历史完整，Phase 3 证明单个 operation 可以收敛，但长任务还需要 workspace-wide continuity。
 
@@ -962,6 +967,7 @@ Process crash、SQLite transaction atomicity 和应用级 `fsync` 不能自动�
 - [Runtime Resume Phase 1 Safe-Boundary Contract](./runtime-resume-phase1-safe-boundary-contract.md)
 - [RecoveryResolver ADR](./runtime-recovery-resolver-adr.zh-CN.md)
 - [Runtime Resume Phase 3–4 实施路线](./runtime-resume-phase3-phase4-workspace-checkpoint-design.zh-CN.md)
+- [Git-native Managed Workspace 新落地路线](./runtime-resume-git-native-workspace-roadmap.zh-CN.md)
 - [Runtime Resume 拆分与提取账本](./runtime-resume-extraction-ledger.zh-CN.md)
 - [Runtime Resume 与 Tool Journal 设计草案](../runtime-resume-tool-journal-design-draft.zh-CN.md)
 - [第一章：Log Is the Runtime](./runtime-core-architecture-draft.zh-CN.md)
