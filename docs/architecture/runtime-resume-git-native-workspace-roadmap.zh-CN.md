@@ -1,7 +1,7 @@
 # Git-native Managed Workspace：Runtime Resume 新落地路线
 
 - 状态：Proposed implementation roadmap
-- 更新日期：2026-07-31
+- 更新日期：2026-08-01
 - 适用范围：Runtime Resume 的 workspace plane、文件型工具、workspace 历史与远端文件备份
 - 已有地基：Recovery Authority（#1521）、Continuation Authority（#1573）
 - 事实权威：immutable RuntimeEvents
@@ -18,10 +18,12 @@
 
 > **Maka Git-native Managed Workspace**
 
-它建立在一个硬前提上：
+它建立在一个隔离与验证契约上：
 
-> 所有需要强恢复保证的 workspace mutation，都必须发生在 Maka-owned、用户不能同时编辑的
-> `managed_worktree` 中。
+> 所有需要强恢复保证的 workspace mutation，都必须发生在 Maka-owned 的私有
+> `managed_worktree` 中；该目录不是用户的日常 checkout，但操作系统无法绝对阻止用户、IDE 或
+> 后台进程写入。任何未归因的外部修改都必须在接受版本或进入下一 model step 前被检测，并使
+> workspace fail closed 进入 quarantine。
 
 在这个前提下，职责被明确分开：
 
@@ -52,7 +54,7 @@ tree/commit 作为 workspace artifact，把 RuntimeEvent 保持为因果与接�
 
 ### 2.1 已完成的地基
 
-截至 2026-07-31，主线已经具备：
+截至 2026-08-01，主线已经具备：
 
 - SQLite 是 RuntimeEvent canonical writer；legacy JSONL 只承担导入/显式导出；
 - T1/T2 工具边界、严格 tool ledger lane 与 Recovery Authority；
@@ -87,9 +89,10 @@ per-file evidence
 - workspace-wide continuity 仍需在后续重新解决；
 - 多 Agent、undo、audit、isolated restore 最终仍会回到 Git worktree/commit。
 
-在 `managed_worktree` 中，用户不能并发写入，mutation barrier 又能串行化 Agent mutation，Git commit
-天然给出 operation 前后的不可变 workspace version。主线因此可以跳过大部分通用 per-file
-checkpoint 基础设施。
+`managed_worktree` 是 Maka-owned 私有目录，产品不把它作为用户编辑入口；mutation barrier 能
+串行化受控 Agent writer，进入下一步前的 tree verification 能检测不受控外部 writer。Git commit
+天然给出 operation 前后的不可变 workspace version。这里依赖的是“隔离意图 + 检测式 fail closed”，
+而不是操作系统级禁止写入；主线因此可以跳过大部分通用 per-file checkpoint 基础设施。
 
 ### 2.3 这次不是删除已有生产能力
 
@@ -134,7 +137,20 @@ Service PR 中通过大仓库和 crash test 证明。
   用户完整 commit ancestry；
 - submodule、LFS filter、sparse checkout、特殊文件和不受支持的 case policy 默认拒绝；
 - ignored 路径 mutation 默认拒绝；
-- 用户不能把 managed worktree 当普通编辑目录共同修改。
+- 产品不向用户开放 managed worktree 作为普通编辑目录；检测到外部修改时 quarantine。
+
+首版 baseline 语义冻结为：
+
+```ts
+baselineSemantics: 'git_tree_materialized_with_fixed_config_v1'
+```
+
+Baseline 以 source HEAD tree 为权威，而不是承诺复制 source checkout 的逐字节表现。Bundled Git
+必须使用固定 config/materialization profile；`core.autocrlf`、attributes、filemode、symlink、object
+format 与 case capability进入 profile/repository identity。LFS/smudge filter、
+`working-tree-encoding`、submodule和不受支持的 symlink语义首版 fail closed。Internal baseline
+materialize 后必须验证 index/worktree clean。UI需要提示：因固定 EOL/materialization policy，managed
+worktree bytes 可能与用户 checkout 的平台表现不同，但其 Git tree相同。
 
 ### 3.2 `attached_checkout`：兼容模式
 
@@ -181,6 +197,10 @@ baseline。它不在用户目录中执行 `git init`。
 
 “不需要系统 Git CLI”不等于 Git 语义消失。正式产品必须随应用分发固定版本的 Git runtime；
 `managed_worktree` 不应静默 fallback 到 PATH 中任意版本的用户 Git。
+
+表中的 attached `operation diff / undo = 有限` 仅指：RuntimeEvent 仍可展示工具级审计信息，未来
+也可以单独增加“只验证 after-state、不自动 redo”的兼容层。它不表示当前 attached checkout
+拥有 accepted workspace version、Git 级 undo，或允许自动 reset/redo；本文 §20 的限制优先。
 
 ## 5. 目标组件与 owner
 
@@ -237,6 +257,13 @@ interface GitWorkspaceService {
 新 Git service 不应借此扩大权限：它仍不得修改用户 project bytes、branch、index 或 project refs。
 未来若把 marker 迁入 project catalog，应作为独立 identity migration PR 处理。
 
+Managed worktree 不得再次把 `.maka-workspace.json` 写入 versioned root。其
+`repositoryId/workspaceId/workspaceEpochId/workspaceInstanceId` 由 storage root 中的 owner record
+提供，并与 canonical workspace fact 交叉校验。这样 identity metadata 不会成为 candidate diff，
+也不需要用 Git ignore 规则把协议文件偷偷排除。旧 identity service 若只支持“在 cwd 写 marker”，
+ManagedWorkspaceOwner 在接线前必须增加显式的 external-marker mode；不能先写 marker、再让 diff
+policy 例外放行。
+
 当前 `createGitWorktreeChildExecutor` 证明了 linked worktree 的项目价值，但不能直接当作最终
 `GitWorkspaceService`：它调用 PATH 中的 `git`，继承大部分进程环境，并直接共享 source
 repository 的 common-dir。新服务应复用其 deterministic lease/adoption 经验，而不是直接扩大
@@ -274,47 +301,158 @@ Host owner 管理：
 它必须使用显式 `opening -> ready -> closing -> closed` 状态机。Desktop、CLI 与 runtime-host
 不能各自组装一套不同的 workspace authority。
 
-## 6. Canonical facts 与 projection
+## 6. Canonical identity、facts 与 projection
 
-### 6.1 `workspace_epoch_opened_v1`
+### 6.1 四层 workspace identity
 
-当 source repository、baseline、workspace mode 或 policy continuity 改变时开启新 epoch：
+```text
+repositoryId
+  Maka-owned Git object universe；决定哪些 commit/tree 属于同一个 artifact domain
+
+workspaceId
+  一个逻辑项目/history 容器；可以跨 epoch
+
+workspaceEpochId
+  一条 mode、policy、baseline 连续的线性 authority branch
+
+workspaceInstanceId
+  一个具体 materialized worktree；可销毁、重建，不是历史 identity
+```
+
+`workspace_heads` 必须以 `(workspaceId, workspaceEpochId)` 为 key。多个 Session 可以引用同一个
+repositoryId，但只有显式共享同一 epoch 时才共享 canonical head。路径不是任何一层的唯一
+identity；source repository 仍需绑定 canonical repository identity、Git common-dir identity 与
+Maka workspace marker。
+
+### 6.2 专用 workspace fact lane
+
+Workspace facts 使用专用、model-invisible envelope：
+
+```ts
+interface RuntimeEventWorkspaceFactEnvelope {
+  kind:
+    | 'workspace_epoch_opened'
+    | 'workspace_mutation_prepared'
+    | 'workspace_version_accepted'
+    | 'workspace_mutation_settled';
+  version: 1;
+  payload: unknown;
+}
+
+interface RuntimeEventActions {
+  workspaceFact?: RuntimeEventWorkspaceFactEnvelope;
+}
+```
+
+它必须拥有 exact semantic lane、strict decoder、dedicated atomic writer 与 schema capability gate。
+Generic append/batch/import、tool call/dispatch/outcome writer 均不能夹带 workspace fact。Read model
+对已知 fact 保持消息不可见；workspace consumer 遇到未知 kind/version 必须 hard park。Branch/copy
+在没有 typed rewrite 规则前必须拒绝包含 workspace authority 的 Session。Online、reopen、rebuild
+和 planner 对同一 immutable ledger 必须等价。
+
+### 6.3 `workspace_epoch_opened_v1` 与 baseline version
+
+Baseline 不是只有 commit/tree 的半个 head。打开 epoch 时，必须在同一个 SQLite transaction 中
+提交 epoch fact、无父节点的 baseline version fact 和 head projection：
 
 ```ts
 interface WorkspaceEpochOpenedV1 {
   protocol: 'workspace_epoch_opened_v1';
+  repositoryId: string;
   workspaceId: string;
   workspaceEpochId: string;
+  workspaceInstanceId: string;
+  initialWorkspaceVersionId: string;
   mode: 'managed_worktree' | 'attached_checkout' | 'shadow_repository';
-  repositoryIdentity: string;
   sourceCommitOid?: string;
   sourceTreeOid?: string;
-  baselineCommitOid?: string;
-  baselineTreeOid?: string;
+  materializationProfileDigest: string;
   policyHash: string;
   parentWorkspaceEpochId?: string;
 }
 ```
 
-repository identity 不能只信路径，应绑定 canonical repository identity、Git common-dir identity 与
-Maka workspace marker。路径变化只作为诊断。
+```text
+workspace_epoch_opened(E, initialVersion=V0)
++ workspace_version_accepted(V0, origin=baseline, parents=[])
++ workspace_heads[E] = V0
+```
 
-### 6.2 `workspace_mutation_prepared_v1`
+Epoch event id 与 version id 在 transaction 前预分配。Baseline accepted fact 的 origin 引用精确的
+epoch-opened event id，因此第一个 mutating operation 永远从一个 canonical workspace version
+开始。
+
+### 6.4 统一的 workspace version
+
+```ts
+type WorkspaceVersionOriginV1 =
+  | { kind: 'baseline'; epochOpenedEventId: string }
+  | {
+      kind: 'tool_mutation';
+      operationId: string;
+      preparedEventId: string;
+      outcomeEventId: string;
+    }
+  | {
+      kind: 'undo';
+      sourceWorkspaceVersionId: string;
+      authorizationEventId: string;
+    }
+  | { kind: 'rebaseline'; authorizationEventId: string }
+  | { kind: 'merge'; mergeOperationId: string };
+
+interface WorkspaceVersionParentV1 {
+  workspaceVersionId: string;
+  commitOid: string;
+}
+
+interface WorkspaceVersionAcceptedV1 {
+  protocol: 'workspace_version_accepted_v1';
+  repositoryId: string;
+  workspaceId: string;
+  workspaceEpochId: string;
+  workspaceVersionId: string;
+  parents: readonly WorkspaceVersionParentV1[];
+  origin: WorkspaceVersionOriginV1;
+  commitOid: string;
+  treeOid: string;
+  policyHash: string;
+  treeDeltaDigest: string;
+  changedFileCount: number;
+  deletedFileCount: number;
+}
+```
+
+Baseline/rebaseline 可以没有 authority parent；普通 mutation/undo 必须有一个当前 head parent；merge
+必须显式列出多个 parents。普通工具版本只能引用 identity 匹配的 prepared fact 与成功 outcome。
+Commit parent/tree、canonical tree delta 与 policy 必须重新验证。一个 proposed version 最多接受
+一次。
+
+### 6.5 `workspace_mutation_prepared_v1`：T1 冻结 candidate identity
 
 该事实与 tool call/dispatch 在同一个 T1 transaction 中提交：
 
 ```ts
 interface WorkspaceMutationPreparedV1 {
   protocol: 'workspace_mutation_prepared_v1';
+  repositoryId: string;
   workspaceId: string;
   workspaceEpochId: string;
-  workspaceMode: 'managed_worktree';
+  workspaceInstanceId: string;
+  workspaceMutationId: string;
+  proposedWorkspaceVersionId: string;
   operationId: string;
   callEventId: string;
   dispatchEventId: string;
   baseWorkspaceVersionId: string;
   baseCommitOid: string;
   baseTreeOid: string;
+  candidateRefName: string;
+  commitTimestampSeconds: number;
+  commitTimezone: '+0000';
+  declaredWriteScopeDigest: string;
+  expectedTreeOid?: string;
+  expectedTreeDeltaDigest?: string;
   policyHash: string;
   effect: 'managed_workspace_only';
   mutationContractId: string;
@@ -322,42 +460,50 @@ interface WorkspaceMutationPreparedV1 {
 }
 ```
 
-它必须是独立、model-invisible 的 RuntimeEvent lane，不能夹带进 call、dispatch 或普通
-`runtimeFact` generic writer。唯一 prepared writer 必须同时验证 tool execution identity、当前
-workspace head 与 policy。
+`workspaceMutationId`、proposed version、candidate ref、commit timestamp/timezone、author、committer
+与 message protocol 在 T1 时冻结。同一 prepared fact、base 和 tree 必须生成同一个 commit OID。
+Candidate ref 固定为 Maka-owned namespace，例如
+`refs/maka/candidates/<workspace-mutation-id>`；accepted retention ref 使用
+`refs/maka/accepted/<workspace-version-id>`。Ref transition 使用 Git ref transaction 或等价 CAS，
+startup repair必须收敛 candidate-only、accepted-only、两者并存与两者均缺失四种状态。
 
-### 6.3 `workspace_version_accepted_v1`
+### 6.6 No-op settlement
+
+No-op 不创建空 commit，也不推进 head，但 prepared operation 必须有 canonical terminal：
 
 ```ts
-interface WorkspaceVersionAcceptedV1 {
-  protocol: 'workspace_version_accepted_v1';
-  workspaceId: string;
-  workspaceEpochId: string;
-  workspaceVersionId: string;
-  parentWorkspaceVersionId: string;
+interface WorkspaceMutationSettledV1 {
+  protocol: 'workspace_mutation_settled_v1';
+  workspaceMutationId: string;
   operationId: string;
   preparedEventId: string;
   outcomeEventId: string;
-  parentCommitOid: string;
-  commitOid: string;
-  treeOid: string;
-  policyHash: string;
-  diffDigest: string;
-  changedFileCount: number;
-  deletedFileCount: number;
+  disposition: 'new_version' | 'no_change';
+  baseWorkspaceVersionId: string;
+  resultWorkspaceVersionId: string;
 }
 ```
 
-约束：
+`new_version` 的 result 指向同 transaction 接受的 proposed version；`no_change` 的 result 等于
+base version。Changed path → outcome + version accepted + settlement + head CAS；no-change → outcome
++ settlement，head 保持不变。两条路径都只有 dedicated writer。
 
-- 只能引用 identity 匹配的 prepared fact 与成功 outcome；
-- `parentCommitOid` 必须等于当前 canonical head；
-- commit 必须以 parent 为父提交，tree/diff/policy 必须重新验证；
-- 一个 operation 最多接受一个 workspace version；
-- outcome、accepted fact、`workspace_heads` CAS projection 在一个 SQLite transaction 中提交；
-- generic RuntimeEvent append、importer 和拆分 writer 都不能写这类保留事实。
+### 6.7 Canonical tree delta digest
 
-### 6.4 projection 不是第二事实源
+`treeDeltaDigest` 不 hash 人类可读 `git diff`。Canonical entry 按 raw path bytes 排序，并包含：
+
+```text
+old mode
+new mode
+old blob/tree oid
+new blob/tree oid
+change kind
+```
+
+Authority 层将 rename 表达为 delete + add；UI 可独立做 rename detection。摘要算法、Git object
+format 与 canonical encoding 都必须版本化。
+
+### 6.8 Projection 不是第二事实源
 
 建议增加可重建 projection：
 
@@ -387,16 +533,23 @@ sequenceDiagram
   Coord->>Coord: acquire mutation barrier
   Coord->>Store: read canonical head H
   Coord->>Git: verify managed worktree == H
-  Coord->>Store: atomic T1(call + dispatch + prepared@H)
+  Coord->>Git: derive expected tree/delta for deterministic contract
+  Coord->>Store: atomic T1(call + dispatch + prepared@H + candidate identity)
   Store-->>Coord: prepared event identity
   Coord->>Worker: execute in managed worktree
   Worker-->>Coord: production-shaped result
-  Coord->>Git: inspect diff + enforce policy
-  Coord->>Git: create candidate C(parent=H)
-  Coord->>Git: retain candidate under temporary ref
-  Coord->>Store: atomic T2 + accepted(C) + head CAS(H→C)
-  Store-->>Coord: accepted
-  Coord->>Git: repair HEAD/index/retention ref to C
+  Coord->>Git: actual tree == expected tree + enforce policy
+  alt tree changed
+    Coord->>Git: create deterministic candidate C(parent=H)
+    Coord->>Git: retain candidate under temporary ref
+    Coord->>Store: atomic T2 + accepted(C) + settlement + head CAS(H→C)
+    Store-->>Coord: accepted
+    Coord->>Git: repair HEAD/index/retention ref to C
+    Coord->>Git: verify worktree exactly ready at C
+  else no change
+    Coord->>Store: atomic T2 + no-change settlement
+    Store-->>Coord: settled at H
+  end
   Coord-->>Tool: durable tool outcome
   Tool-->>Provider: expose result
   Coord->>Coord: release barrier
@@ -406,10 +559,30 @@ sequenceDiagram
 
 - candidate ref 在 SQLite 接受前只能位于 candidate namespace；
 - candidate ref 存在不代表 accepted；
+- candidate commit 的 author/committer/message/timestamp 全部由 prepared fact 派生，重试不能产生
+  第二个合法 OID；
 - SQLite COMMIT 成功后，即使进程来不及同步 worktree metadata，重启也能从 canonical fact 修复；
 - provider 只能看到已经与 workspace version 一起 durable 的 outcome；
+- 下一次 provider/model step 前，worktree 必须精确等于 canonical accepted head，或者进入
+  `quarantined` 并禁止继续；
 - 不使用跨 SQLite/Git 的伪“分布式事务”。SQLite 决定接受，Git object/ref 通过可验证、幂等 repair
   收敛。
+
+正常、失败与修复共用以下状态机：
+
+| 状态 | Git worktree | candidate ref | RuntimeEvent | 下一步 |
+|---|---|---|---|---|
+| `head_verified` | 精确等于 H | 无 | 无新 prepared | 可 T1 |
+| `prepared` | 精确等于 H | 无 | prepared@H | 可执行 worker |
+| `dirty` | 未验证 | 无 | prepared@H | 只能 capture 或 quarantine |
+| `candidate_retained` | 等于 candidate tree | candidate | prepared@H | 可提交 T2 bundle |
+| `accepted_pending_repair` | 可能 dirty/metadata 旧 | candidate/accepted | accepted C | 只能 repair |
+| `ready` | 精确等于 C | accepted | accepted C | 可进入下一 model step |
+| `quarantined` | 未知或 contract violation | 可有 candidate | 无新 accepted version | 禁止工具与 resume |
+
+工具失败、取消、超时、policy rejection 或 unknown effect 后如果 worktree 产生 diff，不能留着继续：
+必须保存诊断后重建到 H，或进入 quarantine。外部 writer 即使只修改 declared scope 内同一路径，
+也必须被 expected-tree/receipt attribution 检出；mutation barrier 本身不是跨进程文件锁。
 
 ## 8. Crash matrix
 
@@ -423,6 +596,7 @@ sequenceDiagram
 | T2 transaction 中 | SQLite 全有或全无 | reopen/rebuild | 取决于最终 COMMIT |
 | T2 后、HEAD/ref 修复前 | accepted C | 从 fact 修复 worktree/ref 到 C | 是 |
 | T2 后、provider 收到前 | accepted C + outcome | replay durable outcome，不重做 mutation | 是 |
+| 任意阶段发现外部修改 managed worktree | canonical head 仍为 H/C，worktree 与其不一致 | 保存有界诊断，撤销执行资格并 quarantine；不得自动接受或覆盖外部 bytes | 否 |
 
 首批工具 PR 不应该为了“看起来能 resume”而自动接受 orphan candidate。只有单独的
 `managed_workspace_reconcile` contract 证明 candidate、result 与 operation 的绑定以后，才能增加：
@@ -435,6 +609,11 @@ prepared + verified candidate
 
 在此之前，prepared-only 一律 fail closed。这样正常事务与 crash recovery 的证明边界不会混进
 同一个 PR。
+
+Quarantine 不是 `reset --hard` 的别名。首版必须先把 worktree 从 active execution namespace 移出或
+标记为不可执行，并保留足够诊断让用户决定删除/导出；只有能证明该实例没有需要保留的用户写入，
+或用户显式确认丢弃以后，owner 才能从 accepted head 创建新的 `workspaceInstanceId`。外部修改不会
+反向成为 accepted version，也不能阻塞 source checkout。
 
 ## 9. Diff acceptance policy
 
@@ -487,12 +666,90 @@ Write/Edit/Rename/Delete 可以逐步证明为 `managed_workspace_only`。Bash �
 即使 Bash 在 managed worktree 中产生了可见 diff，也不能据此证明部署、网络、数据库或其他外部
 副作用没有发生。
 
+### 10.1 Mutation attribution contract
+
+“Maka-owned worktree”降低并发写入概率，但不构成因果证明。杀毒软件、watcher、后台进程、另一个
+host 或用户仍可能触碰路径。每个可自动接受的工具必须选择版本化 attribution contract：
+
+```text
+deterministic_expected_tree_v1
+  base tree + canonical args + transform version
+  → expected tree oid + expected tree delta digest
+
+worker_mutation_receipt_v1（后续）
+  worker 返回逐 path 的 before/after blob oid、mode 与 receipt digest
+  → candidate delta 必须逐项相等
+```
+
+Write/Edit/Rename/Delete 首版只采用 `deterministic_expected_tree_v1`。Expected tree 在 T1 前计算并
+写入 prepared fact；worker 后的实际 candidate 必须完全相等。Receipt 路线只有出现真实的非确定性
+workspace-only 工具消费者时再实现，不能作为宽松 fallback。
+
+所有能继续写 managed worktree 的 background process 都是 workspace writer，必须由同一个 owner
+登记。存在未收敛 writer 时，不得 capture、接受 candidate 或开始下一次 provider step。
+
+### 10.2 Materialization profile 与证明范围
+
+Git workspace continuity 只对 versioned root 作精确承诺。真实项目依赖的 `.env`、`node_modules`、
+`.venv`、SDK credentials、cache 与本地数据库不应偷偷进入 Git history：
+
+```ts
+interface WorkspaceMaterializationProfileV1 {
+  protocol: 'workspace_materialization_profile_v1';
+  versionedRoot: string;
+  readOnlyInputs: readonly ExternalInputMountV1[];
+  writableScratchRoots: readonly string[];
+  secretBindings: readonly SecretBindingRefV1[];
+  profileDigest: string;
+}
+```
+
+首个 Git Service PR 只 materialize versioned root，不创建 external inputs。Host owner 接线前必须
+定义 profile：read-only input/scratch/secret 都位于 versioned root 之外；对这些输入的 identity 或
+policy 变化参与 execution revalidation，但不伪装成 workspace version。任何 excluded root 的写入
+不得被 candidate 吸收。
+
+### 10.3 Ignored content 与真实工具链可用性
+
+Git tree 只描述 versioned root，真实开发任务还依赖 ignored/untracked 内容。这里不能用两个极端
+糊弄过去：既不能把 `.env`、credentials、`node_modules`、cache 全部提交进 history，也不能声称一个
+只有 tracked files 的空 worktree 已经能运行任意构建和测试。
+
+首版按下列目录角色明确分层：
+
+| 角色 | 示例 | 来源与生命周期 | 是否进入 candidate | 首版承诺 |
+|---|---|---|---|---|
+| versioned root | `src/`、tracked config | baseline Git tree | 是 | 强连续性 |
+| read-only external input | SDK、只读 fixture | host 显式 mount/bind | 否 | profile identity 变化即 revalidate/park |
+| secret binding | `.env` 中的 secret、token | credential service 注入 | 否 | 不写磁盘或写 versioned root 外受控路径 |
+| writable scratch | compiler cache、test tmp | Maka-owned epoch scratch | 否 | 可清理，不作为 workspace version |
+| dependency environment | `node_modules`、`.venv` | 后续受控 environment provisioner | 否 | M0 不提供 |
+| unmanaged ignored path | source checkout 中任意 ignored bytes | 不自动复制 | 否 | 拒绝依赖或写入 |
+
+因此 M0 的能力边界很明确：它证明 Git artifact 与 managed workspace 的创建、验证和隔离，不证明
+`npm install`、`pytest`、build watcher 或任意 Bash 能在 managed mode 中工作。第一个 Durable Write
+闭环只允许纯 versioned-root 文件 mutation。需要依赖安装、构建或测试的 Session 在
+`WorkspaceEnvironmentProvisioner` 出现真实生产实现之前继续使用 `attached_checkout`，且不获得强
+workspace resume 保证。
+
+后续若要在 managed mode 支持真实构建，必须单列 PR，先选择明确的生产消费者，再证明：
+
+1. provisioner 只写 epoch-owned dependency/scratch root，不污染 versioned root；
+2. Bash/测试进程的 cwd、mount、environment identity 被 durable profile 固定；
+3. 后台进程关闭或登记为 writer 后，workspace 才能进入 candidate capture；
+4. ignored output 不被误当成 candidate，也不会因“任何 ignored diff 都 park”导致正常任务永久不可用；
+5. external input/profile 变化会使 continuation revalidation park，而不是静默沿用旧环境。
+
+在这个 PR 合并前，文档与 UI 必须把 managed mode 标成“versioned-file mutation preview”，不能宣传
+为完整开发沙箱。`managed_worktree` 的强保证范围是 versioned root，不是整个操作系统环境。
+
 ## 11. Resume 如何绑定 workspace version
 
 Continuation boundary 后续增加：
 
 ```ts
 interface RuntimeWorkspaceBoundaryV1 {
+  repositoryId: string;
   workspaceId: string;
   workspaceEpochId: string;
   workspaceVersionId: string;
@@ -502,6 +759,39 @@ interface RuntimeWorkspaceBoundaryV1 {
 }
 ```
 
+已经发布的 `continuation_claim_v1` 与 `continuation_start_v2` 不原地扩字段。Workspace-bound resume
+使用新协议：
+
+```ts
+interface ContinuationClaimV2 {
+  protocol: 'continuation_claim_v2';
+  runtimeBoundary: RuntimeBoundaryCursorV1;
+  workspaceBoundary: RuntimeWorkspaceBoundaryV1;
+  providerProjectionVersion: number;
+  providerReplayDigest: string;
+  target: ContinuationTargetIdentity;
+}
+
+interface ContinuationStartV3 {
+  protocol: 'continuation_start_v3';
+  claimId: string;
+  runtimeBoundaryDigest: string;
+  workspaceBoundaryDigest: string;
+  workspaceEpochId: string;
+  workspaceVersionId: string;
+  commitOid: string;
+  treeOid: string;
+  policyHash: string;
+}
+```
+
+Provider admission receipt也必须绑定 workspace boundary digest。Claim/start SQLite transaction
+验证 runtime boundary、accepted workspace fact、`workspace_heads`、target identity 与唯一性；
+**不在 SQLite transaction 中运行 Git 子进程或文件系统验证**。Git object/tree 验证在 claim 前与
+provider-call T1 前各执行一次，artifact owner/retention guard 在两次验证之间禁止 GC。Start
+transaction 再次 CAS 当前 workspace head；验证失败只留下可审计 claim，不产生 provider-call T1。
+Claim-only crash repair由 V2 中的 workspace boundary决定 repair/park，不能回退到 V1 推断。
+
 Planning 与 execution revalidation 必须同时验证：
 
 1. immutable Runtime boundary 未变化；
@@ -510,7 +800,7 @@ Planning 与 execution revalidation 必须同时验证：
 4. canonical workspace head 仍等于 boundary version；
 5. accepted commit/tree 存在且可验证；
 6. managed worktree bytes/index/HEAD 可修复到 accepted tree；
-7. workspace epoch、repository identity 与 policy 未变化。
+7. workspace epoch、repository identity、materialization profile 与 policy 未变化。
 
 ```mermaid
 flowchart TD
@@ -573,9 +863,38 @@ canonical history。
 
 - 选择 accepted workspace version；
 - 生成 publish branch；
-- 用户选择保留 operation commits 或 squash；
+- 用户选择 replay operation sequence 或 squash；
 - push 到正式 `origin`；
 - 可选创建 MR/PR。
+
+Internal baseline 没有复制 source ancestry，因此 publish commit 不可能保留 internal OID。“保留
+operation commits”只能表示逐个 replay 逻辑序列，并记录映射：
+
+```ts
+interface WorkspacePublicationV1 {
+  publicationId: string;
+  sourceWorkspaceVersionIds: readonly string[];
+  internalCommitOids: readonly string[];
+  externalBaseCommitOid: string;
+  externalCommitOids: readonly string[];
+  mode: 'replayed_commits' | 'squash';
+}
+```
+
+### 12.5 Import Source Changes
+
+Epoch 打开后，用户 source checkout 的新 commits 不会自动进入 managed history。UI必须明确显示
+当前 imported source commit。同步只能通过显式 operation：
+
+```text
+记录上一次 source commit S0
+→ 观察用户选择的新 source commit S1
+→ 三方合并 S0 / managed H / S1
+→ candidate M + policy/conflict review
+→ 接受新 workspace version，或在语义变化时开启新 epoch
+```
+
+Source sync 不能用后台 `git pull` 修改 managed worktree，也不能悄悄重置 Agent history。
 
 ## 13. 远端 Git 的边界
 
@@ -612,7 +931,7 @@ canonical history。
 ```text
 maka-history
   每个 accepted operation commit 的备份与审计
-  默认 private，不触发 CI/deploy hooks
+  用户应配置为 private；Maka不主动创建CI/deploy配置
 
 origin
   用户正式项目仓库
@@ -620,8 +939,10 @@ origin
   正常 MR/PR/CI
 ```
 
-若共用一个 Git hosting project，也必须使用隔离 namespace 并探测 CI/hook 行为，不能假设自定义
-ref 永远不触发流水线。
+GitLab/GitHub/Gitea adapter可以尽力验证 private visibility 和部分 branch policy；generic SSH/bare
+remote 无法证明服务端没有 receive hook、mirror、CI 或管理员读取。首次绑定必须结构化确认这些
+限制。若共用一个 Git hosting project，也必须使用隔离 namespace 并探测 CI/hook 行为，不能假设
+自定义 ref 永远不触发流水线。
 
 ### 13.3 复制不是 acceptance
 
@@ -683,6 +1004,12 @@ History Remote 只有复制权，没有执行权，因此不需要 lease/fencing
 | process crash matrix | 必须 | 必须 | 不以 skip 反推支持 |
 | power-loss durability | 单独验证 | 单独验证 | 单独验证 |
 | worktree cleanup | owner + GC | owner + GC | 锁文件/杀毒占用专项测试 |
+
+V1 的发布承诺明确限定为 **process crash recovery**，不宣称断电级 durability。断电后 Git object、
+pack、ref 或 SQLite 文件缺失时必须 fail closed，但这不等于已证明 power-loss safety。只有后续固定
+并验证 `core.fsync`、`core.fsyncMethod`、object/pack/ref/directory fsync、SQLite同步等级和真实断电
+测试后，才能升级该承诺。文档中的“durable”在 V1 均指经过进程崩溃后可重开验证的 committed
+prefix。
 
 Git 能可靠表达 regular file bytes、目录结构、可执行位、symlink target 与 gitlink；它不保存完整
 ACL、xattr、owner/group、hard-link topology。若目标文件依赖这些语义，首版必须在 mutation 前
@@ -769,7 +1096,8 @@ packages/runtime/src/workspace-continuation-safety.ts
 - 原子边界：无生产写入。
 - 失败状态：未拍板的 mode 不进入代码。
 - 回滚：撤销 ADR，不影响 runtime。
-- 交付：本文定稿、稳定 error codes、平台能力矩阵、威胁模型。
+- 交付：本文定稿、四层 identity、Git-tree baseline semantics、attribution contract、状态机、稳定
+  error codes、平台能力矩阵与威胁模型。
 
 ### Git Workspace Service — Build the narrow artifact owner
 
@@ -779,16 +1107,20 @@ packages/runtime/src/workspace-continuation-safety.ts
 - 原子边界：单 repository allocation/lease；不写 RuntimeEvent。
 - 失败状态：`git_workspace_unavailable` / `repository_ineligible`，不 fallback 到 attached mode。
 - 回滚：服务无生产消费者，可完整移除。
-- 测试：bundled Git isolation、environment/config/hook/credential fence、adoption、crash residue、三平台矩阵。
+- 测试：bundled Git isolation、固定 materialization config、environment/config/hook/credential fence、
+  adoption、source bytes/branch/index/refs 不变、external marker、ignored content 不被导入、外部 drift
+  quarantine、crash residue、三平台矩阵。
 
 ### Workspace Version Authority — Add canonical facts and projection
 
-- 不变量：workspace epoch/head 只由保留 RuntimeEvent writer 推进；online/reopen/rebuild 同义。
+- 不变量：workspace epoch/version/head 只由专用 workspace fact writer 推进；baseline 与 mutation
+  使用同一 version chain；online/reopen/rebuild 同义。
 - owner：`packages/core` contracts + `packages/storage` SQLite authority。
 - 原子边界：workspace fact + head CAS projection 的 SQLite transaction。
 - 失败状态：malformed/duplicate/out-of-order/row-payload mismatch 全部 fail closed。
 - 回滚：schema capability gate；无工具消费者时可移除。
-- 测试：writer bypass、causal order、projection rebuild、concurrent head CAS、process crash。
+- 测试：baseline version、origin/parents、no-op settlement、writer bypass、causal order、projection
+  rebuild、concurrent head CAS、process crash。
 
 ### Managed Workspace Owner — Compose one production lifecycle
 
@@ -797,16 +1129,31 @@ packages/runtime/src/workspace-continuation-safety.ts
 - 原子边界：owner lease 与生命周期状态机。
 - 失败状态：owner conflict / partial initialization；不启动工具。
 - 回滚：设置中关闭 managed mode，attached mode 保持现状。
-- 测试：初始化失败、双 host、退出中 mutation、double close、startup repair order。
+- 测试：初始化失败、双 host、后台 writer、ready/quarantine gate、退出中 mutation、double close、
+  startup repair order、managed cwd 不写 `.maka-workspace.json`。
+
+### Baseline Open Bundle — Establish the first canonical head
+
+- 不变量：新 epoch 在一个 transaction 中同时拥有 epoch-opened fact、无父 baseline version 与
+  `workspace_heads`；不存在“只有 Git baseline、没有 canonical version”的状态。
+- owner：ManagedWorkspaceOwner + Workspace Version Authority。
+- 原子边界：Git baseline candidate/ref 先存在；SQLite epoch + baseline version + head projection
+  单事务接受；worktree metadata随后幂等repair。
+- 失败状态：pre-accept artifact 是 orphan；post-accept artifact 缺失是 corruption并fail closed。
+- 回滚：删除未接受的 internal repository；已接受 epoch 只能显式关闭/迁移。
+- 测试：source eligibility、fixed-config materialization、每个 Git/SQLite crash point、reopen/adopt、
+  baseline ref与fact错配、source不变。
 
 ### Durable Write Transaction — Prove one end-to-end mutating tool
 
-- 不变量：Write 的 provider-visible success 必须与一个以 canonical H 为父的 accepted commit 原子绑定。
+- 不变量：Write 的 provider-visible success 必须与 prepared fact 预分配、expected tree 证明且以
+  canonical H 为父的 accepted commit 原子绑定；no-op也必须 terminal settle。
 - owner：WorkspaceMutationCoordinator + filesystem worker。
 - 原子边界：T1 prepared；T2 outcome + accepted version + head CAS。
 - 失败状态：pre-T2 residue quarantine/park；post-T2 metadata 由 repair 收敛。
 - 回滚：只关闭 Write managed contract，不影响 fact authority/Git service。
-- 测试：先写 production-shaped crash harness，再接 Desktop/CLI；覆盖本文 crash matrix与外部 diff 注入。
+- 测试：先写 production-shaped crash harness，再接 Desktop/CLI；覆盖本文 crash matrix、同路径
+  外部写入、candidate deterministic OID/ref与no-op。
 
 ### Structured Mutation Expansion — Reuse the proven transaction
 
@@ -817,11 +1164,13 @@ packages/runtime/src/workspace-continuation-safety.ts
 - 回滚：按工具关闭 contract。
 - 测试：每个工具的原有返回契约、rename/delete policy、new-file attribution、cross-tool crash matrix。
 
-### Workspace-bound Resume — Gate continuation on accepted version
+### Workspace-bound Continuation Claim V2 — Gate provider admission on accepted version
 
-- 不变量：provider continuation 同时绑定 immutable Runtime boundary 与 accepted workspace boundary。
+- 不变量：`continuation_claim_v2`、`continuation_start_v3` 和 provider admission receipt 同时绑定
+  immutable Runtime boundary 与 accepted workspace boundary；不改变已发布 V1/V2语义。
 - owner：RuntimeContinuationPlanner + RuntimeKernel revalidation。
-- 原子边界：claim transaction 读取同一个 workspace head；provider-call T1 前再次验证。
+- 原子边界：claim/start SQLite transaction读取同一个 workspace head；Git artifact 在事务外、
+  retention guard内验证；provider-call T1 前再次验证。
 - 失败状态：workspace drift/artifact missing/policy change 稳定 park。
 - 回滚：managed mode只允许新 Session，不启用 resume；现有 continuation authority 保持。
 - 测试：A→B→C lineage + workspace version、claim/head race、post-T2 pre-provider crash。
@@ -835,11 +1184,12 @@ packages/runtime/src/workspace-continuation-safety.ts
 - 回滚：关闭 contract 后仍保留正常 mutation transaction。
 - 测试：candidate/ref corruption、orphan、effect mismatch、bundle crash 与 replay。
 
-### Audit, Undo and Explicit Publish — Expose versions without changing authority
+### Audit, Undo, Source Sync and Explicit Publish — Expose versions without changing authority
 
 - 不变量：UI/undo/publish 只能消费 accepted versions；undo 追加历史，publish 必须用户确认。
 - owner：Product service + GitWorkspaceService read/publish ports。
-- 原子边界：undo 是新 mutation；publish 是独立外部 operation。
+- 原子边界：undo/source sync 是新 mutation；publish 是独立外部 operation并记录internal/external
+  commit mapping。
 - 失败状态：publish failure 不改变 local accepted head。
 - 回滚：移除 UI/adapter，不影响 workspace history。
 
@@ -876,9 +1226,10 @@ flowchart TD
   ADR --> Facts["Workspace Version Authority"]
   GitService --> Owner["Managed Workspace Owner"]
   Facts --> Owner
-  Owner --> Write["Durable Write Transaction"]
+  Owner --> Baseline["Baseline Open Bundle"]
+  Baseline --> Write["Durable Write Transaction"]
   Write --> Structured["Edit / Rename / Delete"]
-  Write --> Resume["Workspace-bound Resume"]
+  Structured --> Resume["Workspace-bound Claim V2"]
   Structured --> Reconcile["Managed Mutation Reconciliation"]
   Resume --> Reconcile
   Structured --> Audit["Audit / Undo / Publish"]
@@ -891,15 +1242,36 @@ flowchart TD
 
 | 里程碑 | 包含 | 用户可见能力 |
 |---|---|---|
-| M0 地基 | ADR + Git Service + Facts + Owner | 可创建/验证 managed workspace；尚不接工具 |
+| M0 地基 | ADR + Git Service + Facts + Owner + Baseline Open Bundle | 新 epoch 一定拥有首个 canonical Git version；可创建/验证 managed workspace，尚不接工具 |
 | M1 单工具闭环 | Durable Write | Write 成功必有 accepted commit；crash fail closed |
-| M2 文件工具闭环 | Structured mutations + Resume + Reconcile | 文件型任务可绑定 workspace version 并安全继续 |
+| M2 文件工具闭环 | Structured mutations + Workspace-bound Claim V2 + Reconcile | 文件型任务可绑定 workspace version 并安全继续 |
 | M3 产品能力 | Audit/Undo/Publish | 查看、回退、发布 Agent 文件历史 |
 | M4 远端历史 | History Remote | 私有远端备份与灾备；不支持跨设备精确 resume |
 | M5 扩展 | Shadow + Multi-agent | 非 Git source 与显式多 Agent merge |
 
-Git Service 与 Workspace Version Authority可以并行，但第一个工具消费者必须等两者与 host owner
-都完成。History Remote 不阻塞本地 resume。
+Git Service 与 Workspace Version Authority 可以并行，但第一个工具消费者必须等 host owner 与
+Baseline Open Bundle 都完成。M0 只保证 versioned-file artifact，不包含 dependency environment；
+History Remote 不阻塞本地 resume。
+
+### 17.1 M0 完成定义
+
+M0 不是“接口都建好了”，而是下面五个平铺 PR 的不变量各自可独立证明并按顺序合并：ADR、Git
+Workspace Service、Workspace Version Authority、Managed Workspace Owner、Baseline Open Bundle。
+其 merge gate 是：
+
+1. 使用显式、校验过的 bundled Git；强模式不查 PATH、不继承 credential/hook/user config；
+2. source bytes、branch、index、refs 与 common-dir 在 open/adopt/crash 全矩阵中保持不变；
+3. managed instance 不包含 source ignored/untracked bytes，不在 versioned root 写 identity marker；
+4. baseline Git artifact 与无父 canonical workspace version 不会只成功一半；
+5. online/reopen/rebuild 得到相同 epoch/version/head，重复 open 只 adopt 同一 identity；
+6. 任意外部 worktree drift 在下一 model/tool step 前进入 `quarantined`；
+7. 每个 crash test 有超时与子进程清理，不能用 hang 表示 fail closed；
+8. Linux/macOS 是首批强证明平台；Windows 未通过独立矩阵时返回稳定 unsupported code；
+9. 没有 Durable Write 消费者以前，不改变现有 attached Session、Desktop cwd 或 resume 行为；
+10. M0 UI/文档不得宣称支持依赖安装、构建、测试或 Bash 的强 workspace resume。
+
+满足 M0 不等于 managed mode 可默认开启。M1 的 production-shaped Write crash test 与显式 opt-in
+是第一个用户可见 gate；完整开发任务还需独立的 environment provisioning 能力。
 
 ## 18. 每个实现 PR 的统一证明模板
 
@@ -979,21 +1351,32 @@ Feature flag 只能作为灰度门，不得改变 durable fact 的解释。一�
 `managed_worktree` 建立，关闭设置不能让同一 epoch 静默退回 attached execution；必须显式结束
 epoch 或创建新的 mode transition。
 
-### 21.2 仍需产品与工程共同决定
+### 21.2 已冻结的首版工程决策
 
-实现前还需要明确以下产品决策：
+1. eligible Git source 必须 clean，baseline 采用 `git_tree_materialized_with_fixed_config_v1`；
+2. managed worktree 由 workspace epoch 拥有，Session 只引用，实例可 quarantine 后重建；
+3. baseline 必须先进入统一 workspace version chain，不能只有 Git commit 没有 canonical fact；
+4. mutation 在 T1 前预分配 candidate/version identity、expected tree/delta 与 deterministic commit metadata；
+5. 新文件只接受本 operation 通过 deterministic expected-tree contract 归因的路径；
+6. source 的 ignored/untracked bytes 不自动导入；M0 只支持 versioned-file artifact，不承诺构建环境；
+7. managed cwd 的 identity marker 存在 storage root，不写入 versioned root；
+8. submodule、LFS/filter、sparse、`working-tree-encoding` 与不支持的 symlink 首版 fail closed；
+9. commit author/committer 使用固定 Maka service identity，不读取用户 identity；
+10. V1 只承诺 process-crash safety，不声称已经证明 power-loss durability；
+11. continuation 通过新 `continuation_claim_v2` / `continuation_start_v3` 绑定 workspace boundary；
+12. generic history remote 只复制 artifact，不能证明 remote 私有性、hook 行为或执行权威。
 
-1. eligible repository 首版是否严格要求 clean source checkout；本文建议“是”；
-2. managed worktree 生命周期按 workspace、Session 还是 task；本文建议 workspace epoch 拥有，
-   Session 引用；
-3. 新文件政策：只接受本 operation 可归因、通过 policy 的文件；
-4. ignored 路径：首版 mutation 直接拒绝；
-5. submodule/LFS/sparse：首版 fail closed，按真实需求逐项解锁；
-6. commit author：固定 Maka service identity，不读取用户 identity；
-7. internal refs namespace 与 retention grace period；
-8. managed mode 从 opt-in 到默认的灰度条件；
-9. history remote 是否只提供 `async/manual`；本文建议首版不做 `required`；
-10. Windows 何时从 limited support 升级为强保证平台。
+### 21.3 仍需产品与工程共同决定
+
+1. bundled Git 的最低版本、object format、发布 manifest、校验与升级策略；
+2. internal refs namespace、candidate/quarantine retention grace period 与磁盘配额；
+3. `WorkspaceEnvironmentProvisioner` 的首个真实消费者，以及 read-only input、dependency、scratch 与
+   secret binding 的最小 profile；
+4. quarantine 的 UI、诊断导出与用户确认删除流程；
+5. managed mode 从 opt-in 到默认的灰度与性能门槛；
+6. history remote 是否只提供 `async/manual`；本文建议首版不做 `required`；
+7. Windows 何时从 limited support 升级为强保证平台；
+8. power-loss durability 是否成为产品目标；若是，必须单列 fsync/Git/SQLite/platform crash 证明 PR。
 
 ## 22. 最终目标
 
