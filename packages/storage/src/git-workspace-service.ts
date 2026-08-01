@@ -190,6 +190,7 @@ export interface ManagedWorkspaceQuarantine {
 }
 
 export interface GitWorkspaceService {
+  assertAvailable(): Promise<void>;
   createManagedWorkspaceFromSource(
     input: CreateManagedWorkspaceFromSourceInput,
   ): Promise<ManagedWorkspaceBinding>;
@@ -295,6 +296,11 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       );
     }
     this.runtime = new VerifiedGitRuntime(input.gitRuntime);
+  }
+
+  async assertAvailable(): Promise<void> {
+    await this.runtime.verify();
+    await withArtifactWriterLock(this.input.storageRoot, async () => undefined);
   }
 
   async createManagedWorkspaceFromSource(
