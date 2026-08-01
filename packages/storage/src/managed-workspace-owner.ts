@@ -4,15 +4,21 @@ import {
   GitWorkspaceServiceError,
   type GitWorkspaceService,
   type GitWorkspaceServiceFailpoint,
+  type ManagedWorkspaceBaselineReceiptV1,
   type ManagedWorkspaceBinding,
   type VerifiedGitRuntimeInput,
 } from './git-workspace-service.js';
+import type { RuntimeWorkspaceVersionAuthorityStore, WorkspaceHeadRecordV1 } from '@maka/core';
 import {
   assertInteractiveRootOwner,
   authenticateInteractiveRootOwner,
   runWithStorageRootLease,
   type InteractiveRootOwner,
 } from './root-authority.js';
+import {
+  assertWorkspaceBaselineAuthorityStoreRootInternal,
+  commitWorkspaceBaselineInternal,
+} from './workspace-version-authority-internal.js';
 
 export type ManagedWorkspaceOwnerErrorCode =
   | 'managed_workspace_owner_conflict'
@@ -37,6 +43,17 @@ export interface OpenManagedWorkspaceOwnerInput {
   readonly failpoint?: (point: GitWorkspaceServiceFailpoint) => void | Promise<void>;
 }
 
+export interface OpenManagedWorkspaceBaselineInput extends CreateManagedWorkspaceFromSourceInput {
+  readonly policyHash: `sha256:${string}`;
+}
+
+export interface OpenManagedWorkspaceBaselineResult {
+  readonly created: boolean;
+  readonly binding: ManagedWorkspaceBinding;
+  readonly receipt: ManagedWorkspaceBaselineReceiptV1;
+  readonly head: WorkspaceHeadRecordV1;
+}
+
 export interface ManagedWorkspaceOwner {
   readonly state: 'ready' | 'closing' | 'closed';
   createManagedWorkspaceFromSource(
@@ -45,6 +62,10 @@ export interface ManagedWorkspaceOwner {
   openManagedWorkspaceFromBinding(
     binding: ManagedWorkspaceBinding,
   ): Promise<ManagedWorkspaceBinding>;
+  openManagedWorkspaceBaseline(
+    store: RuntimeWorkspaceVersionAuthorityStore,
+    input: OpenManagedWorkspaceBaselineInput,
+  ): Promise<OpenManagedWorkspaceBaselineResult>;
   close(): Promise<void>;
 }
 
@@ -139,6 +160,73 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
           { cause: error },
         );
       }
+    });
+  }
+
+  async openManagedWorkspaceBaseline(
+    store: RuntimeWorkspaceVersionAuthorityStore,
+    input: OpenManagedWorkspaceBaselineInput,
+  ): Promise<OpenManagedWorkspaceBaselineResult> {
+    return this.#run(async () => {
+      await assertWorkspaceBaselineAuthorityStoreRootInternal(
+        store,
+        this.rootOwner.capability.canonicalPath,
+      );
+      const existingHead = await store.readWorkspaceHead(input.workspaceId, input.workspaceEpochId);
+      const receipt = existingHead
+        ? await this.service.requireManagedWorkspaceBaselineReceipt(input, input.policyHash)
+        : undefined;
+      const binding = receipt
+        ? await this.#requireReady(
+            await this.service.openManagedWorkspaceFromBinding(receipt.binding),
+          )
+        : await this.#requireReady(await this.service.createManagedWorkspaceFromSource(input));
+      const durableReceipt =
+        receipt ??
+        (await this.service.openManagedWorkspaceBaselineReceipt(binding, input.policyHash));
+      if (
+        existingHead &&
+        (existingHead.workspaceVersionId !== durableReceipt.workspaceVersionId ||
+          existingHead.acceptedEventId !== durableReceipt.baselineAcceptedEventId ||
+          existingHead.commitOid !== binding.baselineCommitOid ||
+          existingHead.treeOid !== binding.baselineTreeOid)
+      ) {
+        throw new ManagedWorkspaceOwnerError(
+          'managed_workspace_owner_unavailable',
+          'Canonical workspace head does not match its durable Git baseline receipt',
+        );
+      }
+      const committed = await commitWorkspaceBaselineInternal(store, {
+        epochOpenedEventId: durableReceipt.epochOpenedEventId,
+        baselineAcceptedEventId: durableReceipt.baselineAcceptedEventId,
+        committedAt: durableReceipt.committedAt,
+        epoch: {
+          repositoryId: binding.repositoryId,
+          workspaceId: binding.workspaceId,
+          workspaceEpochId: binding.workspaceEpochId,
+          workspaceInstanceId: binding.workspaceInstanceId,
+          mode: 'managed_worktree',
+          objectFormat: binding.objectFormat,
+          sourceCommitOid: binding.sourceHeadCommitOid,
+          sourceTreeOid: binding.sourceTreeOid,
+          materializationProfileDigest: binding.materializationProfileDigest,
+          materializationSemantics: binding.materializationSemantics,
+          policyHash: durableReceipt.policyHash,
+        },
+        baseline: {
+          workspaceVersionId: durableReceipt.workspaceVersionId,
+          commitOid: binding.baselineCommitOid,
+          treeOid: binding.baselineTreeOid,
+          treeDeltaDigest: durableReceipt.treeDeltaDigest,
+          changedFileCount: durableReceipt.changedFileCount,
+          deletedFileCount: durableReceipt.deletedFileCount,
+        },
+      });
+      // Canonical acceptance never makes a missing Git artifact acceptable.
+      // Reverify after the SQLite transaction so post-accept artifact loss is
+      // reported fail-closed instead of returning a usable workspace head.
+      await this.service.verifyManagedWorkspaceBaselineReceipt(durableReceipt);
+      return { ...committed, binding, receipt: durableReceipt };
     });
   }
 

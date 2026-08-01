@@ -216,7 +216,7 @@ export class SqliteRuntimeStore
       assertRecoveryAuthorityCapability(this.db);
       assertContinuationAuthorityCapability(this.db);
       assertWorkspaceVersionAuthorityCapability(this.db);
-      if (!options.readOnly) this.registerWorkspaceBaselineAuthorityWriter();
+      if (!options.readOnly) this.registerWorkspaceBaselineAuthorityWriter(path);
       return;
     }
     const DatabaseSync = loadDatabaseSync();
@@ -239,7 +239,7 @@ export class SqliteRuntimeStore
       assertRecoveryAuthorityCapability(this.db);
       assertContinuationAuthorityCapability(this.db);
       assertWorkspaceVersionAuthorityCapability(this.db);
-      if (!options.readOnly) this.registerWorkspaceBaselineAuthorityWriter();
+      if (!options.readOnly) this.registerWorkspaceBaselineAuthorityWriter(path);
     } catch (error) {
       this.db.close();
       this.closed = true;
@@ -908,8 +908,8 @@ export class SqliteRuntimeStore
     });
   }
 
-  private registerWorkspaceBaselineAuthorityWriter(): void {
-    registerWorkspaceBaselineAuthorityWriterInternal(this, (input) =>
+  private registerWorkspaceBaselineAuthorityWriter(databasePath: string): void {
+    registerWorkspaceBaselineAuthorityWriterInternal(this, databasePath, (input) =>
       this.#commitWorkspaceBaseline(input),
     );
   }

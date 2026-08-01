@@ -31,6 +31,13 @@ if (process.env.MAKA_GIT_WORKSPACE_ACTION === 'quarantine') {
   await service.quarantineManagedWorkspace(binding, 'crash_convergence_test');
 }
 
+if (process.env.MAKA_GIT_WORKSPACE_ACTION === 'baseline-receipt') {
+  await service.openManagedWorkspaceBaselineReceipt(
+    binding,
+    requiredEnv('MAKA_GIT_WORKSPACE_POLICY_HASH') as `sha256:${string}`,
+  );
+}
+
 throw new Error('Git workspace crash child missed its failpoint');
 
 function requiredEnv(name: string): string {

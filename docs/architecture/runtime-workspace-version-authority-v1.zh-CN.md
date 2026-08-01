@@ -298,13 +298,13 @@ SQLite read transaction/snapshot；否则并发 writer 可能让读者拼接两�
 
 ## 11. 后续 M0 交付顺序
 
-### Slice 2：Managed Workspace Owner
+### Slice 2：Managed Workspace Owner（已完成）
 
 只证明：Maka 能用 bundled Git 创建并独占一个 private internal repository/worktree lifecycle；外部 drift
 被检测后 quarantine。需要先拍板 ignored dependencies/scratch、identity marker、fixed Git config、
 symlink/LFS/submodule/case/filemode 平台政策。
 
-### Slice 3：Baseline Open Bundle
+### Slice 3：Baseline Open Bundle（实现中）
 
 只证明：从 eligible clean source HEAD 导入 Maka-owned objects、materialize baseline、验证 tree/cleanliness，
 然后调用本切片的 atomic authority writer。Git artifact 在失败时可作为 orphan GC；只有 RuntimeEvent
@@ -312,6 +312,9 @@ symlink/LFS/submodule/case/filemode 平台政策。
 
 完成这两片以后，系统才拥有一个可供工具使用的 managed baseline。真正的 Durable Write 与
 workspace-version/T2 原子接受仍是下一组独立 PR，不能在 host 接线中顺手补入。
+
+Baseline Open 的详细 receipt 合同、组合 owner、crash matrix 与平台承诺见
+[`runtime-managed-workspace-baseline-open-v1.zh-CN.md`](./runtime-managed-workspace-baseline-open-v1.zh-CN.md)。
 
 ## 12. 当前验收记录
 

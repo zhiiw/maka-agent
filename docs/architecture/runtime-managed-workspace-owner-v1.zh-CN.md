@@ -1,6 +1,6 @@
 # Managed Workspace Owner v1：M0 生命周期门
 
-- 状态：实现中；Git Workspace Service 与 Workspace Version Authority 合并后平铺重建
+- 状态：实现完成；Git Workspace Service 与 Workspace Version Authority 合并后平铺重建
 - 更新日期：2026-08-02
 - 主要不变量：一个 authenticated interactive storage-root owner 在其生命周期内至多发布一个
   managed workspace owner；已经 admission 的 workspace 操作必须在关闭前 drain
@@ -64,8 +64,8 @@ owner 当前只开放两条 artifact lifecycle 操作：
 external drift 时，owner 使用同一 `GitWorkspaceService` 的 durable quarantine protocol 收敛；不能把
 `managed_workspace_drifted` 当成可用 cwd 交给工具。
 
-本切片不扫描目录来猜测 workspace identity。后续 Baseline Open Bundle 只能从 canonical workspace
-authority / durable receipt 得到要 reopen 的 exact binding；未接受 Git artifact 属于 orphan GC 范畴。
+本切片不扫描目录来猜测 workspace identity。Baseline Open Bundle 通过 Git artifact owner 的 durable
+receipt 与 canonical workspace authority 绑定 exact identity；未接受 Git artifact 属于 orphan GC 范畴。
 
 ## 5. Crash 与并发证明
 
@@ -94,7 +94,7 @@ reopen/repair，最后才允许 baseline authority read”的组合顺序。
 
 ## 7. 明确延期
 
-- Baseline receipt 与 atomic workspace authority commit；
+- Baseline receipt 与 atomic workspace authority commit（由下一独立切片交付）；
 - Desktop、CLI、runtime-host 接线与 managed-mode 设置；
 - filesystem worker、mutation coordinator 与工具 cwd 切换；
 - candidate refs、mutation repair、GC、replication outbox；

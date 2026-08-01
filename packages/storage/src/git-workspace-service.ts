@@ -22,6 +22,7 @@ const BINDING_SCHEMA_VERSION = 1;
 const REPOSITORY_SCHEMA_VERSION = 1;
 const EPOCH_ARTIFACT_SCHEMA_VERSION = 1;
 const QUARANTINE_INTENT_SCHEMA_VERSION = 1;
+const BASELINE_RECEIPT_SCHEMA_VERSION = 1;
 const IDENTIFIER_PATTERN = /^(repository|workspace|epoch|instance)_[a-f0-9]{32}$/u;
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const OID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
@@ -84,6 +85,19 @@ const QUARANTINE_INTENT_KEYS = [
   'binding',
 ] as const;
 const QUARANTINE_RECORD_KEYS = ['protocol', 'reason', 'binding'] as const;
+const BASELINE_RECEIPT_KEYS = [
+  'schemaVersion',
+  'protocol',
+  'binding',
+  'workspaceVersionId',
+  'policyHash',
+  'epochOpenedEventId',
+  'baselineAcceptedEventId',
+  'committedAt',
+  'treeDeltaDigest',
+  'changedFileCount',
+  'deletedFileCount',
+] as const;
 const MATERIALIZATION_SEMANTICS = 'git_tree_materialized_with_fixed_config_v1';
 const BASELINE_MESSAGE = 'maka managed workspace baseline v1\n';
 const BASELINE_DATE = '2000-01-01T00:00:00Z';
@@ -130,7 +144,8 @@ export type GitWorkspaceServiceFailpoint =
   | 'after_quarantine_unlock'
   | 'after_quarantine_move'
   | 'after_quarantine_binding_removed'
-  | 'after_quarantine_pruned';
+  | 'after_quarantine_pruned'
+  | 'after_baseline_receipt';
 
 export interface ManagedWorkspaceIdentity {
   /**
@@ -166,7 +181,7 @@ export interface ManagedWorkspaceBinding {
   readonly baselineTreeOid: string;
   readonly headRef: string;
   readonly gitRuntimeSha256: `sha256:${string}`;
-  readonly objectFormat: string;
+  readonly objectFormat: 'sha1' | 'sha256';
   readonly materializationProfileDigest: `sha256:${string}`;
   readonly materializationSemantics: typeof MATERIALIZATION_SEMANTICS;
 }
@@ -189,6 +204,20 @@ export interface ManagedWorkspaceQuarantine {
   readonly reason: string;
 }
 
+export interface ManagedWorkspaceBaselineReceiptV1 {
+  readonly schemaVersion: 1;
+  readonly protocol: 'maka_managed_workspace_baseline_receipt_v1';
+  readonly binding: ManagedWorkspaceBinding;
+  readonly workspaceVersionId: string;
+  readonly policyHash: `sha256:${string}`;
+  readonly epochOpenedEventId: string;
+  readonly baselineAcceptedEventId: string;
+  readonly committedAt: number;
+  readonly treeDeltaDigest: `sha256:${string}`;
+  readonly changedFileCount: number;
+  readonly deletedFileCount: 0;
+}
+
 export interface GitWorkspaceService {
   assertAvailable(): Promise<void>;
   createManagedWorkspaceFromSource(
@@ -202,6 +231,15 @@ export interface GitWorkspaceService {
     binding: ManagedWorkspaceBinding,
     reason: string,
   ): Promise<ManagedWorkspaceQuarantine>;
+  openManagedWorkspaceBaselineReceipt(
+    binding: ManagedWorkspaceBinding,
+    policyHash: `sha256:${string}`,
+  ): Promise<ManagedWorkspaceBaselineReceiptV1>;
+  requireManagedWorkspaceBaselineReceipt(
+    input: CreateManagedWorkspaceFromSourceInput,
+    policyHash: `sha256:${string}`,
+  ): Promise<ManagedWorkspaceBaselineReceiptV1>;
+  verifyManagedWorkspaceBaselineReceipt(receipt: ManagedWorkspaceBaselineReceiptV1): Promise<void>;
 }
 
 export function createGitWorkspaceService(
@@ -215,12 +253,19 @@ interface SourceRepositoryInspection {
   readonly gitCommonDir: string;
   readonly headCommitOid: string;
   readonly treeOid: string;
-  readonly objectFormat: string;
+  readonly objectFormat: 'sha1' | 'sha256';
 }
 
 interface GitTreeEntry {
   readonly mode: string;
+  readonly objectType: string;
+  readonly oid: string;
   readonly path: string;
+}
+
+interface BaselineTreeSummary {
+  readonly treeDeltaDigest: `sha256:${string}`;
+  readonly changedFileCount: number;
 }
 
 interface ManagedRepositoryRecord {
@@ -230,7 +275,7 @@ interface ManagedRepositoryRecord {
   readonly repositoryPath: string;
   readonly hooksPath: string;
   readonly gitRuntimeSha256: `sha256:${string}`;
-  readonly objectFormat: string;
+  readonly objectFormat: 'sha1' | 'sha256';
   readonly repositoryCapabilityDigest: `sha256:${string}`;
 }
 
@@ -249,7 +294,7 @@ interface ManagedWorkspaceEpochArtifact {
   readonly baselineRef: string;
   readonly headRef: string;
   readonly gitRuntimeSha256: `sha256:${string}`;
-  readonly objectFormat: string;
+  readonly objectFormat: 'sha1' | 'sha256';
   readonly materializationProfileDigest: `sha256:${string}`;
   readonly materializationSemantics: typeof MATERIALIZATION_SEMANTICS;
 }
@@ -279,6 +324,7 @@ interface WorkspaceLayout {
   readonly epochArtifactPath: string;
   readonly instanceRoot: string;
   readonly bindingPath: string;
+  readonly baselineReceiptPath: string;
   readonly worktreePath: string;
   readonly quarantineRoot: string;
   readonly quarantineIntentRoot: string;
@@ -490,6 +536,117 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
     });
   }
 
+  async openManagedWorkspaceBaselineReceipt(
+    binding: ManagedWorkspaceBinding,
+    policyHash: `sha256:${string}`,
+  ): Promise<ManagedWorkspaceBaselineReceiptV1> {
+    return this.createOrReuseManagedWorkspaceBaselineReceipt(binding, policyHash);
+  }
+
+  async requireManagedWorkspaceBaselineReceipt(
+    input: CreateManagedWorkspaceFromSourceInput,
+    policyHash: `sha256:${string}`,
+  ): Promise<ManagedWorkspaceBaselineReceiptV1> {
+    const runtime = await this.runtime.verify();
+    assertOpenIdentity(input);
+    if (!SHA256_PATTERN.test(policyHash)) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Managed workspace baseline policy hash is invalid',
+      );
+    }
+    return withArtifactWriterLock(this.input.storageRoot, async (canonicalStorageRoot) => {
+      const layout = workspaceLayout(canonicalStorageRoot, input);
+      const receipt = await readBaselineReceipt(layout.baselineReceiptPath);
+      if (!receipt) {
+        throw new GitWorkspaceServiceError(
+          'managed_workspace_unavailable',
+          'Canonical workspace baseline receipt is unavailable',
+        );
+      }
+      assertBindingMatches(receipt.binding, input, layout, runtime.digest);
+      const summary = await this.requireVerifiedBaselineContext(
+        receipt.binding,
+        layout,
+        runtime.digest,
+      );
+      assertBaselineReceiptMatches(receipt, receipt.binding, policyHash, summary);
+      return receipt;
+    });
+  }
+
+  private async createOrReuseManagedWorkspaceBaselineReceipt(
+    binding: ManagedWorkspaceBinding,
+    policyHash: `sha256:${string}`,
+  ): Promise<ManagedWorkspaceBaselineReceiptV1> {
+    const runtime = await this.runtime.verify();
+    assertBindingShape(binding);
+    assertOpenIdentity(binding);
+    if (!SHA256_PATTERN.test(policyHash)) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Managed workspace baseline policy hash is invalid',
+      );
+    }
+    return withArtifactWriterLock(this.input.storageRoot, async (canonicalStorageRoot) => {
+      const layout = workspaceLayout(canonicalStorageRoot, binding);
+      const summary = await this.requireVerifiedBaselineContext(binding, layout, runtime.digest);
+      const existing = await readBaselineReceipt(layout.baselineReceiptPath);
+      if (existing) {
+        assertBaselineReceiptMatches(existing, binding, policyHash, summary);
+        return existing;
+      }
+      const receipt: ManagedWorkspaceBaselineReceiptV1 = {
+        schemaVersion: BASELINE_RECEIPT_SCHEMA_VERSION,
+        protocol: 'maka_managed_workspace_baseline_receipt_v1',
+        binding,
+        workspaceVersionId: `version_${randomBytes(16).toString('hex')}`,
+        policyHash,
+        epochOpenedEventId: randomUUID(),
+        baselineAcceptedEventId: randomUUID(),
+        committedAt: Date.now(),
+        treeDeltaDigest: summary.treeDeltaDigest,
+        changedFileCount: summary.changedFileCount,
+        deletedFileCount: 0,
+      };
+      await atomicWriteJson(layout.baselineReceiptPath, receipt);
+      await this.input.failpoint?.('after_baseline_receipt');
+      const durable = await readBaselineReceipt(layout.baselineReceiptPath);
+      if (!durable) {
+        throw new GitWorkspaceServiceError(
+          'managed_workspace_unavailable',
+          'Managed workspace baseline receipt was not durable',
+        );
+      }
+      assertBaselineReceiptMatches(durable, binding, policyHash, summary);
+      return durable;
+    });
+  }
+
+  async verifyManagedWorkspaceBaselineReceipt(
+    receipt: ManagedWorkspaceBaselineReceiptV1,
+  ): Promise<void> {
+    const runtime = await this.runtime.verify();
+    assertBaselineReceiptShape(receipt);
+    assertOpenIdentity(receipt.binding);
+    await withArtifactWriterLock(this.input.storageRoot, async (canonicalStorageRoot) => {
+      const layout = workspaceLayout(canonicalStorageRoot, receipt.binding);
+      const summary = await this.requireVerifiedBaselineContext(
+        receipt.binding,
+        layout,
+        runtime.digest,
+      );
+      const durable = await readBaselineReceipt(layout.baselineReceiptPath);
+      if (!durable || !sameBaselineReceipt(durable, receipt)) {
+        throw new GitWorkspaceServiceError(
+          'managed_workspace_identity_conflict',
+          'Managed workspace baseline receipt does not match its durable artifact',
+        );
+      }
+      assertBaselineReceiptMatches(durable, receipt.binding, receipt.policyHash, summary);
+    });
+  }
+
   async quarantineManagedWorkspace(
     binding: ManagedWorkspaceBinding,
     reason: string,
@@ -532,6 +689,54 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       assertBindingEpoch(binding, epoch);
       return this.beginQuarantine(binding, layout, reason);
     });
+  }
+
+  private async requireVerifiedBaselineContext(
+    binding: ManagedWorkspaceBinding,
+    layout: WorkspaceLayout,
+    runtimeDigest: `sha256:${string}`,
+  ): Promise<BaselineTreeSummary> {
+    assertBindingPaths(binding, layout);
+    const quarantined = await this.resumePendingQuarantine(binding, layout, runtimeDigest);
+    if (quarantined) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_unavailable',
+        `Managed workspace instance was quarantined: ${binding.workspaceInstanceId}`,
+      );
+    }
+    const stored = await readBinding(layout.bindingPath);
+    if (!stored || !sameBinding(stored, binding)) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_unavailable',
+        `Managed workspace binding is unavailable: ${binding.workspaceInstanceId}`,
+      );
+    }
+    const repository = await this.requireRepository(binding, layout);
+    assertBindingRepository(binding, repository);
+    const epoch = await this.requireEpochArtifact(binding, repository, layout);
+    assertBindingEpoch(binding, epoch);
+    const inspection = await this.inspectBinding(binding, layout);
+    if (inspection.state !== 'ready') {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_drifted',
+        `Managed workspace contains unaccepted changes: ${binding.worktreePath}`,
+      );
+    }
+    return this.readBaselineTreeSummary(binding, layout);
+  }
+
+  private async readBaselineTreeSummary(
+    binding: ManagedWorkspaceBinding,
+    layout: WorkspaceLayout,
+  ): Promise<BaselineTreeSummary> {
+    const entries = parseTreeEntries(
+      await this.runtime.run(
+        ['--git-dir', binding.repositoryPath, 'ls-tree', '-r', '-z', binding.baselineCommitOid],
+        layout.homePath,
+      ),
+    );
+    assertSupportedTree(entries);
+    return baselineTreeSummary(entries);
   }
 
   private async inspectSourceRepository(sourceRoot: string): Promise<SourceRepositoryInspection> {
@@ -588,12 +793,19 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         this.runtime.run(['-C', sourceRoot, 'rev-parse', '--verify', 'HEAD^{tree}']),
         this.runtime.run(['-C', sourceRoot, 'rev-parse', '--show-object-format']),
       ]);
+      const normalizedObjectFormat = objectFormat.trim();
+      if (normalizedObjectFormat !== 'sha1' && normalizedObjectFormat !== 'sha256') {
+        throw new GitWorkspaceServiceError(
+          'repository_ineligible',
+          `Unsupported Git object format: ${normalizedObjectFormat}`,
+        );
+      }
       return {
         sourceRoot: normalize(sourceRoot),
         gitCommonDir: normalize(gitCommonDir),
         headCommitOid: headCommitOid.trim(),
         treeOid: treeOid.trim(),
-        objectFormat: objectFormat.trim(),
+        objectFormat: normalizedObjectFormat,
       };
     } catch (error) {
       if (error instanceof GitWorkspaceServiceError) throw error;
@@ -1563,6 +1775,7 @@ function workspaceLayout(
     epochArtifactPath: join(epochRoot, 'epoch.json'),
     instanceRoot,
     bindingPath: join(instanceRoot, 'binding.json'),
+    baselineReceiptPath: join(instanceRoot, 'baseline-receipt.json'),
     worktreePath: join(instanceRoot, 'worktree'),
     quarantineRoot: join(managedRoot, 'quarantine'),
     quarantineIntentRoot,
@@ -1721,6 +1934,15 @@ async function readBinding(path: string): Promise<ManagedWorkspaceBinding | unde
   const value = await readJson(path);
   if (value === undefined) return undefined;
   assertBindingShape(value);
+  return value;
+}
+
+async function readBaselineReceipt(
+  path: string,
+): Promise<ManagedWorkspaceBaselineReceiptV1 | undefined> {
+  const value = await readJson(path);
+  if (value === undefined) return undefined;
+  assertBaselineReceiptShape(value);
   return value;
 }
 
@@ -1883,6 +2105,65 @@ function isBinding(value: unknown): value is ManagedWorkspaceBinding {
   );
 }
 
+function assertBaselineReceiptShape(
+  value: unknown,
+): asserts value is ManagedWorkspaceBaselineReceiptV1 {
+  if (!isBaselineReceipt(value)) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Invalid managed workspace baseline receipt',
+    );
+  }
+}
+
+function isBaselineReceipt(value: unknown): value is ManagedWorkspaceBaselineReceiptV1 {
+  if (!isRecord(value)) return false;
+  return (
+    hasExactKeys(value, BASELINE_RECEIPT_KEYS) &&
+    value.schemaVersion === BASELINE_RECEIPT_SCHEMA_VERSION &&
+    value.protocol === 'maka_managed_workspace_baseline_receipt_v1' &&
+    isBinding(value.binding) &&
+    typeof value.workspaceVersionId === 'string' &&
+    /^version_[a-f0-9]{32}$/u.test(value.workspaceVersionId) &&
+    typeof value.policyHash === 'string' &&
+    SHA256_PATTERN.test(value.policyHash) &&
+    typeof value.epochOpenedEventId === 'string' &&
+    /^[A-Za-z0-9_-]{1,128}$/u.test(value.epochOpenedEventId) &&
+    typeof value.baselineAcceptedEventId === 'string' &&
+    /^[A-Za-z0-9_-]{1,128}$/u.test(value.baselineAcceptedEventId) &&
+    value.epochOpenedEventId !== value.baselineAcceptedEventId &&
+    typeof value.committedAt === 'number' &&
+    Number.isSafeInteger(value.committedAt) &&
+    value.committedAt >= 0 &&
+    typeof value.treeDeltaDigest === 'string' &&
+    SHA256_PATTERN.test(value.treeDeltaDigest) &&
+    typeof value.changedFileCount === 'number' &&
+    Number.isSafeInteger(value.changedFileCount) &&
+    value.changedFileCount >= 0 &&
+    value.deletedFileCount === 0
+  );
+}
+
+function assertBaselineReceiptMatches(
+  receipt: ManagedWorkspaceBaselineReceiptV1,
+  binding: ManagedWorkspaceBinding,
+  policyHash: `sha256:${string}`,
+  summary: BaselineTreeSummary,
+): void {
+  if (
+    !sameBinding(receipt.binding, binding) ||
+    receipt.policyHash !== policyHash ||
+    receipt.treeDeltaDigest !== summary.treeDeltaDigest ||
+    receipt.changedFileCount !== summary.changedFileCount ||
+    receipt.deletedFileCount !== 0
+  ) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Managed workspace baseline receipt does not match its verified Git boundary',
+    );
+  }
+}
+
 function isRepositoryRecord(value: unknown): value is ManagedRepositoryRecord {
   if (!isRecord(value)) return false;
   return (
@@ -1976,6 +2257,13 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
 }
 
 function sameBinding(left: ManagedWorkspaceBinding, right: ManagedWorkspaceBinding): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function sameBaselineReceipt(
+  left: ManagedWorkspaceBaselineReceiptV1,
+  right: ManagedWorkspaceBaselineReceiptV1,
+): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
@@ -2256,21 +2544,37 @@ function parseTreeEntries(output: string): GitTreeEntry[] {
       const tab = record.indexOf('\t');
       const metadata = tab >= 0 ? record.slice(0, tab) : '';
       const path = tab >= 0 ? record.slice(tab + 1) : '';
-      const mode = metadata.split(' ', 1)[0] ?? '';
-      if (!mode || !path) {
+      const [mode = '', objectType = '', oid = ''] = metadata.split(' ');
+      if (!mode || !objectType || !OID_PATTERN.test(oid) || !path) {
         throw new GitWorkspaceServiceError(
           'repository_ineligible',
           'Git source tree contains an unreadable entry',
         );
       }
-      return { mode, path };
+      return { mode, objectType, oid, path };
     });
+}
+
+function baselineTreeSummary(entries: readonly GitTreeEntry[]): BaselineTreeSummary {
+  const manifest = JSON.stringify({
+    protocol: 'maka_git_empty_tree_delta_v1',
+    entries: entries.map(({ mode, objectType, oid, path }) => ({
+      mode,
+      objectType,
+      oid,
+      path,
+    })),
+  });
+  return {
+    treeDeltaDigest: `sha256:${createHash('sha256').update(manifest).digest('hex')}`,
+    changedFileCount: entries.length,
+  };
 }
 
 function assertSupportedTree(entries: readonly GitTreeEntry[]): void {
   const caseFolded = new Set<string>();
   for (const entry of entries) {
-    if (entry.mode !== '100644' && entry.mode !== '100755') {
+    if ((entry.mode !== '100644' && entry.mode !== '100755') || entry.objectType !== 'blob') {
       throw new GitWorkspaceServiceError(
         'repository_ineligible',
         'Symlinks, submodules, and special Git modes are not supported by managed workspace v1',
