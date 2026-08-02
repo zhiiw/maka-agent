@@ -25,6 +25,7 @@ import {
   type GitWorkspaceService,
   type ManagedWorkspaceBinding,
 } from '../git-workspace-service.js';
+import * as publicStorage from '../index.js';
 
 const execFileAsync = promisify(execFile);
 const cleanup: string[] = [];
@@ -41,6 +42,10 @@ afterEach(async () => {
 });
 
 describe('Git workspace service', () => {
+  test('keeps the artifact factory package-internal until canonical admission exists', () => {
+    assert.equal('createGitWorkspaceService' in publicStorage, false);
+  });
+
   test('fails before creating storage when the explicit Git artifact digest is wrong', async () => {
     const root = await temporaryRoot();
     const storageRoot = join(root, 'storage');
