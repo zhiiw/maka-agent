@@ -1,6 +1,8 @@
 import type { WorkspaceBaselineAuthorityInput, WorkspaceBaselineCommitResult } from '@maka/core';
+import { lstatSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
-import { dirname, normalize, resolve } from 'node:path';
+import { basename, dirname, join, normalize, resolve } from 'node:path';
+import { OPERATIONAL_STATE_DATABASE_NAME } from './operational-state-store.js';
 
 type WorkspaceBaselineAuthorityWriter = (
   input: WorkspaceBaselineAuthorityInput,
@@ -9,6 +11,7 @@ type WorkspaceBaselineAuthorityWriter = (
 interface WorkspaceBaselineAuthorityRegistration {
   readonly writer: WorkspaceBaselineAuthorityWriter;
   readonly databasePath: string;
+  readonly databaseFileIdentity?: string;
 }
 
 const workspaceBaselineAuthorityWriters = new WeakMap<
@@ -24,7 +27,12 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   if (workspaceBaselineAuthorityWriters.has(store)) {
     throw new Error('Workspace baseline authority writer is already registered');
   }
-  workspaceBaselineAuthorityWriters.set(store, { writer, databasePath: resolve(databasePath) });
+  const resolvedDatabasePath = resolve(databasePath);
+  workspaceBaselineAuthorityWriters.set(store, {
+    writer,
+    databasePath: resolvedDatabasePath,
+    databaseFileIdentity: captureRegularFileIdentity(resolvedDatabasePath),
+  });
 }
 
 /**
@@ -47,21 +55,55 @@ export async function assertWorkspaceBaselineAuthorityStoreRootInternal(
   storageRoot: string,
 ): Promise<void> {
   const registration = workspaceBaselineAuthorityWriters.get(store);
-  if (!registration || registration.databasePath === resolve(':memory:')) {
+  if (
+    !registration ||
+    !registration.databaseFileIdentity ||
+    basename(registration.databasePath) !== OPERATIONAL_STATE_DATABASE_NAME
+  ) {
     throw new Error('Workspace baseline authority store is unavailable for this storage root');
   }
-  const [databaseRoot, expectedRoot] = await Promise.all([
-    realpath(dirname(registration.databasePath)),
-    realpath(storageRoot),
-  ]);
-  const canonicalDatabaseRoot = normalize(databaseRoot);
+  const expectedDatabasePath = join(storageRoot, OPERATIONAL_STATE_DATABASE_NAME);
+  const currentIdentity = captureRegularFileIdentity(registration.databasePath);
+  if (currentIdentity !== registration.databaseFileIdentity) {
+    throw new Error('Workspace baseline authority database file identity changed');
+  }
+  let databasePath: string;
+  let expectedPath: string;
+  let expectedRoot: string;
+  try {
+    [databasePath, expectedPath, expectedRoot] = await Promise.all([
+      realpath(registration.databasePath),
+      realpath(expectedDatabasePath),
+      realpath(storageRoot),
+    ]);
+  } catch (error) {
+    throw new Error('Workspace baseline authority store belongs to a different storage root', {
+      cause: error,
+    });
+  }
+  const canonicalDatabasePath = normalize(databasePath);
+  const canonicalExpectedPath = normalize(expectedPath);
   const canonicalExpectedRoot = normalize(expectedRoot);
-  const matches =
-    process.platform === 'win32'
-      ? canonicalDatabaseRoot.toLocaleLowerCase('en-US') ===
-        canonicalExpectedRoot.toLocaleLowerCase('en-US')
-      : canonicalDatabaseRoot === canonicalExpectedRoot;
-  if (!matches) {
+  if (
+    !sameFilesystemPath(canonicalDatabasePath, canonicalExpectedPath) ||
+    !sameFilesystemPath(dirname(canonicalDatabasePath), canonicalExpectedRoot)
+  ) {
     throw new Error('Workspace baseline authority store belongs to a different storage root');
   }
+}
+
+function captureRegularFileIdentity(path: string): string | undefined {
+  try {
+    const info = lstatSync(path, { bigint: true });
+    if (!info.isFile() || info.isSymbolicLink()) return undefined;
+    return `${info.dev}:${info.ino}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function sameFilesystemPath(left: string, right: string): boolean {
+  return process.platform === 'win32'
+    ? left.toLocaleLowerCase('en-US') === right.toLocaleLowerCase('en-US')
+    : left === right;
 }

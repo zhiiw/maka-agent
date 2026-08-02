@@ -8,6 +8,10 @@ import {
   type ManagedWorkspaceBinding,
   type VerifiedGitRuntimeInput,
 } from './git-workspace-service.js';
+import {
+  requireManagedBaselineReceiptAuthorityInternal,
+  type ManagedBaselineReceiptAuthorityInternal,
+} from './managed-baseline-receipt-authority-internal.js';
 import type { RuntimeWorkspaceVersionAuthorityStore, WorkspaceHeadRecordV1 } from '@maka/core';
 import {
   assertInteractiveRootOwner,
@@ -40,12 +44,14 @@ export class ManagedWorkspaceOwnerError extends Error {
 export interface OpenManagedWorkspaceOwnerInput {
   readonly rootOwner: InteractiveRootOwner;
   readonly gitRuntime: VerifiedGitRuntimeInput;
-  readonly failpoint?: (point: GitWorkspaceServiceFailpoint) => void | Promise<void>;
+  readonly failpoint?: (point: ManagedWorkspaceOwnerFailpoint) => void | Promise<void>;
 }
 
-export interface OpenManagedWorkspaceBaselineInput extends CreateManagedWorkspaceFromSourceInput {
-  readonly policyHash: `sha256:${string}`;
-}
+export type ManagedWorkspaceOwnerFailpoint =
+  | GitWorkspaceServiceFailpoint
+  | 'after_baseline_authority_commit';
+
+export type OpenManagedWorkspaceBaselineInput = CreateManagedWorkspaceFromSourceInput;
 
 export interface OpenManagedWorkspaceBaselineResult {
   readonly created: boolean;
@@ -98,7 +104,12 @@ export async function openManagedWorkspaceOwner(
     // flight. Revalidate after the lease-bound operation so a stale lifecycle
     // owner is never published as ready.
     await assertInteractiveRootOwner(rootOwner);
-    const owner = new ManagedWorkspaceOwnerImpl(rootOwner, service);
+    const owner = new ManagedWorkspaceOwnerImpl(
+      rootOwner,
+      service,
+      requireManagedBaselineReceiptAuthorityInternal(service),
+      input.failpoint,
+    );
     owners.set(rootOwner, owner);
     return owner;
   } catch (error) {
@@ -121,6 +132,8 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
   constructor(
     private readonly rootOwner: InteractiveRootOwner,
     private readonly service: GitWorkspaceService,
+    private readonly receiptAuthority: ManagedBaselineReceiptAuthorityInternal,
+    private readonly failpoint?: (point: ManagedWorkspaceOwnerFailpoint) => void | Promise<void>,
   ) {}
 
   get state(): 'ready' | 'closing' | 'closed' {
@@ -173,17 +186,13 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         this.rootOwner.capability.canonicalPath,
       );
       const existingHead = await store.readWorkspaceHead(input.workspaceId, input.workspaceEpochId);
-      const receipt = existingHead
-        ? await this.service.requireManagedWorkspaceBaselineReceipt(input, input.policyHash)
-        : undefined;
+      const receipt = existingHead ? await this.receiptAuthority.require(input) : undefined;
       const binding = receipt
         ? await this.#requireReady(
             await this.service.openManagedWorkspaceFromBinding(receipt.binding),
           )
         : await this.#requireReady(await this.service.createManagedWorkspaceFromSource(input));
-      const durableReceipt =
-        receipt ??
-        (await this.service.openManagedWorkspaceBaselineReceipt(binding, input.policyHash));
+      const durableReceipt = receipt ?? (await this.receiptAuthority.issue(binding));
       if (
         existingHead &&
         (existingHead.workspaceVersionId !== durableReceipt.workspaceVersionId ||
@@ -222,10 +231,11 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
           deletedFileCount: durableReceipt.deletedFileCount,
         },
       });
+      await this.failpoint?.('after_baseline_authority_commit');
       // Canonical acceptance never makes a missing Git artifact acceptable.
       // Reverify after the SQLite transaction so post-accept artifact loss is
       // reported fail-closed instead of returning a usable workspace head.
-      await this.service.verifyManagedWorkspaceBaselineReceipt(durableReceipt);
+      await this.receiptAuthority.verify(durableReceipt);
       return { ...committed, binding, receipt: durableReceipt };
     });
   }

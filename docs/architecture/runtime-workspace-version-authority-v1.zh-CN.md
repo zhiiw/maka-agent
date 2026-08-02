@@ -1,7 +1,8 @@
 # Workspace Version Authority v1：Baseline 事实权威
 
-- 状态：Draft foundation；在 durable verified baseline receipt 接入前不得标记 Ready
-- 更新日期：2026-08-01
+- 状态：authority foundation 已由 M0 Baseline Open Bundle 接入；仍待前置 PR 合并后从最新 `main`
+  平铺并完成最终 CI
+- 更新日期：2026-08-02
 - 主要不变量：经专用 writer 提交的一个 workspace epoch，其 baseline canonical facts 与三个 SQLite projection 对外只能全可见或全不可见
 - 事实权威：immutable RuntimeEvents
 - artifact owner：后续 `GitWorkspaceService`；本切片不执行 Git 命令
@@ -31,20 +32,18 @@ projection，公开 reader 会 fail closed，直到显式 rebuild；这种损坏
 本切片只接受 baseline，不接受 mutation。它不创建 internal repository、不创建 worktree、不调用工具，
 也不改变 Desktop/CLI 行为。这种收缩是刻意的：一个 PR 只证明一个主要不变量。
 
-当前分支只证明事实合同、SQLite 原子写入与 projection 可重建性，**尚未证明 supplied Git object
-真实存在**。因此 raw baseline writer 已从 `@maka/core` store contract 与 `@maka/storage` package API
-移除，只保留为 storage 内部 symbol seam，供本切片的 persistence/crash tests 使用；本 PR 也不能独立
-合并为可用的“accepted workspace”能力。Ready 的硬门槛是后续 Baseline Open slice 提供一份由
-`GitWorkspaceService` 持久化、可重读、可重新验证的 receipt，并让唯一 composition owner 在验证
-receipt 后调用未来的 `commitVerifiedWorkspaceBaseline(receipt)`。裸 OID、TypeScript brand 或 caller
-自报的 `verified: true` 都不能跨过该门槛。
+authority slice 本身只证明事实合同、SQLite 原子写入与 projection 可重建性；M0 Baseline Open Bundle
+在其上增加了生产 composition seam：`ManagedWorkspaceOwner` 持有未导出的 Git receipt capability，
+先持久化并复验 exact receipt，再调用 storage-internal raw writer，SQLite COMMIT 后还会再次复验 Git
+artifact。裸 OID、TypeScript brand、caller 自报的 `verified: true` 或 caller 提供的 policy hash 都不
+构成证据。
 
 ## 2. Owner、边界、失败状态与回滚
 
 | 项目 | 决策 |
 |---|---|
 | 协议 owner | `@maka/core` 的 strict fact contract 与 pure scanner |
-| 写入 owner | storage 内部 `WORKSPACE_BASELINE_AUTHORITY_COMMIT` symbol；不属于 package API |
+| 写入 owner | storage-internal WeakMap writer；不属于 package API，只能由 `ManagedWorkspaceOwner` composition seam 到达 |
 | 原子性边界 | 单个 `BEGIN IMMEDIATE ... COMMIT` SQLite transaction |
 | canonical source | store-owned authority stream 中的两条 immutable RuntimeEvents |
 | disposable state | `runtime_workspace_epochs`、`runtime_workspace_versions`、`runtime_workspace_heads` |
@@ -174,28 +173,30 @@ Writer reservation 同时覆盖：
 
 storage 内部 writer 接受 typed baseline input，由 store 自己构造 RuntimeEvents。它不接受 caller 拼好的
 event，因此 caller 没有机会夹带另一条 semantic lane。该 seam 所在模块不从 `@maka/storage` 导出；
-公开 store 只暴露 capability、reader 与 projection rebuild。未来唯一的生产入口必须接收并重新验证
-durable Git receipt，而不是把这条 raw seam 重新公开。
+公开 store 只暴露 capability、reader 与 projection rebuild。当前唯一生产入口由
+`ManagedWorkspaceOwner` 重新验证 durable Git receipt 后调用 raw seam；receipt issuer 与 raw writer
+都不进入 package root exports。
 
 ## 6. Baseline Open Bundle 时序
 
 ```mermaid
 sequenceDiagram
-  participant G as GitWorkspaceService（后续切片）
+  participant G as GitWorkspaceService
+  participant O as ManagedWorkspaceOwner
   participant S as SqliteRuntimeStore
   participant E as immutable RuntimeEvents
   participant P as workspace projections
 
   G->>G: 验证 source repository、commit/tree、fixed materialization profile
   G->>G: 导入并验证 internal baseline commit/tree
-  G->>S: commitVerifiedWorkspaceBaseline(durable receipt)
-  S->>S: re-read and verify receipt, derive frozen identity
+  G->>O: verified durable receipt (internal capability)
+  O->>S: commitWorkspaceBaselineInternal(receipt-derived input)
   S->>S: BEGIN IMMEDIATE
   S->>S: 扫描全部 canonical workspace facts
   alt exact bundle 已存在
-    S-->>G: created=false
+    S-->>O: created=false
   else identity 或 payload 冲突
-    S-->>G: fail closed / rollback
+    S-->>O: fail closed / rollback
   else authority 为空
     S->>E: append epoch event (seq=1)
     S->>E: append baseline event (seq=2)
@@ -203,14 +204,13 @@ sequenceDiagram
     S->>P: insert version
     S->>P: set head=baseline
     S->>S: COMMIT
-    S-->>G: created=true
+    S-->>O: created=true
   end
 ```
 
-Git 验证与 tree-delta 计算故意不放进 SQLite transaction。后续 Baseline Open Bundle 负责在调用
-writer 前读取并重新验证 durable receipt；SQLite writer 负责冻结已验证 identity，并保证
-facts/projections 原子提交。在该 composition 存在前，当前 typed input 只存在于 storage 内部 test seam，
-不能成为 Desktop、CLI、tool 或自动恢复的生产入口。
+Git 验证与 tree-delta 计算故意不放进 SQLite transaction。Baseline Open Bundle 在调用 writer 前读取
+并重新验证 durable receipt，COMMIT 后再次复验；SQLite writer 负责冻结已验证 identity，并保证
+facts/projections 原子提交。该 composition 仍未接 Desktop、CLI、tool 或自动恢复入口。
 `treeDeltaDigest` 必须是 canonical empty-tree → baseline-tree delta 的摘要，不能由 caller 随意填写。
 
 ## 7. Schema 7 与 projection

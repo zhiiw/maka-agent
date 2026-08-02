@@ -14,6 +14,7 @@ import {
 import { dirname, isAbsolute, join, normalize, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { withArtifactWriterLock } from './artifact-writer-lock.js';
+import { registerManagedBaselineReceiptAuthorityInternal } from './managed-baseline-receipt-authority-internal.js';
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 2 * 60 * 1_000;
@@ -90,6 +91,7 @@ const BASELINE_RECEIPT_KEYS = [
   'protocol',
   'binding',
   'workspaceVersionId',
+  'policyVersion',
   'policyHash',
   'epochOpenedEventId',
   'baselineAcceptedEventId',
@@ -99,6 +101,19 @@ const BASELINE_RECEIPT_KEYS = [
   'deletedFileCount',
 ] as const;
 const MATERIALIZATION_SEMANTICS = 'git_tree_materialized_with_fixed_config_v1';
+const MANAGED_BASELINE_POLICY_V1 = {
+  protocol: 'maka_managed_workspace_baseline_policy_v1',
+  source: 'source_head_tree',
+  trackedFiles: 'include',
+  untrackedFiles: 'exclude',
+  ignoredFiles: 'exclude',
+  symlinks: 'reject',
+  submodules: 'reject',
+  attributes: 'reject',
+  specialModes: 'reject',
+  materialization: MATERIALIZATION_SEMANTICS,
+} as const;
+const MANAGED_BASELINE_POLICY_HASH_V1 = hashCanonicalJson(MANAGED_BASELINE_POLICY_V1);
 const BASELINE_MESSAGE = 'maka managed workspace baseline v1\n';
 const BASELINE_DATE = '2000-01-01T00:00:00Z';
 
@@ -209,6 +224,7 @@ export interface ManagedWorkspaceBaselineReceiptV1 {
   readonly protocol: 'maka_managed_workspace_baseline_receipt_v1';
   readonly binding: ManagedWorkspaceBinding;
   readonly workspaceVersionId: string;
+  readonly policyVersion: 1;
   readonly policyHash: `sha256:${string}`;
   readonly epochOpenedEventId: string;
   readonly baselineAcceptedEventId: string;
@@ -231,15 +247,6 @@ export interface GitWorkspaceService {
     binding: ManagedWorkspaceBinding,
     reason: string,
   ): Promise<ManagedWorkspaceQuarantine>;
-  openManagedWorkspaceBaselineReceipt(
-    binding: ManagedWorkspaceBinding,
-    policyHash: `sha256:${string}`,
-  ): Promise<ManagedWorkspaceBaselineReceiptV1>;
-  requireManagedWorkspaceBaselineReceipt(
-    input: CreateManagedWorkspaceFromSourceInput,
-    policyHash: `sha256:${string}`,
-  ): Promise<ManagedWorkspaceBaselineReceiptV1>;
-  verifyManagedWorkspaceBaselineReceipt(receipt: ManagedWorkspaceBaselineReceiptV1): Promise<void>;
 }
 
 export function createGitWorkspaceService(
@@ -261,6 +268,7 @@ interface GitTreeEntry {
   readonly objectType: string;
   readonly oid: string;
   readonly path: string;
+  readonly pathBytesBase64: string;
 }
 
 interface BaselineTreeSummary {
@@ -342,6 +350,11 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       );
     }
     this.runtime = new VerifiedGitRuntime(input.gitRuntime);
+    registerManagedBaselineReceiptAuthorityInternal(this, {
+      issue: (binding) => this.#createOrReuseManagedWorkspaceBaselineReceipt(binding),
+      require: (request) => this.#requireManagedWorkspaceBaselineReceipt(request),
+      verify: (receipt) => this.#verifyManagedWorkspaceBaselineReceipt(receipt),
+    });
   }
 
   async assertAvailable(): Promise<void> {
@@ -539,25 +552,11 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
     });
   }
 
-  async openManagedWorkspaceBaselineReceipt(
-    binding: ManagedWorkspaceBinding,
-    policyHash: `sha256:${string}`,
-  ): Promise<ManagedWorkspaceBaselineReceiptV1> {
-    return this.createOrReuseManagedWorkspaceBaselineReceipt(binding, policyHash);
-  }
-
-  async requireManagedWorkspaceBaselineReceipt(
+  async #requireManagedWorkspaceBaselineReceipt(
     input: CreateManagedWorkspaceFromSourceInput,
-    policyHash: `sha256:${string}`,
   ): Promise<ManagedWorkspaceBaselineReceiptV1> {
     const runtime = await this.runtime.verify();
     assertOpenIdentity(input);
-    if (!SHA256_PATTERN.test(policyHash)) {
-      throw new GitWorkspaceServiceError(
-        'managed_workspace_identity_conflict',
-        'Managed workspace baseline policy hash is invalid',
-      );
-    }
     return withArtifactWriterLock(this.input.storageRoot, async (canonicalStorageRoot) => {
       const layout = workspaceLayout(canonicalStorageRoot, input);
       const receipt = await readBaselineReceipt(layout.baselineReceiptPath);
@@ -573,40 +572,35 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         layout,
         runtime.digest,
       );
-      assertBaselineReceiptMatches(receipt, receipt.binding, policyHash, summary);
+      assertBaselineReceiptMatches(receipt, receipt.binding, summary);
       return receipt;
     });
   }
 
-  private async createOrReuseManagedWorkspaceBaselineReceipt(
+  async #createOrReuseManagedWorkspaceBaselineReceipt(
     binding: ManagedWorkspaceBinding,
-    policyHash: `sha256:${string}`,
   ): Promise<ManagedWorkspaceBaselineReceiptV1> {
     const runtime = await this.runtime.verify();
     assertBindingShape(binding);
     assertOpenIdentity(binding);
-    if (!SHA256_PATTERN.test(policyHash)) {
-      throw new GitWorkspaceServiceError(
-        'managed_workspace_identity_conflict',
-        'Managed workspace baseline policy hash is invalid',
-      );
-    }
     return withArtifactWriterLock(this.input.storageRoot, async (canonicalStorageRoot) => {
       const layout = workspaceLayout(canonicalStorageRoot, binding);
       const summary = await this.requireVerifiedBaselineContext(binding, layout, runtime.digest);
       const existing = await readBaselineReceipt(layout.baselineReceiptPath);
       if (existing) {
-        assertBaselineReceiptMatches(existing, binding, policyHash, summary);
+        assertBaselineReceiptMatches(existing, binding, summary);
         return existing;
       }
+      const identities = deriveBaselineReceiptIdentities(binding);
       const receipt: ManagedWorkspaceBaselineReceiptV1 = {
         schemaVersion: BASELINE_RECEIPT_SCHEMA_VERSION,
         protocol: 'maka_managed_workspace_baseline_receipt_v1',
         binding,
-        workspaceVersionId: `version_${randomBytes(16).toString('hex')}`,
-        policyHash,
-        epochOpenedEventId: randomUUID(),
-        baselineAcceptedEventId: randomUUID(),
+        workspaceVersionId: identities.workspaceVersionId,
+        policyVersion: 1,
+        policyHash: MANAGED_BASELINE_POLICY_HASH_V1,
+        epochOpenedEventId: identities.epochOpenedEventId,
+        baselineAcceptedEventId: identities.baselineAcceptedEventId,
         committedAt: Date.now(),
         treeDeltaDigest: summary.treeDeltaDigest,
         changedFileCount: summary.changedFileCount,
@@ -621,12 +615,12 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           'Managed workspace baseline receipt was not durable',
         );
       }
-      assertBaselineReceiptMatches(durable, binding, policyHash, summary);
+      assertBaselineReceiptMatches(durable, binding, summary);
       return durable;
     });
   }
 
-  async verifyManagedWorkspaceBaselineReceipt(
+  async #verifyManagedWorkspaceBaselineReceipt(
     receipt: ManagedWorkspaceBaselineReceiptV1,
   ): Promise<void> {
     const runtime = await this.runtime.verify();
@@ -646,7 +640,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           'Managed workspace baseline receipt does not match its durable artifact',
         );
       }
-      assertBaselineReceiptMatches(durable, receipt.binding, receipt.policyHash, summary);
+      assertBaselineReceiptMatches(durable, receipt.binding, summary);
     });
   }
 
@@ -734,7 +728,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
     layout: WorkspaceLayout,
   ): Promise<BaselineTreeSummary> {
     const entries = parseTreeEntries(
-      await this.runtime.run(
+      await this.runtime.runBuffer(
         ['--git-dir', binding.repositoryPath, 'ls-tree', '-r', '-z', binding.baselineCommitOid],
         layout.homePath,
       ),
@@ -783,7 +777,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         );
       }
       const entries = parseTreeEntries(
-        await this.runtime.run(['-C', sourceRoot, 'ls-tree', '-r', '-z', 'HEAD']),
+        await this.runtime.runBuffer(['-C', sourceRoot, 'ls-tree', '-r', '-z', 'HEAD']),
       );
       assertSupportedTree(entries);
 
@@ -1644,6 +1638,36 @@ class VerifiedGitRuntime {
     }
   }
 
+  async runBuffer(
+    args: readonly string[],
+    homePath?: string,
+    extraEnv?: NodeJS.ProcessEnv,
+  ): Promise<Buffer> {
+    const runtime = await this.verify();
+    const hooksPath = homePath ? join(homePath, 'empty-hooks') : dirname(runtime.executablePath);
+    if (homePath) {
+      await mkdir(homePath, { recursive: true });
+      await mkdir(hooksPath, { recursive: true });
+    }
+    const env = isolatedGitEnvironment(
+      runtime.executablePath,
+      homePath ?? dirname(runtime.executablePath),
+    );
+    const { stdout } = await execFileAsync(
+      runtime.executablePath,
+      [...fixedGitArguments(hooksPath), ...args],
+      {
+        cwd: homePath ?? dirname(runtime.executablePath),
+        env: { ...env, ...extraEnv },
+        encoding: 'buffer',
+        maxBuffer: GIT_MAX_BUFFER_BYTES,
+        timeout: GIT_TIMEOUT_MS,
+        windowsHide: true,
+      },
+    );
+    return stdout;
+  }
+
   async runOptional(
     args: readonly string[],
     acceptedMissingExitCode: number,
@@ -2139,6 +2163,7 @@ function isBaselineReceipt(value: unknown): value is ManagedWorkspaceBaselineRec
     isBinding(value.binding) &&
     typeof value.workspaceVersionId === 'string' &&
     /^version_[a-f0-9]{32}$/u.test(value.workspaceVersionId) &&
+    value.policyVersion === 1 &&
     typeof value.policyHash === 'string' &&
     SHA256_PATTERN.test(value.policyHash) &&
     typeof value.epochOpenedEventId === 'string' &&
@@ -2161,12 +2186,16 @@ function isBaselineReceipt(value: unknown): value is ManagedWorkspaceBaselineRec
 function assertBaselineReceiptMatches(
   receipt: ManagedWorkspaceBaselineReceiptV1,
   binding: ManagedWorkspaceBinding,
-  policyHash: `sha256:${string}`,
   summary: BaselineTreeSummary,
 ): void {
+  const identities = deriveBaselineReceiptIdentities(binding);
   if (
     !sameBinding(receipt.binding, binding) ||
-    receipt.policyHash !== policyHash ||
+    receipt.workspaceVersionId !== identities.workspaceVersionId ||
+    receipt.epochOpenedEventId !== identities.epochOpenedEventId ||
+    receipt.baselineAcceptedEventId !== identities.baselineAcceptedEventId ||
+    receipt.policyVersion !== 1 ||
+    receipt.policyHash !== MANAGED_BASELINE_POLICY_HASH_V1 ||
     receipt.treeDeltaDigest !== summary.treeDeltaDigest ||
     receipt.changedFileCount !== summary.changedFileCount ||
     receipt.deletedFileCount !== 0
@@ -2176,6 +2205,42 @@ function assertBaselineReceiptMatches(
       'Managed workspace baseline receipt does not match its verified Git boundary',
     );
   }
+}
+
+function deriveBaselineReceiptIdentities(binding: ManagedWorkspaceBinding): {
+  readonly workspaceVersionId: string;
+  readonly epochOpenedEventId: string;
+  readonly baselineAcceptedEventId: string;
+} {
+  const identity = {
+    repositoryId: binding.repositoryId,
+    workspaceId: binding.workspaceId,
+    workspaceEpochId: binding.workspaceEpochId,
+    workspaceInstanceId: binding.workspaceInstanceId,
+    baselineCommitOid: binding.baselineCommitOid,
+    baselineTreeOid: binding.baselineTreeOid,
+    policyVersion: 1,
+    policyHash: MANAGED_BASELINE_POLICY_HASH_V1,
+  } as const;
+  const derive = (purpose: string): string =>
+    createHash('sha256')
+      .update(
+        JSON.stringify({
+          protocol: 'maka_managed_workspace_baseline_identity_v1',
+          purpose,
+          identity,
+        }),
+      )
+      .digest('hex');
+  return {
+    workspaceVersionId: `version_${derive('workspace_version').slice(0, 32)}`,
+    epochOpenedEventId: `workspace_epoch_opened_${derive('epoch_opened').slice(0, 64)}`,
+    baselineAcceptedEventId: `workspace_baseline_accepted_${derive('baseline_accepted').slice(0, 64)}`,
+  };
+}
+
+function hashCanonicalJson(value: unknown): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 }
 
 function isRepositoryRecord(value: unknown): value is ManagedRepositoryRecord {
@@ -2607,33 +2672,58 @@ function materializationProfileDigest(
   return `sha256:${createHash('sha256').update(profile).digest('hex')}`;
 }
 
-function parseTreeEntries(output: string): GitTreeEntry[] {
-  return output
-    .split('\0')
-    .filter(Boolean)
-    .map((record) => {
-      const tab = record.indexOf('\t');
-      const metadata = tab >= 0 ? record.slice(0, tab) : '';
-      const path = tab >= 0 ? record.slice(tab + 1) : '';
-      const [mode = '', objectType = '', oid = ''] = metadata.split(' ');
-      if (!mode || !objectType || !OID_PATTERN.test(oid) || !path) {
-        throw new GitWorkspaceServiceError(
-          'repository_ineligible',
-          'Git source tree contains an unreadable entry',
-        );
-      }
-      return { mode, objectType, oid, path };
-    });
+function parseTreeEntries(output: Buffer): GitTreeEntry[] {
+  const entries: GitTreeEntry[] = [];
+  let start = 0;
+  while (start < output.length) {
+    const end = output.indexOf(0, start);
+    if (end < 0) {
+      throw new GitWorkspaceServiceError(
+        'repository_ineligible',
+        'Git source tree contains an unterminated entry',
+      );
+    }
+    const record = output.subarray(start, end);
+    start = end + 1;
+    if (record.length === 0) continue;
+    const tab = record.indexOf(0x09);
+    const metadata = tab >= 0 ? record.subarray(0, tab).toString('ascii') : '';
+    const pathBytes = tab >= 0 ? record.subarray(tab + 1) : Buffer.alloc(0);
+    const [mode = '', objectType = '', oid = ''] = metadata.split(' ');
+    let path = '';
+    try {
+      path = new TextDecoder('utf-8', { fatal: true }).decode(pathBytes);
+    } catch {
+      throw new GitWorkspaceServiceError(
+        'repository_ineligible',
+        'Managed workspace v1 requires Git paths to be valid UTF-8',
+      );
+    }
+    if (
+      !mode ||
+      !objectType ||
+      !OID_PATTERN.test(oid) ||
+      pathBytes.length === 0 ||
+      !Buffer.from(path, 'utf8').equals(pathBytes)
+    ) {
+      throw new GitWorkspaceServiceError(
+        'repository_ineligible',
+        'Git source tree contains an unreadable entry',
+      );
+    }
+    entries.push({ mode, objectType, oid, path, pathBytesBase64: pathBytes.toString('base64') });
+  }
+  return entries;
 }
 
 function baselineTreeSummary(entries: readonly GitTreeEntry[]): BaselineTreeSummary {
   const manifest = JSON.stringify({
     protocol: 'maka_git_empty_tree_delta_v1',
-    entries: entries.map(({ mode, objectType, oid, path }) => ({
+    entries: entries.map(({ mode, objectType, oid, pathBytesBase64 }) => ({
       mode,
       objectType,
       oid,
-      path,
+      pathBytesBase64,
     })),
   });
   return {

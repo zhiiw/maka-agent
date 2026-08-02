@@ -216,7 +216,9 @@ export class SqliteRuntimeStore
       assertRecoveryAuthorityCapability(this.db);
       assertContinuationAuthorityCapability(this.db);
       assertWorkspaceVersionAuthorityCapability(this.db);
-      if (!options.readOnly) this.registerWorkspaceBaselineAuthorityWriter(path);
+      if (!options.readOnly) {
+        this.registerWorkspaceBaselineAuthorityWriter(options.databaseLease.databasePath);
+      }
       return;
     }
     const DatabaseSync = loadDatabaseSync();
