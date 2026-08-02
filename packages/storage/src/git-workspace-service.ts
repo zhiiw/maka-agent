@@ -559,6 +559,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
     assertOpenIdentity(input);
     return withArtifactWriterLock(this.input.storageRoot, async (canonicalStorageRoot) => {
       const layout = workspaceLayout(canonicalStorageRoot, input);
+      await assertOwnedManagedWorkspaceLayout(canonicalStorageRoot, layout);
       const receipt = await readBaselineReceipt(layout.baselineReceiptPath);
       if (!receipt) {
         throw new GitWorkspaceServiceError(

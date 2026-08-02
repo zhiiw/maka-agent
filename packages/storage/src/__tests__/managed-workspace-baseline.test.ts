@@ -197,6 +197,45 @@ test('reuses an orphan receipt after interruption before SQLite acceptance', asy
   }
 });
 
+test('rejects a receipt read through a replaced instance-root symlink before parsing it', async () => {
+  const root = await temporaryRoot();
+  const storageRoot = join(root, 'storage');
+  const sourceRoot = await createEligibleSource(join(root, 'source'));
+  const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(rootOwner);
+  const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
+  try {
+    const owner = await openManagedWorkspaceOwner({
+      rootOwner,
+      gitRuntime: {
+        executablePath: gitExecutablePath,
+        expectedSha256: gitExecutableSha256,
+      },
+    });
+    const accepted = await owner.openManagedWorkspaceBaseline(
+      runtimeStore,
+      openRequest(sourceRoot),
+    );
+    const instanceRoot = dirname(accepted.binding.worktreePath);
+    const externalRoot = join(root, 'external-instance');
+    await mkdir(externalRoot, { recursive: true });
+    const movedInstance = join(externalRoot, 'instance');
+    await rename(instanceRoot, movedInstance);
+    await symlink(movedInstance, instanceRoot, process.platform === 'win32' ? 'junction' : 'dir');
+    await writeFile(join(movedInstance, 'baseline-receipt.json'), '{invalid-json', 'utf8');
+
+    await assert.rejects(
+      owner.openManagedWorkspaceBaseline(runtimeStore, openRequest(sourceRoot)),
+      /owned directory escaped or changed identity/u,
+    );
+    await owner.close();
+  } finally {
+    runtimeStore.close();
+    await rootOwner.close();
+  }
+});
+
 test('serializes concurrent baseline opens under the same managed workspace owner', async () => {
   const root = await temporaryRoot();
   const storageRoot = join(root, 'storage');
