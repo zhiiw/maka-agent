@@ -103,9 +103,12 @@ const MATERIALIZATION_SEMANTICS = 'git_tree_materialized_with_fixed_config_v1';
 const MANAGED_BASELINE_POLICY_V1 = {
   protocol: 'maka_managed_workspace_baseline_policy_v1',
   source: 'source_head_tree',
+  sourceWorkingTree: 'clean_tracked_and_untracked_except_ignored',
   trackedFiles: 'include',
   untrackedFiles: 'exclude',
   ignoredFiles: 'exclude',
+  pathEncoding: 'utf8_lossless_roundtrip_required',
+  caseCollisions: 'reject_nfc_casefold_v1',
   symlinks: 'reject',
   submodules: 'reject',
   attributes: 'reject',

@@ -47,8 +47,8 @@ tree delta 或“verified”布尔值。M0 policy 是实现实际执行并内部
 | canonical truth | SQLite authority stream 的 immutable RuntimeEvents；receipt 是 admission evidence，不是 canonical head |
 | Git durability boundary | `baseline-receipt.json` 以同目录临时文件、file fsync、rename、POSIX parent fsync 持久化 |
 | SQLite atomic boundary | epoch fact、baseline fact、epoch/version/head projection 位于同一事务 |
-| root binding | authority store 必须是 authenticated storage root 下精确的普通非 symlink `runtime.sqlite`，并保持注册时的文件 identity；该文件必须只有一个 hard link，lease 的真实 DB path 是唯一依据；SQLite COMMIT 后、返回前再次验证 pathname 与 identity |
-| policy identity | policy version/hash 从固定且实际执行的 M0 policy object 内部派生；public API 不接受裸 hash |
+| root binding | authority store 必须是 authenticated storage root 下精确的普通非 symlink `runtime.sqlite`，并保持注册时的文件 identity；该文件必须只有一个 hard link，lease 的真实 DB path 是唯一依据；数据库 singleton rootId 必须等于 authenticated owner rootId；SQLite COMMIT 后、返回前再次验证 pathname、identity 与 durable rootId |
+| policy identity | policy version/hash 从固定且实际执行的 M0 policy object 内部派生；覆盖 source cleanliness、tracked/untracked/ignored、UTF-8 lossless path、NFC/case-fold collision、symlink/submodule/attributes/special mode 与 materialization；public API 不接受裸 hash |
 | exact retry | version/event IDs 由 binding + artifact + policy 确定性派生；durable receipt 冻结可重新证明的 Git evidence 与 delta |
 | pre-accept orphan | receipt 已落盘而 SQLite 未接受时，它是可重试 orphan；不是 canonical workspace version |
 | post-accept loss | SQLite 已有 head 但 receipt 缺失、漂移或 Git artifact 不可验证时，报 corruption/unavailable，不生成替代 receipt |
@@ -142,6 +142,7 @@ sequenceDiagram
 
   C->>O: openManagedWorkspaceBaseline(store, identity)
   O->>O: authenticate root lease; assert exact runtime.sqlite identity
+  O->>S: bind/verify singleton durable storage-root ID
   O->>G: create/adopt and verify managed workspace
   G->>G: verify binding/repository/epoch/ref/worktree
   G->>G: derive canonical policy + IDs + empty-tree → baseline delta
@@ -158,6 +159,7 @@ sequenceDiagram
   S->>S: COMMIT
   S-->>O: created or exact-existing head
   O->>O: post-commit revalidate exact runtime.sqlite identity
+  O->>S: revalidate exact durable storage-root ID
   O->>G: post-commit reverify exact receipt and Git artifacts
   G-->>O: verified
   O-->>C: usable canonical baseline
@@ -181,6 +183,9 @@ sequenceDiagram
 | 两个进程竞争同一 root owner | loser 不能越过 root-owner admission | winner 独占 composition | winner 关闭后 loser 重试并得到 exact existing |
 | owner 传入另一 storage root 的 DB | 不写 receipt | 不写错误 DB | admission 前拒绝 |
 | 两个 storage root 以 hard link 共享 `runtime.sqlite` inode | 不写 receipt | 不接受共享 DB；拒绝 `nlink != 1` | fail closed，避免 WAL/SHM 跨目录分裂 |
+| 单独复制或移动已绑定的 `runtime.sqlite` 到另一 root | 不写/不读取错误 root 的 receipt | DB rootId 与 owner rootId 冲突 | fail closed；必须使用 whole-root import/adopt 协议 |
+| 正式复制整个 storage root 后 adopt | receipt 与 Git artifact 随 root 保留 | DB rootId 与 marker rootId 保持一致 | `adoptStorageRootOnImport` 只更新 host-local dev/ino，继续 exact open |
+| unbound DB 已含 Session、RuntimeEvent、claim 或 workspace fact 等逻辑数据 | 不生成新 receipt | 禁止静默认领 | 要求显式 adoption 或清理实验 DB；仅 metadata-only 新库可首次绑定 |
 | 初次 DB identity 检查后 canonical pathname 被替换 | receipt 可能成为 orphan | 已打开连接的提交视为 detached，不返回 usable baseline | post-commit DB identity 复验拒绝；新 canonical DB 不获得错误 head |
 | owned quarantine/instance parent 被替换为 symlink | physical layout revalidation 拒绝 | canonical history 不变 | fail closed，不读取外部 control record、不移动到外部目录 |
 

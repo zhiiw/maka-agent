@@ -21,6 +21,7 @@ import {
 } from './root-authority.js';
 import {
   assertWorkspaceBaselineAuthorityStoreRootInternal,
+  bindWorkspaceBaselineAuthorityStoreRootInternal,
   commitWorkspaceBaselineInternal,
 } from './workspace-version-authority-internal.js';
 
@@ -149,6 +150,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         store,
         this.rootOwner.capability.canonicalPath,
       );
+      bindWorkspaceBaselineAuthorityStoreRootInternal(store, this.rootOwner.capability.rootId);
       await this.failpoint?.('after_initial_store_root_validation');
       const existingHead = await store.readWorkspaceHead(input.workspaceId, input.workspaceEpochId);
       const receipt = existingHead ? await this.receiptAuthority.require(input) : undefined;
@@ -202,6 +204,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         store,
         this.rootOwner.capability.canonicalPath,
       );
+      bindWorkspaceBaselineAuthorityStoreRootInternal(store, this.rootOwner.capability.rootId);
       // Canonical acceptance never makes a missing Git artifact acceptable.
       // Reverify after the SQLite transaction so post-accept artifact loss is
       // reported fail-closed instead of returning a usable workspace head.
