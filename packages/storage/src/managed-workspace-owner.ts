@@ -24,6 +24,11 @@ import {
   commitWorkspaceBaselineInternal,
 } from './workspace-version-authority-internal.js';
 
+// RuntimeEvent order is assigned by the SQLite authority spine. M0 therefore
+// uses a protocol-fixed logical timestamp and keeps unauthenticated wall-clock
+// time out of the durable Git receipt.
+const MANAGED_BASELINE_LOGICAL_TIMESTAMP_V1 = 0;
+
 export type ManagedWorkspaceOwnerErrorCode =
   | 'managed_workspace_owner_conflict'
   | 'managed_workspace_owner_unavailable'
@@ -49,6 +54,7 @@ export interface OpenManagedWorkspaceOwnerInput {
 
 export type ManagedWorkspaceOwnerFailpoint =
   | GitWorkspaceServiceFailpoint
+  | 'after_initial_store_root_validation'
   | 'after_baseline_authority_commit';
 
 export type OpenManagedWorkspaceBaselineInput = CreateManagedWorkspaceFromSourceInput;
@@ -62,12 +68,6 @@ export interface OpenManagedWorkspaceBaselineResult {
 
 export interface ManagedWorkspaceOwner {
   readonly state: 'ready' | 'closing' | 'closed';
-  createManagedWorkspaceFromSource(
-    input: CreateManagedWorkspaceFromSourceInput,
-  ): Promise<ManagedWorkspaceBinding>;
-  openManagedWorkspaceFromBinding(
-    binding: ManagedWorkspaceBinding,
-  ): Promise<ManagedWorkspaceBinding>;
   openManagedWorkspaceBaseline(
     store: RuntimeWorkspaceVersionAuthorityStore,
     input: OpenManagedWorkspaceBaselineInput,
@@ -140,42 +140,6 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
     return this.#state;
   }
 
-  async createManagedWorkspaceFromSource(
-    input: CreateManagedWorkspaceFromSourceInput,
-  ): Promise<ManagedWorkspaceBinding> {
-    return this.#run(async () =>
-      this.#requireReady(await this.service.createManagedWorkspaceFromSource(input)),
-    );
-  }
-
-  async openManagedWorkspaceFromBinding(
-    binding: ManagedWorkspaceBinding,
-  ): Promise<ManagedWorkspaceBinding> {
-    return this.#run(async () => {
-      try {
-        return await this.#requireReady(
-          await this.service.openManagedWorkspaceFromBinding(binding),
-        );
-      } catch (error) {
-        if (
-          !(error instanceof GitWorkspaceServiceError) ||
-          error.code !== 'managed_workspace_drifted'
-        ) {
-          throw error;
-        }
-        const quarantine = await this.service.quarantineManagedWorkspace(
-          binding,
-          'external_workspace_drift',
-        );
-        throw new ManagedWorkspaceOwnerError(
-          'managed_workspace_quarantined',
-          `Managed workspace drift was quarantined at ${quarantine.quarantinePath}`,
-          { cause: error },
-        );
-      }
-    });
-  }
-
   async openManagedWorkspaceBaseline(
     store: RuntimeWorkspaceVersionAuthorityStore,
     input: OpenManagedWorkspaceBaselineInput,
@@ -185,12 +149,11 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         store,
         this.rootOwner.capability.canonicalPath,
       );
+      await this.failpoint?.('after_initial_store_root_validation');
       const existingHead = await store.readWorkspaceHead(input.workspaceId, input.workspaceEpochId);
       const receipt = existingHead ? await this.receiptAuthority.require(input) : undefined;
       const binding = receipt
-        ? await this.#requireReady(
-            await this.service.openManagedWorkspaceFromBinding(receipt.binding),
-          )
+        ? await this.#openReadyBinding(receipt.binding)
         : await this.#requireReady(await this.service.createManagedWorkspaceFromSource(input));
       const durableReceipt = receipt ?? (await this.receiptAuthority.issue(binding));
       if (
@@ -208,7 +171,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
       const committed = await commitWorkspaceBaselineInternal(store, {
         epochOpenedEventId: durableReceipt.epochOpenedEventId,
         baselineAcceptedEventId: durableReceipt.baselineAcceptedEventId,
-        committedAt: durableReceipt.committedAt,
+        committedAt: MANAGED_BASELINE_LOGICAL_TIMESTAMP_V1,
         epoch: {
           repositoryId: binding.repositoryId,
           workspaceId: binding.workspaceId,
@@ -232,6 +195,13 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         },
       });
       await this.failpoint?.('after_baseline_authority_commit');
+      // The transaction writes through the already-open SQLite handle. Rebind
+      // that handle to the canonical pathname after COMMIT so an external
+      // rename/replacement cannot make an orphan database look accepted.
+      await assertWorkspaceBaselineAuthorityStoreRootInternal(
+        store,
+        this.rootOwner.capability.canonicalPath,
+      );
       // Canonical acceptance never makes a missing Git artifact acceptable.
       // Reverify after the SQLite transaction so post-accept artifact loss is
       // reported fail-closed instead of returning a usable workspace head.
@@ -288,5 +258,27 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
       'managed_workspace_quarantined',
       `Managed workspace drift was quarantined at ${quarantine.quarantinePath}`,
     );
+  }
+
+  async #openReadyBinding(binding: ManagedWorkspaceBinding): Promise<ManagedWorkspaceBinding> {
+    try {
+      return await this.#requireReady(await this.service.openManagedWorkspaceFromBinding(binding));
+    } catch (error) {
+      if (
+        !(error instanceof GitWorkspaceServiceError) ||
+        error.code !== 'managed_workspace_drifted'
+      ) {
+        throw error;
+      }
+      const quarantine = await this.service.quarantineManagedWorkspace(
+        binding,
+        'external_workspace_drift',
+      );
+      throw new ManagedWorkspaceOwnerError(
+        'managed_workspace_quarantined',
+        `Managed workspace drift was quarantined at ${quarantine.quarantinePath}`,
+        { cause: error },
+      );
+    }
   }
 }

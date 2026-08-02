@@ -6,7 +6,8 @@
   managed workspace owner；已经 admission 的 workspace 操作必须在关闭前 drain
 - artifact owner：`GitWorkspaceService`
 - lifecycle owner：`ManagedWorkspaceOwner`
-- canonical workspace history：仍由 Workspace Version Authority 拥有；本切片不写 RuntimeEvent
+- canonical workspace history：仍由 Workspace Version Authority 拥有；M0 composition 只允许 owner 的
+  `openManagedWorkspaceBaseline(...)` 通过 storage-internal writer 写入 baseline RuntimeEvents
 
 ## 1. 为什么需要独立 owner
 
@@ -31,7 +32,7 @@ owner lock，也不通过路径自行证明 ownership。
 | shutdown | `ready -> closing -> closed`；`closing` 拒绝新操作并等待已 admission 操作 drain |
 | 初始化失败 | 返回 `managed_workspace_owner_unavailable`，释放未发布 claim，允许同一 root owner 修正后重试 |
 | 重复组合 | 返回 `managed_workspace_owner_conflict` |
-| drift | 不返回 drifted cwd；先 durable quarantine，再返回 `managed_workspace_quarantined` |
+| drift | 不返回 drifted cwd；receipt/artifact 复验发现 drift 时 fail closed；复验后 reopen 竞态发现 drift 时 durable quarantine |
 | 回滚 | 不接 Desktop/CLI/runtime-host，不改变 attached mode；可删除本 owner 而不改变 Git artifacts 或 RuntimeEvents |
 
 owner 不关闭外层 `InteractiveRootOwner`。Runtime Host 仍拥有 root owner 的最终关闭顺序；managed owner
@@ -55,14 +56,15 @@ stateDiagram-v2
 
 ## 4. Workspace gate
 
-owner 当前只开放两条 artifact lifecycle 操作：
+owner 的 public surface 只开放一个 workspace admission 操作：
 
-1. 从 eligible clean source 创建或 exact-adopt 一个 managed workspace；
-2. 从 durable binding 重新打开一个 managed workspace。
+1. `openManagedWorkspaceBaseline(store, identity)` 从 eligible clean source 创建/exact-adopt artifact，
+   持久化并复验 receipt，再由 storage-internal writer 接受 canonical baseline。
 
-两条路径返回前都必须验证 worktree、index、HEAD、tree 与 ownership lock 仍为 ready。重新打开发现
-external drift 时，owner 使用同一 `GitWorkspaceService` 的 durable quarantine protocol 收敛；不能把
-`managed_workspace_drifted` 当成可用 cwd 交给工具。
+artifact-only create/open 和 `GitWorkspaceService` factory 不从 package root 导出。调用者不能在 SQLite
+acceptance 前取得 `worktreePath` 或裸 `ManagedWorkspaceBinding`。入口返回前必须验证 worktree、index、
+HEAD、tree、ownership lock、canonical `runtime.sqlite` pathname/inode 与 durable receipt；任何失败都不能把
+cwd 交给工具。
 
 本切片不扫描目录来猜测 workspace identity。Baseline Open Bundle 通过 Git artifact owner 的 durable
 receipt 与 canonical workspace authority 绑定 exact identity；未接受 Git artifact 属于 orphan GC 范畴。
@@ -75,7 +77,7 @@ receipt 与 canonical workspace authority 绑定 exact identity；未接受 Git 
 | pinned Git 初始化失败 | 不发布 owner；修正 digest 后可重试 |
 | operation admission 后 close | close 等待 operation；新 operation 被拒绝 |
 | root owner 同时 close | root close 与 managed close 都等待同一 lease-bound operation |
-| external drift 后 reopen | durable quarantine 后返回 quarantined |
+| external drift 后 reopen | receipt/artifact 复验 fail closed；若发生在复验与 reopen 之间则 durable quarantine |
 | repeated close | exact no-op，不重复释放外层 root owner |
 
 Git artifact create/quarantine 的进程崩溃矩阵继续由 `GitWorkspaceService` 负责；本 owner 不复制第二套
@@ -94,7 +96,6 @@ reopen/repair，最后才允许 baseline authority read”的组合顺序。
 
 ## 7. 明确延期
 
-- Baseline receipt 与 atomic workspace authority commit（由下一独立切片交付）；
 - Desktop、CLI、runtime-host 接线与 managed-mode 设置；
 - filesystem worker、mutation coordinator 与工具 cwd 切换；
 - candidate refs、mutation repair、GC、replication outbox；

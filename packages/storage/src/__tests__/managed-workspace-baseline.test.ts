@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import {
   mkdir,
+  link,
   mkdtemp,
   readFile,
   realpath,
@@ -19,6 +20,7 @@ import { promisify } from 'node:util';
 import { afterEach, before, test } from 'node:test';
 import { openManagedWorkspaceOwner } from '../managed-workspace-owner.js';
 import { createGitWorkspaceService } from '../git-workspace-service.js';
+import * as publicStorage from '../index.js';
 import { acquireOperationalStateDatabase } from '../operational-state-store.js';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '../root-authority.js';
 import { createSqliteRuntimeStore } from '../sqlite-runtime-store.js';
@@ -44,6 +46,29 @@ test('does not expose baseline receipt issuance on the public Git workspace serv
   assert.equal('openManagedWorkspaceBaselineReceipt' in service, false);
   assert.equal('requireManagedWorkspaceBaselineReceipt' in service, false);
   assert.equal('verifyManagedWorkspaceBaselineReceipt' in service, false);
+});
+
+test('does not expose artifact-only workspace creation through the public storage API', async () => {
+  assert.equal('createGitWorkspaceService' in publicStorage, false);
+  const root = await temporaryRoot();
+  const storageRoot = join(root, 'storage');
+  const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(rootOwner);
+  try {
+    const owner = await openManagedWorkspaceOwner({
+      rootOwner,
+      gitRuntime: {
+        executablePath: gitExecutablePath,
+        expectedSha256: gitExecutableSha256,
+      },
+    });
+    assert.equal('createManagedWorkspaceFromSource' in owner, false);
+    assert.equal('openManagedWorkspaceFromBinding' in owner, false);
+    await owner.close();
+  } finally {
+    await rootOwner.close();
+  }
 });
 
 afterEach(async () => {
@@ -73,6 +98,7 @@ test('opens one canonical baseline from a durable verified Git receipt', async (
 
     assert.equal(first.created, true);
     assert.equal(retry.created, false);
+    assert.equal('committedAt' in first.receipt, false);
     assert.deepEqual(retry.receipt, first.receipt);
     assert.equal(first.head.commitOid, first.binding.baselineCommitOid);
     assert.equal(first.head.treeOid, first.binding.baselineTreeOid);
@@ -131,6 +157,17 @@ test('opens one canonical baseline from a durable verified Git receipt', async (
     await assert.rejects(
       owner.openManagedWorkspaceBaseline(runtimeStore, input),
       /does not match its verified Git boundary/u,
+    );
+    await writeFile(receiptPath, `${JSON.stringify(first.receipt)}\n`, 'utf8');
+
+    await writeFile(
+      receiptPath,
+      `${JSON.stringify({ ...first.receipt, committedAt: Date.now() })}\n`,
+      'utf8',
+    );
+    await assert.rejects(
+      owner.openManagedWorkspaceBaseline(runtimeStore, input),
+      /Invalid managed workspace baseline receipt/u,
     );
     await writeFile(receiptPath, `${JSON.stringify(first.receipt)}\n`, 'utf8');
 
@@ -355,6 +392,41 @@ test('rejects an in-memory SQLite authority store', async () => {
   }
 });
 
+test('rejects a cross-root hard link to the canonical SQLite authority database', async () => {
+  const root = await temporaryRoot();
+  const sourceStorageRoot = join(root, 'source-storage');
+  const claimedStorageRoot = join(root, 'claimed-storage');
+  await mkdir(claimedStorageRoot, { recursive: true });
+  const sourceDatabasePath = join(sourceStorageRoot, 'runtime.sqlite');
+  const sourceStore = createSqliteRuntimeStore(sourceDatabasePath);
+  sourceStore.close();
+  await link(sourceDatabasePath, join(claimedStorageRoot, 'runtime.sqlite'));
+
+  const capability = await resolveStorageRoot({ path: claimedStorageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(rootOwner);
+  const runtimeStore = createSqliteRuntimeStore(join(claimedStorageRoot, 'runtime.sqlite'));
+  try {
+    const owner = await openManagedWorkspaceOwner({
+      rootOwner,
+      gitRuntime: {
+        executablePath: gitExecutablePath,
+        expectedSha256: gitExecutableSha256,
+      },
+    });
+    await assert.rejects(
+      owner.openManagedWorkspaceBaseline(runtimeStore, {
+        ...openRequest(join(root, 'unused-source')),
+      }),
+      /unavailable for this storage root/u,
+    );
+    await owner.close();
+  } finally {
+    runtimeStore.close();
+    await rootOwner.close();
+  }
+});
+
 test('rejects an authority database whose file identity changes after registration', {
   skip: process.platform === 'win32',
 }, async () => {
@@ -383,6 +455,58 @@ test('rejects an authority database whose file identity changes after registrati
   } finally {
     runtimeStore.close();
     await rootOwner.close();
+  }
+});
+
+test('does not return an accepted baseline when runtime.sqlite is replaced after the initial root check', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const root = await temporaryRoot();
+  const storageRoot = join(root, 'storage');
+  const databasePath = join(storageRoot, 'runtime.sqlite');
+  const sourceRoot = await createEligibleSource(join(root, 'source'));
+  const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(rootOwner);
+  const runtimeStore = createSqliteRuntimeStore(databasePath);
+  let replaceOnce = true;
+  const owner = await openManagedWorkspaceOwner({
+    rootOwner,
+    gitRuntime: {
+      executablePath: gitExecutablePath,
+      expectedSha256: gitExecutableSha256,
+    },
+    async failpoint(point) {
+      if ((point as string) !== 'after_initial_store_root_validation' || !replaceOnce) return;
+      replaceOnce = false;
+      await rename(databasePath, `${databasePath}.detached`);
+      await writeFile(databasePath, 'replacement database identity\n', 'utf8');
+    },
+  });
+  try {
+    await assert.rejects(
+      owner.openManagedWorkspaceBaseline(runtimeStore, openRequest(sourceRoot)),
+      /database file identity changed/u,
+    );
+  } finally {
+    await owner.close();
+    runtimeStore.close();
+    await rootOwner.close();
+  }
+
+  await Promise.all([
+    rm(databasePath, { force: true }),
+    rm(`${databasePath}-wal`, { force: true }),
+    rm(`${databasePath}-shm`, { force: true }),
+  ]);
+  const replacementStore = createSqliteRuntimeStore(databasePath);
+  try {
+    assert.equal(
+      await replacementStore.readWorkspaceHead('workspace-1', 'workspace-epoch-1'),
+      undefined,
+    );
+  } finally {
+    replacementStore.close();
   }
 });
 

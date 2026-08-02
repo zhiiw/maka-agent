@@ -95,8 +95,12 @@ export async function assertWorkspaceBaselineAuthorityStoreRootInternal(
 function captureRegularFileIdentity(path: string): string | undefined {
   try {
     const info = lstatSync(path, { bigint: true });
-    if (!info.isFile() || info.isSymbolicLink()) return undefined;
-    return `${info.dev}:${info.ino}`;
+    // SQLite sidecars are pathname-scoped. Opening the same main database
+    // inode through a second hard-linked storage root can split its WAL/SHM
+    // coordination across two directories, so a canonical authority database
+    // must have exactly one directory entry.
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1n) return undefined;
+    return `${info.dev}:${info.ino}:${info.nlink}`;
   } catch {
     return undefined;
   }

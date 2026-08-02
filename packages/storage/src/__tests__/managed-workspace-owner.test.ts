@@ -13,6 +13,7 @@ import {
   openManagedWorkspaceOwner,
 } from '../managed-workspace-owner.js';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '../root-authority.js';
+import { createSqliteRuntimeStore } from '../sqlite-runtime-store.js';
 
 const execFileAsync = promisify(execFile);
 const cleanup: string[] = [];
@@ -90,13 +91,14 @@ test('releases a partial owner claim when pinned Git initialization fails', asyn
   }
 });
 
-test('creates a ready managed workspace only through the active owner', async () => {
+test('creates an accepted managed baseline only through the active owner', async () => {
   const root = await temporaryRoot();
   const storageRoot = join(root, 'storage');
   const sourceRoot = await createEligibleSource(join(root, 'source'));
   const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(capability);
   assert.ok(rootOwner);
+  const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
   try {
     const owner = await openManagedWorkspaceOwner({
       rootOwner,
@@ -106,12 +108,16 @@ test('creates a ready managed workspace only through the active owner', async ()
       },
     });
 
-    const binding = await owner.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+    const { binding } = await owner.openManagedWorkspaceBaseline(
+      runtimeStore,
+      openRequest(sourceRoot),
+    );
 
     assert.equal(binding.sourceTreeOid, binding.baselineTreeOid);
     assert.equal(existsSync(join(binding.worktreePath, '.maka-workspace.json')), false);
     await owner.close();
   } finally {
+    runtimeStore.close();
     await rootOwner.close();
   }
 });
@@ -123,6 +129,7 @@ test('drains an admitted workspace operation before closing and rejects new work
   const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(capability);
   assert.ok(rootOwner);
+  const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
   let releaseOperation!: () => void;
   const operationMayFinish = new Promise<void>((resolve) => {
     releaseOperation = resolve;
@@ -133,7 +140,7 @@ test('drains an admitted workspace operation before closing and rejects new work
   });
   let creating:
     | ReturnType<
-        Awaited<ReturnType<typeof openManagedWorkspaceOwner>>['createManagedWorkspaceFromSource']
+        Awaited<ReturnType<typeof openManagedWorkspaceOwner>>['openManagedWorkspaceBaseline']
       >
     | undefined;
   let closing: Promise<void> | undefined;
@@ -151,7 +158,7 @@ test('drains an admitted workspace operation before closing and rejects new work
         await operationMayFinish;
       },
     });
-    creating = owner.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+    creating = owner.openManagedWorkspaceBaseline(runtimeStore, openRequest(sourceRoot));
     await operationReachedFailpoint;
 
     let closeSettled = false;
@@ -172,7 +179,7 @@ test('drains an admitted workspace operation before closing and rejects new work
     assert.equal(rootCloseSettled, false);
     assert.equal(rootCloseDisposition, 'pending');
     await assert.rejects(
-      owner.createManagedWorkspaceFromSource(openRequest(sourceRoot)),
+      owner.openManagedWorkspaceBaseline(runtimeStore, openRequest(sourceRoot)),
       isOwnerError('managed_workspace_owner_closing'),
     );
 
@@ -186,17 +193,19 @@ test('drains an admitted workspace operation before closing and rejects new work
     await Promise.allSettled(
       [creating, closing, rootClosing].filter((value) => value !== undefined),
     );
+    runtimeStore.close();
     await rootOwner.close();
   }
 });
 
-test('quarantines external drift instead of reopening a non-ready workspace', async () => {
+test('rejects external drift instead of reopening a non-ready workspace', async () => {
   const root = await temporaryRoot();
   const storageRoot = join(root, 'storage');
   const sourceRoot = await createEligibleSource(join(root, 'source'));
   const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(capability);
   assert.ok(rootOwner);
+  const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
   try {
     const owner = await openManagedWorkspaceOwner({
       rootOwner,
@@ -205,17 +214,25 @@ test('quarantines external drift instead of reopening a non-ready workspace', as
         expectedSha256: gitExecutableSha256,
       },
     });
-    const binding = await owner.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+    const { binding } = await owner.openManagedWorkspaceBaseline(
+      runtimeStore,
+      openRequest(sourceRoot),
+    );
     await writeFile(join(binding.worktreePath, 'tracked.txt'), 'external drift\n', 'utf8');
 
     await assert.rejects(
-      owner.openManagedWorkspaceFromBinding(binding),
-      isOwnerError('managed_workspace_quarantined'),
+      owner.openManagedWorkspaceBaseline(runtimeStore, openRequest(sourceRoot)),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.name === 'GitWorkspaceServiceError' &&
+        'code' in error &&
+        error.code === 'managed_workspace_drifted',
     );
 
-    assert.equal(existsSync(binding.worktreePath), false);
+    assert.equal(existsSync(binding.worktreePath), true);
     await owner.close();
   } finally {
+    runtimeStore.close();
     await rootOwner.close();
   }
 });

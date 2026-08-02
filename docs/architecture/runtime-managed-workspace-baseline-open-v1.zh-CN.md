@@ -47,9 +47,9 @@ tree delta 或“verified”布尔值。M0 policy 是实现实际执行并内部
 | canonical truth | SQLite authority stream 的 immutable RuntimeEvents；receipt 是 admission evidence，不是 canonical head |
 | Git durability boundary | `baseline-receipt.json` 以同目录临时文件、file fsync、rename、POSIX parent fsync 持久化 |
 | SQLite atomic boundary | epoch fact、baseline fact、epoch/version/head projection 位于同一事务 |
-| root binding | authority store 必须是 authenticated storage root 下精确的普通非 symlink `runtime.sqlite`，并保持注册时的文件 identity；lease 的真实 DB path 是唯一依据 |
+| root binding | authority store 必须是 authenticated storage root 下精确的普通非 symlink `runtime.sqlite`，并保持注册时的文件 identity；该文件必须只有一个 hard link，lease 的真实 DB path 是唯一依据；SQLite COMMIT 后、返回前再次验证 pathname 与 identity |
 | policy identity | policy version/hash 从固定且实际执行的 M0 policy object 内部派生；public API 不接受裸 hash |
-| exact retry | version/event IDs 由 binding + artifact + policy 确定性派生；durable receipt 冻结 timestamp 与 delta |
+| exact retry | version/event IDs 由 binding + artifact + policy 确定性派生；durable receipt 冻结可重新证明的 Git evidence 与 delta |
 | pre-accept orphan | receipt 已落盘而 SQLite 未接受时，它是可重试 orphan；不是 canonical workspace version |
 | post-accept loss | SQLite 已有 head 但 receipt 缺失、漂移或 Git artifact 不可验证时，报 corruption/unavailable，不生成替代 receipt |
 | 回滚 | 停止调用本入口即可；既有 RuntimeEvents 仍可读。不能删除已接受 receipt 来“回滚” canonical history |
@@ -82,7 +82,6 @@ v1 receipt 严格包含：
   policyHash,
   epochOpenedEventId,
   baselineAcceptedEventId,
-  committedAt,
   treeDeltaDigest,
   changedFileCount,
   deletedFileCount: 0,
@@ -100,9 +99,18 @@ v1 receipt 严格包含：
   policy 确定性重新派生；合法 shape 的磁盘篡改也必须被拒绝；
 - tree delta 摘要与 baseline tree 重新计算结果一致。
 
-`GitWorkspaceService` 的 public interface 不暴露 receipt 的 issue/require/verify。对应 capability 位于
-未被 package root 导出的 internal module，并通过实例绑定的 `WeakMap` 只交给
-`ManagedWorkspaceOwner`。普通 package consumer 不能预占一个 epoch 的 admission identity。
+`GitWorkspaceService` 的 public interface 不暴露 receipt 的 issue/require/verify，package root 也不导出
+`git-workspace-service` factory。artifact-only create/open 只作为 storage 内部前置实现存在；public
+`ManagedWorkspaceOwner` 只暴露 `openManagedWorkspaceBaseline(...)` 与 lifecycle close。对应 receipt capability
+位于未被 package root 导出的 internal module，并通过实例绑定的 `WeakMap` 只交给该 owner。普通 package
+consumer 既不能预占一个 epoch 的 admission identity，也不能在 canonical acceptance 前取得 executable
+worktree path。未来 ToolRuntime 接入时只允许消费由该入口成功返回的 accepted handle；在真实 consumer 出现前，
+M0 不预设一个无消费者的 opaque-handle 抽象。
+
+receipt 不保存 wall-clock `committedAt`：artifact owner 无法从 Git evidence 重新证明该时间，允许它进入 receipt
+会让 orphan receipt 篡改污染 canonical event 时间。M0 的 baseline authority 使用协议固定逻辑时间 `0`；
+canonical 顺序由 SQLite authority spine 的 `event_seq` 决定。真实 wall-clock acceptance time 若未来用于观测，
+必须由 store 自己生成并作为 operational metadata 保存，不进入 Git evidence 或恢复身份。
 
 ## 4. Tree delta 摘要
 
@@ -149,6 +157,7 @@ sequenceDiagram
   S->>S: epoch/version/head projections
   S->>S: COMMIT
   S-->>O: created or exact-existing head
+  O->>O: post-commit revalidate exact runtime.sqlite identity
   O->>G: post-commit reverify exact receipt and Git artifacts
   G-->>O: verified
   O-->>C: usable canonical baseline
@@ -171,6 +180,8 @@ sequenceDiagram
 | 同一 root owner 内两个并发 open | artifact lock/SQLite writer 串行 | 一个 transaction 创建 | 一个 created，一个 exact existing |
 | 两个进程竞争同一 root owner | loser 不能越过 root-owner admission | winner 独占 composition | winner 关闭后 loser 重试并得到 exact existing |
 | owner 传入另一 storage root 的 DB | 不写 receipt | 不写错误 DB | admission 前拒绝 |
+| 两个 storage root 以 hard link 共享 `runtime.sqlite` inode | 不写 receipt | 不接受共享 DB；拒绝 `nlink != 1` | fail closed，避免 WAL/SHM 跨目录分裂 |
+| 初次 DB identity 检查后 canonical pathname 被替换 | receipt 可能成为 orphan | 已打开连接的提交视为 detached，不返回 usable baseline | post-commit DB identity 复验拒绝；新 canonical DB 不获得错误 head |
 | owned quarantine/instance parent 被替换为 symlink | physical layout revalidation 拒绝 | canonical history 不变 | fail closed，不读取外部 control record、不移动到外部目录 |
 
 真实进程 crash harness 分别覆盖 receipt durable 后、SQLite authority 前，以及 SQLite COMMIT 后、

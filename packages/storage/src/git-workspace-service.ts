@@ -95,7 +95,6 @@ const BASELINE_RECEIPT_KEYS = [
   'policyHash',
   'epochOpenedEventId',
   'baselineAcceptedEventId',
-  'committedAt',
   'treeDeltaDigest',
   'changedFileCount',
   'deletedFileCount',
@@ -228,7 +227,6 @@ export interface ManagedWorkspaceBaselineReceiptV1 {
   readonly policyHash: `sha256:${string}`;
   readonly epochOpenedEventId: string;
   readonly baselineAcceptedEventId: string;
-  readonly committedAt: number;
   readonly treeDeltaDigest: `sha256:${string}`;
   readonly changedFileCount: number;
   readonly deletedFileCount: 0;
@@ -602,7 +600,6 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         policyHash: MANAGED_BASELINE_POLICY_HASH_V1,
         epochOpenedEventId: identities.epochOpenedEventId,
         baselineAcceptedEventId: identities.baselineAcceptedEventId,
-        committedAt: Date.now(),
         treeDeltaDigest: summary.treeDeltaDigest,
         changedFileCount: summary.changedFileCount,
         deletedFileCount: 0,
@@ -2172,9 +2169,6 @@ function isBaselineReceipt(value: unknown): value is ManagedWorkspaceBaselineRec
     typeof value.baselineAcceptedEventId === 'string' &&
     /^[A-Za-z0-9_-]{1,128}$/u.test(value.baselineAcceptedEventId) &&
     value.epochOpenedEventId !== value.baselineAcceptedEventId &&
-    typeof value.committedAt === 'number' &&
-    Number.isSafeInteger(value.committedAt) &&
-    value.committedAt >= 0 &&
     typeof value.treeDeltaDigest === 'string' &&
     SHA256_PATTERN.test(value.treeDeltaDigest) &&
     typeof value.changedFileCount === 'number' &&
