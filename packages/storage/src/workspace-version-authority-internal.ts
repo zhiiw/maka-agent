@@ -2,18 +2,30 @@ import type { WorkspaceBaselineAuthorityInput, WorkspaceBaselineCommitResult } f
 
 type WorkspaceBaselineAuthorityWriter = (
   input: WorkspaceBaselineAuthorityInput,
+  rootId: string,
 ) => Promise<WorkspaceBaselineCommitResult>;
+type WorkspaceStorageRootBinder = (rootId: string) => void;
 
-const workspaceBaselineAuthorityWriters = new WeakMap<object, WorkspaceBaselineAuthorityWriter>();
+interface WorkspaceBaselineAuthorityRegistration {
+  readonly writer: WorkspaceBaselineAuthorityWriter;
+  readonly bindStorageRoot: WorkspaceStorageRootBinder;
+  boundRootId?: string;
+}
+
+const workspaceBaselineAuthorityWriters = new WeakMap<
+  object,
+  WorkspaceBaselineAuthorityRegistration
+>();
 
 export function registerWorkspaceBaselineAuthorityWriterInternal(
   store: object,
   writer: WorkspaceBaselineAuthorityWriter,
+  bindStorageRoot: WorkspaceStorageRootBinder,
 ): void {
   if (workspaceBaselineAuthorityWriters.has(store)) {
     throw new Error('Workspace baseline authority writer is already registered');
   }
-  workspaceBaselineAuthorityWriters.set(store, writer);
+  workspaceBaselineAuthorityWriters.set(store, { writer, bindStorageRoot });
 }
 
 /**
@@ -25,7 +37,23 @@ export function commitWorkspaceBaselineInternal(
   store: object,
   input: WorkspaceBaselineAuthorityInput,
 ): Promise<WorkspaceBaselineCommitResult> {
-  const writer = workspaceBaselineAuthorityWriters.get(store);
-  if (!writer) throw new Error('Workspace baseline authority writer is unavailable');
-  return writer(input);
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Workspace baseline authority writer is unavailable');
+  if (!registration.boundRootId) {
+    throw new Error('Workspace baseline authority store has no durable storage-root binding');
+  }
+  return registration.writer(input, registration.boundRootId);
+}
+
+export function bindWorkspaceBaselineAuthorityStoreRootInternal(
+  store: object,
+  rootId: string,
+): void {
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Workspace baseline authority writer is unavailable');
+  if (!/^[a-f0-9]{64}$/u.test(rootId)) {
+    throw new Error('Invalid durable storage-root identity');
+  }
+  registration.bindStorageRoot(rootId);
+  registration.boundRootId = rootId;
 }

@@ -7,7 +7,10 @@ import {
   type WorkspaceBaselineAuthorityInput,
 } from '@maka/core';
 import { createSqliteRuntimeStore } from '../../sqlite-runtime-store.js';
-import { commitWorkspaceBaselineInternal } from '../../workspace-version-authority-internal.js';
+import {
+  bindWorkspaceBaselineAuthorityStoreRootInternal,
+  commitWorkspaceBaselineInternal,
+} from '../../workspace-version-authority-internal.js';
 
 const mode = requiredEnv('MAKA_SQLITE_RECOVERY_CONCURRENCY_MODE');
 const dbPath = requiredEnv('MAKA_SQLITE_RECOVERY_CONCURRENCY_DB');
@@ -35,6 +38,7 @@ try {
   } else if (mode === 'rebuild') {
     await store.rebuildToolProjectionsFromRuntimeEvents();
   } else if (mode === 'workspace_baseline_a' || mode === 'workspace_baseline_b') {
+    bindWorkspaceBaselineAuthorityStoreRootInternal(store, 'a'.repeat(64));
     const result = await commitWorkspaceBaselineInternal(
       store,
       workspaceBaselineInput(mode === 'workspace_baseline_b' ? 'b' : 'a'),

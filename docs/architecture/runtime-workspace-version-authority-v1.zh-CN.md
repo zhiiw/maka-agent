@@ -51,9 +51,9 @@ receipt 后调用未来的 `commitVerifiedWorkspaceBaseline(receipt)`。裸 OID�
 | 正常失败 | exact retry 返回 existing；payload/identity drift 返回 conflict |
 | 损坏失败 | malformed fact、orphan、projection mismatch、partial snapshot 污染全部 fail closed |
 | 运行时回滚 | 事务未提交时五部分全部回滚；已提交时五部分全部可读 |
-| 版本回滚 | schema 7 数据库不能由只支持 schema 6 的旧 binary 打开；降级必须使用升级前备份 |
+| 版本回滚 | schema 8 数据库不能由只支持 schema 7 的旧 binary 打开；降级必须使用升级前备份 |
 
-逻辑回滚可以停止调用本 writer，但必须保留 schema 7 reader/migration；不能通过删除 capability marker
+逻辑回滚可以停止调用本 writer，但必须保留 schema 8 reader/migration；不能通过删除 capability marker
 伪装成旧格式。
 
 ## 3. Authority stream
@@ -213,7 +213,7 @@ facts/projections 原子提交。在该 composition 存在前，当前 typed inp
 不能成为 Desktop、CLI、tool 或自动恢复的生产入口。
 `treeDeltaDigest` 必须是 canonical empty-tree → baseline-tree delta 的摘要，不能由 caller 随意填写。
 
-## 7. Schema 7 与 projection
+## 7. Schema 7/8 与 projection
 
 Schema 7 从已发布 schema 6 做纯增量升级，并写入 capability：
 
@@ -228,6 +228,14 @@ runtime_workspace_version_authority @ 1
 | `runtime_workspace_epochs` | epoch identity、source 与 materialization policy |
 | `runtime_workspace_versions` | accepted baseline commit/tree 与因果引用 |
 | `runtime_workspace_heads` | 当前 epoch head；M0 必须等于 baseline |
+| `runtime_storage_root_binding` | singleton durable rootId；阻止单独复制或移动数据库后被另一 storage root 静默认领 |
+
+Schema 8 增加 `runtime_storage_root_binding(singleton=1, root_id, protocol_version=1)`。任何
+workspace authority fact 写入前，storage-internal binder 必须先把数据库绑定到经外层认证的 durable
+`rootId`；已绑定数据库只接受 exact rootId。没有 binding 但已含 Session、RuntimeEvent、claim 或
+workspace fact 等逻辑数据的数据库必须显式 adopt 或清理，不能被新 owner 自动认领；只有除
+schema/capability metadata 外完全为空的新数据库可以首次绑定。rootId 校验与 baseline facts/projections
+提交位于同一个 SQLite 写事务中，因此不能在检查归属后、提交事实前替换 durable binding。
 
 公开的 `WorkspaceHeadRecordV1` 使用通用字段 `acceptedEventId`，因为后续 head 可能由 mutation acceptance
 推进；只有 baseline version record 与 canonical scanner 使用更具体的 `baselineAcceptedEventId`。SQLite

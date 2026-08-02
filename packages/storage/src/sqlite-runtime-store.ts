@@ -843,9 +843,11 @@ export class SqliteRuntimeStore
 
   async #commitWorkspaceBaseline(
     input: WorkspaceBaselineAuthorityInput,
+    rootId: string,
   ): Promise<WorkspaceBaselineCommitResult> {
     const events = buildWorkspaceBaselineAuthorityEvents(input);
     return this.transaction(() => {
+      this.#assertWorkspaceStorageRootBinding(rootId);
       const existingBaselines = this.readCanonicalWorkspaceBaselinesSync();
       const existing = existingBaselines.find(
         (candidate) =>
@@ -909,9 +911,73 @@ export class SqliteRuntimeStore
   }
 
   private registerWorkspaceBaselineAuthorityWriter(): void {
-    registerWorkspaceBaselineAuthorityWriterInternal(this, (input) =>
-      this.#commitWorkspaceBaseline(input),
+    registerWorkspaceBaselineAuthorityWriterInternal(
+      this,
+      (input, rootId) => this.#commitWorkspaceBaseline(input, rootId),
+      (rootId) => this.#bindWorkspaceStorageRoot(rootId),
     );
+  }
+
+  #bindWorkspaceStorageRoot(rootId: string): void {
+    this.transaction(() => {
+      const existing = this.#readWorkspaceStorageRootBinding();
+      if (existing) {
+        if (existing.root_id !== rootId || existing.protocol_version !== 1) {
+          throw new Error(
+            'Workspace authority database belongs to a different durable storage root',
+          );
+        }
+        return;
+      }
+      if (this.#databaseHasLogicalStateBeforeRootBinding()) {
+        throw new Error('Unbound operational data require explicit storage-root adoption');
+      }
+      this.db
+        .prepare(`
+          INSERT INTO runtime_storage_root_binding(singleton, root_id, protocol_version)
+          VALUES (1, ?, 1)
+        `)
+        .run(rootId);
+    });
+  }
+
+  #assertWorkspaceStorageRootBinding(rootId: string): void {
+    const existing = this.#readWorkspaceStorageRootBinding();
+    if (!existing || existing.root_id !== rootId || existing.protocol_version !== 1) {
+      throw new Error('Workspace authority database durable storage-root binding changed');
+    }
+  }
+
+  #readWorkspaceStorageRootBinding(): { root_id: string; protocol_version: number } | undefined {
+    return this.db
+      .prepare(`
+        SELECT root_id, protocol_version
+        FROM runtime_storage_root_binding
+        WHERE singleton = 1
+      `)
+      .get() as { root_id: string; protocol_version: number } | undefined;
+  }
+
+  #databaseHasLogicalStateBeforeRootBinding(): boolean {
+    const metadataTables = new Set([
+      'operational_schema_migrations',
+      'runtime_capabilities',
+      'runtime_storage_root_binding',
+    ]);
+    const tables = this.db
+      .prepare(`
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+        ORDER BY name
+      `)
+      .all() as Array<{ name: string }>;
+    for (const { name } of tables) {
+      if (metadataTables.has(name)) continue;
+      const quotedName = `"${name.replaceAll('"', '""')}"`;
+      if (this.db.prepare(`SELECT 1 FROM ${quotedName} LIMIT 1`).get()) return true;
+    }
+    return false;
   }
 
   async readWorkspaceEpoch(

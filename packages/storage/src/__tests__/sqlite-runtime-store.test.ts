@@ -48,6 +48,7 @@ describe('SqliteRuntimeStore', () => {
 
       const legacy = new DatabaseSync(dbPath);
       legacy.exec(`
+        DROP TABLE runtime_storage_root_binding;
         DROP TABLE runtime_workspace_heads;
         DROP TABLE runtime_workspace_versions;
         DROP TABLE runtime_workspace_epochs;
