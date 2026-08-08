@@ -20,6 +20,8 @@ import {
 import {
   bindWorkspaceBaselineAuthorityStoreRootInternal,
   commitWorkspaceBaselineInternal,
+  commitWorkspaceSuccessorInternal,
+  type WorkspaceSuccessorCommitInput,
 } from '../workspace-version-authority-internal.js';
 
 const TEST_STORAGE_ROOT_ID = 'a'.repeat(64);
@@ -132,6 +134,97 @@ describe('workspace version persistence authority', () => {
         );
       } finally {
         raw.close();
+      }
+    });
+  });
+
+  it('atomically commits one tool outcome with its successor workspace head', async () => {
+    await withDatabase(async ({ dbPath, store }) => {
+      const { baseline, input } = await prepareSuccessorCommit(store);
+      const result = await commitWorkspaceSuccessorInternal(store, input);
+
+      assert.equal(result.created, true);
+      assert.equal(result.head.revision, 2);
+      assert.equal(
+        (await store.readToolOperation(input.toolOutcome.operationId))?.currentState,
+        'outcome_committed',
+      );
+      assert.deepEqual(
+        await store.readWorkspaceHead(baseline.epoch.workspaceId, baseline.epoch.workspaceEpochId),
+        result.head,
+      );
+      assert.equal(
+        (await store.readWorkspaceVersion(result.head.workspaceVersionId))?.origin.kind,
+        'tool_mutation',
+      );
+
+      const retry = await commitWorkspaceSuccessorInternal(store, input);
+      assert.deepEqual(retry, { ...result, created: false });
+      const raw = new DatabaseSync(dbPath);
+      try {
+        assert.equal(count(raw, 'runtime_workspace_versions'), 2);
+        assert.equal(count(raw, 'runtime_workspace_heads'), 1);
+        assert.equal(
+          countWhere(raw, 'runtime_events', 'session_id = ?', WORKSPACE_AUTHORITY_SESSION_ID),
+          3,
+        );
+      } finally {
+        raw.close();
+      }
+
+      const corrupt = new DatabaseSync(dbPath);
+      try {
+        const row = corrupt
+          .prepare('SELECT payload_json FROM runtime_events WHERE event_id = ?')
+          .get(input.successor.acceptedEventId) as { payload_json: string };
+        const event = JSON.parse(row.payload_json) as RuntimeEvent;
+        const fact = event.actions?.workspaceFact;
+        assert.equal(fact?.kind, 'maka.workspace.version_accepted');
+        if (fact?.kind === 'maka.workspace.version_accepted') {
+          fact.payload.origin.outcomeEventId = 'other-outcome-event';
+        }
+        corrupt
+          .prepare('UPDATE runtime_events SET payload_json = ? WHERE event_id = ?')
+          .run(JSON.stringify(event), input.successor.acceptedEventId);
+      } finally {
+        corrupt.close();
+      }
+      await assert.rejects(
+        store.readWorkspaceHead(baseline.epoch.workspaceId, baseline.epoch.workspaceEpochId),
+        /workspace successor tool evidence: identity_conflict/i,
+      );
+    });
+  });
+
+  it('rolls back tool outcome, successor fact, projection, and head together', async () => {
+    await withDatabase(async ({ dbPath, store, setFailpoint }) => {
+      const { baseline, input } = await prepareSuccessorCommit(store);
+      setFailpoint('after_workspace_successor_event_insert');
+      await assert.rejects(commitWorkspaceSuccessorInternal(store, input), /failpoint/);
+      setFailpoint(undefined);
+      store.close();
+
+      const reopened = createSqliteRuntimeStore(dbPath);
+      try {
+        assert.equal(
+          (await reopened.readToolOperation(input.toolOutcome.operationId))?.currentState,
+          'prepared',
+        );
+        assert.equal(
+          (
+            await reopened.readWorkspaceHead(
+              baseline.epoch.workspaceId,
+              baseline.epoch.workspaceEpochId,
+            )
+          )?.workspaceVersionId,
+          baseline.baseline.workspaceVersionId,
+        );
+        assert.equal(
+          await reopened.readWorkspaceVersion(input.successor.successor.workspaceVersionId),
+          undefined,
+        );
+      } finally {
+        reopened.close();
       }
     });
   });
@@ -481,6 +574,117 @@ async function withDatabase(
     store.close();
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function prepareSuccessorCommit(store: ReturnType<typeof createSqliteRuntimeStore>): Promise<{
+  baseline: WorkspaceBaselineAuthorityInput;
+  input: WorkspaceSuccessorCommitInput;
+}> {
+  const baseline = baselineInput();
+  const opened = await commitWorkspaceBaselineInternal(store, baseline);
+  const args = { path: 'notes.txt', content: 'successor' };
+  const argsHash = canonicalToolArgsHash('Write', args);
+  const operationId = 'operation-successor-1';
+  const toolCallId = 'call-successor-1';
+  await store.commitToolPrepared({
+    operationId,
+    journalEventId: `${operationId}_prepared`,
+    runtimeEvent: {
+      id: 'call-successor-event',
+      sessionId: 'session-successor',
+      invocationId: 'invocation-successor',
+      runId: 'run-successor',
+      turnId: 'turn-successor',
+      ts: baseline.committedAt + 1,
+      partial: false,
+      role: 'model',
+      author: 'agent',
+      content: { kind: 'function_call', id: toolCallId, name: 'Write', args },
+      refs: { operationId, toolCallId },
+    },
+    dispatchRuntimeEvent: {
+      id: 'dispatch-successor-event',
+      sessionId: 'session-successor',
+      invocationId: 'invocation-successor',
+      runId: 'run-successor',
+      turnId: 'turn-successor',
+      ts: baseline.committedAt + 1,
+      partial: false,
+      role: 'system',
+      author: 'system',
+      actions: {
+        toolDispatch: {
+          protocol: 't1_after_preflight_v1',
+          operationId,
+          providerToolCallId: toolCallId,
+          toolName: 'Write',
+          canonicalArgsHash: argsHash,
+          recoveryMode: 'reconcile',
+        },
+      },
+      refs: { operationId, toolCallId },
+    },
+    providerToolCallId: toolCallId,
+    toolName: 'Write',
+    canonicalArgsHash: argsHash,
+    recoveryMode: 'reconcile',
+    committedAt: baseline.committedAt + 1,
+  });
+
+  return {
+    baseline,
+    input: {
+      successor: {
+        acceptedEventId: 'workspace-successor-event-1',
+        committedAt: baseline.committedAt + 2,
+        successor: {
+          repositoryId: baseline.epoch.repositoryId,
+          workspaceId: baseline.epoch.workspaceId,
+          workspaceEpochId: baseline.epoch.workspaceEpochId,
+          workspaceVersionId: 'version_77777777777777777777777777777777',
+          objectFormat: baseline.epoch.objectFormat,
+          parentWorkspaceVersionId: opened.head.workspaceVersionId,
+          baseAcceptedEventId: opened.head.acceptedEventId,
+          baseHeadRevision: opened.head.revision,
+          commitOid: '7'.repeat(40),
+          treeOid: '8'.repeat(40),
+          policyHash: baseline.epoch.policyHash,
+          treeDeltaDigest: `sha256:${'9'.repeat(64)}`,
+          changedFileCount: 1,
+          deletedFileCount: 0,
+          executionProfileDigest: `sha256:${'a'.repeat(64)}`,
+        },
+        origin: {
+          operationId,
+          dispatchEventId: 'dispatch-successor-event',
+          outcomeEventId: 'outcome-successor-event',
+        },
+      },
+      toolOutcome: {
+        operationId,
+        journalEventId: `${operationId}_outcome`,
+        committedAt: baseline.committedAt + 2,
+        runtimeEvent: {
+          id: 'outcome-successor-event',
+          sessionId: 'session-successor',
+          invocationId: 'invocation-successor',
+          runId: 'run-successor',
+          turnId: 'turn-successor',
+          ts: baseline.committedAt + 2,
+          partial: false,
+          role: 'tool',
+          author: 'tool',
+          content: {
+            kind: 'function_response',
+            id: toolCallId,
+            name: 'Write',
+            result: 'Wrote notes.txt',
+          },
+          refs: { operationId, toolCallId },
+        },
+      },
+    },
+  };
 }
 
 function baselineInput(

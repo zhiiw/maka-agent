@@ -598,6 +598,24 @@ M1.1 合同见
 这一步取代旧的“先做通用 checkpoint contract，再接 observe-only Git carrier”。不得同时维护两套
 managed workspace version writer。
 
+M2 按权威边界分三段施工，但保留在同一条 M2 集成分支上逐段收敛：
+
+1. **M2.1 successor persistence authority（当前已实现）**：新增严格的
+   `maka.workspace.version_accepted@1` 事实、因果 scanner、schema 11 successor projection 与唯一的
+   storage-internal bundle writer。writer 在同一个 SQLite transaction 中提交 T2 outcome、successor
+   RuntimeEvent、version projection 与 head CAS；reader/rebuild 从 immutable RuntimeEvents 重新验证
+   successor 所引用的 Write/Edit dispatch/outcome，不能只信 projection。
+2. **M2.2 Git candidate artifact owner（下一段）**：从当前 accepted head 创建 operation-bound candidate
+   ref/commit，验证单次 mutation delta、execution profile 与 worktree ownership，并定义 orphan、promotion
+   和 crash convergence。M2.1 不自行生成 Git OID，也不接受 host 拼装的 candidate 作为最终生产证据。
+3. **M2.3 production mutation composition（完成门槛）**：在 T1 前冻结 base head、execution profile 与
+   mutation identity；工具只经 owner-bound worker 修改 owned worktree；Git owner 产生 candidate；
+   ManagedWorkspaceOwner 调用 M2.1 bundle writer 并在提交后收敛 Git head。完成这一段以前，M2 分支不接
+   Desktop/CLI，也不得宣称 Write/Edit 已可恢复。
+
+M2.1 的详细合同见
+[Managed Workspace Mutation Version Authority v1](./runtime-managed-workspace-mutation-version-authority-v1.zh-CN.md)。
+
 ### M3 — Workspace-bound continuation / resume
 
 Continuation boundary 同时绑定 immutable RuntimeEvent cursor 与 accepted workspace version/epoch：
@@ -630,12 +648,14 @@ M0.1 Git artifact owner (merged)
   + M0.2 workspace version authority (merged)
   + M0.3 managed owner lifecycle (merged)
   └─> M0.4 baseline open bundle (merged)
-       └─> M1.1 execution scope admission (current)
-            └─> M1.2 runtime-host composition
-                 └─> M1.3 explicit environment provisioning
-                      └─> M2 mutation version acceptance
-                           └─> M3 workspace-bound continuation
-                                └─> M4 restore / rebaseline / publish / replication
+       └─> M1.1 execution scope admission (completed)
+            └─> M1.2 runtime-host composition (completed)
+                 └─> M1.3 explicit environment provisioning (completed prerequisite)
+                      └─> M2.1 successor persistence authority (current)
+                           └─> M2.2 Git candidate artifact owner
+                                └─> M2.3 production mutation composition
+                                     └─> M3 workspace-bound continuation
+                                          └─> M4 restore / rebaseline / publish / replication
 
 Independent maintenance gates before broad production enablement:
   - legacy non-empty DB root-binding adoption

@@ -178,6 +178,7 @@ export {
 
 export type {
   RuntimeEventWorkspaceFactEnvelope,
+  ScannedWorkspaceSuccessorAuthority,
   ScannedWorkspaceBaselineAuthority,
   WorkspaceAuthorityIdentity,
   WorkspaceAuthorityIssue,
@@ -188,6 +189,7 @@ export type {
   WorkspaceBaselineAuthorityScanResult,
   WorkspaceBaselineDescriptorV1,
   WorkspaceBaselineAcceptedV1,
+  WorkspaceAcceptedVersionV1,
   WorkspaceEpochDescriptorV1,
   WorkspaceEpochOpenedV1,
   WorkspaceEpochRecordV1,
@@ -196,6 +198,10 @@ export type {
   WorkspaceHeadRecordV1,
   WorkspaceBaselineCommitResult,
   WorkspaceProjectionRebuildResult,
+  WorkspaceMutationOriginV1,
+  WorkspaceSuccessorAuthorityInput,
+  WorkspaceSuccessorDescriptorV1,
+  WorkspaceVersionAcceptedV1,
   WorkspaceVersionRecordV1,
 } from './workspace-version-authority.js';
 export {
@@ -204,8 +210,10 @@ export {
   WORKSPACE_FACT_VERSION,
   WORKSPACE_MATERIALIZATION_SEMANTICS_V1,
   WORKSPACE_BASELINE_ACCEPTED_FACT_KIND,
+  WORKSPACE_VERSION_ACCEPTED_FACT_KIND,
   WORKSPACE_VERSION_AUTHORITY_CAPABILITY_V1,
   buildWorkspaceBaselineAuthorityEvents,
+  buildWorkspaceSuccessorAuthorityEvent,
   isRuntimeEventWorkspaceFactEnvelope,
   scanWorkspaceBaselineAuthority,
   validateWorkspaceFactEventLane,
