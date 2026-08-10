@@ -2,10 +2,26 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { RetryError } from 'ai';
 
-import { ModelAdapter, normalizeAiSdkUsage } from '../model-adapter.js';
+import { lowerModelTools, ModelAdapter, normalizeAiSdkUsage } from '../model-adapter.js';
 import type { ModelStreamEvent } from '../model-protocol.js';
 
 describe('ModelAdapter stream and error normalization', () => {
+  test('lowers apply_patch to the client-executed OpenAI provider tool', () => {
+    const tools = lowerModelTools({
+      apply_patch: { kind: 'provider', providerTool: { kind: 'openai-apply-patch' } },
+    });
+
+    assert.deepEqual(
+      {
+        type: (tools.apply_patch as { type?: unknown }).type,
+        id: (tools.apply_patch as { id?: unknown }).id,
+        isProviderExecuted: (tools.apply_patch as { isProviderExecuted?: unknown })
+          .isProviderExecuted,
+      },
+      { type: 'provider', id: 'openai.apply_patch', isProviderExecuted: false },
+    );
+  });
+
   test('resolves optional-key LocalAI without fabricating a credential', () => {
     const model = {};
     let observedApiKey: string | undefined;
@@ -193,6 +209,56 @@ describe('ModelAdapter stream and error normalization', () => {
         providerMetadata: { anthropic: { signature: 'sig-empty' } },
       } as Chunk),
       [{ kind: 'thinking-signature', signature: 'sig-empty' }],
+    );
+  });
+
+  test('marks OpenAI Chat field metadata as a Maka transport hint', () => {
+    const adapter = new ModelAdapter({
+      connection: {
+        slug: 'deepseek',
+        providerType: 'deepseek',
+        defaultModel: 'deepseek-v4-pro',
+        models: [{ id: 'deepseek-v4-pro', apiProtocol: 'openai-chat' }],
+      },
+      apiKey: 'deepseek-token',
+      modelId: 'deepseek-v4-pro',
+      modelFactory: () => ({}),
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    type Chunk = Parameters<typeof adapter.translateChunk>[0];
+
+    assert.deepEqual(adapter.translateChunk({ type: 'reasoning-delta', text: 'think' } as Chunk), [
+      {
+        kind: 'thinking',
+        text: 'think',
+        providerOptions: { maka: { openAiChatReasoningField: 'reasoning_content' } },
+        providerOptionsOrigin: 'maka_transport',
+      },
+    ]);
+  });
+
+  test('surfaces provider-executed tool input as replay-unsafe activity', () => {
+    const adapter = newAdapter();
+    type Chunk = Parameters<typeof adapter.translateChunk>[0];
+
+    assert.deepEqual(
+      adapter.translateChunk({
+        type: 'tool-input-start',
+        toolCallId: 'search-1',
+        toolName: 'WebSearch',
+        providerExecuted: true,
+      } as Chunk),
+      [{ kind: 'provider-tool-input' }],
+    );
+    assert.deepEqual(
+      adapter.translateChunk({
+        type: 'tool-input-start',
+        toolCallId: 'read-1',
+        toolName: 'Read',
+        providerExecuted: false,
+      } as Chunk),
+      [],
     );
   });
 

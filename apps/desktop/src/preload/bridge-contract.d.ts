@@ -391,6 +391,7 @@ export interface MakaBridge {
   };
   projects: {
     list(): Promise<ProjectRecord[]>;
+    subscribeChanges(handler: () => void): () => void;
     add(): Promise<
       { ok: true; project: ProjectRecord; path: string } | { ok: false; reason: 'cancelled' }
     >;
@@ -458,6 +459,11 @@ export interface MakaBridge {
     test(slug: string, opts?: { model?: string }): Promise<ConnectionTestResult>;
     fetchModels(slug: string): Promise<ModelDiscoveryResult>;
     hasSecret(slug: string): Promise<boolean>;
+    getRequestHeaders(slug: string): Promise<import('@maka/core').SavedRequestHeaders>;
+    setRequestHeaders(
+      slug: string,
+      headers: readonly import('@maka/core').RequestHeaderUpdate[],
+    ): Promise<import('@maka/core').SavedRequestHeaders>;
     subscribeEvents(handler: (event: ConnectionEvent) => void): () => void;
   };
   mcp: {

@@ -22,6 +22,7 @@ import { promisify } from 'node:util';
 import {
   connectOrSpawnRuntimeHost,
   connectRuntimeHost,
+  RuntimeHostRequestInterruptedError,
   type RuntimeHostConnection,
 } from '../client/index.js';
 import { connectOrSpawnRuntimeHostWithDependencies } from '../client/connect-or-spawn.js';
@@ -35,10 +36,12 @@ import { readHostRegistration } from '../control/registration.js';
 import { removePosixEndpointDirectories } from './fixtures/endpoint-hygiene.js';
 import {
   decodeHostFrame,
+  encodeProtocolMessage,
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
-  RUNTIME_HOST_MAX_FRAME_BYTES,
+  RUNTIME_HOST_MAX_MESSAGE_BYTES,
   RUNTIME_HOST_PROTOCOL_VERSION,
   RuntimeHostProtocolError,
+  type ClientFrame,
   type ClientSurface,
 } from '../protocol/index.js';
 import {
@@ -73,6 +76,39 @@ const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
 
 describe('non-serving Runtime Host kernel', () => {
+  test('service lifecycle remains ready until explicitly closed', async () => {
+    await withHostPaths(async (paths) => {
+      const capability = await resolveStorageRoot({ path: paths.root, kind: 'interactive' });
+      const owner = await tryAcquireInteractiveRootOwner(capability);
+      assert.ok(owner);
+      const host = await RuntimeHostKernel.start({
+        owner,
+        lifecycleMode: 'service',
+      });
+
+      await sleep(25);
+      assert.equal(host.state, 'ready');
+      assert.equal(await tryAcquireInteractiveRootOwner(capability), undefined);
+
+      const incompatible = await connectOrSpawnRuntimeHost({
+        ...paths,
+        rootPath: paths.root,
+        surface: 'tui',
+        protocol: LEGACY_PROTOCOL,
+        electionDeadlineMs: 500,
+      });
+      assert.equal(incompatible.kind, 'incompatible');
+      if (incompatible.kind === 'incompatible') {
+        assert.equal(incompatible.handshake.replacement, 'blocked_by_residency');
+      }
+
+      await host.close();
+      const successor = await tryAcquireInteractiveRootOwner(capability);
+      assert.ok(successor);
+      await successor.close();
+    });
+  });
+
   test('elects one owner, serves status and diagnostics, and releases ownership after true-idle shutdown', async () => {
     await withHostPaths(async (paths) => {
       const winner = await startTestRuntimeHostCandidate(paths, {
@@ -179,7 +215,7 @@ describe('non-serving Runtime Host kernel', () => {
         assert.ok(registration);
         assert.equal(registration.state, 'recovering');
         transport = new FramedTransport(await openSocket(registration.endpoint));
-        await transport.write({
+        await writeClientFrame(transport, {
           kind: 'hello',
           clientInstanceId: 'lifecycle-test',
           surface: 'inspect',
@@ -190,14 +226,18 @@ describe('non-serving Runtime Host kernel', () => {
         const handshake = decodeHostFrame(await transport.read(1_000));
         assert.ok('kind' in handshake && handshake.kind === 'accepted');
 
-        await transport.write({ requestId: 'status', operation: 'host.status', input: {} });
+        await writeClientFrame(transport, {
+          requestId: 'status',
+          operation: 'host.status',
+          input: {},
+        });
         const status = decodeHostFrame(await transport.read(1_000));
         assert.ok(!('kind' in status) && status.operation === 'host.status' && status.ok);
         if (!('kind' in status) && status.operation === 'host.status' && status.ok) {
           assert.equal(status.result.state, 'recovering');
         }
 
-        await transport.write({
+        await writeClientFrame(transport, {
           requestId: 'query',
           operation: 'turn.query',
           input: { sessionId: 'session', turnId: 'turn' },
@@ -209,7 +249,7 @@ describe('non-serving Runtime Host kernel', () => {
         }
       } finally {
         releaseFactory();
-        transport?.destroy();
+        transport?.abort();
         host = await hostTask.catch(() => undefined);
         await host?.close().catch(() => undefined);
       }
@@ -408,7 +448,8 @@ describe('non-serving Runtime Host kernel', () => {
       if (resident.kind !== 'connected') return;
 
       const staleWhileResident = new FramedTransport(await openSocket(candidate.host.endpoint));
-      await staleWhileResident.writeEncoded(
+      await writeRawLocalIpc(
+        staleWhileResident,
         encodeLegacyProtocolFrame({
           kind: 'hello',
           clientInstanceId: 'stale-schema-resident',
@@ -426,7 +467,7 @@ describe('non-serving Runtime Host kernel', () => {
         state: 'ready',
         replacement: 'blocked_by_residency',
       });
-      staleWhileResident.destroy();
+      staleWhileResident.abort();
       await staleWhileResident.closed;
 
       const blocked = await connectOrSpawnRuntimeHost({
@@ -442,7 +483,8 @@ describe('non-serving Runtime Host kernel', () => {
       await resident.connection.close();
 
       const staleAtIdle = new FramedTransport(await openSocket(candidate.host.endpoint));
-      await staleAtIdle.writeEncoded(
+      await writeRawLocalIpc(
+        staleAtIdle,
         encodeLegacyProtocolFrame({
           kind: 'hello',
           clientInstanceId: 'stale-schema-idle',
@@ -456,7 +498,7 @@ describe('non-serving Runtime Host kernel', () => {
       if ('kind' in staleIdleResponse && staleIdleResponse.kind === 'incompatible') {
         assert.equal(staleIdleResponse.replacement, 'wait_for_idle_exit');
       }
-      staleAtIdle.destroy();
+      staleAtIdle.abort();
       await staleAtIdle.closed;
 
       const replaceable = await Promise.all([
@@ -869,7 +911,11 @@ describe('non-serving Runtime Host kernel', () => {
         await assert.rejects(
           locallyTimed,
           (error: unknown) =>
-            error instanceof RuntimeHostTransportError && error.code === 'read_timeout',
+            error instanceof RuntimeHostRequestInterruptedError &&
+            error.reason === 'timeout' &&
+            error.retryable &&
+            error.cause instanceof RuntimeHostTransportError &&
+            error.cause.code === 'read_timeout',
         );
         assert.equal(
           (await connected.connection.status()).hostEpoch,
@@ -916,9 +962,12 @@ describe('non-serving Runtime Host kernel', () => {
           assert.rejects(
             pending,
             (error: unknown) =>
-              error instanceof RuntimeHostTransportError &&
-              error.code === 'read_timeout' &&
-              error.message.includes('host.status'),
+              error instanceof RuntimeHostRequestInterruptedError &&
+              error.reason === 'connection_lost' &&
+              error.retryable &&
+              error.cause instanceof RuntimeHostTransportError &&
+              error.cause.code === 'read_timeout' &&
+              error.cause.message.includes('host.status'),
           ),
           5_000,
           'automatic Runtime Host liveness check did not reject pending work',
@@ -1100,7 +1149,7 @@ describe('non-serving Runtime Host kernel', () => {
       const transport = new FramedTransport(socket);
       await new Promise<void>((resolve) => setImmediate(resolve));
       const closing = candidate.host.close();
-      await transport.write({
+      await writeClientFrame(transport, {
         kind: 'hello',
         clientInstanceId: 'draining-client',
         surface: 'tui',
@@ -1110,7 +1159,7 @@ describe('non-serving Runtime Host kernel', () => {
       });
       const response = decodeHostFrame(await transport.read(2_000));
       assert.deepEqual(response, { kind: 'draining', hostEpoch: candidate.host.hostEpoch });
-      transport.destroy();
+      transport.abort();
       await transport.closed;
       await closing;
     });
@@ -1162,7 +1211,7 @@ describe('non-serving Runtime Host kernel', () => {
       });
       const transport = new FramedTransport(await openSocket(host.endpoint));
       try {
-        await transport.write({
+        await writeClientFrame(transport, {
           kind: 'hello',
           clientInstanceId: 'composition-connection-release',
           surface: 'tui',
@@ -1174,7 +1223,7 @@ describe('non-serving Runtime Host kernel', () => {
         assert.ok('kind' in handshake && handshake.kind === 'accepted');
         if (!('kind' in handshake) || handshake.kind !== 'accepted') return;
 
-        await transport.write({
+        await writeClientFrame(transport, {
           requestId: 'blocked-memory-mutation',
           operation: 'memory.mutate',
           input: {
@@ -1187,7 +1236,7 @@ describe('non-serving Runtime Host kernel', () => {
         const admittedConnectionId = await handlerEntered;
         assert.equal(admittedConnectionId, handshake.connectionId);
 
-        transport.destroy();
+        transport.abort();
         await transport.closed;
         await new Promise<void>((resolve) => setImmediate(resolve));
         assert.deepEqual(releasedConnectionIds, []);
@@ -1196,7 +1245,7 @@ describe('non-serving Runtime Host kernel', () => {
         assert.equal(await connectionReleased, handshake.connectionId);
       } finally {
         releaseHandler();
-        transport.destroy();
+        transport.abort();
         await host.close().catch(() => undefined);
       }
     });
@@ -1290,7 +1339,7 @@ describe('non-serving Runtime Host kernel', () => {
       const transport = new FramedTransport(await openHalfOpenSocket(candidate.host.endpoint));
       const incompleteSocket = await openHalfOpenSocket(candidate.host.endpoint);
       try {
-        await transport.write({
+        await writeClientFrame(transport, {
           kind: 'hello',
           clientInstanceId: 'half-open-client',
           surface: 'tui',
@@ -1314,7 +1363,7 @@ describe('non-serving Runtime Host kernel', () => {
         assert.ok(owner);
         await owner?.close();
       } finally {
-        transport.destroy();
+        transport.abort();
         incompleteSocket.destroy();
       }
     });
@@ -1420,7 +1469,7 @@ describe('non-serving Runtime Host kernel', () => {
       try {
         const ready = await waitForUncooperativeHostMessage(child, 'ready');
         transport = new FramedTransport(await openSocket(ready.endpoint));
-        await transport.write({
+        await writeClientFrame(transport, {
           kind: 'hello',
           clientInstanceId: 'bounded-shutdown-test',
           surface: 'tui',
@@ -1433,7 +1482,7 @@ describe('non-serving Runtime Host kernel', () => {
         assert.equal(handshake.kind, 'accepted');
 
         const blocked = waitForUncooperativeHostMessage(child, 'operation-blocked');
-        await transport.write({
+        await writeClientFrame(transport, {
           requestId: 'blocked-turn-start',
           operation: 'turn.start',
           input: {
@@ -1447,7 +1496,7 @@ describe('non-serving Runtime Host kernel', () => {
         child.send({ type: 'shutdown' });
         await shutdownRequested;
 
-        await transport.write({
+        await writeClientFrame(transport, {
           requestId: 'post-drain-status',
           operation: 'host.status',
           input: {},
@@ -1463,7 +1512,7 @@ describe('non-serving Runtime Host kernel', () => {
 
         const rejectedHandshakeTransport = new FramedTransport(await openSocket(ready.endpoint));
         try {
-          await rejectedHandshakeTransport.write({
+          await writeClientFrame(rejectedHandshakeTransport, {
             kind: 'hello',
             clientInstanceId: 'post-drain-client',
             surface: 'inspect',
@@ -1476,7 +1525,7 @@ describe('non-serving Runtime Host kernel', () => {
             hostEpoch: ready.hostEpoch,
           });
         } finally {
-          rejectedHandshakeTransport.destroy();
+          rejectedHandshakeTransport.abort();
         }
 
         assert.equal(child.exitCode, null);
@@ -1509,7 +1558,7 @@ describe('non-serving Runtime Host kernel', () => {
         await connected.connection.close();
         await successor.host.close();
       } finally {
-        transport?.destroy();
+        transport?.abort();
         if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
         await withTimeout(waitForExit(child), 1_000, 'uncooperative Host cleanup did not exit');
       }
@@ -1683,7 +1732,7 @@ describe('non-serving Runtime Host kernel', () => {
       await sendInvalidBootstrap(candidate.host.endpoint, Buffer.from('not-json\n'));
       await sendInvalidBootstrap(
         candidate.host.endpoint,
-        Buffer.alloc(RUNTIME_HOST_MAX_FRAME_BYTES + 1, 0x61),
+        Buffer.alloc(RUNTIME_HOST_MAX_MESSAGE_BYTES + 1, 0x61),
       );
 
       const connected = await retryConnect(paths, CURRENT_PROTOCOL);
@@ -2291,6 +2340,16 @@ async function sendInvalidBootstrap(path: string, payload: Buffer): Promise<void
 
 function encodeLegacyProtocolFrame(frame: unknown): Buffer {
   return Buffer.from(`${JSON.stringify(frame)}\n`, 'utf8');
+}
+
+function writeRawLocalIpc(transport: FramedTransport, frame: Uint8Array): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transport.socket.write(frame, (error) => (error ? reject(error) : resolve()));
+  });
+}
+
+function writeClientFrame(transport: FramedTransport, frame: ClientFrame): Promise<void> {
+  return transport.write(encodeProtocolMessage(frame));
 }
 
 async function removeControlDirectoriesForRootsUnder(base: string): Promise<void> {

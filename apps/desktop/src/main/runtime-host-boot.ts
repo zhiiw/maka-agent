@@ -19,11 +19,11 @@ import {
   buildMcpTools,
   type BotIncomingMessage,
 } from "@maka/runtime";
+import { loadOrCreateRuntimeHostClientInstanceId } from "@maka/runtime-host/client";
 import { McpClientManager } from "@maka/mcp";
 import {
   createSettingsStore,
   createMcpConfigStore,
-  createProjectCatalog,
   createSqlitePlanReminderStore,
 } from "@maka/storage";
 import { registerAppIpc } from "./app-ipc-main.js";
@@ -71,6 +71,7 @@ import {
   registerPermissionOverlayIpc,
 } from "./permission-overlay/permission-overlay-main.js";
 import { resolveProjectContextRoot } from "./project-context-root.js";
+import { resolveDefaultPermissionMode } from "./permission-mode-default.js";
 import { createProjectManagementService } from "./project-management-service.js";
 import type { ProjectManagementService } from "./project-management-service.js";
 import { createProjectRootController } from "./project-root-controller.js";
@@ -99,7 +100,7 @@ import { registerRuntimeHostOAuthIpc } from "./runtime-host-oauth-ipc-main.js";
 import { RuntimeHostOAuthPresentation } from "./runtime-host-oauth-presentation.js";
 import { registerRuntimeHostPermissionsIpc } from "./runtime-host-permissions-ipc-main.js";
 import { registerRuntimeHostSearchIpc } from "./runtime-host-search-ipc-main.js";
-import { createRuntimeHostProjectSessionCatalog } from "./runtime-host-project-session-catalog.js";
+import { createRuntimeHostProjectCatalog } from "./runtime-host-project-catalog.js";
 import { toDesktopHostSessionSummary } from "./runtime-host-session-catalog-ipc-main.js";
 import {
   loadRuntimeHostSettings,
@@ -129,6 +130,9 @@ await resolveShellEnv();
 
 const buildInfo = resolveBuildInfo(app.isPackaged, app.getAppPath());
 const userDataDir = app.getPath("userData");
+const runtimeHostClientInstanceId = await loadOrCreateRuntimeHostClientInstanceId(
+  join(userDataDir, "runtime-host-client.json"),
+);
 const e2eFixture = resolveDesktopE2eFixture();
 const useBotOnboardingFixture =
   e2eFixture?.scenario === "settings-bots" ||
@@ -156,10 +160,6 @@ if (e2eFixture) {
   }
 }
 const settingsStore = createSettingsStore(workspaceRoot);
-const projectCatalog = createProjectCatalog(workspaceRoot, {
-  onLegacyImportFailure: (error) =>
-    console.error("[projects] projects.json could not be imported:", error),
-});
 const mcpConfigStore = createMcpConfigStore(workspaceRoot);
 const mcpManager = new McpClientManager({
   clientName: "maka-desktop",
@@ -237,13 +237,12 @@ const oauthPresentation = new RuntimeHostOAuthPresentation(
 );
 let owner: RuntimeHostDesktopOwner | undefined;
 let runtimePolicyClient: DesktopRuntimeHostClient | undefined;
+const projectCatalog = createRuntimeHostProjectCatalog(() => {
+  if (!runtimePolicyClient) throw new Error("Runtime Host client is unavailable");
+  return runtimePolicyClient;
+});
 const projectManagement: ProjectManagementService = createProjectManagementService({
   catalog: projectCatalog,
-  sessions: {
-    listHeaders: () => runtimeHostProjectSessionCatalog().listHeaders(),
-    updateHeader: (sessionId, patch) =>
-      runtimeHostProjectSessionCatalog().updateHeader(sessionId, patch),
-  },
   chooseDirectory: async () => {
     const result = await mainWindowController.showOpenDialog({
       title: "Add project",
@@ -253,17 +252,15 @@ const projectManagement: ProjectManagementService = createProjectManagementServi
   },
   selection: projectRoot,
 });
-function runtimeHostProjectSessionCatalog() {
-  if (!runtimePolicyClient) throw new Error("Runtime Host client is unavailable");
-  return createRuntimeHostProjectSessionCatalog(runtimePolicyClient);
-}
 const mcpCapabilityPublisher = createCapabilityRevisionPublisher(() =>
   mcpManager.toolSnapshotRevision(),
 );
 let settingsBotsIpc: SettingsBotsIpcHandle | undefined;
 const botRegistry = new BotRegistry({
   onIncomingMessage: (message: BotIncomingMessage) => {
-    void owner?.handleBotIncomingMessage(message);
+    void owner
+      ?.handleBotIncomingMessage(message)
+      .catch((error) => console.error("[runtime-host] bot message failed:", error));
   },
   onStatusChange: (status) => {
     mainWindowController.send("settings:bots:statusChanged", status);
@@ -376,6 +373,7 @@ const sessionCopyOwnerProcessId = randomUUID();
 owner = await startRuntimeHostDesktopOwner(
   {
     rootPath: workspaceRoot,
+    clientInstanceId: runtimeHostClientInstanceId,
     candidateEntrypoint: new URL(
       import.meta.resolve(
         isE2e
@@ -521,6 +519,9 @@ function registerHostClientIpc(
   const unsubscribeSessionCatalogChanges = client.subscribeSessionCatalogChanges(
     ({ sessionId }) => emitSessionsChanged("updated", sessionId),
   );
+  const unsubscribeProjectCatalogChanges = client.subscribeProjectCatalogChanges(() => {
+    mainWindowController.send("projects:changed");
+  });
   const capabilityBinding = mcpCapabilityPublisher.bind(
     controls.refreshClientCapabilities,
   );
@@ -639,6 +640,8 @@ function registerHostClientIpc(
     workspaceRoot,
     mainWindowController,
     getCurrentProjectRoot: () => projectRoot.current(),
+    getDefaultPermissionMode: () =>
+      resolveDefaultPermissionMode(() => loadRuntimeHostSettings(settingsIpcDeps)),
     openPath: (path) => shell.openPath(path),
   });
   registerRuntimeHostSearchIpc({ ipcMain: scopedIpc, client });
@@ -756,6 +759,7 @@ function registerHostClientIpc(
   return async () => {
     unsubscribeConfigurationChanges();
     unsubscribeSessionCatalogChanges();
+    unsubscribeProjectCatalogChanges();
     candidateSettingsBotsIpc.dispose();
     if (settingsBotsIpc === candidateSettingsBotsIpc) {
       settingsBotsIpc = undefined;

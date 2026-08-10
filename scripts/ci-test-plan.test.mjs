@@ -1,32 +1,65 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { formatGitHubOutputs, loadWorkspaceGraph, planTests } from './ci-test-plan.mjs';
+import {
+  changedFilesBetween,
+  formatGitHubOutputs,
+  loadWorkspaceGraph,
+  planTests,
+} from './ci-test-plan.mjs';
 
 const graph = loadWorkspaceGraph();
 
 test('impact planning distinguishes docs, UI, and backend changes', () => {
   const docs = planTests(['README.md', 'docs/testing.md'], { graph });
   assert.equal(docs.code, false);
+  assert.equal(docs.windows, false);
   assert.deepEqual(docs.workspaces, []);
 
   const ui = planTests(['packages/ui/src/button.tsx'], { graph });
   assert.equal(ui.e2e, true);
-  // Product UI work is not a Storybook catalog change — typecheck/unit/e2e own it.
-  assert.equal(ui.storybook, false);
+  assert.equal(ui.windows, true);
+  assert.equal(ui.windowsRuntime, false);
+  assert.equal(ui.windowsStorage, false);
+  // Product UI is mounted by the catalog. Runtime export and render changes can
+  // break Storybook even when its story files themselves are unchanged.
+  assert.equal(ui.storybook, true);
   assert.equal(ui.scriptMode, 'none');
   assert.deepEqual(ui.workspaces, ['packages/ui', 'apps/desktop']);
 
-  // Ordinary desktop product files must not drag Storybook Chromium.
-  assert.equal(planTests(['apps/desktop/src/main/main.ts'], { graph }).storybook, false);
-  assert.equal(planTests(['apps/desktop/e2e/settings.spec.ts'], { graph }).storybook, false);
+  // Unit-only packages/ui edits still run workspace tests, but must not force
+  // cold Electron e2e or Storybook build+Chromium smoke.
+  const uiUnitOnly = planTests(['packages/ui/src/__tests__/tool-activity-presentation.test.ts'], {
+    graph,
+  });
+  assert.equal(uiUnitOnly.e2e, false);
+  assert.equal(uiUnitOnly.storybook, false);
+  assert.ok(uiUnitOnly.workspaces.includes('packages/ui'));
+  assert.equal(planTests(['packages/ui/src/composer.tsx'], { graph }).e2e, true);
 
-  // Catalog + harness only.
+  // Renderer code is mounted by product stories; main-process and e2e files are not.
   assert.equal(
-    planTests(['apps/desktop/stories/app-shell.stories.tsx'], { graph }).storybook,
+    planTests(['apps/desktop/src/renderer/settings/daily-review-settings-page.tsx'], {
+      graph,
+    }).storybook,
     true,
   );
-  assert.equal(planTests(['apps/desktop/.storybook/preview.tsx'], { graph }).storybook, true);
-  assert.equal(planTests(['packages/ui/stories/composer.stories.tsx'], { graph }).storybook, true);
+  assert.equal(planTests(['apps/desktop/src/main/main.ts'], { graph }).storybook, false);
+  assert.equal(planTests(['apps/desktop/e2e/settings.spec.ts'], { graph }).storybook, false);
+  assert.equal(planTests(['apps/desktop/e2e/settings.spec.ts'], { graph }).e2e, true);
+
+  // Catalog + harness changes build and render the catalog without paying for
+  // workspace tests or real-window Electron E2E.
+  for (const path of [
+    'apps/desktop/stories/app-shell.stories.tsx',
+    'apps/desktop/stories/FIDELITY.md',
+    'apps/desktop/.storybook/preview.tsx',
+    'packages/ui/stories/composer.stories.tsx',
+  ]) {
+    const catalog = planTests([path], { graph });
+    assert.equal(catalog.storybook, true, path);
+    assert.equal(catalog.e2e, false, path);
+    assert.deepEqual(catalog.workspaces, [], path);
+  }
 
   // .storybook/preview.tsx reads THEME_PALETTES from this one core module.
   // Other core paths must not force Storybook.
@@ -49,11 +82,56 @@ test('impact planning distinguishes docs, UI, and backend changes', () => {
   assert.equal(alignment.storybook, false);
 
   const backend = planTests(['packages/storage/src/session-store.ts'], { graph });
+  assert.equal(backend.windowsRuntime, true);
+  assert.equal(backend.windowsStorage, true);
   assert.equal(backend.e2e, false);
   assert.equal(backend.storybook, false);
   for (const workspace of ['packages/storage', 'packages/runtime', 'apps/desktop']) {
     assert.ok(backend.workspaces.includes(workspace));
   }
+});
+
+test('Windows planning runs workflow changes fully and helper changes narrowly', () => {
+  const workflow = planTests(['.github/workflows/windows-baseline.yml'], { graph });
+  assert.equal(workflow.windows, true);
+  assert.equal(workflow.windowsRuntime, true);
+  assert.equal(workflow.windowsStorage, true);
+
+  for (const path of [
+    'scripts/windows-baseline-workflow.test.mjs',
+    'scripts/windows-process-identity.ps1',
+    'scripts/windows-smoke.mjs',
+  ]) {
+    const plan = planTests([path], { graph });
+    assert.equal(plan.windows, true, path);
+    assert.equal(plan.windowsRuntime, false, path);
+    assert.equal(plan.windowsStorage, false, path);
+  }
+});
+
+test('cross-surface renames retain both paths for impact planning', () => {
+  let invocation;
+  const files = changedFilesBetween('base-sha', 'head-sha', (command, args, options) => {
+    invocation = { command, args, options };
+    return 'packages/storage/src/legacy.ts\napps/desktop/src/main/replacement.ts\n';
+  });
+
+  assert.deepEqual(files, [
+    'packages/storage/src/legacy.ts',
+    'apps/desktop/src/main/replacement.ts',
+  ]);
+  assert.deepEqual(invocation.args, [
+    'diff',
+    '--no-renames',
+    '--name-only',
+    '--diff-filter=ACMRD',
+    'base-sha',
+    'head-sha',
+  ]);
+
+  const plan = planTests(files, { graph });
+  assert.equal(plan.windows, true);
+  assert.equal(plan.windowsStorage, true);
 });
 
 test('stress and specialized script checks run only for their owning surfaces', () => {
@@ -64,11 +142,30 @@ test('stress and specialized script checks run only for their owning surfaces', 
     'packages/storage/src/root-authority.ts',
     'packages/storage/src/__tests__/root-authority.test.ts',
     'packages/storage/src/__tests__/fixtures/root-lock-holder.ts',
+    // The amplified fresh-WAL race: the test, its worker, and the production
+    // owners of WAL initialization, locking, and every migration that
+    // acquireOperationalStateDatabase() runs inside the race.
+    'packages/storage/src/operational-state-store.ts',
+    'packages/storage/src/sqlite-artifact-schema.ts',
+    'packages/storage/src/sqlite-automation-schema.ts',
+    'packages/storage/src/sqlite-core-execution-schema.ts',
+    'packages/storage/src/sqlite-runtime-schema.ts',
+    'packages/storage/src/sqlite-session-metadata-schema.ts',
+    'packages/storage/src/sqlite-usage-schema.ts',
+    'packages/storage/src/sqlite-workflow-schema.ts',
+    'packages/storage/src/__tests__/sqlite-recovery-concurrency.test.ts',
+    'packages/storage/src/__tests__/fixtures/sqlite-recovery-concurrency-child.ts',
   ]) {
     assert.equal(planTests([path], { graph }).storageStress, true, path);
   }
   assert.equal(
     planTests(['packages/storage/src/session-store.ts'], { graph }).storageStress,
+    false,
+  );
+  // Imported by the race worker for its other modes, but the amplified
+  // operational_open_only branch never constructs it — not a stress trigger.
+  assert.equal(
+    planTests(['packages/storage/src/sqlite-runtime-store.ts'], { graph }).storageStress,
     false,
   );
   assert.equal(planTests([], { graph, forceFull: true }).storageStress, false);
@@ -149,6 +246,9 @@ test('heavy workspaces are projected onto dedicated CI lanes', () => {
   assert.ok(outputs.includes('runtime_host=true'));
   assert.ok(outputs.includes('headless=false'));
   assert.ok(outputs.includes('standard_workspaces=packages/cli,apps/desktop'));
+  assert.ok(outputs.includes('windows=true'));
+  assert.ok(outputs.includes('windows_runtime=false'));
+  assert.ok(outputs.includes('windows_storage=false'));
 });
 
 test('global and unknown production changes fail safe to the complete suite', () => {

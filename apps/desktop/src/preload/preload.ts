@@ -427,6 +427,11 @@ const makaBridge = {
     list(): Promise<ProjectRecord[]> {
       return ipcRenderer.invoke('projects:list');
     },
+    subscribeChanges(handler: () => void): () => void {
+      const listener = () => handler();
+      ipcRenderer.on('projects:changed', listener);
+      return () => ipcRenderer.off('projects:changed', listener);
+    },
     add(): Promise<
       { ok: true; project: ProjectRecord; path: string } | { ok: false; reason: 'cancelled' }
     > {
@@ -559,6 +564,15 @@ const makaBridge = {
     },
     hasSecret(slug: string): Promise<boolean> {
       return ipcRenderer.invoke('connections:hasSecret', slug);
+    },
+    getRequestHeaders(slug: string): Promise<import('@maka/core').SavedRequestHeaders> {
+      return ipcRenderer.invoke('connections:getRequestHeaders', slug);
+    },
+    setRequestHeaders(
+      slug: string,
+      headers: readonly import('@maka/core').RequestHeaderUpdate[],
+    ): Promise<import('@maka/core').SavedRequestHeaders> {
+      return ipcRenderer.invoke('connections:setRequestHeaders', slug, headers);
     },
     subscribeEvents(handler: (event: ConnectionEvent) => void): () => void {
       const listener = (_event: Electron.IpcRendererEvent, payload: ConnectionEvent) => handler(payload);

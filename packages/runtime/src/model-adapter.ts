@@ -60,6 +60,10 @@ import {
   OPENAI_RESPONSES_LANE_HEADER,
   type OpenAiResponsesTransportState,
 } from './openai-responses-websocket.js';
+import {
+  codexV4aApplyPatchProviderTool,
+  openAiApplyPatchProviderTool,
+} from './openai-apply-patch.js';
 
 /**
  * Build an ai-sdk LanguageModel from a single input object.
@@ -694,6 +698,7 @@ function translateChunk(
                   providerOptions: openAiChatReasoningFieldProviderOptions(
                     openAiChatReasoningTransportState.reasoningField,
                   ),
+                  providerOptionsOrigin: 'maka_transport' as const,
                 }
               : {}),
         });
@@ -710,6 +715,10 @@ function translateChunk(
           : []),
       ];
     }
+    case 'tool-input-start':
+    case 'tool-input-delta':
+    case 'tool-input-end':
+      return chunk.providerExecuted === true ? [{ kind: 'provider-tool-input' }] : [];
     // Step boundaries (`start-step` / `finish-step`) and the terminal `finish`
     // carry no text/thinking to stream. The backend owns step accounting: it
     // counts and flushes one AssistantMessage per step and rotates the
@@ -809,6 +818,10 @@ function compileProviderTool(
   tool: NonNullable<import('./tool-runtime.js').MakaTool['providerTool']>,
 ): unknown {
   switch (tool.kind) {
+    case 'openai-apply-patch':
+      return openAiApplyPatchProviderTool;
+    case 'openai-custom-apply-patch':
+      return codexV4aApplyPatchProviderTool;
     case 'openai-web-search':
       return openai.tools.webSearch({
         ...(tool.searchContextSize ? { searchContextSize: tool.searchContextSize } : {}),
