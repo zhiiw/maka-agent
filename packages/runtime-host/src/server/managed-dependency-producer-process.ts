@@ -30,15 +30,40 @@ export function isManagedNpmNodeVersionSupported(version: string): boolean {
 
 export interface RunManagedNpmDependencyProvisionInput {
   readonly producerInput: ManagedDependencyEnvironmentProducerInput;
+  readonly runtime: ManagedNpmRuntimeCapability;
+}
+
+export interface ManagedNpmRuntimeCapability {
+  readonly npmVersion: typeof MANAGED_NPM_PACKAGE_MANAGER_VERSION;
+  readonly nodeVersion: string;
+  readonly nodeAbi: string;
+  readonly platform: NodeJS.Platform;
+  readonly arch: string;
   readonly nodeExecutablePath: string;
   readonly npmRuntimeRoot: string;
   readonly npmCliPath: string;
+  readonly runtimeIdentitySha256: `sha256:${string}`;
 }
 
-/** @internal PR3 must bind this candidate owner to an attested bundled runtime before export. */
+const attestedNpmRuntimeCapabilities = new WeakMap<
+  ManagedNpmRuntimeCapability,
+  () => Promise<void>
+>();
+
+/** @internal Only the bundled runtime attestation owner may issue this capability. */
+export function issueManagedNpmRuntimeCapabilityInternal(
+  input: ManagedNpmRuntimeCapability,
+  revalidate: () => Promise<void>,
+): ManagedNpmRuntimeCapability {
+  const capability = Object.freeze({ ...input });
+  attestedNpmRuntimeCapabilities.set(capability, revalidate);
+  return capability;
+}
+
 export async function runManagedNpmDependencyProvision(
   input: RunManagedNpmDependencyProvisionInput,
 ): Promise<void> {
+  const runtime = await requireAttestedNpmRuntimeCapability(input.runtime);
   assertSafeNpmInputs(input.producerInput);
   const outputRoot = normalize(await realpath(input.producerInput.outputRoot));
   const scratchRoot = normalize(await realpath(input.producerInput.scratchRoot));
@@ -51,11 +76,11 @@ export async function runManagedNpmDependencyProvision(
     throw new TypeError('Managed npm producer requires one exact owned staging project');
   }
   const nodeExecutablePath = await canonicalRegularFile(
-    input.nodeExecutablePath,
+    runtime.nodeExecutablePath,
     'Managed npm Node runtime',
   );
-  const npmRuntimeRoot = await canonicalDirectory(input.npmRuntimeRoot, 'Managed npm runtime');
-  const npmCliPath = await canonicalRegularFile(input.npmCliPath, 'Managed npm CLI');
+  const npmRuntimeRoot = await canonicalDirectory(runtime.npmRuntimeRoot, 'Managed npm runtime');
+  const npmCliPath = await canonicalRegularFile(runtime.npmCliPath, 'Managed npm CLI');
   if (!isPathWithin(npmCliPath, npmRuntimeRoot)) {
     throw new Error('Managed npm CLI escapes its verified runtime root');
   }
@@ -82,6 +107,7 @@ export async function runManagedNpmDependencyProvision(
     argv: [
       nodeExecutablePath,
       '--permission',
+      ...(requiresExplicitNetworkPermission(runtime.nodeVersion) ? ['--allow-net'] : []),
       `--allow-fs-read=${npmRuntimeRoot}`,
       `--allow-fs-read=${projectRoot}`,
       `--allow-fs-write=${projectRoot}`,
@@ -109,6 +135,20 @@ export async function runManagedNpmDependencyProvision(
     maxObservedBytes: MANAGED_NPM_MAX_OBSERVED_BYTES,
     maxObservedEntries: MANAGED_NPM_MAX_OBSERVED_ENTRIES,
   });
+}
+
+function requiresExplicitNetworkPermission(nodeVersion: string): boolean {
+  const major = Number.parseInt(nodeVersion.split('.')[0] ?? '', 10);
+  return Number.isSafeInteger(major) && major >= 26;
+}
+
+async function requireAttestedNpmRuntimeCapability(
+  capability: ManagedNpmRuntimeCapability,
+): Promise<ManagedNpmRuntimeCapability> {
+  const revalidate = attestedNpmRuntimeCapabilities.get(capability);
+  if (!revalidate) throw new Error('Managed npm producer requires an attested runtime capability');
+  await revalidate();
+  return capability;
 }
 
 function assertSafeNpmInputs(input: ManagedDependencyEnvironmentProducerInput): void {
@@ -226,9 +266,14 @@ function hermeticNpmEnvironment(
   temporaryRoot: string,
   compileCacheRoot: string,
 ): NodeJS.ProcessEnv {
+  // libuv's Windows home lookup rejects USERPROFILE values at MAX_PATH even
+  // though Node's filesystem APIs can access the owned long path. The cwd is
+  // the exact staging project, so a relative home preserves the same authority
+  // boundary without depending on that fixed-size OS lookup buffer.
+  const effectiveHomeRoot = process.platform === 'win32' ? join('.maka-runtime', 'home') : homeRoot;
   return {
-    HOME: homeRoot,
-    USERPROFILE: homeRoot,
+    HOME: effectiveHomeRoot,
+    USERPROFILE: effectiveHomeRoot,
     npm_config_audit: 'false',
     npm_config_fund: 'false',
     npm_config_ignore_scripts: 'true',
@@ -241,7 +286,12 @@ function hermeticNpmEnvironment(
     TMPDIR: temporaryRoot,
     NODE_COMPILE_CACHE: compileCacheRoot,
     ...(process.platform === 'win32'
-      ? { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR }
+      ? {
+          APPDATA: join(effectiveHomeRoot, 'AppData', 'Roaming'),
+          LOCALAPPDATA: join(effectiveHomeRoot, 'AppData', 'Local'),
+          SystemRoot: process.env.SystemRoot,
+          WINDIR: process.env.WINDIR,
+        }
       : {}),
     ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
   };
