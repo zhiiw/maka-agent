@@ -1,17 +1,36 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, before, describe, test } from 'node:test';
-import { createGitWorkspaceService, type GitWorkspaceService } from '../git-workspace-service.js';
+import { fileURLToPath } from 'node:url';
+import {
+  createGitWorkspaceService,
+  type GitWorkspaceService,
+  type ManagedWorkspaceBinding,
+} from '../git-workspace-service.js';
 import { requireManagedBaselineReceiptAuthorityInternal } from '../managed-baseline-receipt-authority-internal.js';
-import { requireManagedMutationCandidateAuthorityInternal } from '../managed-mutation-candidate-authority-internal.js';
+import {
+  type ManagedMutationCandidateReceiptV1,
+  type ManagedMutationCandidateRequest,
+  requireManagedMutationCandidateAuthorityInternal,
+} from '../managed-mutation-candidate-authority-internal.js';
 
 const execFileAsync = promisify(execFile);
+const RUN_REAL_PROCESS_CRASH_TESTS = process.env.MAKA_STORAGE_STRESS === '1';
 const cleanup: string[] = [];
 let gitExecutablePath: string;
 let gitExecutableSha256: `sha256:${string}`;
@@ -84,8 +103,13 @@ describe('managed mutation candidate authority', () => {
     const binding = await interrupted.createManagedWorkspaceFromSource(openRequest(sourceRoot));
     const baseline =
       await requireManagedBaselineReceiptAuthorityInternal(interrupted).issue(binding);
-    const request = candidateRequest(binding, baseline);
-    await writeFile(join(binding.worktreePath, 'tracked.txt'), 'candidate\n', 'utf8');
+    const request = candidateRequest(
+      binding,
+      baseline,
+      ['docs/a.md'],
+      'operation-nested-ref-retry',
+    );
+    await writeFile(join(binding.worktreePath, 'docs', 'a.md'), 'candidate\n', 'utf8');
 
     await assert.rejects(
       requireManagedMutationCandidateAuthorityInternal(interrupted).capture(request),
@@ -108,7 +132,32 @@ describe('managed mutation candidate authority', () => {
       ),
       recovered.candidateRef,
     );
+    assert.deepEqual(recovered.changedPaths, ['docs/a.md']);
   });
+
+  for (const mutation of ['add', 'modify', 'delete'] as const) {
+    test(`captures a nested ${mutation} as the exact changed path`, async () => {
+      const root = await temporaryRoot();
+      const sourceRoot = await createEligibleSource(join(root, `source-${mutation}`));
+      const service = await serviceAt(join(root, `storage-${mutation}`));
+      const binding = await service.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+      const baseline = await requireManagedBaselineReceiptAuthorityInternal(service).issue(binding);
+      const relativePath = mutation === 'add' ? 'docs/new.md' : 'docs/a.md';
+      const targetPath = join(binding.worktreePath, ...relativePath.split('/'));
+      if (mutation === 'delete') {
+        await rm(targetPath);
+      } else {
+        await writeFile(targetPath, `${mutation}\n`, 'utf8');
+      }
+
+      const receipt = await requireManagedMutationCandidateAuthorityInternal(service).capture(
+        candidateRequest(binding, baseline, [relativePath], `operation-nested-${mutation}`),
+      );
+
+      assert.deepEqual(receipt.changedPaths, [relativePath]);
+      assert.deepEqual(receipt.deletedPaths, mutation === 'delete' ? [relativePath] : []);
+    });
+  }
 
   test('rejects a candidate that changes a regular file into a symlink', {
     skip: process.platform === 'win32',
@@ -129,6 +178,33 @@ describe('managed mutation candidate authority', () => {
         error instanceof Error &&
         'code' in error &&
         error.code === 'managed_mutation_candidate_rejected',
+    );
+  });
+
+  test('rejects a durable receipt whose workspace policy no longer matches the baseline', async () => {
+    const root = await temporaryRoot();
+    const sourceRoot = await createEligibleSource(join(root, 'source'));
+    const service = await serviceAt(join(root, 'storage'));
+    const binding = await service.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+    const baseline = await requireManagedBaselineReceiptAuthorityInternal(service).issue(binding);
+    const request = candidateRequest(binding, baseline);
+    await writeFile(join(binding.worktreePath, 'tracked.txt'), 'candidate\n', 'utf8');
+    await requireManagedMutationCandidateAuthorityInternal(service).capture(request);
+
+    const receiptRoot = join(dirname(binding.worktreePath), 'mutation-candidates');
+    const receiptName = (await readdir(receiptRoot)).find((name) => name.endsWith('.json'));
+    assert.ok(receiptName);
+    const receiptPath = join(receiptRoot, receiptName);
+    const receipt = JSON.parse(await readFile(receiptPath, 'utf8')) as Record<string, unknown>;
+    receipt.workspacePolicyHash = `sha256:${'f'.repeat(64)}`;
+    await writeFile(receiptPath, `${JSON.stringify(receipt)}\n`, 'utf8');
+
+    await assert.rejects(
+      requireManagedMutationCandidateAuthorityInternal(service).capture(request),
+      (error: unknown) =>
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'managed_workspace_identity_conflict',
     );
   });
 
@@ -171,6 +247,77 @@ describe('managed mutation candidate authority', () => {
     );
   });
 
+  test('converges candidate capture after a real process is killed post-ref', {
+    skip: !RUN_REAL_PROCESS_CRASH_TESTS,
+    timeout: 60_000,
+  }, async () => {
+    const root = await temporaryRoot();
+    const sourceRoot = await createEligibleSource(join(root, 'source'));
+    const storageRoot = join(root, 'storage');
+    const outputPath = join(root, 'mutation-output.json');
+    const child = spawnMutationCrashChild({
+      action: 'mutation-capture',
+      failpoint: 'after_mutation_candidate_ref',
+      sourceRoot,
+      storageRoot,
+      outputPath,
+    });
+    try {
+      await waitForReady(child, 30_000);
+      child.kill('SIGKILL');
+      await waitForExit(child);
+      const { candidateRequest } = JSON.parse(await readFile(outputPath, 'utf8')) as {
+        candidateRequest: ManagedMutationCandidateRequest;
+      };
+
+      const restarted = await serviceAt(storageRoot);
+      const receipt =
+        await requireManagedMutationCandidateAuthorityInternal(restarted).capture(candidateRequest);
+      assert.deepEqual(receipt.changedPaths, ['docs/a.md']);
+      assert.equal(
+        await gitBare(candidateRequest.binding.repositoryPath, 'rev-parse', receipt.candidateRef),
+        receipt.candidateCommitOid,
+      );
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }
+  });
+
+  test('converges candidate discard after a real process is killed post-ref deletion', {
+    skip: !RUN_REAL_PROCESS_CRASH_TESTS,
+    timeout: 60_000,
+  }, async () => {
+    const root = await temporaryRoot();
+    const sourceRoot = await createEligibleSource(join(root, 'source'));
+    const storageRoot = join(root, 'storage');
+    const outputPath = join(root, 'mutation-output.json');
+    const child = spawnMutationCrashChild({
+      action: 'mutation-discard',
+      failpoint: 'after_mutation_candidate_discard_ref',
+      sourceRoot,
+      storageRoot,
+      outputPath,
+    });
+    try {
+      await waitForReady(child, 30_000);
+      child.kill('SIGKILL');
+      await waitForExit(child);
+      const { binding, receipt } = JSON.parse(await readFile(outputPath, 'utf8')) as {
+        binding: ManagedWorkspaceBinding;
+        receipt: ManagedMutationCandidateReceiptV1;
+      };
+
+      const restarted = await serviceAt(storageRoot);
+      await requireManagedMutationCandidateAuthorityInternal(restarted).discard(receipt);
+      await requireManagedMutationCandidateAuthorityInternal(restarted).discard(receipt);
+      await assert.rejects(
+        gitBare(binding.repositoryPath, 'rev-parse', '--verify', receipt.candidateRef),
+      );
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }
+  });
+
   test('rejects undeclared and ignored workspace changes before publishing a ref', async () => {
     for (const extraPath of ['extra.txt', 'ignored.env']) {
       const root = await temporaryRoot();
@@ -208,10 +355,12 @@ function candidateRequest(
   baseline: Awaited<
     ReturnType<ReturnType<typeof requireManagedBaselineReceiptAuthorityInternal>['issue']>
   >,
+  expectedPaths: readonly string[] = ['tracked.txt'],
+  operationId = 'operation-candidate-1',
 ) {
   return {
     binding,
-    operationId: 'operation-candidate-1',
+    operationId,
     baseHead: {
       repositoryId: binding.repositoryId,
       workspaceId: binding.workspaceId,
@@ -222,7 +371,7 @@ function candidateRequest(
       treeOid: binding.baselineTreeOid,
       revision: 1,
     },
-    expectedPaths: ['tracked.txt'],
+    expectedPaths,
     executionProfileDigest: `sha256:${'e'.repeat(64)}`,
   } as const;
 }
@@ -250,9 +399,11 @@ function openRequest(sourceRoot: string) {
 async function createEligibleSource(sourceRoot: string): Promise<string> {
   await mkdir(sourceRoot, { recursive: true });
   await git(sourceRoot, 'init', '--quiet');
+  await mkdir(join(sourceRoot, 'docs'), { recursive: true });
   await writeFile(join(sourceRoot, 'tracked.txt'), 'tracked\n', 'utf8');
+  await writeFile(join(sourceRoot, 'docs', 'a.md'), 'nested\n', 'utf8');
   await writeFile(join(sourceRoot, '.gitignore'), 'ignored.env\n', 'utf8');
-  await git(sourceRoot, 'add', 'tracked.txt', '.gitignore');
+  await git(sourceRoot, 'add', 'tracked.txt', 'docs/a.md', '.gitignore');
   await git(
     sourceRoot,
     '-c',
@@ -288,6 +439,80 @@ async function sha256File(path: string): Promise<`sha256:${string}`> {
   const hash = createHash('sha256');
   for await (const chunk of createReadStream(path)) hash.update(chunk);
   return `sha256:${hash.digest('hex')}`;
+}
+
+function spawnMutationCrashChild(input: {
+  action: 'mutation-capture' | 'mutation-discard';
+  failpoint: 'after_mutation_candidate_ref' | 'after_mutation_candidate_discard_ref';
+  sourceRoot: string;
+  storageRoot: string;
+  outputPath: string;
+}): ReturnType<typeof spawn> {
+  return spawn(
+    process.execPath,
+    [fileURLToPath(new URL('./fixtures/git-workspace-service-crash-child.js', import.meta.url))],
+    {
+      env: {
+        ...process.env,
+        MAKA_GIT_WORKSPACE_ACTION: input.action,
+        MAKA_GIT_WORKSPACE_FAILPOINT: input.failpoint,
+        MAKA_GIT_WORKSPACE_SOURCE: input.sourceRoot,
+        MAKA_GIT_WORKSPACE_STORAGE: input.storageRoot,
+        MAKA_GIT_WORKSPACE_EXECUTABLE: gitExecutablePath,
+        MAKA_GIT_WORKSPACE_SHA256: gitExecutableSha256,
+        MAKA_GIT_WORKSPACE_MUTATION_OUTPUT: input.outputPath,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+}
+
+function waitForReady(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      cleanupListeners();
+      reject(new Error(`Managed mutation crash child did not become ready: ${stderr}`));
+    }, timeoutMs);
+    const onStdout = (chunk: unknown) => {
+      stdout += String(chunk);
+      if (stdout.includes('READY\n')) {
+        cleanupListeners();
+        resolve();
+      }
+    };
+    const onStderr = (chunk: unknown) => {
+      stderr += String(chunk);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanupListeners();
+      reject(new Error(`Managed mutation crash child exited early: ${code}/${signal} ${stderr}`));
+    };
+    const onError = (error: Error) => {
+      cleanupListeners();
+      reject(error);
+    };
+    const cleanupListeners = () => {
+      clearTimeout(timeout);
+      child.stdout?.off('data', onStdout);
+      child.stderr?.off('data', onStderr);
+      child.off('exit', onExit);
+      child.off('error', onError);
+    };
+    child.stdout?.on('data', onStdout);
+    child.stderr?.on('data', onStderr);
+    child.once('exit', onExit);
+    child.once('error', onError);
+  });
+}
+
+function waitForExit(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    child.once('exit', () => resolve());
+    child.once('error', reject);
+  });
 }
 
 async function git(cwd: string, ...args: string[]): Promise<string> {

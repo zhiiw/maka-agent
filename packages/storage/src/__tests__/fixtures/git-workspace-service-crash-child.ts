@@ -1,6 +1,8 @@
 import { writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { createGitWorkspaceService } from '../../git-workspace-service.js';
+import { requireManagedBaselineReceiptAuthorityInternal } from '../../managed-baseline-receipt-authority-internal.js';
+import { requireManagedMutationCandidateAuthorityInternal } from '../../managed-mutation-candidate-authority-internal.js';
 import { openManagedWorkspaceOwner } from '../../managed-workspace-owner.js';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '../../root-authority.js';
 import { createSqliteRuntimeStore } from '../../sqlite-runtime-store.js';
@@ -52,6 +54,41 @@ const service = createGitWorkspaceService({
 });
 
 const binding = await service.createManagedWorkspaceFromSource(request);
+
+if (
+  process.env.MAKA_GIT_WORKSPACE_ACTION === 'mutation-capture' ||
+  process.env.MAKA_GIT_WORKSPACE_ACTION === 'mutation-discard'
+) {
+  const baseline = await requireManagedBaselineReceiptAuthorityInternal(service).issue(binding);
+  const candidateRequest = {
+    binding,
+    operationId: 'operation-real-process-candidate',
+    baseHead: {
+      repositoryId: binding.repositoryId,
+      workspaceId: binding.workspaceId,
+      workspaceEpochId: binding.workspaceEpochId,
+      workspaceVersionId: baseline.workspaceVersionId,
+      acceptedEventId: baseline.baselineAcceptedEventId,
+      commitOid: binding.baselineCommitOid,
+      treeOid: binding.baselineTreeOid,
+      revision: 1,
+    },
+    expectedPaths: ['docs/a.md'],
+    executionProfileDigest: `sha256:${'e'.repeat(64)}` as const,
+  };
+  writeFileSync(join(binding.worktreePath, 'docs', 'a.md'), 'candidate from child\n', 'utf8');
+  const outputPath = requiredEnv('MAKA_GIT_WORKSPACE_MUTATION_OUTPUT');
+  if (process.env.MAKA_GIT_WORKSPACE_ACTION === 'mutation-capture') {
+    writeFileSync(outputPath, `${JSON.stringify({ candidateRequest })}\n`, 'utf8');
+    await requireManagedMutationCandidateAuthorityInternal(service).capture(candidateRequest);
+  } else {
+    const receipt =
+      await requireManagedMutationCandidateAuthorityInternal(service).capture(candidateRequest);
+    writeFileSync(outputPath, `${JSON.stringify({ binding, receipt })}\n`, 'utf8');
+    await requireManagedMutationCandidateAuthorityInternal(service).discard(receipt);
+  }
+  throw new Error('Managed mutation crash child missed its failpoint');
+}
 
 if (process.env.MAKA_GIT_WORKSPACE_ACTION === 'quarantine') {
   writeFileSync(

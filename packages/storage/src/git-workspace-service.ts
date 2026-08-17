@@ -733,7 +733,12 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           }
           const existing = await readMutationCandidateReceipt(receiptPath);
           if (existing) {
-            assertMutationCandidateReceiptMatches(existing, request, identity.ref);
+            assertMutationCandidateReceiptMatches(
+              existing,
+              request,
+              identity.ref,
+              baselineReceipt.policyHash,
+            );
             await this.assertMutationCandidateArtifact(existing, layout);
             return existing;
           }
@@ -1048,6 +1053,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           '--git-dir',
           binding.repositoryPath,
           'diff-tree',
+          '-r',
           '--raw',
           '-z',
           '--no-renames',
@@ -1061,6 +1067,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           '--git-dir',
           binding.repositoryPath,
           'diff-tree',
+          '-r',
           '--name-status',
           '-z',
           '--no-renames',
@@ -3022,6 +3029,7 @@ function assertMutationCandidateReceiptMatches(
   receipt: ManagedMutationCandidateReceiptV1,
   request: ManagedMutationCandidateRequest,
   candidateRef: string,
+  workspacePolicyHash: `sha256:${string}`,
 ): void {
   assertMutationCandidateReceipt(receipt);
   if (
@@ -3034,6 +3042,7 @@ function assertMutationCandidateReceiptMatches(
     receipt.gitRuntimeSha256 !== request.binding.gitRuntimeSha256 ||
     receipt.objectFormat !== request.binding.objectFormat ||
     receipt.materializationProfileDigest !== request.binding.materializationProfileDigest ||
+    receipt.workspacePolicyHash !== workspacePolicyHash ||
     !isDeepStrictEqual(receipt.baseHead, request.baseHead) ||
     !sameStringSet(receipt.changedPaths, request.expectedPaths) ||
     receipt.executionProfileDigest !== request.executionProfileDigest
