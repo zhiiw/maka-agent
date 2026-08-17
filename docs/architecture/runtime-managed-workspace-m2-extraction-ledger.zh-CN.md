@@ -36,7 +36,8 @@
 |---|---|
 | `packages/storage/src/managed-mutation-candidate-authority-internal.ts` | 只有 service-bound internal capability 能 capture/discard candidate |
 | `packages/storage/src/git-workspace-service.ts` | 在既有 Git owner 中发布/验证 operation-bound ref、receipt 与 discard tombstone |
-| `packages/storage/src/__tests__/managed-mutation-candidate-authority.test.ts` | 真实 Git capture、ref crash convergence、discard convergence 与路径策略 |
+| `packages/storage/src/__tests__/managed-mutation-candidate-authority.test.ts` | 真实 Git capture、嵌套 add/modify/delete、receipt corruption、真实 child-process capture/discard crash convergence 与路径策略 |
+| `packages/storage/src/__tests__/fixtures/git-workspace-service-crash-child.ts` | candidate ref/receipt 与 discard tombstone 的真实进程 kill seam |
 | `docs/architecture/runtime-managed-workspace-git-mutation-candidate-owner-v1.zh-CN.md` | M2.2 owner、发布顺序、失败状态和平台矩阵 |
 
 M2.2 仍不迁入 runtime protocol、Host lifecycle、Write/Edit composition 或 SQLite successor commit；这些分别属于

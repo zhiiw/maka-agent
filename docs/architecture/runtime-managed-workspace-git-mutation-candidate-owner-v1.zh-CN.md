@@ -41,7 +41,8 @@ config 和 storage-root writer lock。M2.2 通过 storage-internal `WeakMap` cap
 - status 只有声明的路径，没有 ignored、rename/copy 或额外变化；
 - candidate 全树只有普通 blob mode `100644/100755`，没有 symlink、submodule、special mode、属性文件或大小写冲突；
 - candidate commit 只有一个 parent，且 commit identity/message 使用固定协议；
-- receipt 的 ref、commit、tree、parent、delta digest 和路径集合可从 Git object database 重算。
+- receipt 的 ref、commit、tree、parent、递归文件级 delta digest 和路径集合可从 Git object database 重算；
+- receipt 的 workspace policy 必须等于本次从 baseline authority 重验出的 policy，不能信任 receipt 自报。
 
 ## 3. 发布协议
 
@@ -112,6 +113,10 @@ tombstone 在删除 ref 前落盘，所以崩溃后不会把“外部删 ref”�
 | power-loss ordering | v1 不承诺 | v1 不承诺 | v1 不承诺 |
 
 普通 `fsync`、Git ref 的平台实现和设备缓存不足以构成统一的断电证明，所以 v1 只声明进程崩溃收敛。
+
+进程崩溃承诺由真实 child-process kill/reopen 测试约束：capture 在 ref publication 后被杀，新进程补齐同一
+receipt；discard 在 ref deletion 后被杀，新进程依 tombstone 幂等完成清理。嵌套目录的新增、修改与删除均以
+递归 `diff-tree -r` 的文件路径作为 receipt 证据，不能退化成顶层目录名。
 
 ## 7. 留给 M2.3/M2.4 的边界
 
