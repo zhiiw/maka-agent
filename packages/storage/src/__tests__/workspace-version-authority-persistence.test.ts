@@ -196,6 +196,31 @@ describe('workspace version persistence authority', () => {
     });
   });
 
+  it('rejects a failed Write outcome without advancing the workspace head', async () => {
+    await withDatabase(async ({ store }) => {
+      const { baseline, input } = await prepareSuccessorCommit(store);
+      assert.equal(input.toolOutcome.runtimeEvent.content?.kind, 'function_response');
+      if (input.toolOutcome.runtimeEvent.content?.kind !== 'function_response') {
+        throw new Error('Expected a function response fixture');
+      }
+      input.toolOutcome.runtimeEvent.content.isError = true;
+
+      await assert.rejects(
+        commitWorkspaceSuccessorInternal(store, input),
+        /workspace successor requires a successful tool outcome/i,
+      );
+      assert.equal(
+        (await store.readToolOperation(input.toolOutcome.operationId))?.currentState,
+        'prepared',
+      );
+      assert.equal(
+        (await store.readWorkspaceHead(baseline.epoch.workspaceId, baseline.epoch.workspaceEpochId))
+          ?.workspaceVersionId,
+        baseline.baseline.workspaceVersionId,
+      );
+    });
+  });
+
   it('rolls back tool outcome, successor fact, projection, and head together', async () => {
     await withDatabase(async ({ dbPath, store, setFailpoint }) => {
       const { baseline, input } = await prepareSuccessorCommit(store);
@@ -242,6 +267,56 @@ describe('workspace version persistence authority', () => {
       assert.equal(
         (await store.readToolOperation(stale.input.toolOutcome.operationId))?.currentState,
         'prepared',
+      );
+    });
+  });
+
+  it('returns an earlier exact successor retry after the canonical head advances', async () => {
+    await withDatabase(async ({ store }) => {
+      const first = await prepareSuccessorCommit(store, 1);
+      const firstResult = await commitWorkspaceSuccessorInternal(store, first.input);
+      const second = await prepareSuccessorCommit(store, 2);
+      const secondResult = await commitWorkspaceSuccessorInternal(store, second.input);
+      assert.equal(secondResult.head.revision, firstResult.head.revision + 1);
+
+      const retry = await commitWorkspaceSuccessorInternal(store, first.input);
+      assert.deepEqual(retry, { ...firstResult, created: false });
+      assert.deepEqual(
+        await store.readWorkspaceHead(
+          first.baseline.epoch.workspaceId,
+          first.baseline.epoch.workspaceEpochId,
+        ),
+        secondResult.head,
+      );
+    });
+  });
+
+  it('rejects a failed outcome referenced by immutable successor authority', async () => {
+    await withDatabase(async ({ dbPath, store }) => {
+      const { input } = await prepareSuccessorCommit(store);
+      await commitWorkspaceSuccessorInternal(store, input);
+
+      const raw = new DatabaseSync(dbPath);
+      try {
+        const row = raw
+          .prepare('SELECT payload_json FROM runtime_events WHERE event_id = ?')
+          .get(input.toolOutcome.runtimeEvent.id) as { payload_json: string };
+        const outcome = JSON.parse(row.payload_json) as RuntimeEvent;
+        assert.equal(outcome.content?.kind, 'function_response');
+        if (outcome.content?.kind !== 'function_response') {
+          throw new Error('Expected a function response fixture');
+        }
+        outcome.content.isError = true;
+        raw
+          .prepare('UPDATE runtime_events SET payload_json = ? WHERE event_id = ?')
+          .run(JSON.stringify(outcome), input.toolOutcome.runtimeEvent.id);
+      } finally {
+        raw.close();
+      }
+
+      await assert.rejects(
+        store.rebuildWorkspaceVersionProjections(),
+        /workspace successor tool evidence: identity_conflict/i,
       );
     });
   });
