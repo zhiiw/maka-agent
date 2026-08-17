@@ -42,7 +42,7 @@ M2.2 的 Git candidate owner；M2.1 只建立其唯一持久化出口。
 | canonical evidence | workspace authority facts + successor 引用的 tool call/dispatch/response facts |
 | disposable state | `runtime_workspace_versions`、`runtime_workspace_heads` |
 | 并发裁判 | SQLite write transaction + base version/event/revision 三元 CAS |
-| exact retry | outcome、successor fact 与当前 head 全部一致时返回 `created=false` |
+| exact retry | immutable outcome 与 successor fact 精确一致时返回该 operation 原先接受的 head；后续合法 head 推进不改变历史结果 |
 | stale writer | base head 任一字段不一致即拒绝，且对应 tool operation 保持 `prepared` |
 | corruption | malformed fact、断链、重复 version identity、tool evidence 不匹配全部 fail closed |
 | 运行时回滚 | transaction 未提交时 T2/fact/projection/head 全部回滚 |
@@ -94,7 +94,8 @@ Scanner 还必须证明：
 - authority `event_seq` 连续，不能跨过或重放旧 revision；
 - workspace version identity 在整个 authority 中唯一；
 - origin 引用的是同一条无 corruption 的 Write/Edit `reconcile` operation；
-- `dispatchEventId` 与 `outcomeEventId` 精确指向该 operation 的 immutable T1/T2 facts。
+- `dispatchEventId` 与 `outcomeEventId` 精确指向该 operation 的 immutable T1/T2 facts；
+- T2 必须是成功的 `function_response`；`isError: true` 不能创建 successor，也不能通过 rebuild。
 
 最后两项在 SQLite canonical reader/rebuild 中对同一 snapshot 的 RuntimeEvents 运行 tool-ledger scanner 后交叉
 验证；不能由 tool projection 或 caller 自报代替。
@@ -151,6 +152,7 @@ RuntimeEvents 仍是唯一事实源。projection 删除后可以重建；canonic
 | projection insert 后异常 | transaction 回滚 | 不存在“fact 有、head 没有”的半状态 |
 | head CAS 前已有另一 successor | stale writer 被拒绝 | 不结算 stale operation |
 | COMMIT 成功、响应丢失 | exact retry 返回 `created=false` | 不重复写 T2/fact/version |
+| 更晚 successor 已推进 head 后重试旧 operation | 返回旧 operation 原先接受的 successor | current head 由独立读取返回，不篡改历史重试结果 |
 | fact/tool evidence 被篡改 | canonical reader fail closed | projection 不能掩盖 corruption |
 
 SQLite transaction 提供三平台一致的数据库原子性；本切片不声称 Git ref、目录 rename 或 workspace 文件内容已经
@@ -197,8 +199,11 @@ M2.4 不接 workspace-bound continuation；那属于 M3。
 
 - strict successor decode/scanner 与 causal head advancement；
 - exact retry 不重复写 fact/version/head；
+- exact retry 在后续 head 推进后仍返回 immutable 的原接受结果；
+- 失败 Write/Edit outcome 在 writer 与 canonical rebuild 两处均被拒绝；
 - stale successor 不结算对应 prepared operation；
-- successor event insert 后 failpoint 证明 T2/fact/projection/head 全回滚；
+- 真实 child process 在 successor transaction 内被杀后，reopen 证明 T2/fact/projection/head 全回滚；
+- 真实 child process 在 COMMIT 后被杀，reopen exact retry 收敛到同一 successor；
 - populated schema 12 → 13 数据升级；
 - canonical origin 被篡改后 reader fail closed；
 - schema、SQLite multi-process 与既有 recovery 定向 suites 保持通过。

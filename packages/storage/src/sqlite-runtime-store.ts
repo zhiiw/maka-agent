@@ -1249,6 +1249,12 @@ export class SqliteRuntimeStore
     ) {
       throw new Error('Workspace successor does not match its tool outcome identity');
     }
+    if (
+      toolOutcome.runtimeEvent.content?.kind !== 'function_response' ||
+      toolOutcome.runtimeEvent.content.isError === true
+    ) {
+      throw new Error('Workspace successor requires a successful tool outcome');
+    }
 
     return this.transaction(() => {
       this.#assertWorkspaceStorageRootBinding(rootId);
@@ -1279,12 +1285,18 @@ export class SqliteRuntimeStore
           toolOutcome.runtimeEvent,
           this.readRuntimeEventJson(operation.resultEventId),
         );
-        if (currentHead.workspaceVersionId !== existing.successor.workspaceVersionId) {
-          throw new Error('Workspace successor retry no longer describes the canonical head');
-        }
         return {
           created: false,
-          head: currentHead,
+          head: {
+            repositoryId: existing.successor.repositoryId,
+            workspaceId: existing.successor.workspaceId,
+            workspaceEpochId: existing.successor.workspaceEpochId,
+            workspaceVersionId: existing.successor.workspaceVersionId,
+            acceptedEventId: existing.acceptedEventId,
+            commitOid: existing.successor.commitOid,
+            treeOid: existing.successor.treeOid,
+            revision: existing.successor.baseHeadRevision + 1,
+          },
           outcomeRuntimeEventSeq: this.runtimeEventSeq(operation.resultEventId),
         };
       }
@@ -1569,7 +1581,8 @@ export class SqliteRuntimeStore
         (dispatch.toolName !== 'Write' && dispatch.toolName !== 'Edit') ||
         !response ||
         response.id !== origin.outcomeEventId ||
-        response.content?.kind !== 'function_response'
+        response.content?.kind !== 'function_response' ||
+        response.content.isError === true
       ) {
         throw new Error(
           `Corrupt workspace successor tool evidence: identity_conflict at ${accepted.acceptedEventId}`,
