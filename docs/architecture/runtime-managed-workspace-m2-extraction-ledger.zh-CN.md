@@ -30,6 +30,18 @@
 | continuation boundary 绑定 workspace version | M3 |
 | restore、rebaseline、publish、undo、replication | M4 |
 
+## M2.2 增量归属
+
+| 文件 | 主要不变量 |
+|---|---|
+| `packages/storage/src/managed-mutation-candidate-authority-internal.ts` | 只有 service-bound internal capability 能 capture/discard candidate |
+| `packages/storage/src/git-workspace-service.ts` | 在既有 Git owner 中发布/验证 operation-bound ref、receipt 与 discard tombstone |
+| `packages/storage/src/__tests__/managed-mutation-candidate-authority.test.ts` | 真实 Git capture、ref crash convergence、discard convergence 与路径策略 |
+| `docs/architecture/runtime-managed-workspace-git-mutation-candidate-owner-v1.zh-CN.md` | M2.2 owner、发布顺序、失败状态和平台矩阵 |
+
+M2.2 仍不迁入 runtime protocol、Host lifecycle、Write/Edit composition 或 SQLite successor commit；这些分别属于
+M2.3/M2.4。最终 PR 在前置栈合并后从最新 `main` 重建。
+
 ## Commit 映射
 
 | 当前提交 | 来源 | 说明 |
