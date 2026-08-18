@@ -1484,7 +1484,7 @@ export class SqliteRuntimeStore
         dispatchEvent,
         mutation,
         outcomeEvent: toolOutcome.runtimeEvent,
-        reason: input.reason,
+        disposition: input.disposition,
       });
       const existingTerminalJson = this.readRuntimeEventJson(terminalEvent.id);
       if (operation.resultEventId !== undefined || existingTerminalJson !== undefined) {
@@ -1557,9 +1557,12 @@ export class SqliteRuntimeStore
       const response = toolOutcome.runtimeEvent.content;
       if (
         response?.kind !== 'function_response' ||
-        (input.reason === 'operation_failed_no_effect') !== (response.isError === true)
+        (input.disposition === 'operation_failed_no_effect_committed') !==
+          (response.isError === true)
       ) {
-        throw new Error('Managed mutation terminal reason conflicts with its exact tool outcome');
+        throw new Error(
+          'Managed mutation terminal disposition conflicts with its exact tool outcome',
+        );
       }
 
       const outcomeResult = this.commitToolOutcomeSync(toolOutcome, 'workspace_terminal');
@@ -4261,14 +4264,13 @@ function buildManagedMutationTerminalEvent(input: {
   readonly dispatchEvent: RuntimeEvent;
   readonly mutation: RuntimeEventManagedWorkspaceMutationV1;
   readonly outcomeEvent: RuntimeEvent;
-  readonly reason: RuntimeEventManagedWorkspaceMutationTerminalV1['reason'];
+  readonly disposition: RuntimeEventManagedWorkspaceMutationTerminalV1['disposition'];
 }): RuntimeEvent {
   const dispatch = input.dispatchEvent.actions?.toolDispatch;
   if (!dispatch) throw new Error('Managed mutation terminal requires a dispatch event');
   const terminal: RuntimeEventManagedWorkspaceMutationTerminalV1 = {
     protocol: 'managed_mutation_terminal_v1',
-    disposition: 'safely_discarded',
-    reason: input.reason,
+    disposition: input.disposition,
     operationId: dispatch.operationId,
     dispatchEventId: input.dispatchEvent.id,
     outcomeEventId: input.outcomeEvent.id,
@@ -4317,7 +4319,7 @@ function scanManagedMutationTerminalFacts(
             dispatchEvent,
             mutation: dispatch.managedMutation,
             outcomeEvent: response,
-            reason: terminal.reason,
+            disposition: terminal.disposition,
           })
         : undefined;
     const actionKeys = event.actions ? Object.keys(event.actions) : [];
@@ -4347,7 +4349,7 @@ function scanManagedMutationTerminalFacts(
       event.runId !== dispatchEvent.runId ||
       event.turnId !== dispatchEvent.turnId ||
       (eventOrder.get(event.id) ?? -1) <= (eventOrder.get(response.id) ?? -1) ||
-      (terminal.reason === 'operation_failed_no_effect') !==
+      (terminal.disposition === 'operation_failed_no_effect_committed') !==
         (response.content?.kind === 'function_response' && response.content.isError === true) ||
       terminalOperations.has(terminal.operationId)
     ) {

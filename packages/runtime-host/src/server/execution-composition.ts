@@ -76,6 +76,7 @@ import { openInteractiveUsageStoresForWrite } from '@maka/storage/usage-stores';
 import { resolveWorkspaceIdentity } from '@maka/storage/workspace-identity';
 import {
   openManagedWorkspaceOwner,
+  type ManagedWorkspaceOwnerFailpoint,
   type ManagedWorkspaceFilesystemWorker,
   type ManagedWorkspaceOwner,
   type VerifiedGitRuntimeInput,
@@ -195,6 +196,10 @@ export interface CreateExecutionRuntimeHostCompositionOptions {
 
 export interface ExecutionRuntimeHostCompositionDependencies {
   readonly primaryBackendFactory?: BackendFactory;
+  /** Test-only crash boundary used by production-shaped Host recovery probes. */
+  readonly managedWorkspaceOwnerFailpoint?: (
+    point: ManagedWorkspaceOwnerFailpoint,
+  ) => void | Promise<void>;
   readonly oauthAuthorization?: Pick<
     HostOAuthCoordinatorInput,
     'startCodexAuthorization' | 'pollCodexAuthorization' | 'exchangeCodexCode'
@@ -345,6 +350,9 @@ export async function createExecutionRuntimeHostComposition(
         rootOwner: context.owner,
         gitRuntime: options.managedWorkspaceGitRuntime,
         filesystemWorker: managedFilesystemWorker,
+        ...(dependencies.managedWorkspaceOwnerFailpoint
+          ? { failpoint: dependencies.managedWorkspaceOwnerFailpoint }
+          : {}),
       });
     }
     workspaceExecution = createRuntimeHostWorkspaceExecutionComposition({

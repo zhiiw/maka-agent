@@ -783,8 +783,7 @@ describe('workspace version persistence authority', () => {
           actions: {
             managedMutationTerminal: {
               protocol: 'managed_mutation_terminal_v1',
-              disposition: 'safely_discarded',
-              reason: 'no_workspace_change',
+              disposition: 'no_workspace_change_committed',
               operationId: prepared.operationId,
               dispatchEventId: prepared.dispatchRuntimeEvent.id,
               outcomeEventId: 'workspace-terminal-bypass-outcome',

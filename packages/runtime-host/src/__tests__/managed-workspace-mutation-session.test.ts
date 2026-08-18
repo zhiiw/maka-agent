@@ -49,6 +49,7 @@ test('binds read and mutation operations to one owner-issued managed handle', as
       calls.push(`admit:${input.toolName}`);
       return {
         durableDispatch: {} as never,
+        executionArgs: input.persistedArgs as Readonly<Record<string, string>>,
         async execute() {
           throw new Error('not used');
         },

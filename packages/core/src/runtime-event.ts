@@ -263,8 +263,7 @@ export interface RuntimeEventManagedWorkspaceMutationV1 {
  */
 export interface RuntimeEventManagedWorkspaceMutationTerminalV1 {
   protocol: 'managed_mutation_terminal_v1';
-  disposition: 'safely_discarded';
-  reason: 'operation_failed_no_effect' | 'no_workspace_change';
+  disposition: 'operation_failed_no_effect_committed' | 'no_workspace_change_committed';
   operationId: string;
   dispatchEventId: string;
   outcomeEventId: string;
@@ -581,15 +580,7 @@ const RUNTIME_MANAGED_WORKSPACE_MUTATION_SHAPE =
   );
 const RUNTIME_MANAGED_WORKSPACE_MUTATION_TERMINAL_SHAPE =
   defineObjectShape<RuntimeEventManagedWorkspaceMutationTerminalV1>()(
-    [
-      'protocol',
-      'disposition',
-      'reason',
-      'operationId',
-      'dispatchEventId',
-      'outcomeEventId',
-      'mutation',
-    ],
+    ['protocol', 'disposition', 'operationId', 'dispatchEventId', 'outcomeEventId', 'mutation'],
     [],
   );
 const RUNTIME_PROTOCOL_MARKER_SHAPE = defineObjectShape<RuntimeEventProtocolMarker>()(
@@ -913,8 +904,8 @@ export function isRuntimeManagedWorkspaceMutationTerminal(
     isRecord(value) &&
     hasExactShape(value, RUNTIME_MANAGED_WORKSPACE_MUTATION_TERMINAL_SHAPE) &&
     value.protocol === 'managed_mutation_terminal_v1' &&
-    value.disposition === 'safely_discarded' &&
-    (value.reason === 'operation_failed_no_effect' || value.reason === 'no_workspace_change') &&
+    (value.disposition === 'operation_failed_no_effect_committed' ||
+      value.disposition === 'no_workspace_change_committed') &&
     typeof value.operationId === 'string' &&
     value.operationId.length > 0 &&
     typeof value.dispatchEventId === 'string' &&

@@ -1,7 +1,7 @@
 # Managed Workspace Write/Edit Production Composition v1
 
 - 阶段：M2.4
-- 状态：实现切片；首个生产消费者为显式 `managed-coding-v1` profile
+- 状态：API-only Draft；Runtime Host 已消费显式 `managed-coding-v1` profile，但 Desktop/CLI 尚未创建该类 session
 - owner：Runtime Host composition + `ManagedWorkspaceOwner` + SQLite workspace authority
 - 不包含：workspace-bound continuation（M3）、自动 restore/rebaseline/publish（M4）
 
@@ -43,7 +43,15 @@ workspace 时必须从 SQLite head 找到 operation-bound candidate，严格重�
 
 ## 3. 无副作用终态
 
-失败 Write/Edit 与成功 no-op 不允许回退 generic T2。Owner 先证明 worktree 仍精确等于 T1 base，然后由专用
+T1 后只允许进入四种互斥状态：
+
+- `workspace_successor_committed`：成功、有 workspace 变化，T2/successor/head/reservation 已原子收敛；
+- `no_workspace_change_committed`：成功、无 workspace 变化，success T2/terminal/reservation 已原子收敛；
+- `operation_failed_no_effect_committed`：失败、且 Git owner 已证明无副作用，error T2/terminal/reservation 已原子收敛；
+- `unsettled`：副作用或 durable proof 不能证明，保留 reservation 并 fail-stop。
+
+失败 Write/Edit 与成功 no-op 不允许回退 generic T2。真实 `FilesystemWorkerClient` 的确定性业务 reject 先由
+Runtime 捕获为唯一、不可变、bounded strict-JSON error proof；Owner 再证明 worktree 仍精确等于 T1 base。随后专用
 SQLite writer 在一个 transaction 内提交：
 
 ```text
@@ -53,10 +61,10 @@ exact Runtime-owned function_response
 + unchanged canonical workspace head
 ```
 
-terminal fact 的 reason 只有：
+terminal fact 的 disposition 只有：
 
-- `operation_failed_no_effect`：response 必须为 error；
-- `no_workspace_change`：response 必须为 success。
+- `operation_failed_no_effect_committed`：response 必须为 error；
+- `no_workspace_change_committed`：response 必须为 success。
 
 terminal fact、T1 mutation identity、dispatch/outcome identity、base head 与 expected paths 在 online writer 和 rebuild
 中都要一致。generic append/import 和 generic T2 writer 无权写入该 fact。若 worker 可能已改变文件、Git 状态漂移、
@@ -80,16 +88,20 @@ terminal fact 缺失/损坏或 candidate 无法重验，则保留 reservation �
 | 能力 | Linux | macOS | Windows |
 |---|---|---|---|
 | T1/reservation/terminal/successor SQLite 原子性 | 承诺 | 承诺 | 承诺 |
-| exact Write/Edit path + worker profile binding | 承诺 | 承诺 | 承诺 |
+| exact Write/Edit path + worker profile binding | 承诺 | 承诺 | 实现并由边界测试证明；当前 recovery runner 未打包 broker |
 | candidate capture/accept process-crash 收敛 | CI 证明 | CI 证明 | CI 证明 |
-| successor commit 后进程 kill、reopen 不重跑 | CI 证明 | CI 证明 | CI 证明 |
+| 真实 Host/worker 在 successor commit 后 kill、reopen 不重跑 | CI 证明 | CI 证明 | release broker 存在；当前 recovery runner 明确 skip |
 | power-loss 后硬件永久写入顺序 | 不承诺 | 不承诺 | 不承诺 |
 
-统一 recovery inventory 执行真实 child process kill/reopen。这里的承诺是 process-crash convergence，不把普通
-`fsync`、Git ref 或 SQLite WAL 夸大为断电级证明。
+统一 recovery inventory 执行真实 child process kill/reopen。Linux/macOS 的组合测试经过 Runtime Host、ToolRuntime、
+真实 `FilesystemWorkerClient`、Git owner 与 SQLite authority，并在 reopen 后执行一个真实 `edit_conflict`，证明 worker
+reject 能收敛为 no-effect error terminal；Windows runner 仍执行 29 条 SQLite/Git crash 用例，但
+因没有构建发布包内的 Rust sandbox broker，完整 Host/worker 用例以一个显式 skip 记录，不能表述为已由该 lane 证明。
+这里的承诺是 process-crash convergence，不把普通 `fsync`、Git ref 或 SQLite WAL 夸大为断电级证明。
 
 ## 6. 用户可见边界
 
 M2.4 完成的是“显式 managed coding task 中，一次 Write/Edit 的执行与 accepted workspace version 原子闭环”。
-它还不是“任意中断点自动继续整段对话”：把 continuation cursor 与 accepted workspace version 绑定、在重启后继续
+当前入口是 Runtime Host API/profile，Desktop/CLI 还不会创建 `managed-coding-v1` session，因此本切片继续保持 Draft。
+它也还不是“任意中断点自动继续整段对话”：把 continuation cursor 与 accepted workspace version 绑定、在重启后继续
 provider loop 属于 M3。attached checkout 仍保持原能力，不会自动获得 managed redo/restore。

@@ -73,7 +73,8 @@ successor，不重复推进 head。
 | T1 后进程崩溃 | reservation 跨进程保留；新的 mutation 不能取得所有权 |
 | operation park | reservation 保留，禁止另一个 mutation 越过未知副作用 |
 
-`safely_discarded` 的 canonical release fact 由 M2.4 定义为 `managed_mutation_terminal_v1`：只有 Git owner
+`no_workspace_change_committed` 与 `operation_failed_no_effect_committed` 的 canonical release fact 由 M2.4 定义为
+`managed_mutation_terminal_v1`：只有 Git owner
 证明 worktree 仍等于 exact T1 base 后，专用 SQLite writer 才能将 exact T2、terminal fact 与 reservation release
 原子提交。M2.3a 仍不提供手工删除 reservation 的公共 API。
 

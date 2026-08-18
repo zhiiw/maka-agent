@@ -479,13 +479,19 @@ export type RuntimeManagedMutationSettlement =
       readonly durableOutcome: RuntimeEvent;
     }
   | {
-      readonly kind: 'safely_discarded';
+      readonly kind: 'no_workspace_change_committed';
+      readonly durableOutcome: RuntimeEvent;
+    }
+  | {
+      readonly kind: 'operation_failed_no_effect_committed';
       readonly durableOutcome: RuntimeEvent;
     }
   | { readonly kind: 'unsettled'; readonly error: unknown };
 
 export interface RuntimeManagedMutationAdmission {
   readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceMutationV1>;
+  /** Owner-issued arguments whose canonical path is identical to durableDispatch.expectedPaths. */
+  readonly executionArgs: unknown;
   execute(
     operation: () => Promise<RuntimeManagedMutationOperationProof>,
   ): Promise<RuntimeManagedMutationSettlement>;
@@ -1316,6 +1322,7 @@ export class ToolRuntime {
     }
 
     let managedMutationAdmission: RuntimeManagedMutationAdmission | undefined;
+    let runtimeExecutionArgs = executionArgs;
     if (tool.durableExecutionProfile === 'managed_mutation_v1') {
       if (
         (tool.name !== 'Write' && tool.name !== 'Edit') ||
@@ -1336,6 +1343,7 @@ export class ToolRuntime {
           persistedArgs: structuredClone(persistedArgs),
           abortSignal: ctx.abortSignal,
         });
+        runtimeExecutionArgs = managedMutationAdmission.executionArgs;
       } catch (error) {
         const reason = `Managed workspace mutation admission failed: ${formatSyntheticToolErrorText(error)}`;
         await refuseBeforeDispatch(reason);
@@ -1410,7 +1418,7 @@ export class ToolRuntime {
         const runId = this.input.runId;
         const executionBoundary = clientCapabilityBoundary ?? (await this.readExecutionBoundary());
         const invokeTool = () =>
-          tool.impl(structuredClone(executionArgs) as never, {
+          tool.impl(structuredClone(runtimeExecutionArgs) as never, {
             sessionId: this.input.sessionId,
             turnId,
             ...(runId ? { runId } : {}),
@@ -1474,7 +1482,33 @@ export class ToolRuntime {
         const prepareOperationValue = async (
           immutableSnapshot = false,
         ): Promise<RuntimeManagedMutationOperationValue<unknown>> => {
-          const rawResult = await invokeTool();
+          let rawResult: unknown;
+          try {
+            rawResult = await invokeTool();
+          } catch (error) {
+            if (!immutableSnapshot) throw error;
+            const message = formatSyntheticToolErrorText(error);
+            const result = snapshotManagedToolResult(this.errorReturn(message), ctx.maxResultBytes);
+            const sandboxError = serializeSandboxError(error);
+            const sandboxDenial = sandboxDenialSignalFromError(error);
+            const sandboxFailure = sandboxBoundaryFailureSignal(sandboxError);
+            const uncertainOutcome = uncertainOutcomeSignalFromError(error);
+            const content = deepFreezeRuntimeOwnedValue<ToolResultContent>({
+              kind: 'text',
+              text: message,
+              ...(sandboxDenial ? { sandboxDenial } : {}),
+              ...(sandboxFailure ? { sandboxFailure } : {}),
+              ...(uncertainOutcome ? { uncertainOutcome } : {}),
+            });
+            return Object.freeze({
+              result,
+              outcome: Object.freeze({
+                content,
+                isError: true,
+                durationMs: this.input.now() - startedAt,
+              }),
+            });
+          }
           const result = immutableSnapshot
             ? snapshotManagedToolResult(rawResult, ctx.maxResultBytes)
             : rawResult;
@@ -3109,7 +3143,11 @@ function normalizeManagedMutationSettlement(settlement: unknown):
       durableOutcome: RuntimeEvent;
     }
   | {
-      kind: 'safely_discarded';
+      kind: 'no_workspace_change_committed';
+      durableOutcome: RuntimeEvent;
+    }
+  | {
+      kind: 'operation_failed_no_effect_committed';
       durableOutcome: RuntimeEvent;
     } {
   if (!settlement || typeof settlement !== 'object' || Array.isArray(settlement)) {
@@ -3120,7 +3158,11 @@ function normalizeManagedMutationSettlement(settlement: unknown):
   if (kind === 'unsettled') {
     throw new RuntimeManagedMutationUnsettledError(record.error);
   }
-  if (kind !== 'workspace_successor_committed' && kind !== 'safely_discarded') {
+  if (
+    kind !== 'workspace_successor_committed' &&
+    kind !== 'no_workspace_change_committed' &&
+    kind !== 'operation_failed_no_effect_committed'
+  ) {
     throw new Error('Managed mutation owner returned an unknown settlement kind');
   }
   const durableOutcomeValue = Object.hasOwn(record, 'durableOutcome')
@@ -3135,16 +3177,17 @@ function normalizeManagedMutationSettlement(settlement: unknown):
   }
   const durableOutcome = durableOutcomeValue as RuntimeEvent;
 
-  if (kind === 'workspace_successor_committed') {
-    return {
-      kind,
-      durableOutcome,
-    };
-  }
-
   const response = durableOutcome.content;
-  if (response?.kind !== 'function_response' || response.isError !== true) {
-    throw new Error('Managed safely-discarded settlement has no durable error outcome');
+  if (response?.kind !== 'function_response') {
+    throw new Error('Managed mutation settlement has no durable function response');
+  }
+  const expectsError = kind === 'operation_failed_no_effect_committed';
+  if ((response.isError === true) !== expectsError) {
+    throw new Error(
+      expectsError
+        ? 'Managed no-effect failure settlement has no durable error outcome'
+        : 'Managed successful settlement has no durable success outcome',
+    );
   }
   return {
     kind,

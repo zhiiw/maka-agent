@@ -18,6 +18,9 @@ export const RECOVERY_TEST_INVENTORIES = Object.freeze({
       'packages/storage/src/sqlite-runtime-schema.ts',
       'packages/storage/src/sqlite-runtime-store.ts',
       'packages/storage/src/workspace-version-authority-internal.ts',
+      'packages/runtime/src/tool-runtime.ts',
+      'packages/runtime-host/src/server/execution-composition.ts',
+      'packages/runtime-host/src/server/managed-workspace-mutation-session.ts',
       'packages/storage/src/__tests__/managed-workspace-baseline.test.ts',
       'packages/storage/src/__tests__/git-workspace-service.test.ts',
       'packages/storage/src/__tests__/managed-mutation-candidate-authority.test.ts',
@@ -26,6 +29,8 @@ export const RECOVERY_TEST_INVENTORIES = Object.freeze({
       'packages/storage/src/__tests__/sqlite-recovery-concurrency.test.ts',
       'packages/storage/src/__tests__/fixtures/git-workspace-service-crash-child.ts',
       'packages/storage/src/__tests__/fixtures/sqlite-recovery-concurrency-child.ts',
+      'packages/runtime-host/src/__tests__/managed-workspace-write-edit-crash.test.ts',
+      'packages/runtime-host/src/__tests__/fixtures/managed-workspace-write-edit-host-crash.ts',
     ]),
     testNamePattern:
       'real process crash|real process is killed|real crash|real-process crash|crash after baseline ref publication|durable managed mutation ownership',
@@ -36,11 +41,15 @@ export const RECOVERY_TEST_INVENTORIES = Object.freeze({
       'packages/storage/dist/__tests__/managed-workspace-owner.test.js',
       'packages/storage/dist/__tests__/sqlite-runtime-crash.test.js',
       'packages/storage/dist/__tests__/sqlite-recovery-concurrency.test.js',
+      'packages/runtime-host/dist/__tests__/managed-workspace-write-edit-crash.test.js',
     ]),
     expectedByPlatform: Object.freeze({
-      darwin: Object.freeze({ tests: 29, pass: 29, skipped: 0 }),
-      linux: Object.freeze({ tests: 29, pass: 29, skipped: 0 }),
-      win32: Object.freeze({ tests: 29, pass: 29, skipped: 0 }),
+      darwin: Object.freeze({ tests: 30, pass: 30, skipped: 0 }),
+      linux: Object.freeze({ tests: 30, pass: 30, skipped: 0 }),
+      // The Windows release contains the sandbox broker, but the recovery
+      // runner does not currently build/package that Rust artifact. Keep the
+      // full Host test visible as an explicit platform evidence gap.
+      win32: Object.freeze({ tests: 30, pass: 29, skipped: 1 }),
     }),
   }),
 });

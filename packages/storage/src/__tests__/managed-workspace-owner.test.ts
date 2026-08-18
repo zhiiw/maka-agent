@@ -217,7 +217,7 @@ test('publishes only a revocable execution scope through its accepted handle', a
   }
 });
 
-test('freezes a managed Write admission from the owner-bound head and worker profile', async () => {
+test('freezes canonical Write/Edit admission from the owner-bound head and worker profile', async () => {
   const root = await temporaryRoot();
   const storageRoot = join(root, 'storage');
   const sourceRoot = await createEligibleSource(join(root, 'source'));
@@ -244,10 +244,11 @@ test('freezes a managed Write admission from the owner-bound head and worker pro
       openRequest(sourceRoot),
     );
 
+    const inputPath = process.platform === 'win32' ? 'dir\\tracked.txt' : 'dir/tracked.txt';
     const admission = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
       operationId: 'operation-managed-write-1',
       toolName: 'Write',
-      persistedArgs: { path: 'tracked.txt', content: 'updated\n' },
+      persistedArgs: { path: inputPath, content: 'updated\n' },
       abortSignal: new AbortController().signal,
     });
 
@@ -263,13 +264,34 @@ test('freezes a managed Write admission from the owner-bound head and worker pro
       baseHeadRevision: accepted.head.revision,
       baseCommitOid: accepted.head.commitOid,
       baseTreeOid: accepted.head.treeOid,
-      expectedPaths: ['tracked.txt'],
+      expectedPaths: ['dir/tracked.txt'],
       executionProfileDigest: admission.durableDispatch.executionProfileDigest,
+    });
+    assert.deepEqual(admission.executionArgs, {
+      path: 'dir/tracked.txt',
+      content: 'updated\n',
     });
     assert.match(admission.durableDispatch.executionProfileDigest, /^sha256:[a-f0-9]{64}$/u);
     assert.equal('executionProfileDigest' in admission, false);
 
     await admission.dispose();
+    const editAdmission = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+      operationId: 'operation-managed-edit-1',
+      toolName: 'Edit',
+      persistedArgs: {
+        path: inputPath,
+        old_string: 'before',
+        new_string: 'after',
+      },
+      abortSignal: new AbortController().signal,
+    });
+    assert.deepEqual(editAdmission.durableDispatch.expectedPaths, ['dir/tracked.txt']);
+    assert.deepEqual(editAdmission.executionArgs, {
+      path: 'dir/tracked.txt',
+      old_string: 'before',
+      new_string: 'after',
+    });
+    await editAdmission.dispose();
     await owner.close();
   } finally {
     runtimeStore.close();
@@ -498,7 +520,7 @@ test('atomically settles failed and successful no-effect Writes without advancin
       durableOutcome: managedMutationOutcome(operationId, toolCallId, result, true),
     }));
 
-    assert.equal(settlement.kind, 'safely_discarded');
+    assert.equal(settlement.kind, 'operation_failed_no_effect_committed');
     assert.equal(
       (
         await runtimeStore.readWorkspaceHead(
@@ -564,7 +586,7 @@ test('atomically settles failed and successful no-effect Writes without advancin
         ),
       };
     });
-    assert.equal(noChangeSettlement.kind, 'safely_discarded');
+    assert.equal(noChangeSettlement.kind, 'no_workspace_change_committed');
     assert.equal(
       (
         await runtimeStore.readWorkspaceHead(

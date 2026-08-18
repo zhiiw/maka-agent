@@ -1,7 +1,7 @@
 # Managed Workspace Mutation Runtime Settlement v1
 
 - 阶段：M2.3b
-- 状态：实现切片；M2.4 已提供首个显式 managed Write/Edit 生产消费者
+- 状态：实现切片；M2.4 Runtime Host API 已消费，Desktop/CLI session creator 尚未接入
 - owner：Tool Runtime managed settlement seam
 - durable 真相：M2.3a SQLite reservation 与 owner 已提交的 immutable outcome
 
@@ -16,11 +16,12 @@ owner 最多调用一次；`execute()` 返回或抛错时 capability 立即关�
 Runtime 必须先 join 该 operation，再将整个结算判为 unsettled，确保 Runtime 返回后不存在仍可产生副作用的 detached
 execution。
 
-Runtime 只接受三种 owner 结算：
+Runtime 只接受四种 owner 结算：
 
 1. `workspace_successor_committed`：M2.1 的成功 T2、successor 与 head 已经原子提交；
-2. `safely_discarded`：owner 已证明 workspace 无副作用，并已提交 exact error/no-op outcome 与 terminal fact；
-3. `unsettled`：副作用或结算状态不可证明，M2.3a reservation 保留给恢复流程。
+2. `no_workspace_change_committed`：成功但 tree 未变化，success outcome 与 terminal fact 已提交；
+3. `operation_failed_no_effect_committed`：失败且 owner 已证明 workspace 无副作用，error outcome 与 terminal fact 已提交；
+4. `unsettled`：副作用或结算状态不可证明，M2.3a reservation 保留给恢复流程。
 
 owner 返回值首先经过运行时结构校验，规范化成内部 terminal union。managed/generic lane 只由 T1 前已经确定的
 `managedMutationAdmission` 决定，绝不再用 `durableOutcome` 是否 truthy 选择 writer；terminal settlement 缺失
@@ -66,13 +67,15 @@ flowchart TD
   Q --> N["normalize terminal proof"]
   N --> S{"terminal state proven?"}
   S -->|"successor committed"| A["compare exact durable success envelope"]
-  S -->|"safely discarded"| E["compare exact durable error envelope"]
+  S -->|"no change committed"| N0["compare exact durable success envelope"]
+  S -->|"failed no effect committed"| E["compare exact durable error envelope"]
   S -->|"unknown / throw / invalid"| P["fail-stop; reservation remains"]
   A --> R["publish provider result"]
+  N0 --> R
   E --> R
 ```
 
-`safely_discarded` 与 success 一样只携带 terminal proof 和 exact `durableOutcome`，不允许 Host 重新提交
+两个 no-effect committed 状态与 successor success 一样只携带 terminal proof 和 exact `durableOutcome`，不允许 Host 重新提交
 `providerResult`。Runtime 在 operation 边界持有唯一 bounded strict-JSON snapshot；getter、serialization、
 canonicalization 或 size-check 的任何失败都变成 managed unsettled，不写 generic T2。
 
@@ -96,7 +99,8 @@ parent refs 和 duration。缺字段、多字段或任意值不同都 fail-stop�
 | Host admission seam 缺失或 admission 在 T1 前失败 | 无 T1、不执行工具 |
 | T1 commit 失败 | dispose admission，不执行工具 |
 | owner 已原子接受 successor | Runtime 采用 exact durable success outcome |
-| owner 已安全 discard | Runtime 采用 exact durable error outcome |
+| owner 已提交成功 no-op | Runtime 采用 exact durable success outcome |
+| owner 已证明 operation failure 无副作用 | Runtime 采用 exact durable error outcome |
 | owner 返回 unsettled、抛错或响应丢失 | 无 generic T2、无 provider result，reservation 保留 |
 | owner 结算后再次调用 operation | capability 已关闭，不执行工具 |
 | owner 在 operation 运行中提前结算 | join operation 后 fail-stop，不接受 terminal settlement |
@@ -110,11 +114,12 @@ parent refs 和 duration。缺字段、多字段或任意值不同都 fail-stop�
 | T1 reservation kill/reopen | CI 证明 | CI 证明 | CI 证明 |
 | 跨进程唯一 mutation reservation | CI 证明 | CI 证明 | CI 证明 |
 | Runtime managed settlement fail-stop | 平台无关测试 | 平台无关测试 | 平台无关测试 |
-| mutation worker/profile/candidate | CI 证明 | CI 证明 | CI 证明 |
+| mutation worker/profile/candidate | CI 证明 | CI 证明 | 边界测试证明；完整 Host crash lane 等待发布 broker |
 | power-loss convergence | 不在本切片 | 不在本切片 | 不在本切片 |
 
-统一 recovery inventory 同时包含 managed baseline/candidate、`sqlite-runtime-crash` 与
-`sqlite-recovery-concurrency`。Linux、macOS、Windows 使用相同文件清单、name pattern 和严格测试数量。
+统一 recovery inventory 同时包含 managed baseline/candidate、`sqlite-runtime-crash`、
+`sqlite-recovery-concurrency` 与真实 Host/worker kill-reopen。Linux、macOS 完整执行 30 条；Windows 使用同一清单，
+其中 29 条通过，完整 Host/worker 用例因当前 runner 不打包 Rust broker 而明确 skip。
 
 ## 7. 验证
 
@@ -125,8 +130,8 @@ parent refs 和 duration。缺字段、多字段或任意值不同都 fail-stop�
 - terminal settlement 撤销 operation capability；detached operation 必须 join 后 fail-stop；
 - 工具事后修改原始 result 不得改变 durable、message、event 或 provider snapshot；
 - oversized result 必须在遍历越过 budget 前终止；strict-JSON 非法值不得进入 durable event；
-- safe-discard live result 与 durable content 不一致时 fail-stop；
-- getter/canonicalization 异常和超大 safe-discard 均不写 generic T2、不发布结果；
+- no-effect terminal 的 live result 与 durable content 不一致时 fail-stop；
+- getter/canonicalization 异常和超大 no-effect result 均不写 generic T2、不发布结果；
 - code-mode response 的 origin、hidden visibility、parent refs 与 duration 必须完整匹配；
 - explicit unsettled、owner throw 和 T1 后任意异常均 fail-stop；
 - real-process kill-after-T1 与双进程 reservation 竞争进入三平台 recovery inventory。

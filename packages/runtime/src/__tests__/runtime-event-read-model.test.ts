@@ -1689,8 +1689,7 @@ const ACTION_COVERAGE_SAMPLES: ActionCoverageSamples = {
   managedMutationTerminal: {
     action: {
       protocol: 'managed_mutation_terminal_v1',
-      disposition: 'safely_discarded',
-      reason: 'operation_failed_no_effect',
+      disposition: 'operation_failed_no_effect_committed',
       operationId: 'coverage-op',
       dispatchEventId: 'coverage-dispatch',
       outcomeEventId: 'coverage-outcome',

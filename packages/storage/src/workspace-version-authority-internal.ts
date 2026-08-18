@@ -30,7 +30,7 @@ export interface WorkspaceSuccessorCommitResult {
   outcomeRuntimeEventSeq: number;
 }
 export interface ManagedMutationTerminalCommitInput {
-  readonly reason: 'operation_failed_no_effect' | 'no_workspace_change';
+  readonly disposition: 'operation_failed_no_effect_committed' | 'no_workspace_change_committed';
   readonly toolOutcome: WorkspaceSuccessorCommitInput['toolOutcome'];
 }
 export interface ManagedMutationTerminalCommitResult {
