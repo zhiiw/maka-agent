@@ -19,7 +19,8 @@ Runtime 只接受三种 owner 结算：
 
 owner 返回值首先经过运行时结构校验，规范化成内部 terminal union。managed/generic lane 只由 T1 前已经确定的
 `managedMutationAdmission` 决定，绝不再用 `durableOutcome` 是否 truthy 选择 writer；terminal settlement 缺失
-durable outcome、value 或 canonical content 时只能 fail-stop。
+durable outcome 或 canonical content 时只能 fail-stop。成功路径的 provider value 始终由 Runtime 在执行
+`operation()` 时捕获并冻结，不进入 owner settlement。
 
 本切片不声称拥有 mutation worker、execution-profile attestation、Git candidate 或 production admission。它只定义
 Runtime 如何消费 M2.4 将提供的 owner capability。这样 T1 不会记录一个由只读 worker 或 caller callback 冒充的
@@ -55,8 +56,9 @@ digest 如何从实际 worker/sandbox 能力产生，以及 admission 如何重�
 
 ```mermaid
 flowchart TD
-  T1["managed T1 durable"] --> O["owner execute"]
-  O --> N["normalize + size-check settlement"]
+  T1["managed T1 durable"] --> O["Runtime executes and owns provider value"]
+  O --> Q["owner receives isolated outcome proof"]
+  Q --> N["normalize terminal proof"]
   N --> S{"terminal state proven?"}
   S -->|"successor committed"| A["compare exact durable success envelope"]
   S -->|"safely discarded"| E["compare exact durable error envelope"]
@@ -68,6 +70,11 @@ flowchart TD
 `safely_discarded` 只携带一个 exact `providerResult`。Runtime 从该值生成 canonical content，并执行与普通工具
 相同的 `maxResultBytes` 检查。getter、serialization、canonicalization 或 size-check 的任何失败都变成 managed
 unsettled，不写 generic T2。
+
+`workspace_successor_committed` 只携带 `durableOutcome`，不得重新提交 provider value。Runtime 在调用真实 operation
+时完成唯一一次 size check 和 canonicalization，私有保存 live value，仅把隔离复制的 `content/isError/durationMs`
+proof 交给 owner 用于提交 successor。owner 返回后，Runtime 用自己的 canonical outcome 校验 durable envelope；
+因此 owner 无法构造 live A / replay B，也无法用替换 value 绕过结果大小限制。
 
 owner 返回的 response 必须与 Runtime 从 T1 identity 构造的唯一 canonical envelope 完全相等，包括：event id、
 run/invocation/session/turn、timestamp 形状、origin、model visibility、function response、error bit、exact refs、
@@ -103,6 +110,7 @@ parent refs 和 duration。缺字段、多字段或任意值不同都 fail-stop�
 - Host admission 缺失时不落 T1、不执行工具；
 - owner-committed successor 只采用 durable T2，不调用 generic writer；
 - success settlement 缺失 durable outcome 时不调用 generic writer；
+- success settlement 不能替换 Runtime-owned provider value，live 与 replay 内容不一致时 fail-stop；
 - safe-discard live result 与 durable content 不一致时 fail-stop；
 - getter/canonicalization 异常和超大 safe-discard 均不写 generic T2、不发布结果；
 - code-mode response 的 origin、hidden visibility、parent refs 与 duration 必须完整匹配；

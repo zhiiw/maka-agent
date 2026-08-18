@@ -451,7 +451,7 @@ export interface ToolRuntimeInput {
   }) => Promise<RuntimeManagedMutationAdmission>;
 }
 
-export interface RuntimeManagedMutationOperationValue<T> {
+interface RuntimeManagedMutationOperationValue<T> {
   readonly result: T;
   readonly outcome: {
     readonly content: ToolResultContent;
@@ -460,10 +460,20 @@ export interface RuntimeManagedMutationOperationValue<T> {
   };
 }
 
-export type RuntimeManagedMutationSettlement<T> =
+/**
+ * The only operation evidence exposed to the workspace owner. Runtime keeps
+ * the provider-facing value private so the owner cannot replace the live
+ * result while committing a different durable response.
+ */
+export interface RuntimeManagedMutationOperationProof {
+  readonly content: ToolResultContent;
+  readonly isError: boolean;
+  readonly durationMs: number;
+}
+
+export type RuntimeManagedMutationSettlement =
   | {
       readonly kind: 'workspace_successor_committed';
-      readonly value: RuntimeManagedMutationOperationValue<T>;
       readonly durableOutcome: RuntimeEvent;
     }
   | {
@@ -476,9 +486,9 @@ export type RuntimeManagedMutationSettlement<T> =
 
 export interface RuntimeManagedMutationAdmission {
   readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceMutationV1>;
-  execute<T>(
-    operation: () => Promise<RuntimeManagedMutationOperationValue<T>>,
-  ): Promise<RuntimeManagedMutationSettlement<T>>;
+  execute(
+    operation: () => Promise<RuntimeManagedMutationOperationProof>,
+  ): Promise<RuntimeManagedMutationSettlement>;
   /** Idempotent for an unused, failed-T1, or already executed admission. */
   dispose(): Promise<void>;
 }
@@ -1488,9 +1498,27 @@ export class ToolRuntime {
             }
           | { kind: 'generic'; value: RuntimeManagedMutationOperationValue<unknown> };
         if (managedMutationAdmission) {
-          let settlement: RuntimeManagedMutationSettlement<unknown>;
+          let operationInvoked = false;
+          let runtimeOwnedValue: RuntimeManagedMutationOperationValue<unknown> | undefined;
+          const executeManagedOperation =
+            async (): Promise<RuntimeManagedMutationOperationProof> => {
+              if (operationInvoked) {
+                throw new Error('Managed mutation owner invoked the operation more than once');
+              }
+              operationInvoked = true;
+              const value = await prepareOperationValue();
+              runtimeOwnedValue = value;
+              return {
+                // The owner receives an isolated proof. Mutating it cannot
+                // change Runtime's provider-facing value or canonical outcome.
+                content: structuredClone(value.outcome.content),
+                isError: value.outcome.isError,
+                durationMs: value.outcome.durationMs,
+              };
+            };
+          let settlement: RuntimeManagedMutationSettlement;
           try {
-            settlement = await managedMutationAdmission.execute(prepareOperationValue);
+            settlement = await managedMutationAdmission.execute(executeManagedOperation);
           } catch (error) {
             // Once managed T1 is durable, an admission/owner failure may never
             // fall through to the generic synthetic T2 path. Only the owner can
@@ -1499,7 +1527,26 @@ export class ToolRuntime {
             throw new RuntimeManagedMutationUnsettledError(error);
           }
           const normalized = normalizeManagedMutationSettlement(settlement, ctx.maxResultBytes);
-          settledExecution = { kind: 'managed', ...normalized };
+          if (normalized.kind === 'workspace_successor_committed') {
+            if (!runtimeOwnedValue) {
+              throw new RuntimeManagedMutationUnsettledError(
+                new Error(
+                  'Managed mutation owner committed success without executing the operation',
+                ),
+              );
+            }
+            settledExecution = {
+              kind: 'managed',
+              value: runtimeOwnedValue,
+              durableOutcome: normalized.durableOutcome,
+            };
+          } else {
+            settledExecution = {
+              kind: 'managed',
+              value: normalized.value,
+              durableOutcome: normalized.durableOutcome,
+            };
+          }
         } else {
           settledExecution = { kind: 'generic', value: await prepareOperationValue() };
         }
@@ -2992,12 +3039,18 @@ function uncertainOutcomeSignalFromError(error: unknown): ToolUncertainOutcomeSi
 }
 
 function normalizeManagedMutationSettlement(
-  settlement: RuntimeManagedMutationSettlement<unknown>,
+  settlement: RuntimeManagedMutationSettlement,
   maxResultBytes: number | undefined,
-): {
-  value: RuntimeManagedMutationOperationValue<unknown>;
-  durableOutcome: RuntimeEvent;
-} {
+):
+  | {
+      kind: 'workspace_successor_committed';
+      durableOutcome: RuntimeEvent;
+    }
+  | {
+      kind: 'safely_discarded';
+      value: RuntimeManagedMutationOperationValue<unknown>;
+      durableOutcome: RuntimeEvent;
+    } {
   if (!settlement || typeof settlement !== 'object' || Array.isArray(settlement)) {
     throw new Error('Managed mutation owner returned an invalid settlement');
   }
@@ -3022,49 +3075,8 @@ function normalizeManagedMutationSettlement(
   const durableOutcome = durableOutcomeValue as RuntimeEvent;
 
   if (kind === 'workspace_successor_committed') {
-    const operationValue = Object.hasOwn(record, 'value') ? record.value : undefined;
-    if (!operationValue || typeof operationValue !== 'object' || Array.isArray(operationValue)) {
-      throw new Error('Managed mutation success has no operation value');
-    }
-    const value = operationValue as Record<string, unknown>;
-    const outcomeValue = value.outcome;
-    if (
-      !Object.hasOwn(value, 'result') ||
-      !outcomeValue ||
-      typeof outcomeValue !== 'object' ||
-      Array.isArray(outcomeValue)
-    ) {
-      throw new Error('Managed mutation success has an invalid operation value');
-    }
-    const outcome = outcomeValue as Record<string, unknown>;
-    const contentValue = outcome.content;
-    const isError = outcome.isError;
-    const durationMs = outcome.durationMs;
-    if (
-      !Object.hasOwn(outcome, 'content') ||
-      typeof isError !== 'boolean' ||
-      typeof durationMs !== 'number' ||
-      !Number.isFinite(durationMs)
-    ) {
-      throw new Error('Managed mutation success has an invalid operation outcome');
-    }
-    let content: ToolResultContent;
-    try {
-      content = decodeCanonicalToolResultContent(contentValue);
-    } catch (error) {
-      throw new Error('Managed mutation success has non-canonical result content', {
-        cause: error,
-      });
-    }
     return {
-      value: {
-        result: value.result,
-        outcome: {
-          content,
-          isError,
-          durationMs,
-        },
-      },
+      kind,
       durableOutcome,
     };
   }
@@ -3085,6 +3097,7 @@ function normalizeManagedMutationSettlement(
   }
   const content = coerceResultContent(providerResult);
   return {
+    kind,
     value: {
       result: providerResult,
       outcome: {

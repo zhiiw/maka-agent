@@ -206,13 +206,12 @@ describe('ToolRuntime durable boundary', () => {
           order.push('admit');
           return managedAdmission(async (operation) => {
             order.push('lease-enter');
-            const value = await operation();
+            const proof = await operation();
             order.push('successor-bundle');
             return {
               kind: 'workspace_successor_committed',
-              value,
-              durableOutcome: managedOutcomeEvent(operationId, value.outcome.content, false, {
-                durationMs: value.outcome.durationMs,
+              durableOutcome: managedOutcomeEvent(operationId, proof.content, false, {
+                durationMs: proof.durationMs,
               }),
             };
           }, order);
@@ -328,10 +327,9 @@ describe('ToolRuntime durable boundary', () => {
       {
         admitManagedMutation: async () =>
           managedAdmission(async (operation) => {
-            const value = await operation();
+            await operation();
             return {
               kind: 'workspace_successor_committed',
-              value,
             } as never;
           }),
       },
@@ -342,6 +340,59 @@ describe('ToolRuntime durable boundary', () => {
     managedTool.durableExecutionProfile = 'managed_mutation_v1';
 
     await assert.rejects(harness.execute(managedTool), /durable outcome/i);
+    assert.equal(genericOutcomeCalls, 0);
+    assert.equal(
+      harness.events.some((event) => event.type === 'tool_result'),
+      false,
+    );
+  });
+
+  it('does not let a managed owner replace the Runtime-owned success result', async () => {
+    let genericOutcomeCalls = 0;
+    let operationId = '';
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          genericOutcomeCalls += 1;
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            const proof = await operation();
+            const forgedContent = { kind: 'json' as const, value: { source: 'durable-B' } };
+            return {
+              kind: 'workspace_successor_committed',
+              // Simulate an untyped/older Host attempting to reintroduce the
+              // removed result channel. Runtime must ignore this value and
+              // compare the durable event with its own captured operation.
+              value: {
+                result: { source: 'live-A' },
+                outcome: {
+                  content: forgedContent,
+                  isError: false,
+                  durationMs: proof.durationMs,
+                },
+              },
+              durableOutcome: managedOutcomeEvent(operationId, forgedContent, false, {
+                durationMs: proof.durationMs,
+              }),
+            } as never;
+          });
+        },
+      },
+    );
+    const managedTool = tool(() => ({ source: 'runtime-original' }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await assert.rejects(harness.execute(managedTool), /mismatched durable outcome/i);
     assert.equal(genericOutcomeCalls, 0);
     assert.equal(
       harness.events.some((event) => event.type === 'tool_result'),
@@ -553,12 +604,11 @@ describe('ToolRuntime durable boundary', () => {
         admitManagedMutation: async (input) => {
           operationId = input.operationId;
           return managedAdmission(async (operation) => {
-            const value = await operation();
+            const proof = await operation();
             return {
               kind: 'workspace_successor_committed',
-              value,
-              durableOutcome: managedOutcomeEvent(operationId, value.outcome.content, false, {
-                durationMs: value.outcome.durationMs,
+              durableOutcome: managedOutcomeEvent(operationId, proof.content, false, {
+                durationMs: proof.durationMs,
                 origin: 'code_mode',
                 // The live nested call is hidden. A visible durable replay is
                 // a different provider contract and must never be adopted.
