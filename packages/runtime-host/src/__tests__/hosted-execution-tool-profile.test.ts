@@ -72,3 +72,33 @@ test('the headless coding profile freezes prompt, tools, memory, and foreground 
   );
   assert.equal((await schema.safeParseAsync({ command: 'true', pty: true })).success, false);
 });
+
+test('the managed coding profile fixes Write/Edit durable mode before T1', () => {
+  const tool = (name: 'Write' | 'Edit'): MakaTool => ({
+    name,
+    description: name,
+    parameters: z.object({}),
+    recoveryMode: 'reconcile',
+    impl: async () => 'ok',
+  });
+  const attached = projectHostedExecutionTools([tool('Write')], 'headless-coding-v1');
+  const managed = projectHostedExecutionTools([tool('Write'), tool('Edit')], 'managed-coding-v1');
+
+  assert.equal(attached[0]?.durableExecutionProfile, undefined);
+  assert.deepEqual(hostedExecutionRunProfile('managed-coding-v1')?.toolNames, [
+    'Read',
+    'Write',
+    'Edit',
+    'Glob',
+    'Grep',
+  ]);
+  assert.doesNotMatch(hostedExecutionRunProfile('managed-coding-v1')!.systemPrompt, /Bash/u);
+  assert.deepEqual(
+    managed.map((entry) => [entry.name, entry.durableExecutionProfile]),
+    [
+      ['Write', 'managed_mutation_v1'],
+      ['Edit', 'managed_mutation_v1'],
+    ],
+  );
+  assert.equal(hostedExecutionRunProfile('managed-coding-v1')?.memoryExtraction, false);
+});

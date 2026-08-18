@@ -3,6 +3,7 @@ import type { RuntimeExecutionConnection } from '@maka/core/llm-connections';
 import { generalizedErrorMessage } from '@maka/core/redaction';
 import { emptyPlanSessionState } from '@maka/core/plan';
 import type { PermissionMode } from '@maka/core/permission';
+import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
 import { isDeepResearchSession } from '@maka/core/session';
 import { filterModelVisibleTaskLedgerTasks } from '@maka/core/task-ledger';
 import { AgentGraphCoordinator } from '@maka/runtime/stream-graph-coordinator';
@@ -22,6 +23,7 @@ import {
 } from '@maka/runtime/sandbox';
 import {
   createFilesystemWorkerLaunchSpecProvider,
+  FILESYSTEM_WORKER_PROTOCOL_VERSION,
   FilesystemWorkerClient,
 } from '@maka/runtime/filesystem-worker';
 import { FakeBackend } from '@maka/runtime/fake-backend';
@@ -173,6 +175,7 @@ import {
 } from './web-search-tool.js';
 import { createHostWebFetchService, createHostWebFetchToolFromService } from './web-fetch-tool.js';
 import { createHostExecutionArtifactServices } from './execution-artifacts.js';
+import { createManagedWorkspaceMutationSession } from './managed-workspace-mutation-session.js';
 import {
   createRuntimeHostWorkspaceExecutionComposition,
   RuntimeHostWorkspaceExecutionError,
@@ -638,8 +641,23 @@ export async function createExecutionRuntimeHostComposition(
     backends.register(
       'ai-sdk',
       dependencies.primaryBackendFactory ??
-        ((backendContext) =>
-          createHostAiSdkBackend({
+        (async (backendContext) => {
+          const managedMutationSession =
+            backendContext.header.toolProfile === 'managed-coding-v1'
+              ? await createManagedWorkspaceMutationSession({
+                  owner: requireManagedWorkspaceOwner(managedWorkspaceOwner),
+                  stores,
+                  sourceRoot: backendContext.header.cwd,
+                  sessionId: backendContext.sessionId,
+                  ...(backendContext.abortSignal
+                    ? { abortSignal: backendContext.abortSignal }
+                    : {}),
+                })
+              : undefined;
+          const sessionBuiltinTools = managedMutationSession
+            ? { ...builtinTools, filesystemWorker: managedMutationSession.filesystemWorker }
+            : builtinTools;
+          return createHostAiSdkBackend({
             context: backendContext,
             runtimePolicy: runtimePolicyStores,
             oauthCredentials,
@@ -657,7 +675,7 @@ export async function createExecutionRuntimeHostComposition(
                 backendContext.sessionId,
               ),
               goalTools: requireGoal(goal).tools,
-              builtinTools,
+              builtinTools: sessionBuiltinTools,
               hostTools,
               resolveRootTools: (sessionId) =>
                 requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId),
@@ -677,8 +695,12 @@ export async function createExecutionRuntimeHostComposition(
               backendContext.sessionId,
             ),
             runtimeCommitSink: stores.runtimeEventStore,
+            ...(managedMutationSession
+              ? { admitManagedMutation: managedMutationSession.admitManagedMutation }
+              : {}),
             requestDrain: context.requestDrain,
-          })),
+          });
+        }),
     );
     const runtimeAuthority: RuntimeHostedRootAuthority = {
       bindRun: (identity) => messages.bindRun(identity),
@@ -1727,26 +1749,55 @@ function requireWorkspaceExecution(
   return composition;
 }
 
+function requireManagedWorkspaceOwner(
+  owner: ManagedWorkspaceOwner | undefined,
+): ManagedWorkspaceOwner {
+  if (!owner) {
+    throw new RuntimeHostWorkspaceExecutionError(
+      'managed_workspace_profile_unavailable',
+      'Managed coding requires the bundled Git workspace owner',
+    );
+  }
+  return owner;
+}
+
 function adaptManagedWorkspaceFilesystemWorker(
   worker: Pick<FilesystemWorkerClient, 'execute'>,
 ): ManagedWorkspaceFilesystemWorker {
   return {
+    mutationExecutionProfileDigest: managedMutationWorkerProfileDigest(),
     async execute(input) {
       const result = await worker.execute(input);
       switch (result.kind) {
         case 'read':
         case 'read_image':
+        case 'write':
+        case 'edit':
         case 'glob':
         case 'grep':
           return result;
         default:
           throw new RuntimeHostWorkspaceExecutionError(
             'workspace_operation_denied',
-            `Read-only filesystem worker returned mutating result ${result.kind}`,
+            `Managed filesystem worker returned unsupported result ${result.kind}`,
           );
       }
     },
   };
+}
+
+function managedMutationWorkerProfileDigest(): `sha256:${string}` {
+  const digest = createHash('sha256')
+    .update(
+      JSON.stringify({
+        protocol: 'maka_managed_workspace_mutation_worker_profile_v1',
+        permissionProfile: createWorkspaceWritePermissionProfile(),
+        workerProtocol: FILESYSTEM_WORKER_PROTOCOL_VERSION,
+      }),
+      'utf8',
+    )
+    .digest('hex');
+  return `sha256:${digest}`;
 }
 
 function subagentWritebackArtifactId(sessionId: string, turnId: string): string {

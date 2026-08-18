@@ -605,7 +605,8 @@ M2 按 owner 与原子边界拆成五个 stacked slices：
    size/envelope validation 与 publication failure 都 fail-stop，禁止 generic T2；
 5. **M2.4 Write/Edit production composition**：由同一 owner 绑定真实 mutation profile、canonical head、
    active reservation、worker、candidate capture 与 M2.1 bundle，并用真实 Host kill/reopen crash test 完成前三片的
-   生产消费者。
+   生产消费者。实现合同见
+   [Managed Workspace Write/Edit Production Composition v1](./runtime-managed-workspace-write-edit-production-v1.zh-CN.md)。
 
 M2.2/M2.3a/M2.3b 在 M2.4 消费者存在前保持 Draft。M2.4 不绑定 continuation boundary；该能力仍属于 M3。
 
