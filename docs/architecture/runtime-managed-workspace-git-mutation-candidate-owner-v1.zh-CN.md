@@ -1,6 +1,6 @@
 # Managed Workspace Git Mutation Candidate Owner v1
 
-- 状态：M2.2 核心实现完成；stacked Draft，等待 M2.3/M2.4 消费者
+- 状态：M2.2 核心实现完成；已在最新 main 上重建并仅叠加 M2.1，保持 Draft 等待 M2.3/M2.4 消费者
 - 更新日期：2026-08-17
 - 主要不变量：只有 Maka 的 Git artifact owner 能把 owned worktree 中一次声明路径的变化发布成 operation-bound candidate
 - owner：既有 `GitWorkspaceService`；不新建第二个 repository/ref writer
@@ -109,14 +109,17 @@ tombstone 在删除 ref 前落盘，所以崩溃后不会把“外部删 ref”�
 | private temporary index | 支持 | 支持 | 支持 |
 | symlink candidate 拒绝 | Git tree mode 验证；实测 | Git tree mode 验证；实测 | 同一 tree-mode 验证；创建 symlink fixture 可能跳过 |
 | operation path identity | case-sensitive | case-sensitive | filesystem 路径比较 case-insensitive；Git path 仍严格 |
-| process-crash convergence | 承诺 | 承诺 | 承诺 |
+| process-crash convergence | 承诺；Linux storage stress CI | 实现预期支持，但 v1 未持续验证、不作承诺 | 承诺；Windows recovery CI |
 | power-loss ordering | v1 不承诺 | v1 不承诺 | v1 不承诺 |
 
 普通 `fsync`、Git ref 的平台实现和设备缓存不足以构成统一的断电证明，所以 v1 只声明进程崩溃收敛。
 
 进程崩溃承诺由真实 child-process kill/reopen 测试约束：capture 在 ref publication 后被杀，新进程补齐同一
-receipt；discard 在 ref deletion 后被杀，新进程依 tombstone 幂等完成清理。嵌套目录的新增、修改与删除均以
-递归 `diff-tree -r` 的文件路径作为 receipt 证据，不能退化成顶层目录名。
+receipt；discard 在 ref deletion 后被杀，新进程依 tombstone 幂等完成清理。统一的
+`scripts/recovery-test-inventory.mjs` 拥有 recovery suite 和 Linux/Windows 期望数量，Windows workflow 直接
+消费该 inventory；Linux storage stress 全量测试包含相同用例。仓库当前没有 macOS runner，因此 v1 不把 macOS
+process-crash convergence 写成已证明能力。嵌套目录的新增、修改与删除均以递归 `diff-tree -r` 的文件路径作为
+receipt 证据，不能退化成顶层目录名。
 
 ## 7. 留给 M2.3/M2.4 的边界
 
