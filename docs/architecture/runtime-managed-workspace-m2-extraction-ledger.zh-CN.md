@@ -61,6 +61,20 @@ M2.3a/M2.3b/M2.4。当前 M2.2 已从最新 `main` 重建，且相对 M2.1 不�
 M2.3a 不迁入 Runtime hook、ManagedWorkspaceOwner lease、candidate capture/discard 或真实 Write/Edit；前两项属于
 M2.3b，后两项属于 M2.4。
 
+## M2.3b 增量归属
+
+| 路径 | 归属 | 不变量 |
+|---|---|---|
+| `packages/runtime/src/tool-runtime.ts` | M2.3b | managed T1 后只采用 owner 已提交 outcome；异常/unsettled 禁止 generic T2 |
+| `packages/runtime/src/__tests__/tool-runtime-durable-boundary.test.ts` | M2.3b | pre-T1 gate、success/discard adoption、unsettled fail-stop |
+| `packages/storage/src/managed-workspace-mutation-authority-internal.ts` | M2.3b | opaque one-shot process capability；不冒充 durable truth |
+| `packages/storage/src/managed-workspace-owner.ts` | M2.3b | 重验 canonical head 与 M2.3a active reservation后签发 lease |
+| `packages/storage/src/__tests__/managed-workspace-owner.test.ts` | M2.3b | process lease 排他、restart 后 durable reservation gate |
+| `docs/architecture/runtime-managed-workspace-mutation-execution-admission-v1.zh-CN.md` | M2.3b | owner、失败状态、平台承诺和 M2.4 seam |
+
+M2.3b 不迁入 built-in Write/Edit 标记、filesystem worker mutation、Git candidate capture/discard、successor/error
+bundle composition 或 Desktop/CLI wiring；这些共同构成 M2.4 的首个生产消费者。
+
 ## Commit 映射
 
 | 当前提交 | 来源 | 说明 |
