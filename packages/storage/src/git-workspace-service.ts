@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises';
 import { dirname, isAbsolute, join, normalize, posix, relative, resolve } from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
+import { isCanonicalManagedMutationPathV1 } from '@maka/core/runtime-event';
 import { withArtifactWriterLock } from './artifact-writer-lock.js';
 import { bundledGitEnvironment } from './dugite-native-environment.js';
 import { registerManagedBaselineReceiptAuthorityInternal } from './managed-baseline-receipt-authority-internal.js';
@@ -3504,13 +3505,7 @@ function assertManagedTrackedPath(path: string): string {
 
 function assertManagedMutationPath(path: string): string {
   const normalized = assertManagedTrackedPath(path);
-  const firstSegment = normalized.split('/')[0]!;
-  if (
-    firstSegment === '.git' ||
-    (process.platform === 'win32'
-      ? firstSegment.toLowerCase() === 'node_modules'
-      : firstSegment === 'node_modules')
-  ) {
+  if (!isCanonicalManagedMutationPathV1(normalized)) {
     throw new GitWorkspaceServiceError(
       'managed_mutation_candidate_rejected',
       'Managed mutation path belongs to workspace control or dependency state',
