@@ -211,7 +211,9 @@ describe('ToolRuntime durable boundary', () => {
             return {
               kind: 'workspace_successor_committed',
               value,
-              durableOutcome: managedOutcomeEvent(operationId, value.outcome.content, false),
+              durableOutcome: managedOutcomeEvent(operationId, value.outcome.content, false, {
+                durationMs: value.outcome.durationMs,
+              }),
             };
           }, order);
         },
@@ -392,6 +394,154 @@ describe('ToolRuntime durable boundary', () => {
     managedTool.durableExecutionProfile = 'managed_mutation_v1';
 
     await assert.rejects(harness.execute(managedTool), /mismatched durable outcome/i);
+    assert.equal(
+      harness.events.some((event) => event.type === 'tool_result'),
+      false,
+    );
+  });
+
+  it('fail-stops safe-discard canonicalization without writing generic T2', async () => {
+    let genericOutcomeCalls = 0;
+    let operationId = '';
+    const providerResult = Object.defineProperty({}, 'kind', {
+      enumerable: true,
+      get: () => {
+        throw new Error('provider result getter exploded');
+      },
+    });
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          genericOutcomeCalls += 1;
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            await operation();
+            return {
+              kind: 'safely_discarded',
+              providerResult,
+              durableOutcome: managedOutcomeEvent(
+                operationId,
+                { kind: 'json', value: { error: 'discarded' } },
+                true,
+              ),
+            };
+          });
+        },
+      },
+    );
+    const managedTool = tool(() => ({ ok: true }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await assert.rejects(
+      harness.execute(managedTool),
+      /provider result getter exploded|byte limit exceeded/i,
+    );
+    assert.equal(genericOutcomeCalls, 0);
+    assert.equal(
+      harness.events.some((event) => event.type === 'tool_result'),
+      false,
+    );
+  });
+
+  it('fail-stops an oversized safe discard before durable publication', async () => {
+    let genericOutcomeCalls = 0;
+    let operationId = '';
+    const oversized = { error: 'x'.repeat(128) };
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          genericOutcomeCalls += 1;
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            await operation();
+            return {
+              kind: 'safely_discarded',
+              providerResult: oversized,
+              durableOutcome: managedOutcomeEvent(
+                operationId,
+                { kind: 'json', value: oversized },
+                true,
+                {
+                  origin: 'code_mode',
+                  modelVisibility: 'hidden',
+                  toolCallId: 'nested-call-1',
+                  parentToolCallId: 'exec-1',
+                  parentOperationId: 'exec-op-1',
+                },
+              ),
+            };
+          });
+        },
+      },
+    );
+    const managedTool = tool(() => ({ ok: true }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await assert.rejects(harness.executeNested(managedTool, 32), /byte limit exceeded/i);
+    assert.equal(genericOutcomeCalls, 0);
+    assert.equal(JSON.stringify(harness.events).includes(oversized.error), false);
+  });
+
+  it('rejects a durable managed response with a different code-mode envelope', async () => {
+    let operationId = '';
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            const value = await operation();
+            return {
+              kind: 'workspace_successor_committed',
+              value,
+              durableOutcome: managedOutcomeEvent(operationId, value.outcome.content, false, {
+                durationMs: value.outcome.durationMs,
+                origin: 'code_mode',
+                // The live nested call is hidden. A visible durable replay is
+                // a different provider contract and must never be adopted.
+                modelVisibility: 'visible',
+                toolCallId: 'nested-call-1',
+                parentToolCallId: 'exec-1',
+                parentOperationId: 'exec-op-1',
+              }),
+            };
+          });
+        },
+      },
+    );
+    const managedTool = tool(() => ({ ok: true }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await assert.rejects(harness.executeNested(managedTool), /mismatched durable outcome/i);
     assert.equal(
       harness.events.some((event) => event.type === 'tool_result'),
       false,
@@ -825,7 +975,20 @@ function managedAdmission(
   };
 }
 
-function managedOutcomeEvent(operationId: string, result: unknown, isError: boolean) {
+function managedOutcomeEvent(
+  operationId: string,
+  result: unknown,
+  isError: boolean,
+  options: {
+    durationMs?: number;
+    origin?: 'provider' | 'code_mode';
+    modelVisibility?: 'visible' | 'hidden';
+    toolCallId?: string;
+    parentToolCallId?: string;
+    parentOperationId?: string;
+  } = {},
+) {
+  const toolCallId = options.toolCallId ?? 'provider-call-1';
   return {
     id: `${operationId}_response`,
     invocationId: 'run-1',
@@ -836,14 +999,22 @@ function managedOutcomeEvent(operationId: string, result: unknown, isError: bool
     partial: false,
     role: 'tool' as const,
     author: 'tool' as const,
+    origin: options.origin ?? ('provider' as const),
+    modelVisibility: options.modelVisibility ?? ('visible' as const),
     content: {
       kind: 'function_response' as const,
-      id: 'provider-call-1',
+      id: toolCallId,
       name: 'Write',
       result,
       ...(isError ? { isError: true } : {}),
     },
-    refs: { operationId, toolCallId: 'provider-call-1' },
+    refs: {
+      operationId,
+      toolCallId,
+      ...(options.parentToolCallId ? { parentToolCallId: options.parentToolCallId } : {}),
+      ...(options.parentOperationId ? { parentOperationId: options.parentOperationId } : {}),
+    },
+    actions: { stateDelta: { durationMs: options.durationMs ?? 0 } },
   };
 }
 

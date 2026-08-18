@@ -1504,6 +1504,13 @@ export class ToolRuntime {
                 new Error('Managed safely-discarded settlement has no durable error outcome'),
               );
             }
+            if (
+              ctx.maxResultBytes !== undefined &&
+              serializedByteLength(settlement.providerResult, ctx.maxResultBytes) >
+                ctx.maxResultBytes
+            ) {
+              throw new ToolResultLimitError();
+            }
             const content = coerceResultContent(settlement.providerResult);
             operationValue = {
               result: settlement.providerResult,
@@ -1647,6 +1654,13 @@ export class ToolRuntime {
         err instanceof RuntimeManagedMutationUnsettledError
       ) {
         throw err;
+      }
+      // Admission exists only after the owner has selected managed mode and
+      // Runtime has committed its T1 dispatch. From that point onward every
+      // normalization, size check, adoption, publication, and telemetry error
+      // is recovery-owned. It may never fall through to generic synthetic T2.
+      if (managedMutationAdmission) {
+        throw new RuntimeManagedMutationUnsettledError(err);
       }
       if (isInteractionControlError(err)) throw err;
       output.flush();
@@ -1911,43 +1925,49 @@ export class ToolRuntime {
     } catch (error) {
       throw new RuntimeCommitBoundaryError('T1', error);
     }
+    const buildResponseEvent = (
+      result: unknown,
+      isError: boolean,
+      durationMs: number | undefined,
+      ts: number,
+    ): RuntimeEvent => ({
+      id: `${operationId}_response`,
+      invocationId,
+      runId,
+      sessionId: this.input.sessionId,
+      turnId: input.startEvent.turnId,
+      ts,
+      partial: false,
+      role: 'tool',
+      author: 'tool',
+      origin: input.startEvent.origin ?? 'provider',
+      modelVisibility: input.startEvent.modelVisibility ?? 'visible',
+      content: {
+        kind: 'function_response',
+        id: input.startEvent.toolUseId,
+        name: input.tool.name,
+        result,
+        ...(isError ? { isError: true } : {}),
+      },
+      refs: {
+        operationId,
+        toolCallId: input.startEvent.toolUseId,
+        ...(input.startEvent.parentToolCallId
+          ? { parentToolCallId: input.startEvent.parentToolCallId }
+          : {}),
+        ...(input.startEvent.parentOperationId
+          ? { parentOperationId: input.startEvent.parentOperationId }
+          : {}),
+      },
+      ...(durationMs !== undefined ? { actions: { stateDelta: { durationMs } } } : {}),
+    });
     let committedOutcome: { id: string; operationId: string; ts: number } | undefined;
     return {
       operationId,
       responseEventId: `${operationId}_response`,
       commitOutcome: async (result, isError, durationMs) => {
         if (committedOutcome) return committedOutcome;
-        const responseEvent: RuntimeEvent = {
-          id: `${operationId}_response`,
-          invocationId,
-          runId,
-          sessionId: this.input.sessionId,
-          turnId: input.startEvent.turnId,
-          ts: this.input.now(),
-          partial: false,
-          role: 'tool',
-          author: 'tool',
-          origin: input.startEvent.origin ?? 'provider',
-          modelVisibility: input.startEvent.modelVisibility ?? 'visible',
-          content: {
-            kind: 'function_response',
-            id: input.startEvent.toolUseId,
-            name: input.tool.name,
-            result,
-            ...(isError ? { isError: true } : {}),
-          },
-          refs: {
-            operationId,
-            toolCallId: input.startEvent.toolUseId,
-            ...(input.startEvent.parentToolCallId
-              ? { parentToolCallId: input.startEvent.parentToolCallId }
-              : {}),
-            ...(input.startEvent.parentOperationId
-              ? { parentOperationId: input.startEvent.parentOperationId }
-              : {}),
-          },
-          ...(durationMs !== undefined ? { actions: { stateDelta: { durationMs } } } : {}),
-        };
+        const responseEvent = buildResponseEvent(result, isError, durationMs, this.input.now());
         try {
           await sink.commitToolOutcome({
             operationId,
@@ -1970,26 +1990,8 @@ export class ToolRuntime {
       },
       adoptCommittedOutcome: (event, result, isError, durationMs) => {
         if (committedOutcome) return committedOutcome;
-        const response = event.content;
-        const recordedDuration = event.actions?.stateDelta?.durationMs;
-        if (
-          event.id !== `${operationId}_response` ||
-          event.sessionId !== this.input.sessionId ||
-          event.invocationId !== invocationId ||
-          event.runId !== runId ||
-          event.turnId !== input.startEvent.turnId ||
-          event.partial ||
-          event.role !== 'tool' ||
-          event.author !== 'tool' ||
-          response?.kind !== 'function_response' ||
-          response.id !== input.startEvent.toolUseId ||
-          response.name !== input.tool.name ||
-          (response.isError === true) !== isError ||
-          !isDeepStrictEqual(response.result, result) ||
-          event.refs?.operationId !== operationId ||
-          event.refs.toolCallId !== input.startEvent.toolUseId ||
-          (recordedDuration !== undefined && recordedDuration !== durationMs)
-        ) {
+        const expected = buildResponseEvent(result, isError, durationMs, event.ts);
+        if (!Number.isFinite(event.ts) || !isDeepStrictEqual(event, expected)) {
           throw new RuntimeCommitBoundaryError(
             'T2',
             new Error('Managed mutation settlement returned a mismatched durable outcome'),

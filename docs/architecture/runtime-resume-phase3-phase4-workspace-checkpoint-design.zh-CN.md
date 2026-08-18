@@ -601,10 +601,11 @@ M2 按 owner 与原子边界拆成五个 stacked slices：
    ref/commit、delta/path policy、artifact receipt 与基于 durable discard tombstone 的 orphan 回收；不写 T2；
 3. **M2.3a durable mutation reservation**：schema 14 将 T1 与 workspace-instance-exclusive reservation
    原子绑定，successor fact 固化 exact changed paths，generic T2 无权结算 managed mutation；
-4. **M2.3b mutation execution admission**：T1 前冻结 base head、execution profile、operation identity，
-   消费 durable reservation gate；T1 后禁止 silent fallback；
-5. **M2.4 Write/Edit production composition**：把 owner-bound worker、candidate capture 与 M2.1 bundle
-   串成唯一生产路径，并用真实 Host kill/reopen crash test 完成前三片的生产消费者。
+4. **M2.3b Runtime managed settlement**：Host seam 缺失时不落 T1；managed T1 后所有 normalization、
+   size/envelope validation 与 publication failure 都 fail-stop，禁止 generic T2；
+5. **M2.4 Write/Edit production composition**：由同一 owner 绑定真实 mutation profile、canonical head、
+   active reservation、worker、candidate capture 与 M2.1 bundle，并用真实 Host kill/reopen crash test 完成前三片的
+   生产消费者。
 
 M2.2/M2.3a/M2.3b 在 M2.4 消费者存在前保持 Draft。M2.4 不绑定 continuation boundary；该能力仍属于 M3。
 

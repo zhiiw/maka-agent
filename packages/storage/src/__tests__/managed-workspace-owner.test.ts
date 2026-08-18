@@ -8,13 +8,11 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { afterEach, before, test } from 'node:test';
-import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import {
   ManagedWorkspaceOwnerError,
   openManagedWorkspaceOwner,
   type ManagedWorkspaceExecutionHandle,
   type ManagedWorkspaceExecutionScope,
-  type ManagedWorkspaceFilesystemWorker,
 } from '../managed-workspace-owner.js';
 import {
   managedWorkspaceExecutionAuthorityTestSupport,
@@ -132,13 +130,6 @@ test('creates an accepted managed baseline only through the active owner', async
     assert.notEqual(binding, receipt.binding);
     assert.deepEqual(binding, receipt.binding);
     assert.equal(existsSync(join(binding.worktreePath, '.maka-workspace.json')), false);
-    await assert.rejects(
-      owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
-        operationId: 'operation_without_owned_worker_profile',
-        expectedPaths: ['tracked.txt'],
-      }),
-      isMutationAdmissionError('managed_workspace_mutation_profile_unavailable'),
-    );
     await owner.close();
   } finally {
     runtimeStore.close();
@@ -894,241 +885,8 @@ test('rejects external drift instead of reopening a non-ready workspace', async 
   }
 });
 
-test('freezes one owner-bound managed mutation admission before T1', async () => {
-  const root = await temporaryRoot();
-  const storageRoot = join(root, 'storage');
-  const sourceRoot = await createEligibleSource(join(root, 'source'));
-  const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
-  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
-  assert.ok(rootOwner);
-  const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
-  try {
-    const owner = await openManagedWorkspaceOwner({
-      rootOwner,
-      gitRuntime: {
-        executablePath: gitExecutablePath,
-        expectedSha256: gitExecutableSha256,
-      },
-      filesystemWorker: managedFilesystemWorker(),
-    });
-    const accepted = await owner.openManagedWorkspaceBaseline(
-      runtimeStore,
-      openRequest(sourceRoot),
-    );
-    await assert.rejects(
-      owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
-        operationId: 'operation_m2_3_caller_asserted_profile',
-        expectedPaths: ['tracked.txt'],
-        executionProfileDigest: `sha256:${'9'.repeat(64)}`,
-      } as unknown as Parameters<typeof owner.admitManagedWorkspaceMutation>[1]),
-      isMutationAdmissionError('managed_workspace_mutation_admission_invalid'),
-    );
-    const expectedPaths = ['tracked.txt'];
-    const admission = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
-      operationId: 'operation_m2_3_write_1',
-      expectedPaths,
-    });
-    expectedPaths[0] = 'caller-mutated.txt';
-
-    assert.equal(admission.lease.kind, 'managed_workspace_mutation_lease_v1');
-    assert.deepEqual(admission.durableDispatch.expectedPaths, ['tracked.txt']);
-    assert.equal(
-      admission.durableDispatch.baseWorkspaceVersionId,
-      accepted.head.workspaceVersionId,
-    );
-    assert.equal(
-      admission.durableDispatch.executionProfileDigest,
-      'sha256:b34146d08a1bc4e3fd2cb3e60d924bf92f098cd2597717869f1ab6d9dc4f7e9d',
-    );
-    await assert.rejects(
-      owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
-        operationId: 'operation_m2_3_write_2',
-        expectedPaths: ['tracked.txt'],
-      }),
-      isMutationAdmissionError('managed_workspace_mutation_admission_conflict'),
-    );
-    await owner.cancelManagedWorkspaceMutation(admission.lease);
-    await assert.rejects(
-      owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
-        operationId: 'operation_m2_3_invalid_path',
-        expectedPaths: ['NODE_MODULES/pkg/index.js'],
-      }),
-      isMutationAdmissionError('managed_workspace_mutation_admission_invalid'),
-    );
-    const executableAdmission = await owner.admitManagedWorkspaceMutation(
-      accepted.executionHandle,
-      {
-        operationId: 'operation_m2_3_execute_once',
-        expectedPaths: ['tracked.txt'],
-      },
-    );
-    assert.equal(
-      await owner.withManagedWorkspaceMutation(executableAdmission.lease, async (scope) => {
-        assert.equal(scope.kind, 'managed_workspace_mutation_scope_v1');
-        return 'executed';
-      }),
-      'executed',
-    );
-    await assert.rejects(
-      owner.withManagedWorkspaceMutation(executableAdmission.lease, async () => undefined),
-      isMutationAdmissionError('managed_workspace_mutation_lease_invalid'),
-    );
-    const drainingAdmission = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
-      operationId: 'operation_m2_3_close_drain',
-      expectedPaths: ['tracked.txt'],
-    });
-    const closing = owner.close();
-    assert.equal(
-      await Promise.race([closing.then(() => 'closed'), delay(250, 'pending')]),
-      'pending',
-    );
-    await owner.cancelManagedWorkspaceMutation(drainingAdmission.lease);
-    await closing;
-  } finally {
-    runtimeStore.close();
-    await rootOwner.close();
-  }
-});
-
-test('rejects a new owner admission when a prepared T1 survives restart', async () => {
-  const root = await temporaryRoot();
-  const storageRoot = join(root, 'storage');
-  const databasePath = join(storageRoot, 'runtime.sqlite');
-  const sourceRoot = await createEligibleSource(join(root, 'source'));
-  const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
-  const firstRootOwner = await tryAcquireInteractiveRootOwner(capability);
-  assert.ok(firstRootOwner);
-  const firstStore = createSqliteRuntimeStore(databasePath);
-  const firstOwner = await openManagedWorkspaceOwner({
-    rootOwner: firstRootOwner,
-    gitRuntime: {
-      executablePath: gitExecutablePath,
-      expectedSha256: gitExecutableSha256,
-    },
-    filesystemWorker: managedFilesystemWorker(),
-  });
-  const accepted = await firstOwner.openManagedWorkspaceBaseline(
-    firstStore,
-    openRequest(sourceRoot),
-  );
-  const admission = await firstOwner.admitManagedWorkspaceMutation(accepted.executionHandle, {
-    operationId: 'operation_m2_3_survives_restart',
-    expectedPaths: ['tracked.txt'],
-  });
-  await commitManagedMutationT1(
-    firstStore,
-    'operation_m2_3_survives_restart',
-    admission.durableDispatch,
-  );
-  await firstOwner.cancelManagedWorkspaceMutation(admission.lease);
-  await firstOwner.close();
-  firstStore.close();
-  await firstRootOwner.close();
-
-  const secondCapability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
-  const secondRootOwner = await tryAcquireInteractiveRootOwner(secondCapability);
-  assert.ok(secondRootOwner);
-  const secondStore = createSqliteRuntimeStore(databasePath);
-  try {
-    const secondOwner = await openManagedWorkspaceOwner({
-      rootOwner: secondRootOwner,
-      gitRuntime: {
-        executablePath: gitExecutablePath,
-        expectedSha256: gitExecutableSha256,
-      },
-      filesystemWorker: managedFilesystemWorker(),
-    });
-    const reopened = await secondOwner.openManagedWorkspaceBaseline(
-      secondStore,
-      openRequest(sourceRoot),
-    );
-    await assert.rejects(
-      secondOwner.admitManagedWorkspaceMutation(reopened.executionHandle, {
-        operationId: 'operation_m2_3_after_restart',
-        expectedPaths: ['tracked.txt'],
-      }),
-      isMutationAdmissionError('managed_workspace_mutation_admission_conflict'),
-    );
-    await secondOwner.close();
-  } finally {
-    secondStore.close();
-    await secondRootOwner.close();
-  }
-});
-
 function isOwnerError(code: string): (error: unknown) => boolean {
   return (error) => error instanceof ManagedWorkspaceOwnerError && error.code === code;
-}
-
-function isMutationAdmissionError(code: string): (error: unknown) => boolean {
-  return (error) => error instanceof Error && 'code' in error && error.code === code;
-}
-
-function managedFilesystemWorker(): ManagedWorkspaceFilesystemWorker {
-  return {
-    async execute() {
-      throw new Error('Managed filesystem worker is not used by admission-only tests');
-    },
-  };
-}
-
-async function commitManagedMutationT1(
-  store: ReturnType<typeof createSqliteRuntimeStore>,
-  operationId: string,
-  managedMutation: Awaited<
-    ReturnType<
-      Awaited<ReturnType<typeof openManagedWorkspaceOwner>>['admitManagedWorkspaceMutation']
-    >
-  >['durableDispatch'],
-): Promise<void> {
-  const args = { path: 'tracked.txt', content: 'mutated\n' };
-  const toolCallId = `${operationId}_call`;
-  const canonicalArgsHash = canonicalToolArgsHash('Write', args);
-  await store.commitToolPrepared({
-    operationId,
-    journalEventId: `${operationId}_prepared`,
-    runtimeEvent: {
-      id: `${operationId}_call_event`,
-      sessionId: 'session-managed-mutation-owner',
-      invocationId: 'invocation-managed-mutation-owner',
-      runId: 'run-managed-mutation-owner',
-      turnId: 'turn-managed-mutation-owner',
-      ts: 10,
-      partial: false,
-      role: 'model',
-      author: 'agent',
-      content: { kind: 'function_call', id: toolCallId, name: 'Write', args },
-      refs: { operationId, toolCallId },
-    },
-    dispatchRuntimeEvent: {
-      id: `${operationId}_dispatch_event`,
-      sessionId: 'session-managed-mutation-owner',
-      invocationId: 'invocation-managed-mutation-owner',
-      runId: 'run-managed-mutation-owner',
-      turnId: 'turn-managed-mutation-owner',
-      ts: 10,
-      partial: false,
-      role: 'system',
-      author: 'system',
-      actions: {
-        toolDispatch: {
-          protocol: 't1_after_preflight_v1',
-          operationId,
-          providerToolCallId: toolCallId,
-          toolName: 'Write',
-          canonicalArgsHash,
-          recoveryMode: 'reconcile',
-          managedMutation,
-        },
-      },
-      refs: { operationId, toolCallId },
-    },
-    providerToolCallId: toolCallId,
-    toolName: 'Write',
-    canonicalArgsHash,
-    recoveryMode: 'reconcile',
-    committedAt: 10,
-  });
 }
 
 async function temporaryRoot(): Promise<string> {

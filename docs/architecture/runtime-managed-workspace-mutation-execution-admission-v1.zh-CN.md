@@ -1,120 +1,116 @@
-# Managed Workspace Mutation Execution Admission v1
+# Managed Workspace Mutation Runtime Settlement v1
 
 - 阶段：M2.3b
 - 状态：实现切片；保持 Draft，等待 M2.4 Write/Edit 生产消费者
-- owner：`ManagedWorkspaceOwner` 与 Tool Runtime managed settlement seam
-- durable 真相：M2.3a SQLite reservation，而不是进程内 lease
+- owner：Tool Runtime managed settlement seam
+- durable 真相：M2.3a SQLite reservation 与 owner 已提交的 immutable outcome
 
-## 1. 主要不变量
+## 1. 本切片只证明一个主要不变量
 
-Write/Edit 只有在 T1 前取得与 managed workspace、canonical base head、operation、exact paths 和 owner-selected
-execution profile 绑定的 capability，才允许落下 `managed_mutation_v1` T1。T1 durable 后，Runtime 不得自行写
-generic T2；只有 workspace owner 能报告以下三种结算：
+当未来的 Host owner 在 T1 前返回一份 exact `managed_mutation_v1` dispatch 后，Tool Runtime 将它与 call 一起
+提交为 durable T1。从这一刻起，整个 settlement、result canonicalization、大小检查、durable outcome adoption、
+provider publication 与 telemetry 都处于 managed fail-stop 状态：任何异常都不得进入 generic synthetic T2。
+
+Runtime 只接受三种 owner 结算：
 
 1. `workspace_successor_committed`：M2.1 的成功 T2、successor 与 head 已经原子提交；
-2. `safely_discarded`：owner 已证明副作用未被接受，并提交与 exact provider result 一致的 canonical error
-   outcome；
-3. `unsettled`：副作用或结算状态不可证明，保留 M2.3a reservation，交给恢复流程。
+2. `safely_discarded`：owner 已证明 candidate 未被接受，并已提交 exact error outcome；
+3. `unsettled`：副作用或结算状态不可证明，M2.3a reservation 保留给恢复流程。
 
-owner callback 抛出异常也属于 `unsettled`，不能静默回退到 Runtime 的 synthetic error T2。
+本切片不声称拥有 mutation worker、execution-profile attestation、Git candidate 或 production admission。它只定义
+Runtime 如何消费 M2.4 将提供的 owner capability。这样 T1 不会记录一个由只读 worker 或 caller callback 冒充的
+execution profile。
 
 ## 2. 权威分层
 
-| 层 | owner | 作用 | 不承担 |
-|---|---|---|---|
-| durable ownership | M2.3a SQLite authority | T1 时创建跨进程 reservation，successor 时原子消费 | 文件执行和 candidate capture |
-| admission capability | `ManagedWorkspaceOwner` | T1 前重验 handle、artifact、head、active reservation，并签发 opaque lease | 跨重启事实源 |
-| runtime settlement seam | Tool Runtime | 将 owner 结算投影为 provider-visible result；禁止 generic T2 | 自行判断 Git/filesystem 是否成功 |
-| production composition | M2.4 | 调 worker、capture/discard candidate、提交 successor/error | 改写前述事实协议 |
+| 层 | owner | 当前职责 |
+|---|---|---|
+| durable ownership | M2.3a SQLite authority | T1 时创建跨进程 reservation，successor 时原子消费 |
+| runtime settlement | M2.3b Tool Runtime | T1 后禁止 generic T2；采用完整一致的 durable response envelope |
+| execution admission | M2.4 Host/workspace owner | 绑定真实 mutation worker、sandbox profile、head、paths 与 candidate lease |
+| production composition | M2.4 | 执行 Write/Edit、capture/discard candidate、提交 successor/error |
 
-进程内 `WeakMap` lease 只防伪造、重复执行和 owner 生命周期竞态。它消失后不会释放 durable ownership；新
-owner admission 必须读取 M2.3a active reservation，发现 prepared operation 就 fail closed。
+`admitManagedMutation` 在 M2.3b 是一个注入式 Host seam，不是当前 `ManagedWorkspaceOwner` 的公开能力。没有该 seam
+时，标记为 `managed_mutation_v1` 的工具必须在 T1 前拒绝；不得降级为普通工具执行。
 
-## 3. T1 前 admission
+## 3. T1 前接口边界
 
 ```text
 Tool Runtime
-  -> ManagedWorkspaceOwner.admit(operation, paths)
-     -> validate opaque execution handle
-     -> verify Git artifact and storage-root binding
-     -> read canonical workspace head
-     -> read active durable mutation reservation
-     -> select the protocol-fixed profile owned by its filesystem worker
-     -> issue one-shot opaque lease + exact managedMutation dispatch
+  -> Host admission seam(operation, tool, args)
+     -> M2.4: validate real worker/profile/head/path/candidate capability
+     -> return exact managedMutation dispatch + one-shot execute/dispose handle
   -> SQLite commitToolPrepared(call + dispatch + reservation)
 ```
 
-任一步失败都发生在 T1 前：工具实现不运行，普通 preflight error 可返回给 provider。caller 只提供 operation
-和 paths；裸 `executionProfileDigest` 属于非法字段。owner 只有在持有 filesystem worker capability 时才选择唯一
-的 v1 profile，并从 canonical profile descriptor 内部计算 digest。caller 数据在第一次异步操作前复制并校验；
-路径语法复用 Core 的平台无关 canonical validator。
+M2.3b 只校验 Host seam 是否存在，并将其返回的 immutable dispatch 原样纳入 T1。dispatch 的真实性、profile
+digest 如何从实际 worker/sandbox 能力产生，以及 admission 如何重验 canonical head，全部由 M2.4 同一个 owner
+实现和测试。
 
-## 4. T1 后 settlement
+## 4. T1 后 fail-stop 状态机
 
 ```mermaid
 flowchart TD
-  T1["managed T1 durable"] --> O["owner-bound execute callback"]
-  O --> S{"owner can prove terminal state?"}
-  S -->|"successor committed"| A["adopt durable success T2"]
-  S -->|"candidate safely discarded"| E["adopt durable error T2"]
-  S -->|"unknown / thrown / lost response"| P["fail-stop; reservation remains"]
+  T1["managed T1 durable"] --> O["owner execute"]
+  O --> N["normalize + size-check settlement"]
+  N --> S{"terminal state proven?"}
+  S -->|"successor committed"| A["compare exact durable success envelope"]
+  S -->|"safely discarded"| E["compare exact durable error envelope"]
+  S -->|"unknown / throw / invalid"| P["fail-stop; reservation remains"]
   A --> R["publish provider result"]
   E --> R
 ```
 
-Runtime 对 owner 返回的 durable outcome 做 exact identity/content/status 校验，然后只“采用”已经提交的事件，
-不重复调用 `commitToolOutcome`。不匹配的 outcome、owner channel 异常或明确 `unsettled` 都 fail-stop，不发布
-tool result。
+`safely_discarded` 只携带一个 exact `providerResult`。Runtime 从该值生成 canonical content，并执行与普通工具
+相同的 `maxResultBytes` 检查。getter、serialization、canonicalization 或 size-check 的任何失败都变成 managed
+unsettled，不写 generic T2。
 
-`safely_discarded` 只携带一个 exact `providerResult`。Runtime 从该值生成 canonical content，并与 durable T2
-逐字段比较；live 模型和 crash replay 因此不能分别来自两个错误对象。对应 durable writer 和 candidate 证明由
-M2.4 提供；M2.3b 只固定 Runtime 不得越权结算。
+owner 返回的 response 必须与 Runtime 从 T1 identity 构造的唯一 canonical envelope 完全相等，包括：event id、
+run/invocation/session/turn、timestamp 形状、origin、model visibility、function response、error bit、exact refs、
+parent refs 和 duration。缺字段、多字段或任意值不同都 fail-stop。这样 live provider 与 crash replay 只有一个结果源。
 
-## 5. 生命周期与失败状态
+## 5. 失败状态
 
 | 场景 | 结果 |
 |---|---|
-| admission 前取消、handle/path/head 无效 | 无 T1，标准 preflight error |
-| owner 没有 filesystem worker profile | 无 T1，profile unavailable |
-| caller 夹带裸 profile digest | 无 T1，unsupported field |
-| 同进程已有 pending/active lease | admission conflict |
-| 旧进程 T1 已提交、内存 lease 已消失 | SQLite reservation 拒绝新 admission |
-| T1 commit 失败 | dispose 未使用 lease，不执行工具 |
-| owner 已原子接受 successor | Runtime 采用 durable success outcome |
-| owner 已安全 discard | Runtime 采用 durable error outcome |
-| owner 返回 unsettled 或抛出 | 无 generic T2、无 provider result，reservation 保留 |
-| owner close 与 lease 并发 | close 等待 cancel/finish 后收敛 |
+| Host admission seam 缺失或 admission 在 T1 前失败 | 无 T1、不执行工具 |
+| T1 commit 失败 | dispose admission，不执行工具 |
+| owner 已原子接受 successor | Runtime 采用 exact durable success outcome |
+| owner 已安全 discard | Runtime 采用 exact durable error outcome |
+| owner 返回 unsettled、抛错或响应丢失 | 无 generic T2、无 provider result，reservation 保留 |
+| canonicalization、size check、envelope validation 或 publication 失败 | 同上，统一 fail-stop |
+| durable envelope origin/visibility/refs/duration 不一致 | T2 boundary error，禁止发布 |
 
 ## 6. 平台能力矩阵
 
 | 能力 | Linux | macOS | Windows |
 |---|---|---|---|
-| T1 前 owner capability 与 head/reservation gate | 承诺 | 承诺 | 承诺 |
-| canonical path fact 同值同义 | 承诺 | 承诺 | 承诺 |
-| 进程重启后 prepared T1 阻止新 mutation | 承诺 | 承诺 | 承诺 |
-| 文件副作用、candidate capture 与 publish | M2.4 | M2.4 | M2.4 |
+| T1 reservation kill/reopen | CI 证明 | CI 证明 | CI 证明 |
+| 跨进程唯一 mutation reservation | CI 证明 | CI 证明 | CI 证明 |
+| Runtime managed settlement fail-stop | 平台无关测试 | 平台无关测试 | 平台无关测试 |
+| mutation worker/profile/candidate | M2.4 | M2.4 | M2.4 |
 | power-loss convergence | 不在本切片 | 不在本切片 | 不在本切片 |
 
-三平台的 managed-workspace process-crash inventory 使用同一文件清单、name pattern 和严格通过数量；Linux
-由标准 storage stress lane 执行，Windows 与 macOS 分别有独立 recovery workflow。
+统一 recovery inventory 同时包含 managed baseline/candidate、`sqlite-runtime-crash` 与
+`sqlite-recovery-concurrency`。Linux、macOS、Windows 使用相同文件清单、name pattern 和严格测试数量。
 
 ## 7. 验证
 
-- owner admission 冻结 caller operation/paths，拒绝裸 digest，并从 owner-held worker profile 产生固定 digest；
-- 没有 filesystem worker 的 owner 不能签发 mutation profile；
-- 关闭旧 owner、重开 SQLite/owner 后，prepared T1 仍拒绝新 admission；
-- Tool Runtime 在 Host admission 缺失时不落 T1、不执行工具；
+- Host admission 缺失时不落 T1、不执行工具；
 - owner-committed successor 只采用 durable T2，不调用 generic writer；
-- safely-discarded exact provider result 与 durable T2 不一致时 fail-stop；
-- explicit unsettled 与 owner 抛错都 fail-stop，不发布结果、不写 generic T2；
-- owner close 等待 outstanding lease cancel/finish。
+- safe-discard live result 与 durable content 不一致时 fail-stop；
+- getter/canonicalization 异常和超大 safe-discard 均不写 generic T2、不发布结果；
+- code-mode response 的 origin、hidden visibility、parent refs 与 duration 必须完整匹配；
+- explicit unsettled、owner throw 和 T1 后任意异常均 fail-stop；
+- real-process kill-after-T1 与双进程 reservation 竞争进入三平台 recovery inventory。
 
-## 8. 明确不做
+## 8. 明确留给 M2.4
 
 - 不给 built-in Write/Edit 启用 `durableExecutionProfile`；
-- 不调用真实 filesystem worker mutation；
+- 不由 `ManagedWorkspaceOwner` 签发 mutation lease 或静态 profile digest；
+- 不调用真实 mutation-capable filesystem worker；
 - 不 capture、discard 或 accept Git candidate；
-- 不接 Desktop/CLI，不改变当前用户可见 resume 能力；
-- 不提供手工删除 durable reservation 的公共 API。
+- 不接 Desktop/CLI，不改变当前用户可见 resume 能力。
 
-这些属于 M2.4。M2.3b 没有生产消费者，因此即使测试通过也保持 Draft。
+M2.3b 没有生产消费者，因此即使测试通过也保持 Draft。M2.4 必须由同一个 owner 同时签发并执行真实 mutation
+profile，不能重新引入 caller digest、静态标签或 callback 自证。
