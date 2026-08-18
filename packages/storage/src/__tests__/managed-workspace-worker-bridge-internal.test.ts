@@ -24,6 +24,7 @@ test('injects the owner-bound cwd and read-only boundary for allowed operations'
   const ownerToken = {};
   const calls: unknown[] = [];
   const bridge = createManagedWorkspaceWorkerBridgeInternal(ownerToken, {
+    mutationExecutionProfileDigest: `sha256:${'a'.repeat(64)}`,
     async execute(input) {
       calls.push(input);
       switch (input.operation.kind) {
@@ -33,6 +34,8 @@ test('injects the owner-bound cwd and read-only boundary for allowed operations'
           return { kind: 'glob', files: [] };
         case 'grep':
           return { kind: 'grep', matches: [] };
+        default:
+          throw new Error('mutating worker operation was not expected');
       }
     },
   });
@@ -75,6 +78,7 @@ test('rejects foreign, expired, mutating, and unknown operations before worker d
   const ownerToken = {};
   let dispatches = 0;
   const bridge = createManagedWorkspaceWorkerBridgeInternal(ownerToken, {
+    mutationExecutionProfileDigest: `sha256:${'a'.repeat(64)}`,
     async execute() {
       dispatches += 1;
       return { kind: 'read', content: 'unexpected' };

@@ -195,7 +195,7 @@ describe('workspace version persistence authority', () => {
             },
           },
         }),
-        /managed mutation outcome requires the workspace successor writer/i,
+        /managed mutation outcome requires a workspace settlement writer/i,
       );
       assert.equal((await store.readToolOperation(prepared.operationId))?.currentState, 'prepared');
     });
@@ -758,6 +758,41 @@ describe('workspace version persistence authority', () => {
           },
         }),
         /workspace version authority writer/i,
+      );
+
+      const baseline = baselineInput();
+      const opened = await commitWorkspaceBaselineInternal(store, baseline);
+      const prepared = managedPreparedCommit(
+        baseline,
+        opened.head,
+        'workspace-terminal-bypass-operation',
+      );
+      const mutation = prepared.dispatchRuntimeEvent.actions.toolDispatch.managedMutation;
+      await assert.rejects(
+        store.appendRuntimeEvent('session-1', 'run-1', {
+          id: 'workspace-terminal-bypass-event',
+          sessionId: 'session-1',
+          invocationId: 'invocation-1',
+          runId: 'run-1',
+          turnId: 'turn-1',
+          ts: 2,
+          partial: false,
+          role: 'system',
+          author: 'system',
+          modelVisibility: 'hidden',
+          actions: {
+            managedMutationTerminal: {
+              protocol: 'managed_mutation_terminal_v1',
+              disposition: 'safely_discarded',
+              reason: 'no_workspace_change',
+              operationId: prepared.operationId,
+              dispatchEventId: prepared.dispatchRuntimeEvent.id,
+              outcomeEventId: 'workspace-terminal-bypass-outcome',
+              mutation,
+            },
+          },
+        }),
+        /atomic workspace settlement writer/i,
       );
     });
   });

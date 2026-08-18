@@ -8,6 +8,10 @@ import type {
 export interface ManagedBaselineReceiptAuthorityInternal {
   issue(binding: ManagedWorkspaceBinding): Promise<ManagedWorkspaceBaselineReceiptV1>;
   require(input: CreateManagedWorkspaceFromSourceInput): Promise<ManagedWorkspaceBaselineReceiptV1>;
+  /** Loads immutable baseline evidence without requiring the worktree to remain at baseline HEAD. */
+  loadAcceptedContext(
+    input: CreateManagedWorkspaceFromSourceInput,
+  ): Promise<ManagedWorkspaceBaselineReceiptV1>;
   verify(receipt: ManagedWorkspaceBaselineReceiptV1): Promise<void>;
 }
 

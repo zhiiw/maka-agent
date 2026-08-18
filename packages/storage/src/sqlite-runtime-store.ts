@@ -23,11 +23,13 @@ import {
 } from '@maka/core/workspace-version-authority';
 import {
   decodeRuntimeEvent,
+  isRuntimeManagedWorkspaceMutationTerminal,
   isPartialRuntimeEvent,
   isTerminalRuntimeEvent,
   TOOL_BOUNDARY_PROTOCOL_V1,
   type RuntimeEvent,
   type RuntimeEventManagedWorkspaceMutationV1,
+  type RuntimeEventManagedWorkspaceMutationTerminalV1,
   type ToolRecoveryMode,
 } from '@maka/core/runtime-event';
 import {
@@ -77,6 +79,8 @@ import {
 } from './sqlite-runtime-schema.js';
 import {
   registerWorkspaceBaselineAuthorityWriterInternal,
+  type ManagedMutationTerminalCommitInput,
+  type ManagedMutationTerminalCommitResult,
   type WorkspaceSuccessorCommitInput,
   type WorkspaceSuccessorCommitResult,
 } from './workspace-version-authority-internal.js';
@@ -1444,6 +1448,139 @@ export class SqliteRuntimeStore
     });
   }
 
+  async #commitManagedMutationTerminal(
+    input: ManagedMutationTerminalCommitInput,
+    rootId: string,
+  ): Promise<ManagedMutationTerminalCommitResult> {
+    const toolOutcome: CommitToolOutcomeInput = {
+      ...input.toolOutcome,
+      runtimeEvent: canonicalizeRuntimeEventForStorage(input.toolOutcome.runtimeEvent),
+    };
+    assertNoReservedWorkspaceAuthorityAppend(toolOutcome.runtimeEvent);
+    assertOutcomeInput(toolOutcome);
+
+    return this.transaction(() => {
+      this.#assertWorkspaceStorageRootBinding(rootId);
+      const authority = this.readCanonicalWorkspaceAuthoritySync();
+      this.assertWorkspaceProjectionsMatchSync(authority);
+      const operation = this.readToolOperationSync(toolOutcome.operationId);
+      if (
+        !operation ||
+        operation.dispatchEventId === undefined ||
+        operation.recoveryMode !== 'reconcile' ||
+        (operation.toolName !== 'Write' && operation.toolName !== 'Edit')
+      ) {
+        throw new Error('Managed mutation terminal requires one prepared Write/Edit operation');
+      }
+      const dispatchJson = this.readRuntimeEventJson(operation.dispatchEventId);
+      const dispatchEvent = dispatchJson
+        ? decodeRuntimeEvent(JSON.parse(dispatchJson) as unknown)
+        : undefined;
+      const mutation = dispatchEvent?.actions?.toolDispatch?.managedMutation;
+      if (!dispatchEvent || !mutation) {
+        throw new Error('Managed mutation terminal is missing its exact durable T1');
+      }
+      const terminalEvent = buildManagedMutationTerminalEvent({
+        dispatchEvent,
+        mutation,
+        outcomeEvent: toolOutcome.runtimeEvent,
+        reason: input.reason,
+      });
+      const existingTerminalJson = this.readRuntimeEventJson(terminalEvent.id);
+      if (operation.resultEventId !== undefined || existingTerminalJson !== undefined) {
+        if (operation.resultEventId !== toolOutcome.runtimeEvent.id || !existingTerminalJson) {
+          throw new Error('Managed mutation terminal retry conflicts with its committed outcome');
+        }
+        assertStoredRuntimeEventEquals(
+          toolOutcome.runtimeEvent,
+          this.readRuntimeEventJson(operation.resultEventId),
+        );
+        assertStoredRuntimeEventEquals(terminalEvent, existingTerminalJson);
+        return {
+          created: false,
+          outcomeRuntimeEventSeq: this.runtimeEventSeq(operation.resultEventId),
+        };
+      }
+      if (operation.currentState !== 'prepared') {
+        throw new Error('Managed mutation terminal requires one prepared operation');
+      }
+      const currentHead = authority.heads.find(
+        (candidate) =>
+          candidate.workspaceId === mutation.workspaceId &&
+          candidate.workspaceEpochId === mutation.workspaceEpochId,
+      );
+      const reservation = this.db
+        .prepare(`
+          SELECT
+            workspace_instance_id, operation_id, dispatch_event_id,
+            base_workspace_version_id, base_accepted_event_id, base_head_revision,
+            base_commit_oid, base_tree_oid, expected_paths_json, execution_profile_digest
+          FROM runtime_managed_mutation_reservations
+          WHERE operation_id = ?
+        `)
+        .get(operation.operationId) as
+        | Pick<
+            ManagedMutationReservationProjectionRow,
+            | 'workspace_instance_id'
+            | 'operation_id'
+            | 'dispatch_event_id'
+            | 'base_workspace_version_id'
+            | 'base_accepted_event_id'
+            | 'base_head_revision'
+            | 'base_commit_oid'
+            | 'base_tree_oid'
+            | 'expected_paths_json'
+            | 'execution_profile_digest'
+          >
+        | undefined;
+      if (
+        !currentHead ||
+        !reservation ||
+        currentHead.workspaceVersionId !== mutation.baseWorkspaceVersionId ||
+        currentHead.acceptedEventId !== mutation.baseAcceptedEventId ||
+        currentHead.revision !== mutation.baseHeadRevision ||
+        currentHead.commitOid !== mutation.baseCommitOid ||
+        currentHead.treeOid !== mutation.baseTreeOid ||
+        reservation.workspace_instance_id !== mutation.workspaceInstanceId ||
+        reservation.operation_id !== operation.operationId ||
+        reservation.dispatch_event_id !== operation.dispatchEventId ||
+        reservation.base_workspace_version_id !== mutation.baseWorkspaceVersionId ||
+        reservation.base_accepted_event_id !== mutation.baseAcceptedEventId ||
+        reservation.base_head_revision !== mutation.baseHeadRevision ||
+        reservation.base_commit_oid !== mutation.baseCommitOid ||
+        reservation.base_tree_oid !== mutation.baseTreeOid ||
+        reservation.execution_profile_digest !== mutation.executionProfileDigest ||
+        !isDeepStrictEqual(JSON.parse(reservation.expected_paths_json), mutation.expectedPaths)
+      ) {
+        throw new Error('Managed mutation terminal requires its exact active reservation and head');
+      }
+      const response = toolOutcome.runtimeEvent.content;
+      if (
+        response?.kind !== 'function_response' ||
+        (input.reason === 'operation_failed_no_effect') !== (response.isError === true)
+      ) {
+        throw new Error('Managed mutation terminal reason conflicts with its exact tool outcome');
+      }
+
+      const outcomeResult = this.commitToolOutcomeSync(toolOutcome, 'workspace_terminal');
+      this.insertRuntimeEvent(terminalEvent, toolOutcome.committedAt, false);
+      const released = this.db
+        .prepare(`
+          DELETE FROM runtime_managed_mutation_reservations
+          WHERE workspace_instance_id = ? AND operation_id = ? AND dispatch_event_id = ?
+        `)
+        .run(mutation.workspaceInstanceId, operation.operationId, operation.dispatchEventId);
+      if (released.changes !== 1) {
+        throw new Error('Managed mutation terminal reservation release compare-and-set failed');
+      }
+      this.assertWorkspaceProjectionsMatchSync(this.readCanonicalWorkspaceAuthoritySync());
+      return {
+        created: true,
+        outcomeRuntimeEventSeq: outcomeResult.runtimeEventSeq,
+      };
+    });
+  }
+
   private registerWorkspaceBaselineAuthorityWriter(databasePath: string): void {
     const readWorkspaceHead = this.readWorkspaceHead.bind(this);
     registerWorkspaceBaselineAuthorityWriterInternal(
@@ -1451,6 +1588,7 @@ export class SqliteRuntimeStore
       databasePath,
       (input, rootId) => this.#commitWorkspaceBaseline(input, rootId),
       (input, rootId) => this.#commitWorkspaceSuccessor(input, rootId),
+      (input, rootId) => this.#commitManagedMutationTerminal(input, rootId),
       (rootId) => this.#bindWorkspaceStorageRoot(rootId),
       readWorkspaceHead,
       (workspaceInstanceId) => this.#readActiveManagedMutation(workspaceInstanceId),
@@ -1708,9 +1846,11 @@ export class SqliteRuntimeStore
         );
       }
     }
+    const terminalOperations = scanManagedMutationTerminalFacts(events, toolScan);
     const activeManagedMutations = this.scanCanonicalManagedMutationReservationsSync(
       toolScan,
       scan,
+      terminalOperations,
     );
     this.options.failpoint?.('after_workspace_canonical_scan');
     return { ...scan, activeManagedMutations };
@@ -1719,6 +1859,7 @@ export class SqliteRuntimeStore
   private scanCanonicalManagedMutationReservationsSync(
     toolScan: ReturnType<typeof scanToolLedger>,
     authority: ReturnType<typeof scanWorkspaceBaselineAuthority>,
+    terminalOperations: ReadonlySet<string>,
   ): ManagedMutationReservationProjectionRow[] {
     const acceptedOperations = new Set(
       authority.successors.map((candidate) => candidate.successor.origin.operationId),
@@ -1741,7 +1882,12 @@ export class SqliteRuntimeStore
           `Corrupt managed mutation reservation: identity_conflict at ${dispatchEvent?.id ?? operation.operationId}`,
         );
       }
-      if (acceptedOperations.has(operation.operationId)) continue;
+      if (
+        acceptedOperations.has(operation.operationId) ||
+        terminalOperations.has(operation.operationId)
+      ) {
+        continue;
+      }
       if (operation.responseEvent) {
         throw new Error(
           `Corrupt managed mutation reservation: generic_outcome at ${operation.responseEvent.id}`,
@@ -2649,7 +2795,7 @@ export class SqliteRuntimeStore
 
   private commitToolOutcomeSync(
     input: CommitToolOutcomeInput,
-    settlementOwner: 'generic' | 'workspace_successor' = 'generic',
+    settlementOwner: 'generic' | 'workspace_successor' | 'workspace_terminal' = 'generic',
   ): ToolCommitResult {
     const operation = this.readToolOperationSync(input.operationId);
     if (!operation) throw new Error(`Unknown tool operation ${input.operationId}`);
@@ -2682,8 +2828,8 @@ export class SqliteRuntimeStore
       if (!reservation) {
         throw new Error('Managed mutation T1 is missing its durable reservation');
       }
-      if (settlementOwner !== 'workspace_successor') {
-        throw new Error('Managed mutation outcome requires the workspace successor writer');
+      if (settlementOwner === 'generic') {
+        throw new Error('Managed mutation outcome requires a workspace settlement writer');
       }
     }
     const runtimeEventSeq = this.insertRuntimeEvent(input.runtimeEvent, input.committedAt, false);
@@ -4109,6 +4255,107 @@ function managedMutationMatchesAcceptedSuccessor(
     mutation.executionProfileDigest === successor.executionProfileDigest &&
     isDeepStrictEqual(mutation.expectedPaths, successor.changedPaths)
   );
+}
+
+function buildManagedMutationTerminalEvent(input: {
+  readonly dispatchEvent: RuntimeEvent;
+  readonly mutation: RuntimeEventManagedWorkspaceMutationV1;
+  readonly outcomeEvent: RuntimeEvent;
+  readonly reason: RuntimeEventManagedWorkspaceMutationTerminalV1['reason'];
+}): RuntimeEvent {
+  const dispatch = input.dispatchEvent.actions?.toolDispatch;
+  if (!dispatch) throw new Error('Managed mutation terminal requires a dispatch event');
+  const terminal: RuntimeEventManagedWorkspaceMutationTerminalV1 = {
+    protocol: 'managed_mutation_terminal_v1',
+    disposition: 'safely_discarded',
+    reason: input.reason,
+    operationId: dispatch.operationId,
+    dispatchEventId: input.dispatchEvent.id,
+    outcomeEventId: input.outcomeEvent.id,
+    mutation: structuredClone(input.mutation),
+  };
+  if (!isRuntimeManagedWorkspaceMutationTerminal(terminal)) {
+    throw new Error('Invalid managed mutation terminal fact');
+  }
+  const digest = createHash('sha256')
+    .update(`${dispatch.operationId}\0${input.dispatchEvent.id}\0${input.outcomeEvent.id}`)
+    .digest('hex')
+    .slice(0, 32);
+  return {
+    id: `managed_terminal_${digest}`,
+    sessionId: input.dispatchEvent.sessionId,
+    invocationId: input.dispatchEvent.invocationId,
+    runId: input.dispatchEvent.runId,
+    turnId: input.dispatchEvent.turnId,
+    ts: input.outcomeEvent.ts,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    modelVisibility: 'hidden',
+    actions: { managedMutationTerminal: terminal },
+  };
+}
+
+function scanManagedMutationTerminalFacts(
+  events: readonly RuntimeEvent[],
+  toolScan: ReturnType<typeof scanToolLedger>,
+): ReadonlySet<string> {
+  const terminalOperations = new Set<string>();
+  const eventOrder = new Map(events.map((event, index) => [event.id, index]));
+  for (const event of events) {
+    const terminal = event.actions?.managedMutationTerminal;
+    if (!terminal) continue;
+    const operation = toolScan.operations.find(
+      (candidate) => candidate.operationId === terminal.operationId,
+    );
+    const dispatchEvent = operation?.dispatchEvent;
+    const dispatch = dispatchEvent?.actions?.toolDispatch;
+    const response = operation?.responseEvent;
+    const expectedTerminalEvent =
+      dispatchEvent && dispatch?.managedMutation && response
+        ? buildManagedMutationTerminalEvent({
+            dispatchEvent,
+            mutation: dispatch.managedMutation,
+            outcomeEvent: response,
+            reason: terminal.reason,
+          })
+        : undefined;
+    const actionKeys = event.actions ? Object.keys(event.actions) : [];
+    if (
+      !isRuntimeManagedWorkspaceMutationTerminal(terminal) ||
+      event.partial ||
+      event.role !== 'system' ||
+      event.author !== 'system' ||
+      event.modelVisibility !== 'hidden' ||
+      event.content !== undefined ||
+      event.status !== undefined ||
+      event.refs !== undefined ||
+      actionKeys.length !== 1 ||
+      actionKeys[0] !== 'managedMutationTerminal' ||
+      !operation ||
+      operation.issues.length > 0 ||
+      !dispatchEvent ||
+      !dispatch ||
+      !response ||
+      !expectedTerminalEvent ||
+      !isDeepStrictEqual(event, expectedTerminalEvent) ||
+      terminal.dispatchEventId !== dispatchEvent.id ||
+      terminal.outcomeEventId !== response.id ||
+      !isDeepStrictEqual(terminal.mutation, dispatch.managedMutation) ||
+      event.sessionId !== dispatchEvent.sessionId ||
+      event.invocationId !== dispatchEvent.invocationId ||
+      event.runId !== dispatchEvent.runId ||
+      event.turnId !== dispatchEvent.turnId ||
+      (eventOrder.get(event.id) ?? -1) <= (eventOrder.get(response.id) ?? -1) ||
+      (terminal.reason === 'operation_failed_no_effect') !==
+        (response.content?.kind === 'function_response' && response.content.isError === true) ||
+      terminalOperations.has(terminal.operationId)
+    ) {
+      throw new Error(`Corrupt managed mutation terminal fact: identity_conflict at ${event.id}`);
+    }
+    terminalOperations.add(terminal.operationId);
+  }
+  return terminalOperations;
 }
 
 function workspaceEpochProjectionRow(

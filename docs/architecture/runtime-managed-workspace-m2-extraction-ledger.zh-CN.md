@@ -75,6 +75,23 @@ M2.3b 不迁入 `ManagedWorkspaceOwner` mutation lease/profile、built-in Write/
 Git candidate capture/discard、successor/error bundle composition 或 Desktop/CLI wiring；这些共同构成 M2.4 的首个
 生产消费者。只读 worker 的存在不能签发 mutation profile，caller callback 也不能自证执行能力。
 
+## M2.4 增量归属
+
+| 路径 | 主要不变量 |
+|---|---|
+| `packages/core/src/session.ts` | 显式 `managed-coding-v1` profile；attached profile 不静默升级 |
+| `packages/runtime/src/tool-runtime.ts` | Runtime-owned result snapshot；managed terminal 只采用 exact durable proof |
+| `packages/storage/src/managed-workspace-owner.ts` | 同一 execution handle 绑定 head/path/worker profile/candidate/settlement |
+| `packages/storage/src/sqlite-runtime-store.ts` | successor 或 no-effect terminal 的专用原子 writer；generic T2 继续被拒绝 |
+| `packages/storage/src/git-workspace-service.ts` | candidate capture/accept 与成功 no-op 的明确区分 |
+| `packages/runtime-host/src/server/managed-workspace-mutation-session.ts` | production Host 将 Read/Glob/Grep/Write/Edit 路由到同一 owner-bound workspace |
+| `packages/runtime-host/src/server/execution-composition.ts` | 仅显式 managed profile 取得 managed admission + mutation worker |
+| `scripts/recovery-test-inventory.mjs` | successor SQLite commit 后真实 process kill/reopen 的三平台证据 |
+| `runtime-managed-workspace-write-edit-production-v1.zh-CN.md` | M2.4 owner、原子边界、失败状态和平台矩阵 |
+
+M2.4 不绑定 continuation cursor，也不在 attached checkout 自动 redo。前者属于 M3，restore/rebaseline/publish
+属于 M4。
+
 ## Commit 映射
 
 | 当前提交 | 来源 | 说明 |

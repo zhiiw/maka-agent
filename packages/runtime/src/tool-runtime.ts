@@ -469,6 +469,8 @@ export interface RuntimeManagedMutationOperationProof {
   readonly content: ToolResultContent;
   readonly isError: boolean;
   readonly durationMs: number;
+  /** Runtime-owned exact response envelope for the workspace successor transaction. */
+  readonly durableOutcome: RuntimeEvent;
 }
 
 export type RuntimeManagedMutationSettlement =
@@ -478,8 +480,6 @@ export type RuntimeManagedMutationSettlement =
     }
   | {
       readonly kind: 'safely_discarded';
-      /** Exact value returned to the provider and canonicalized for durable replay. */
-      readonly providerResult: unknown;
       readonly durableOutcome: RuntimeEvent;
     }
   | { readonly kind: 'unsettled'; readonly error: unknown };
@@ -496,6 +496,7 @@ export interface RuntimeManagedMutationAdmission {
 interface DurableToolAttempt {
   operationId: string;
   responseEventId: string;
+  buildOutcome(result: ToolResultContent, isError: boolean, durationMs: number): RuntimeEvent;
   commitOutcome(
     result: unknown,
     isError: boolean,
@@ -1531,6 +1532,11 @@ export class ToolRuntime {
                   content: value.outcome.content,
                   isError: value.outcome.isError,
                   durationMs: value.outcome.durationMs,
+                  durableOutcome: durableAttempt!.buildOutcome(
+                    value.outcome.content,
+                    value.outcome.isError,
+                    value.outcome.durationMs,
+                  ),
                 };
               } finally {
                 if (operationLifecycle.state === 'running') {
@@ -1576,7 +1582,7 @@ export class ToolRuntime {
             // discarded; every other failure remains unsettled for recovery.
             throw new RuntimeManagedMutationUnsettledError(ownerError);
           }
-          const normalized = normalizeManagedMutationSettlement(settlement, ctx.maxResultBytes);
+          const normalized = normalizeManagedMutationSettlement(settlement);
           if (normalized.kind === 'workspace_successor_committed') {
             if (!runtimeOwnedValue) {
               throw new RuntimeManagedMutationUnsettledError(
@@ -1591,9 +1597,14 @@ export class ToolRuntime {
               durableOutcome: normalized.durableOutcome,
             };
           } else {
+            if (!runtimeOwnedValue) {
+              throw new RuntimeManagedMutationUnsettledError(
+                new Error('Managed mutation owner discarded the operation without executing it'),
+              );
+            }
             settledExecution = {
               kind: 'managed',
-              value: normalized.value,
+              value: runtimeOwnedValue,
               durableOutcome: normalized.durableOutcome,
             };
           }
@@ -2047,6 +2058,10 @@ export class ToolRuntime {
     return {
       operationId,
       responseEventId: `${operationId}_response`,
+      buildOutcome: (result, isError, durationMs) =>
+        deepFreezeRuntimeOwnedValue(
+          buildResponseEvent(result, isError, durationMs, this.input.now()),
+        ),
       commitOutcome: async (result, isError, durationMs) => {
         if (committedOutcome) return committedOutcome;
         const responseEvent = buildResponseEvent(result, isError, durationMs, this.input.now());
@@ -3088,17 +3103,13 @@ function uncertainOutcomeSignalFromError(error: unknown): ToolUncertainOutcomeSi
   };
 }
 
-function normalizeManagedMutationSettlement(
-  settlement: unknown,
-  maxResultBytes: number | undefined,
-):
+function normalizeManagedMutationSettlement(settlement: unknown):
   | {
       kind: 'workspace_successor_committed';
       durableOutcome: RuntimeEvent;
     }
   | {
       kind: 'safely_discarded';
-      value: RuntimeManagedMutationOperationValue<unknown>;
       durableOutcome: RuntimeEvent;
     } {
   if (!settlement || typeof settlement !== 'object' || Array.isArray(settlement)) {
@@ -3131,29 +3142,12 @@ function normalizeManagedMutationSettlement(
     };
   }
 
-  if (!Object.hasOwn(record, 'providerResult')) {
-    throw new Error('Managed safely-discarded settlement has no provider result');
-  }
-  const providerResult = snapshotManagedToolResult(record.providerResult, maxResultBytes);
   const response = durableOutcome.content;
   if (response?.kind !== 'function_response' || response.isError !== true) {
     throw new Error('Managed safely-discarded settlement has no durable error outcome');
   }
-  const content = Object.freeze(coerceResultContent(providerResult));
-  const outcome = Object.freeze({
-    content,
-    isError: true,
-    durationMs:
-      typeof durableOutcome.actions?.stateDelta?.durationMs === 'number'
-        ? durableOutcome.actions.stateDelta.durationMs
-        : 0,
-  });
   return {
     kind,
-    value: Object.freeze({
-      result: providerResult,
-      outcome,
-    }),
     durableOutcome,
   };
 }
@@ -3335,6 +3329,13 @@ function consumeManagedJsonStringBytes(budget: ManagedResultSnapshotBudget, valu
 function consumeManagedResultBytes(budget: ManagedResultSnapshotBudget, bytes: number): void {
   if (budget.bytes > budget.limit - bytes) throw new ToolResultLimitError();
   budget.bytes += bytes;
+}
+
+function deepFreezeRuntimeOwnedValue<T>(value: T, seen = new WeakSet<object>()): T {
+  if (!value || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  for (const nested of Object.values(value)) deepFreezeRuntimeOwnedValue(nested, seen);
+  return Object.freeze(value);
 }
 
 function coerceTerminalFailure(

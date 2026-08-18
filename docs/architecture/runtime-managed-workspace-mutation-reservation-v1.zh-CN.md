@@ -1,7 +1,7 @@
 # Managed Workspace Mutation Reservation v1
 
 - 阶段：M2.3a
-- 状态：实现切片；保持 Draft，等待 M2.3b admission 与 M2.4 Write/Edit 生产消费者
+- 状态：实现切片；M2.3b admission 与 M2.4 显式 managed Write/Edit 消费者已接入
 - owner：SQLite workspace mutation authority
 
 ## 1. 主要不变量
@@ -73,8 +73,9 @@ successor，不重复推进 head。
 | T1 后进程崩溃 | reservation 跨进程保留；新的 mutation 不能取得所有权 |
 | operation park | reservation 保留，禁止另一个 mutation 越过未知副作用 |
 
-`safely_discarded` 的 canonical release fact 不属于本切片；M2.4 在拥有真实 candidate 与 Write/Edit 结果后
-定义。M2.3a 不提供手工删除 reservation 的公共 API。
+`safely_discarded` 的 canonical release fact 由 M2.4 定义为 `managed_mutation_terminal_v1`：只有 Git owner
+证明 worktree 仍等于 exact T1 base 后，专用 SQLite writer 才能将 exact T2、terminal fact 与 reservation release
+原子提交。M2.3a 仍不提供手工删除 reservation 的公共 API。
 
 ## 5. 路径合同
 
@@ -93,7 +94,7 @@ M2.3b/M2.4 的平台 owner 在副作用前验证。Core 不读取 `process.platf
 | 多进程同 workspace 唯一 reservation | 承诺 | 承诺 | 承诺 |
 | process-crash 后 reservation 重建 | 承诺 | 承诺 | 承诺 |
 | path fact 跨平台同值同义 | 承诺 | 承诺 | 承诺 |
-| filesystem mutation/candidate correctness | M2.4 | M2.4 | M2.4 |
+| filesystem mutation/candidate correctness | CI 证明 | CI 证明 | CI 证明 |
 
 本切片不承诺断电后的 Git/filesystem 收敛，也不接 Desktop/CLI。
 

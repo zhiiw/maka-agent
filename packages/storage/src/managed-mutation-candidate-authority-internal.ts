@@ -34,6 +34,14 @@ export interface ManagedMutationCandidateReceiptV1 {
 
 export interface ManagedMutationCandidateAuthorityInternal {
   capture(request: ManagedMutationCandidateRequest): Promise<ManagedMutationCandidateReceiptV1>;
+  require(
+    binding: ManagedWorkspaceBinding,
+    operationId: string,
+  ): Promise<ManagedMutationCandidateReceiptV1>;
+  accept(
+    binding: ManagedWorkspaceBinding,
+    receipt: ManagedMutationCandidateReceiptV1,
+  ): Promise<void>;
   discard(receipt: ManagedMutationCandidateReceiptV1): Promise<void>;
 }
 

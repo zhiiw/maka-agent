@@ -7,6 +7,7 @@ import type {
 import type { RuntimeEvent, ToolBoundaryProtocol } from '@maka/core/runtime-event';
 import type { RuntimeContinuationAuthorityStore } from '@maka/core/runtime-event-store';
 import type { SessionHeader, SessionSummary, StoredMessage, TurnRecord } from '@maka/core/session';
+import { registerExecutionStoresWorkspaceAuthorityInternal } from './execution-stores-workspace-authority-internal.js';
 import type { SessionListFilter } from '@maka/core/runtime-inputs';
 import {
   createSqliteAgentRunStore,
@@ -517,6 +518,7 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
     },
   };
   freezeExecutionStoresFacade(stores);
+  registerExecutionStoresWorkspaceAuthorityInternal(stores, runtimePersistence.runtimeCommitStore);
   executionStoresWriterKinds.set(stores, kind);
   executionStoresWritersByLease.set(lease, stores);
   return stores;

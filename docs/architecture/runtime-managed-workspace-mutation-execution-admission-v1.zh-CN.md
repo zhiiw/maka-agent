@@ -1,7 +1,7 @@
 # Managed Workspace Mutation Runtime Settlement v1
 
 - 阶段：M2.3b
-- 状态：实现切片；保持 Draft，等待 M2.4 Write/Edit 生产消费者
+- 状态：实现切片；M2.4 已提供首个显式 managed Write/Edit 生产消费者
 - owner：Tool Runtime managed settlement seam
 - durable 真相：M2.3a SQLite reservation 与 owner 已提交的 immutable outcome
 
@@ -19,7 +19,7 @@ execution。
 Runtime 只接受三种 owner 结算：
 
 1. `workspace_successor_committed`：M2.1 的成功 T2、successor 与 head 已经原子提交；
-2. `safely_discarded`：owner 已证明 candidate 未被接受，并已提交 exact error outcome；
+2. `safely_discarded`：owner 已证明 workspace 无副作用，并已提交 exact error/no-op outcome 与 terminal fact；
 3. `unsettled`：副作用或结算状态不可证明，M2.3a reservation 保留给恢复流程。
 
 owner 返回值首先经过运行时结构校验，规范化成内部 terminal union。managed/generic lane 只由 T1 前已经确定的
@@ -72,9 +72,9 @@ flowchart TD
   E --> R
 ```
 
-`safely_discarded` 只携带一个 exact `providerResult`。Runtime 从该值生成 canonical content，并执行与普通工具
-相同的 `maxResultBytes` 检查。getter、serialization、canonicalization 或 size-check 的任何失败都变成 managed
-unsettled，不写 generic T2。
+`safely_discarded` 与 success 一样只携带 terminal proof 和 exact `durableOutcome`，不允许 Host 重新提交
+`providerResult`。Runtime 在 operation 边界持有唯一 bounded strict-JSON snapshot；getter、serialization、
+canonicalization 或 size-check 的任何失败都变成 managed unsettled，不写 generic T2。
 
 `workspace_successor_committed` 只携带 `durableOutcome`，不得重新提交 provider value。Runtime 在调用真实 operation
 完成边界用一次 bounded strict-JSON walker 同时执行 byte budget、类型校验、plain snapshot 和递归冻结。walker
@@ -110,7 +110,7 @@ parent refs 和 duration。缺字段、多字段或任意值不同都 fail-stop�
 | T1 reservation kill/reopen | CI 证明 | CI 证明 | CI 证明 |
 | 跨进程唯一 mutation reservation | CI 证明 | CI 证明 | CI 证明 |
 | Runtime managed settlement fail-stop | 平台无关测试 | 平台无关测试 | 平台无关测试 |
-| mutation worker/profile/candidate | M2.4 | M2.4 | M2.4 |
+| mutation worker/profile/candidate | CI 证明 | CI 证明 | CI 证明 |
 | power-loss convergence | 不在本切片 | 不在本切片 | 不在本切片 |
 
 统一 recovery inventory 同时包含 managed baseline/candidate、`sqlite-runtime-crash` 与
@@ -139,5 +139,5 @@ parent refs 和 duration。缺字段、多字段或任意值不同都 fail-stop�
 - 不 capture、discard 或 accept Git candidate；
 - 不接 Desktop/CLI，不改变当前用户可见 resume 能力。
 
-M2.3b 没有生产消费者，因此即使测试通过也保持 Draft。M2.4 必须由同一个 owner 同时签发并执行真实 mutation
-profile，不能重新引入 caller digest、静态标签或 callback 自证。
+M2.4 现在由同一个 owner 同时签发并执行真实 mutation profile，详细合同见
+[Managed Workspace Write/Edit Production Composition v1](./runtime-managed-workspace-write-edit-production-v1.zh-CN.md)。
