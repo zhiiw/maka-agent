@@ -2,7 +2,7 @@
 
 - 新基线：`upstream/main@32e3cbbd0`
 - 历史实现来源：`codex/managed-workspace-mutation-authority-m2@d9ba64697`
-- 当前重建分支：`codex/m2-1-main-rebuild`（验证后替换正式 Draft 分支）
+- 当前重建：M2.1 直接基于该主线；M2.2 只叠加 M2.1（验证后替换两个正式 Draft 分支）
 - 原则：历史分支只作为测试与实现来源；最终 diff 直接建立在已合入 M1.3 的最新主线上，不带入旧集成栈提交
 
 ## M2.1 文件归属
@@ -38,10 +38,12 @@
 | `packages/storage/src/git-workspace-service.ts` | 在既有 Git owner 中发布/验证 operation-bound ref、receipt 与 discard tombstone |
 | `packages/storage/src/__tests__/managed-mutation-candidate-authority.test.ts` | 真实 Git capture、嵌套 add/modify/delete、receipt corruption、真实 child-process capture/discard crash convergence 与路径策略 |
 | `packages/storage/src/__tests__/fixtures/git-workspace-service-crash-child.ts` | candidate ref/receipt 与 discard tombstone 的真实进程 kill seam |
+| `scripts/recovery-test-inventory.mjs`、`scripts/run-recovery-test-inventory.mjs` | recovery CI 的 suite/期望数量唯一清单与跨平台执行器 |
+| `.github/workflows/windows-recovery.yml` | Windows 消费统一 inventory，不维护第二份文件名/魔法计数 |
 | `docs/architecture/runtime-managed-workspace-git-mutation-candidate-owner-v1.zh-CN.md` | M2.2 owner、发布顺序、失败状态和平台矩阵 |
 
 M2.2 仍不迁入 runtime protocol、Host lifecycle、Write/Edit composition 或 SQLite successor commit；这些分别属于
-M2.3/M2.4。最终 PR 在前置栈合并后从最新 `main` 重建。
+M2.3/M2.4。当前 M2.2 已从最新 `main` 重建，且相对 M2.1 不重复携带 M1.3 文件。
 
 ## Commit 映射
 
