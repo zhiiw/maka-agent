@@ -22,7 +22,10 @@ explicit managed-coding-v1 profile
 
 caller 不能提供 cwd、base head、candidate、execution profile digest 或 terminal result。普通
 `headless-coding-v1` 不会因为 bundled Git/worker 恰好可用而静默升级；只有显式 profile 在 T1 前选择
-`managed_mutation_v1`。缺失 owner、worker、Git、SQLite authority 或任一 identity mismatch 都在 T1 前拒绝。
+`managed_mutation_v1`。execution boundary 读取、owner admission、canonical path 和其他可失败 preflight
+必须在 T1 前完成；缺失 owner、worker、Git、SQLite authority 或任一 identity mismatch 都在 T1 前拒绝。
+Owner 只签发与 `expectedPaths[0]` 相同的 `canonicalPath`，没有改写 `content`、`old_string` 或
+`new_string` 的权限；真实执行参数由 Runtime 从已经校验并写入 durable call 的原始参数重建。
 
 首版 profile 的工具面严格限定为 `Read/Glob/Grep/Write/Edit`。`Bash` 与 `apply_patch` 尚无等价的 effect
 owner 和 successor 协议，因此不会暴露给 managed task；不能借由这些工具绕过 canonical workspace head。
@@ -70,11 +73,16 @@ terminal fact、T1 mutation identity、dispatch/outcome identity、base head 与
 中都要一致。generic append/import 和 generic T2 writer 无权写入该 fact。若 worker 可能已改变文件、Git 状态漂移、
 terminal fact 缺失/损坏或 candidate 无法重验，则保留 reservation 并 fail-stop/park。
 
+T1 后取消不允许在 operation capability 之前短路。Runtime 仍调用唯一一次 operation capability；若 worker 因已经
+取消而在产生副作用前拒绝，Runtime 将该拒绝冻结为 error proof，Owner 在 clean-base 证明后提交
+`operation_failed_no_effect_committed`。如果 clean-base 无法证明，则保持 `unsettled`。
+
 ## 4. 失败状态与回滚
 
 | 崩溃/失败点 | durable 状态 | 重启行为 |
 |---|---|---|
 | T1 前 | 无 reservation | 明确失败，可重新 admission |
+| T1 后取消，worker 明确未产生 effect 且 Git clean | error T2 + terminal fact | 已收敛，head 不变 |
 | T1 后、worker 前/中，effect 不可证明 | reservation 保留 | park；M2.4 不自动猜测或覆盖 |
 | worker error 且 Git owner 证明 clean base | error T2 + terminal fact | 已收敛，head 不变 |
 | success 但 tree 无变化 | success T2 + terminal fact | 已收敛，head 不变 |

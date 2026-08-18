@@ -267,10 +267,7 @@ test('freezes canonical Write/Edit admission from the owner-bound head and worke
       expectedPaths: ['dir/tracked.txt'],
       executionProfileDigest: admission.durableDispatch.executionProfileDigest,
     });
-    assert.deepEqual(admission.executionArgs, {
-      path: 'dir/tracked.txt',
-      content: 'updated\n',
-    });
+    assert.equal(admission.canonicalPath, 'dir/tracked.txt');
     assert.match(admission.durableDispatch.executionProfileDigest, /^sha256:[a-f0-9]{64}$/u);
     assert.equal('executionProfileDigest' in admission, false);
 
@@ -286,11 +283,7 @@ test('freezes canonical Write/Edit admission from the owner-bound head and worke
       abortSignal: new AbortController().signal,
     });
     assert.deepEqual(editAdmission.durableDispatch.expectedPaths, ['dir/tracked.txt']);
-    assert.deepEqual(editAdmission.executionArgs, {
-      path: 'dir/tracked.txt',
-      old_string: 'before',
-      new_string: 'after',
-    });
+    assert.equal(editAdmission.canonicalPath, 'dir/tracked.txt');
     await editAdmission.dispose();
     await owner.close();
   } finally {
@@ -462,7 +455,7 @@ test('accepts a worker-owned Write only after capturing its Git candidate', asyn
   }
 });
 
-test('atomically settles failed and successful no-effect Writes without advancing the head', async () => {
+test('atomically settles post-T1 failure and successful no-effect Writes without advancing the head', async () => {
   const root = await temporaryRoot();
   const storageRoot = join(root, 'storage');
   const sourceRoot = await createEligibleSource(join(root, 'source'));
@@ -500,11 +493,12 @@ test('atomically settles failed and successful no-effect Writes without advancin
       runtimeStore,
       openRequest(sourceRoot),
     );
+    const controller = new AbortController();
     const admission = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
       operationId,
       toolName: 'Write',
       persistedArgs: args,
-      abortSignal: new AbortController().signal,
+      abortSignal: controller.signal,
     });
     await commitManagedMutationT1(runtimeStore, admission.durableDispatch, {
       operationId,
@@ -512,14 +506,20 @@ test('atomically settles failed and successful no-effect Writes without advancin
       args,
     });
     const result = { kind: 'text' as const, text: 'Write failed before changing the workspace' };
+    controller.abort(new Error('cancelled after T1'));
+    let operationProofCalls = 0;
 
-    const settlement = await admission.execute(async () => ({
-      content: result,
-      isError: true,
-      durationMs: 1,
-      durableOutcome: managedMutationOutcome(operationId, toolCallId, result, true),
-    }));
+    const settlement = await admission.execute(async () => {
+      operationProofCalls += 1;
+      return {
+        content: result,
+        isError: true,
+        durationMs: 1,
+        durableOutcome: managedMutationOutcome(operationId, toolCallId, result, true),
+      };
+    });
 
+    assert.equal(operationProofCalls, 1);
     assert.equal(settlement.kind, 'operation_failed_no_effect_committed');
     assert.equal(
       (

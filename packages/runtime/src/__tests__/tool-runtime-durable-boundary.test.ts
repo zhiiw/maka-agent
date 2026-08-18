@@ -629,7 +629,7 @@ describe('ToolRuntime durable boundary', () => {
     assert.equal(published?.type === 'tool_result' && published.isError, true);
   });
 
-  it('executes the exact canonical arguments issued by managed admission', async () => {
+  it('executes the Runtime arguments with the canonical path issued by managed admission', async () => {
     let receivedArgs: unknown;
     const canonicalArgs = { path: 'dir/file.txt', content: 'same' };
     const harness = makeHarness(
@@ -650,7 +650,11 @@ describe('ToolRuntime durable boundary', () => {
               durableOutcome: proof.durableOutcome,
             };
           }),
-          executionArgs: canonicalArgs,
+          durableDispatch: {
+            ...managedMutationDispatch(),
+            expectedPaths: ['dir/file.txt'],
+          },
+          canonicalPath: canonicalArgs.path,
         }),
       },
     );
@@ -664,6 +668,104 @@ describe('ToolRuntime durable boundary', () => {
 
     await harness.executeWithInput(managedTool, { path: 'dir\\file.txt', content: 'same' });
     assert.deepEqual(receivedArgs, canonicalArgs);
+  });
+
+  it('resolves the managed execution boundary before committing T1', async () => {
+    let preparedCalls = 0;
+    let operationCalls = 0;
+    let disposeCalls = 0;
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => {
+          preparedCalls += 1;
+          return { created: true, runtimeEventSeq: 1 };
+        },
+        commitToolOutcome: async () => {
+          throw new Error('must not reach T2');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        readExecutionBoundary: async () => {
+          throw new Error('execution boundary unavailable');
+        },
+        admitManagedMutation: async () => ({
+          ...managedAdmission(async (operation) => {
+            operationCalls += 1;
+            const proof = await operation();
+            return {
+              kind: 'workspace_successor_committed',
+              durableOutcome: proof.durableOutcome,
+            };
+          }),
+          dispose: async () => {
+            disposeCalls += 1;
+          },
+        }),
+      },
+    );
+    const managedTool = tool(() => ({ ok: true }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    assert.match(
+      JSON.stringify(await harness.execute(managedTool)),
+      /execution boundary unavailable/u,
+    );
+    assert.equal(preparedCalls, 0);
+    assert.equal(operationCalls, 0);
+    assert.equal(disposeCalls, 1);
+  });
+
+  it('does not let managed admission rewrite non-path tool arguments', async () => {
+    let receivedArgs: unknown;
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async () => ({
+          ...managedAdmission(async (operation) => {
+            const proof = await operation();
+            return {
+              kind: 'no_workspace_change_committed',
+              durableOutcome: proof.durableOutcome,
+            };
+          }),
+          durableDispatch: {
+            ...managedMutationDispatch(),
+            expectedPaths: ['dir/file.txt'],
+          },
+          canonicalPath: 'dir/file.txt',
+          // A malformed Host may still attach extra data at runtime. Runtime
+          // must ignore it because the protocol grants path authority only.
+          executionArgs: { path: 'dir/file.txt', content: 'owner-rewritten' },
+        }),
+      },
+    );
+    const managedTool = tool((args) => {
+      receivedArgs = args;
+      return { ok: true };
+    });
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await harness.executeWithInput(managedTool, {
+      path: 'dir\\file.txt',
+      content: 'runtime-validated',
+    });
+    assert.deepEqual(receivedArgs, {
+      path: 'dir/file.txt',
+      content: 'runtime-validated',
+    });
   });
 
   it('snapshots a no-effect failure result before its owner can mutate it', async () => {
@@ -1545,7 +1647,7 @@ function managedAdmission(
 ): RuntimeManagedMutationAdmission {
   return {
     durableDispatch: managedMutationDispatch(),
-    executionArgs: {},
+    canonicalPath: 'notes.txt',
     execute,
     dispose: async () => {
       order?.push('dispose');

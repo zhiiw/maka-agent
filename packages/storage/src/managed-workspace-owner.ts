@@ -123,7 +123,7 @@ export interface AdmitManagedWorkspaceMutationInput {
 
 export interface ManagedWorkspaceMutationAdmission {
   readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceMutationV1>;
-  readonly executionArgs: Readonly<Record<string, string>>;
+  readonly canonicalPath: string;
   execute(
     operation: () => Promise<ManagedWorkspaceMutationOperationProof>,
   ): Promise<ManagedWorkspaceMutationSettlement>;
@@ -553,8 +553,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
           `Managed workspace already has active mutation ${active.operationId}`,
         );
       }
-      const canonicalInput = canonicalManagedMutationInput(input.toolName, input.persistedArgs);
-      const expectedPath = canonicalInput.path;
+      const canonicalPath = canonicalManagedMutationPath(input.toolName, input.persistedArgs);
       input.abortSignal.throwIfAborted();
       const durableDispatch = Object.freeze({
         protocol: 'managed_mutation_v1' as const,
@@ -568,7 +567,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         baseHeadRevision: currentHead.revision,
         baseCommitOid: currentHead.commitOid,
         baseTreeOid: currentHead.treeOid,
-        expectedPaths: Object.freeze([expectedPath]),
+        expectedPaths: Object.freeze([canonicalPath]),
         executionProfileDigest: this.#workerBridge.mutationExecutionProfileDigest,
       });
       let state: 'open' | 'executing' | 'closed' = 'open';
@@ -584,7 +583,6 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         state = 'executing';
         try {
           return await this.#run(async () => {
-            input.abortSignal.throwIfAborted();
             const reservation = await readActiveManagedMutationInternal(
               accepted.store,
               accepted.binding.workspaceInstanceId,
@@ -709,7 +707,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
       };
       return Object.freeze({
         durableDispatch,
-        executionArgs: canonicalInput.executionArgs,
+        canonicalPath,
         execute,
         async dispose() {
           if (state === 'open') state = 'closed';
@@ -886,13 +884,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
   }
 }
 
-function canonicalManagedMutationInput(
-  toolName: 'Write' | 'Edit',
-  persistedArgs: unknown,
-): {
-  readonly path: string;
-  readonly executionArgs: Readonly<Record<string, string>>;
-} {
+function canonicalManagedMutationPath(toolName: 'Write' | 'Edit', persistedArgs: unknown): string {
   if (!persistedArgs || typeof persistedArgs !== 'object' || Array.isArray(persistedArgs)) {
     throw new ManagedWorkspaceOwnerError(
       'managed_workspace_owner_unavailable',
@@ -921,15 +913,7 @@ function canonicalManagedMutationInput(
       'Managed workspace mutation path is not a canonical tracked file path',
     );
   }
-  const executionArgs =
-    toolName === 'Write'
-      ? Object.freeze({ path, content: record.content as string })
-      : Object.freeze({
-          path,
-          old_string: record.old_string as string,
-          new_string: record.new_string as string,
-        });
-  return Object.freeze({ path, executionArgs });
+  return path;
 }
 
 function assertManagedMutationReservation(

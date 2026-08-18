@@ -490,13 +490,35 @@ export type RuntimeManagedMutationSettlement =
 
 export interface RuntimeManagedMutationAdmission {
   readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceMutationV1>;
-  /** Owner-issued arguments whose canonical path is identical to durableDispatch.expectedPaths. */
-  readonly executionArgs: unknown;
+  /** Owner-issued canonical identity for the sole path in durableDispatch.expectedPaths. */
+  readonly canonicalPath: string;
   execute(
     operation: () => Promise<RuntimeManagedMutationOperationProof>,
   ): Promise<RuntimeManagedMutationSettlement>;
   /** Idempotent for an unused, failed-T1, or already executed admission. */
   dispose(): Promise<void>;
+}
+
+function managedMutationExecutionArgs(
+  toolName: 'Write' | 'Edit',
+  executionArgs: unknown,
+  admission: RuntimeManagedMutationAdmission,
+): unknown {
+  const expectedPaths = admission.durableDispatch.expectedPaths;
+  if (
+    expectedPaths.length !== 1 ||
+    admission.canonicalPath.length === 0 ||
+    admission.canonicalPath !== expectedPaths[0]
+  ) {
+    throw new Error('Managed mutation canonical path does not match its durable dispatch');
+  }
+  if (!executionArgs || typeof executionArgs !== 'object' || Array.isArray(executionArgs)) {
+    throw new Error(`Managed ${toolName} execution arguments are invalid`);
+  }
+  const runtimeOwnedArgs = structuredClone(executionArgs) as Record<string, unknown>;
+  // The owner has authority to canonicalize path identity only. Every other
+  // field remains the exact Runtime-validated value bound to the durable call.
+  return Object.freeze({ ...runtimeOwnedArgs, path: admission.canonicalPath });
 }
 
 interface DurableToolAttempt {
@@ -1322,6 +1344,7 @@ export class ToolRuntime {
     }
 
     let managedMutationAdmission: RuntimeManagedMutationAdmission | undefined;
+    let managedMutationExecutionBoundary: ExecutionBoundary | undefined;
     let runtimeExecutionArgs = executionArgs;
     if (tool.durableExecutionProfile === 'managed_mutation_v1') {
       if (
@@ -1343,8 +1366,17 @@ export class ToolRuntime {
           persistedArgs: structuredClone(persistedArgs),
           abortSignal: ctx.abortSignal,
         });
-        runtimeExecutionArgs = managedMutationAdmission.executionArgs;
+        runtimeExecutionArgs = managedMutationExecutionArgs(
+          tool.name,
+          executionArgs,
+          managedMutationAdmission,
+        );
+        // This is the last fallible Runtime preflight for managed execution.
+        // Resolve it before T1 so every post-T1 path enters the owner-scoped
+        // operation proof state machine.
+        managedMutationExecutionBoundary = await this.readExecutionBoundary();
       } catch (error) {
+        await managedMutationAdmission?.dispose();
         const reason = `Managed workspace mutation admission failed: ${formatSyntheticToolErrorText(error)}`;
         await refuseBeforeDispatch(reason);
         this.recordLoopGateOutcome(callSignature, true);
@@ -1416,7 +1448,10 @@ export class ToolRuntime {
       pauseTarget?.pause();
       try {
         const runId = this.input.runId;
-        const executionBoundary = clientCapabilityBoundary ?? (await this.readExecutionBoundary());
+        const executionBoundary =
+          clientCapabilityBoundary ??
+          managedMutationExecutionBoundary ??
+          (await this.readExecutionBoundary());
         const invokeTool = () =>
           tool.impl(structuredClone(runtimeExecutionArgs) as never, {
             sessionId: this.input.sessionId,
