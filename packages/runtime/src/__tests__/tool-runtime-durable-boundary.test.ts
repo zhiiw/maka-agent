@@ -400,6 +400,60 @@ describe('ToolRuntime durable boundary', () => {
     );
   });
 
+  it('publishes one immutable snapshot when the tool mutates its returned object later', async () => {
+    let operationId = '';
+    const mutableResult = { state: 'A' };
+    const appendedMessages: StoredMessage[] = [];
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        appendMessage: async (message) => {
+          if (message.type === 'tool_result') mutableResult.state = 'B';
+          appendedMessages.push(structuredClone(message));
+        },
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            const proof = await operation();
+            return {
+              kind: 'workspace_successor_committed',
+              durableOutcome: managedOutcomeEvent(operationId, proof.content, false, {
+                durationMs: proof.durationMs,
+              }),
+            };
+          });
+        },
+      },
+    );
+    const managedTool = tool(() => mutableResult);
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    const result = await harness.execute(managedTool);
+    const storedResult = appendedMessages.find((message) => message.type === 'tool_result');
+    const liveEvent = harness.events.find((event) => event.type === 'tool_result');
+
+    assert.equal(mutableResult.state, 'B');
+    assert.deepEqual(result, { state: 'A' });
+    assert.equal(Object.isFrozen(result), true);
+    assert.deepEqual(storedResult?.type === 'tool_result' ? storedResult.content : undefined, {
+      kind: 'json',
+      value: { state: 'A' },
+    });
+    assert.deepEqual(liveEvent?.type === 'tool_result' ? liveEvent.content : undefined, {
+      kind: 'json',
+      value: { state: 'A' },
+    });
+  });
+
   it('adopts an owner-committed safe discard without invoking generic T2', async () => {
     let genericOutcomeCalls = 0;
     let operationId = '';
@@ -444,6 +498,166 @@ describe('ToolRuntime durable boundary', () => {
     const published = harness.events.at(-1);
     assert.equal(published?.type, 'tool_result');
     assert.equal(published?.type === 'tool_result' && published.isError, true);
+  });
+
+  it('snapshots a safe-discard result before its owner can mutate it', async () => {
+    let operationId = '';
+    const ownerResult = { error: 'discarded-A' };
+    const appendedMessages: StoredMessage[] = [];
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        appendMessage: async (message) => {
+          if (message.type === 'tool_result') ownerResult.error = 'mutated-B';
+          appendedMessages.push(structuredClone(message));
+        },
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            await operation();
+            return {
+              kind: 'safely_discarded',
+              providerResult: ownerResult,
+              durableOutcome: managedOutcomeEvent(
+                operationId,
+                { kind: 'json', value: { error: 'discarded-A' } },
+                true,
+              ),
+            };
+          });
+        },
+      },
+    );
+    const managedTool = tool(() => ({ ok: true }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    const result = await harness.execute(managedTool);
+    const storedResult = appendedMessages.find((message) => message.type === 'tool_result');
+
+    assert.equal(ownerResult.error, 'mutated-B');
+    assert.deepEqual(result, { error: 'discarded-A' });
+    assert.equal(Object.isFrozen(result), true);
+    assert.deepEqual(storedResult?.type === 'tool_result' ? storedResult.content : undefined, {
+      kind: 'json',
+      value: { error: 'discarded-A' },
+    });
+  });
+
+  it('revokes a retained managed operation after terminal settlement', async () => {
+    let operationId = '';
+    let implementationCalls = 0;
+    let retainedOperation: Parameters<RuntimeManagedMutationAdmission['execute']>[0] | undefined;
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            retainedOperation = operation;
+            const result = { error: 'candidate was safely discarded' };
+            return {
+              kind: 'safely_discarded',
+              providerResult: result,
+              durableOutcome: managedOutcomeEvent(
+                operationId,
+                { kind: 'json', value: result },
+                true,
+              ),
+            };
+          });
+        },
+      },
+    );
+    const managedTool = tool(() => {
+      implementationCalls += 1;
+      return { ok: true };
+    });
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    assert.deepEqual(await harness.execute(managedTool), {
+      error: 'candidate was safely discarded',
+    });
+    assert.ok(retainedOperation);
+    await assert.rejects(retainedOperation(), /operation capability is closed/i);
+    assert.equal(implementationCalls, 0);
+  });
+
+  it('does not accept terminal settlement while a detached operation is running', async () => {
+    let operationId = '';
+    let releaseOperation!: () => void;
+    const operationBlocked = new Promise<void>((resolve) => {
+      releaseOperation = resolve;
+    });
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            void operation().catch(() => undefined);
+            const result = { error: 'candidate was safely discarded' };
+            return {
+              kind: 'safely_discarded',
+              providerResult: result,
+              durableOutcome: managedOutcomeEvent(
+                operationId,
+                { kind: 'json', value: result },
+                true,
+              ),
+            };
+          });
+        },
+      },
+    );
+    const managedTool = tool(async () => {
+      await operationBlocked;
+      return { ok: true };
+    });
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    const execution = harness.execute(managedTool);
+    const settledBeforeRelease = await Promise.race([
+      execution.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 20)),
+    ]);
+    releaseOperation();
+
+    assert.equal(settledBeforeRelease, false);
+    await assert.rejects(execution, /owner settled before the operation completed/i);
+    assert.equal(
+      harness.events.some((event) => event.type === 'tool_result'),
+      false,
+    );
   });
 
   it('rejects a safe discard whose live error differs from its durable result', async () => {
@@ -531,7 +745,7 @@ describe('ToolRuntime durable boundary', () => {
 
     await assert.rejects(
       harness.execute(managedTool),
-      /provider result getter exploded|byte limit exceeded/i,
+      /not JSON-compatible|provider result getter exploded|byte limit exceeded/i,
     );
     assert.equal(genericOutcomeCalls, 0);
     assert.equal(

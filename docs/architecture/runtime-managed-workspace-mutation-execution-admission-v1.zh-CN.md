@@ -11,6 +11,11 @@
 提交为 durable T1。从这一刻起，整个 settlement、result canonicalization、大小检查、durable outcome adoption、
 provider publication 与 telemetry 都处于 managed fail-stop 状态：任何异常都不得进入 generic synthetic T2。
 
+managed T1 后的 operation authority 是 Runtime-owned 线性 capability：`open → running → settled → closed`。
+owner 最多调用一次；`execute()` 返回或抛错时 capability 立即关闭。若 owner 在 operation 尚未完成时提前结算，
+Runtime 必须先 join 该 operation，再将整个结算判为 unsettled，确保 Runtime 返回后不存在仍可产生副作用的 detached
+execution。
+
 Runtime 只接受三种 owner 结算：
 
 1. `workspace_successor_committed`：M2.1 的成功 T2、successor 与 head 已经原子提交；
@@ -72,9 +77,12 @@ flowchart TD
 unsettled，不写 generic T2。
 
 `workspace_successor_committed` 只携带 `durableOutcome`，不得重新提交 provider value。Runtime 在调用真实 operation
-时完成唯一一次 size check 和 canonicalization，私有保存 live value，仅把隔离复制的 `content/isError/durationMs`
-proof 交给 owner 用于提交 successor。owner 返回后，Runtime 用自己的 canonical outcome 校验 durable envelope；
-因此 owner 无法构造 live A / replay B，也无法用替换 value 绕过结果大小限制。
+完成边界生成一次 canonical immutable snapshot：拒绝 cycle、`toJSON`、非 plain JSON container 和其他非 JSON
+值，复制 getter 在该边界产生的值并递归冻结所有可变节点。size check、canonical content、proof、message、telemetry
+和 provider 返回只能读取该 snapshot。
+Runtime 私有保存 snapshot，仅把隔离复制的 `content/isError/durationMs` proof 交给 owner 用于提交 successor。owner
+返回后，Runtime 用自己的 canonical outcome 校验 durable envelope；因此 owner 无法构造 live A / replay B，工具也
+无法通过事后修改原始返回对象改变已验证结果。
 
 owner 返回的 response 必须与 Runtime 从 T1 identity 构造的唯一 canonical envelope 完全相等，包括：event id、
 run/invocation/session/turn、timestamp 形状、origin、model visibility、function response、error bit、exact refs、
@@ -89,6 +97,8 @@ parent refs 和 duration。缺字段、多字段或任意值不同都 fail-stop�
 | owner 已原子接受 successor | Runtime 采用 exact durable success outcome |
 | owner 已安全 discard | Runtime 采用 exact durable error outcome |
 | owner 返回 unsettled、抛错或响应丢失 | 无 generic T2、无 provider result，reservation 保留 |
+| owner 结算后再次调用 operation | capability 已关闭，不执行工具 |
+| owner 在 operation 运行中提前结算 | join operation 后 fail-stop，不接受 terminal settlement |
 | canonicalization、size check、envelope validation 或 publication 失败 | 同上，统一 fail-stop |
 | durable envelope origin/visibility/refs/duration 不一致 | T2 boundary error，禁止发布 |
 
@@ -111,6 +121,8 @@ parent refs 和 duration。缺字段、多字段或任意值不同都 fail-stop�
 - owner-committed successor 只采用 durable T2，不调用 generic writer；
 - success settlement 缺失 durable outcome 时不调用 generic writer；
 - success settlement 不能替换 Runtime-owned provider value，live 与 replay 内容不一致时 fail-stop；
+- terminal settlement 撤销 operation capability；detached operation 必须 join 后 fail-stop；
+- 工具事后修改原始 result 不得改变 durable、message、event 或 provider snapshot；
 - safe-discard live result 与 durable content 不一致时 fail-stop；
 - getter/canonicalization 异常和超大 safe-discard 均不写 generic T2、不发布结果；
 - code-mode response 的 origin、hidden visibility、parent refs 与 duration 必须完整匹配；

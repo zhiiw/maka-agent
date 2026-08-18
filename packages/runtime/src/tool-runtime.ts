@@ -1470,18 +1470,21 @@ export class ToolRuntime {
                 queue,
               ),
           });
-        const prepareOperationValue = async (): Promise<
-          RuntimeManagedMutationOperationValue<unknown>
-        > => {
-          const result = await invokeTool();
+        const prepareOperationValue = async (
+          immutableSnapshot = false,
+        ): Promise<RuntimeManagedMutationOperationValue<unknown>> => {
+          const rawResult = await invokeTool();
+          const result = immutableSnapshot ? snapshotManagedToolResult(rawResult) : rawResult;
           if (
             ctx.maxResultBytes !== undefined &&
             serializedByteLength(result, ctx.maxResultBytes) > ctx.maxResultBytes
           ) {
             throw new ToolResultLimitError();
           }
-          const content = coerceResultContent(result);
-          return {
+          const content = immutableSnapshot
+            ? deepFreezeRuntimeSnapshot(coerceResultContent(result))
+            : coerceResultContent(result);
+          const value = {
             result,
             outcome: {
               content,
@@ -1489,6 +1492,7 @@ export class ToolRuntime {
               durationMs: this.input.now() - startedAt,
             },
           };
+          return immutableSnapshot ? deepFreezeRuntimeSnapshot(value) : value;
         };
         let settledExecution:
           | {
@@ -1498,33 +1502,75 @@ export class ToolRuntime {
             }
           | { kind: 'generic'; value: RuntimeManagedMutationOperationValue<unknown> };
         if (managedMutationAdmission) {
-          let operationInvoked = false;
+          const operationLifecycle: {
+            state: 'open' | 'running' | 'settled' | 'closed';
+          } = { state: 'open' };
+          let operationPromise: Promise<RuntimeManagedMutationOperationProof> | undefined;
           let runtimeOwnedValue: RuntimeManagedMutationOperationValue<unknown> | undefined;
-          const executeManagedOperation =
-            async (): Promise<RuntimeManagedMutationOperationProof> => {
-              if (operationInvoked) {
-                throw new Error('Managed mutation owner invoked the operation more than once');
+          const executeManagedOperation = (): Promise<RuntimeManagedMutationOperationProof> => {
+            if (operationLifecycle.state !== 'open') {
+              if (operationLifecycle.state === 'closed') {
+                return Promise.reject(new Error('Managed mutation operation capability is closed'));
               }
-              operationInvoked = true;
-              const value = await prepareOperationValue();
-              runtimeOwnedValue = value;
-              return {
-                // The owner receives an isolated proof. Mutating it cannot
-                // change Runtime's provider-facing value or canonical outcome.
-                content: structuredClone(value.outcome.content),
-                isError: value.outcome.isError,
-                durationMs: value.outcome.durationMs,
-              };
-            };
-          let settlement: RuntimeManagedMutationSettlement;
+              return Promise.reject(
+                new Error('Managed mutation owner invoked the operation more than once'),
+              );
+            }
+            operationLifecycle.state = 'running';
+            operationPromise = (async () => {
+              try {
+                const value = await prepareOperationValue(true);
+                runtimeOwnedValue = value;
+                return {
+                  // The owner receives an isolated proof. Mutating it cannot
+                  // change Runtime's provider-facing value or canonical outcome.
+                  content: structuredClone(value.outcome.content),
+                  isError: value.outcome.isError,
+                  durationMs: value.outcome.durationMs,
+                };
+              } finally {
+                if (operationLifecycle.state === 'running') {
+                  operationLifecycle.state = 'settled';
+                }
+              }
+            })();
+            // Runtime also observes the promise so a careless owner cannot
+            // turn an un-awaited operation rejection into an unhandled one.
+            void operationPromise.catch(() => undefined);
+            return operationPromise;
+          };
+          let settlement: unknown;
+          let ownerFailed = false;
+          let ownerError: unknown;
           try {
             settlement = await managedMutationAdmission.execute(executeManagedOperation);
           } catch (error) {
+            ownerFailed = true;
+            ownerError = error;
+          }
+          const ownerSettledWhileOperationRunning = operationLifecycle.state === 'running';
+          if (ownerSettledWhileOperationRunning) {
+            try {
+              await operationPromise;
+            } catch {
+              // The terminal state is invalid regardless of how the detached
+              // operation settles. Join it so no side effect can occur later.
+            } finally {
+              operationLifecycle.state = 'closed';
+            }
+            throw new RuntimeManagedMutationUnsettledError(
+              new Error('Managed mutation owner settled before the operation completed', {
+                ...(ownerFailed ? { cause: ownerError } : {}),
+              }),
+            );
+          }
+          operationLifecycle.state = 'closed';
+          if (ownerFailed) {
             // Once managed T1 is durable, an admission/owner failure may never
             // fall through to the generic synthetic T2 path. Only the owner can
             // prove that a successor was accepted or the candidate was safely
             // discarded; every other failure remains unsettled for recovery.
-            throw new RuntimeManagedMutationUnsettledError(error);
+            throw new RuntimeManagedMutationUnsettledError(ownerError);
           }
           const normalized = normalizeManagedMutationSettlement(settlement, ctx.maxResultBytes);
           if (normalized.kind === 'workspace_successor_committed') {
@@ -3039,7 +3085,7 @@ function uncertainOutcomeSignalFromError(error: unknown): ToolUncertainOutcomeSi
 }
 
 function normalizeManagedMutationSettlement(
-  settlement: RuntimeManagedMutationSettlement,
+  settlement: unknown,
   maxResultBytes: number | undefined,
 ):
   | {
@@ -3084,7 +3130,7 @@ function normalizeManagedMutationSettlement(
   if (!Object.hasOwn(record, 'providerResult')) {
     throw new Error('Managed safely-discarded settlement has no provider result');
   }
-  const providerResult = record.providerResult;
+  const providerResult = snapshotManagedToolResult(record.providerResult);
   const response = durableOutcome.content;
   if (response?.kind !== 'function_response' || response.isError !== true) {
     throw new Error('Managed safely-discarded settlement has no durable error outcome');
@@ -3128,6 +3174,33 @@ function coerceResultContent(raw: unknown): ToolResultContent {
     return { kind: 'json', value: raw };
   }
   return { kind: 'text', text: String(raw ?? '') };
+}
+
+/**
+ * Takes one JSON-compatible, recursively frozen snapshot without retaining
+ * tool/owner-owned object aliases. Validation rejects custom prototypes,
+ * cycles, and toJSON values before they can create a live-only representation.
+ */
+function snapshotManagedToolResult(value: unknown): unknown {
+  if (!Number.isFinite(serializedByteLength(value))) {
+    throw new Error('Managed tool result is not JSON-compatible');
+  }
+  try {
+    const snapshot = structuredClone(value);
+    if (!Number.isFinite(serializedByteLength(snapshot))) {
+      throw new Error('Managed tool result snapshot is not JSON-compatible');
+    }
+    return deepFreezeRuntimeSnapshot(snapshot);
+  } catch (error) {
+    throw new Error('Managed tool result could not be snapshotted', { cause: error });
+  }
+}
+
+function deepFreezeRuntimeSnapshot<T>(value: T, seen = new WeakSet<object>()): T {
+  if (!value || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  for (const nested of Object.values(value)) deepFreezeRuntimeSnapshot(nested, seen);
+  return Object.freeze(value);
 }
 
 function coerceTerminalFailure(
