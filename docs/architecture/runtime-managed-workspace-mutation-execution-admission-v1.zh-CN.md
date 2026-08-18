@@ -17,6 +17,10 @@ Runtime 只接受三种 owner 结算：
 2. `safely_discarded`：owner 已证明 candidate 未被接受，并已提交 exact error outcome；
 3. `unsettled`：副作用或结算状态不可证明，M2.3a reservation 保留给恢复流程。
 
+owner 返回值首先经过运行时结构校验，规范化成内部 terminal union。managed/generic lane 只由 T1 前已经确定的
+`managedMutationAdmission` 决定，绝不再用 `durableOutcome` 是否 truthy 选择 writer；terminal settlement 缺失
+durable outcome、value 或 canonical content 时只能 fail-stop。
+
 本切片不声称拥有 mutation worker、execution-profile attestation、Git candidate 或 production admission。它只定义
 Runtime 如何消费 M2.4 将提供的 owner capability。这样 T1 不会记录一个由只读 worker 或 caller callback 冒充的
 execution profile。
@@ -98,6 +102,7 @@ parent refs 和 duration。缺字段、多字段或任意值不同都 fail-stop�
 
 - Host admission 缺失时不落 T1、不执行工具；
 - owner-committed successor 只采用 durable T2，不调用 generic writer；
+- success settlement 缺失 durable outcome 时不调用 generic writer；
 - safe-discard live result 与 durable content 不一致时 fail-stop；
 - getter/canonicalization 异常和超大 safe-discard 均不写 generic T2、不发布结果；
 - code-mode response 的 origin、hidden visibility、parent refs 与 duration 必须完整匹配；

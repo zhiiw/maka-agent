@@ -313,6 +313,42 @@ describe('ToolRuntime durable boundary', () => {
     );
   });
 
+  it('fail-stops a managed success with no durable outcome instead of writing generic T2', async () => {
+    let genericOutcomeCalls = 0;
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          genericOutcomeCalls += 1;
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async () =>
+          managedAdmission(async (operation) => {
+            const value = await operation();
+            return {
+              kind: 'workspace_successor_committed',
+              value,
+            } as never;
+          }),
+      },
+    );
+    const managedTool = tool(() => ({ ok: true }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await assert.rejects(harness.execute(managedTool), /durable outcome/i);
+    assert.equal(genericOutcomeCalls, 0);
+    assert.equal(
+      harness.events.some((event) => event.type === 'tool_result'),
+      false,
+    );
+  });
+
   it('adopts an owner-committed safe discard without invoking generic T2', async () => {
     let genericOutcomeCalls = 0;
     let operationId = '';

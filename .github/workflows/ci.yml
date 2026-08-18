@@ -19,6 +19,7 @@ jobs:
       e2e: ${{ steps.plan.outputs.e2e }}
       runtime_host: ${{ steps.plan.outputs.runtime_host }}
       runtime_sandbox: ${{ steps.plan.outputs.runtime_sandbox }}
+      recovery_inventory: ${{ steps.plan.outputs.recovery_inventory }}
       standard_workspaces: ${{ steps.plan.outputs.standard_workspaces }}
       storage_stress: ${{ steps.plan.outputs.storage_stress }}
       storybook: ${{ steps.plan.outputs.storybook }}
@@ -89,7 +90,7 @@ jobs:
         run: npx knip --workspace packages/ui
   test_workspaces:
     needs: changes
-    if: needs.changes.outputs.standard_workspaces != ''
+    if: needs.changes.outputs.standard_workspaces != '' || needs.changes.outputs.recovery_inventory == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -134,6 +135,9 @@ jobs:
             export MAKA_STORAGE_STRESS=1
           fi
           node scripts/run-workspace-tests-parallel.mjs --concurrency=3 --workspaces="$WORKSPACES"
+      - name: Verify strict managed-workspace recovery inventory
+        if: needs.changes.outputs.recovery_inventory == 'true'
+        run: node scripts/run-recovery-test-inventory.mjs managed-workspace
 
   test_runtime_host:
     needs: changes

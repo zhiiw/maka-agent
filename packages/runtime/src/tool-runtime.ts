@@ -1480,8 +1480,13 @@ export class ToolRuntime {
             },
           };
         };
-        let operationValue: RuntimeManagedMutationOperationValue<unknown>;
-        let adoptedOutcomeEvent: RuntimeEvent | undefined;
+        let settledExecution:
+          | {
+              kind: 'managed';
+              value: RuntimeManagedMutationOperationValue<unknown>;
+              durableOutcome: RuntimeEvent;
+            }
+          | { kind: 'generic'; value: RuntimeManagedMutationOperationValue<unknown> };
         if (managedMutationAdmission) {
           let settlement: RuntimeManagedMutationSettlement<unknown>;
           try {
@@ -1493,55 +1498,35 @@ export class ToolRuntime {
             // discarded; every other failure remains unsettled for recovery.
             throw new RuntimeManagedMutationUnsettledError(error);
           }
-          if (settlement.kind === 'unsettled') {
-            throw new RuntimeManagedMutationUnsettledError(settlement.error);
-          }
-          if (settlement.kind === 'safely_discarded') {
-            const response = settlement.durableOutcome.content;
-            if (response?.kind !== 'function_response' || response.isError !== true) {
-              throw new RuntimeCommitBoundaryError(
-                'T2',
-                new Error('Managed safely-discarded settlement has no durable error outcome'),
-              );
-            }
-            if (
-              ctx.maxResultBytes !== undefined &&
-              serializedByteLength(settlement.providerResult, ctx.maxResultBytes) >
-                ctx.maxResultBytes
-            ) {
-              throw new ToolResultLimitError();
-            }
-            const content = coerceResultContent(settlement.providerResult);
-            operationValue = {
-              result: settlement.providerResult,
-              outcome: {
-                content,
-                isError: true,
-                durationMs:
-                  typeof settlement.durableOutcome.actions?.stateDelta?.durationMs === 'number'
-                    ? settlement.durableOutcome.actions.stateDelta.durationMs
-                    : 0,
-              },
-            };
-          } else {
-            operationValue = settlement.value;
-          }
-          adoptedOutcomeEvent = settlement.durableOutcome;
+          const normalized = normalizeManagedMutationSettlement(settlement, ctx.maxResultBytes);
+          settledExecution = { kind: 'managed', ...normalized };
         } else {
-          operationValue = await prepareOperationValue();
+          settledExecution = { kind: 'generic', value: await prepareOperationValue() };
         }
-        const { result, outcome } = operationValue;
+        const { result, outcome } = settledExecution.value;
         output.flush();
         const { content, durationMs } = outcome;
         const toolResultStatus = outcome.isError ? 'error' : 'success';
-        const durableOutcome = adoptedOutcomeEvent
-          ? durableAttempt?.adoptCommittedOutcome(
-              adoptedOutcomeEvent,
-              content,
-              outcome.isError,
-              durationMs,
-            )
-          : await durableAttempt?.commitOutcome(content, outcome.isError, durationMs);
+        let durableOutcome: { id: string; operationId: string; ts: number } | undefined;
+        if (settledExecution.kind === 'managed') {
+          if (!durableAttempt) {
+            throw new RuntimeManagedMutationUnsettledError(
+              new Error('Managed mutation settlement has no durable T1 attempt'),
+            );
+          }
+          durableOutcome = durableAttempt.adoptCommittedOutcome(
+            settledExecution.durableOutcome,
+            content,
+            outcome.isError,
+            durationMs,
+          );
+        } else {
+          durableOutcome = await durableAttempt?.commitOutcome(
+            content,
+            outcome.isError,
+            durationMs,
+          );
+        }
         if (hasSandboxDenial(content)) {
           const denialKey = sandboxDenialKey(tool.name, this.input.header.cwd, executionArgs);
           this.recentSandboxDenials.add(denialKey);
@@ -3003,6 +2988,115 @@ function uncertainOutcomeSignalFromError(error: unknown): ToolUncertainOutcomeSi
   return {
     code: 'outcome_unknown',
     retrySafe: false,
+  };
+}
+
+function normalizeManagedMutationSettlement(
+  settlement: RuntimeManagedMutationSettlement<unknown>,
+  maxResultBytes: number | undefined,
+): {
+  value: RuntimeManagedMutationOperationValue<unknown>;
+  durableOutcome: RuntimeEvent;
+} {
+  if (!settlement || typeof settlement !== 'object' || Array.isArray(settlement)) {
+    throw new Error('Managed mutation owner returned an invalid settlement');
+  }
+  const record = settlement as unknown as Record<string, unknown>;
+  const kind = record.kind;
+  if (kind === 'unsettled') {
+    throw new RuntimeManagedMutationUnsettledError(record.error);
+  }
+  if (kind !== 'workspace_successor_committed' && kind !== 'safely_discarded') {
+    throw new Error('Managed mutation owner returned an unknown settlement kind');
+  }
+  const durableOutcomeValue = Object.hasOwn(record, 'durableOutcome')
+    ? record.durableOutcome
+    : undefined;
+  if (
+    !durableOutcomeValue ||
+    typeof durableOutcomeValue !== 'object' ||
+    Array.isArray(durableOutcomeValue)
+  ) {
+    throw new Error('Managed mutation settlement has no durable outcome');
+  }
+  const durableOutcome = durableOutcomeValue as RuntimeEvent;
+
+  if (kind === 'workspace_successor_committed') {
+    const operationValue = Object.hasOwn(record, 'value') ? record.value : undefined;
+    if (!operationValue || typeof operationValue !== 'object' || Array.isArray(operationValue)) {
+      throw new Error('Managed mutation success has no operation value');
+    }
+    const value = operationValue as Record<string, unknown>;
+    const outcomeValue = value.outcome;
+    if (
+      !Object.hasOwn(value, 'result') ||
+      !outcomeValue ||
+      typeof outcomeValue !== 'object' ||
+      Array.isArray(outcomeValue)
+    ) {
+      throw new Error('Managed mutation success has an invalid operation value');
+    }
+    const outcome = outcomeValue as Record<string, unknown>;
+    const contentValue = outcome.content;
+    const isError = outcome.isError;
+    const durationMs = outcome.durationMs;
+    if (
+      !Object.hasOwn(outcome, 'content') ||
+      typeof isError !== 'boolean' ||
+      typeof durationMs !== 'number' ||
+      !Number.isFinite(durationMs)
+    ) {
+      throw new Error('Managed mutation success has an invalid operation outcome');
+    }
+    let content: ToolResultContent;
+    try {
+      content = decodeCanonicalToolResultContent(contentValue);
+    } catch (error) {
+      throw new Error('Managed mutation success has non-canonical result content', {
+        cause: error,
+      });
+    }
+    return {
+      value: {
+        result: value.result,
+        outcome: {
+          content,
+          isError,
+          durationMs,
+        },
+      },
+      durableOutcome,
+    };
+  }
+
+  if (!Object.hasOwn(record, 'providerResult')) {
+    throw new Error('Managed safely-discarded settlement has no provider result');
+  }
+  const providerResult = record.providerResult;
+  const response = durableOutcome.content;
+  if (response?.kind !== 'function_response' || response.isError !== true) {
+    throw new Error('Managed safely-discarded settlement has no durable error outcome');
+  }
+  if (
+    maxResultBytes !== undefined &&
+    serializedByteLength(providerResult, maxResultBytes) > maxResultBytes
+  ) {
+    throw new ToolResultLimitError();
+  }
+  const content = coerceResultContent(providerResult);
+  return {
+    value: {
+      result: providerResult,
+      outcome: {
+        content,
+        isError: true,
+        durationMs:
+          typeof durableOutcome.actions?.stateDelta?.durationMs === 'number'
+            ? durableOutcome.actions.stateDelta.durationMs
+            : 0,
+      },
+    },
+    durableOutcome,
   };
 }
 

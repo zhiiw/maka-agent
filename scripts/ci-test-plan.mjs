@@ -153,6 +153,14 @@ const STORAGE_STRESS_FILES = new Set([
   'packages/storage/src/__tests__/fixtures/root-resolver.ts',
 ]);
 
+const RECOVERY_INVENTORY_FILES = new Set([
+  '.github/workflows/ci.yml',
+  '.github/workflows/macos-recovery.yml',
+  '.github/workflows/windows-recovery.yml',
+  'scripts/recovery-test-inventory.mjs',
+  'scripts/run-recovery-test-inventory.mjs',
+]);
+
 function normalizePath(path) {
   return path.split(sep).join('/').replace(/^\.\//, '');
 }
@@ -238,6 +246,7 @@ export function planTests(changedFiles, options = {}) {
       // Stress multipliers and native child-process lock probes run only when
       // their owning storage seam changes; making --full imply stress turned
       // every unrelated merge into a 10K-chunk pressure run.
+      recoveryInventory: true,
       storageStress: false,
       storybook: true,
       windows: true,
@@ -290,6 +299,8 @@ export function planTests(changedFiles, options = {}) {
 
   const workspaces = reverseDependencyClosure(directWorkspaces, graph);
   const storageStress = files.some((path) => STORAGE_STRESS_FILES.has(path));
+  const recoveryInventory =
+    storageStress || files.some((path) => RECOVERY_INVENTORY_FILES.has(path));
   const windowsBaselineChanged = files.includes('.github/workflows/windows-baseline.yml');
   const windows = code || files.some((path) => WINDOWS_BASELINE_FILES.has(path));
   const windowsRuntime = windowsBaselineChanged || workspaces.includes('packages/runtime');
@@ -312,6 +323,7 @@ export function planTests(changedFiles, options = {}) {
     // the cli workspace runs in the dependency closure, not only for direct
     // cli/runtime edits (e.g. a storage-only change still selects cli via runtime).
     runtimeSandbox: workspaces.includes('packages/cli'),
+    recoveryInventory,
     storageStress,
     // Storybook build + smoke: catalog/harness only. Not every desktop/ui/core
     // PR — product ship gates are typecheck, unit, and Electron e2e. See
@@ -333,6 +345,7 @@ export function formatGitHubOutputs(plan) {
     `full=${plan.full}`,
     `runtime_host=${plan.runtimeHost}`,
     `runtime_sandbox=${plan.runtimeSandbox}`,
+    `recovery_inventory=${plan.recoveryInventory}`,
     `storage_stress=${plan.storageStress}`,
     `storybook=${plan.storybook}`,
     `unit=${plan.workspaces.length > 0}`,
