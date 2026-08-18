@@ -599,12 +599,14 @@ M2 按 owner 与原子边界拆成四个 stacked slices：
    从 populated schema 12 保留 baseline/head；不接真实 Write/Edit；
 2. **M2.2 Git mutation candidate owner（当前实现切片）**：唯一拥有 operation-bound candidate
    ref/commit、delta/path policy、artifact receipt 与基于 durable discard tombstone 的 orphan 回收；不写 T2；
-3. **M2.3 mutation execution admission**：T1 前冻结 base head、execution profile、operation identity 与
-   candidate lease；T1 后禁止 silent fallback；
+3. **M2.3 mutation execution admission（当前实现切片）**：owner 重读 canonical head 并签发 one-shot
+   mutation lease；Tool Runtime 在 T1 冻结 base head、execution profile、operation identity 与预期路径；
+   M2.1 online/rebuild 均验证该 identity，T1 后禁止 silent fallback；
 4. **M2.4 Write/Edit production composition**：把 owner-bound worker、candidate capture 与 M2.1 bundle
    串成唯一生产路径，并用真实 Host kill/reopen crash test 完成前三片的生产消费者。
 
-M2.2/M2.3 在 M2.4 消费者存在前保持 Draft。M2.4 不绑定 continuation boundary；该能力仍属于 M3。
+M2.2/M2.3 在 M2.4 消费者存在前保持 Draft。M2.3 没有给 built-in Write/Edit 启用 marker，因此不改变当前
+用户可见恢复能力。M2.4 不绑定 continuation boundary；该能力仍属于 M3。
 
 ### M3 — Workspace-bound continuation / resume
 

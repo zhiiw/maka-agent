@@ -1,7 +1,7 @@
 # Managed Workspace Mutation Version Authority v1
 
-- 状态：M2.1 切片实现完成；已从最新 `upstream/main` 平铺重建，保持 Draft 等待 M2.4 生产消费者
-- 更新日期：2026-08-17
+- 状态：M2.1/M2.2/M2.3 切片实现完成；保持 Draft 等待 M2.4 生产消费者
+- 更新日期：2026-08-18
 - 主要不变量：工具成功结果、successor workspace fact、version projection 与 canonical head 推进只能全可见或全不可见
 - canonical source：immutable RuntimeEvents
 - 写入 owner：storage-internal successor bundle writer
@@ -175,7 +175,7 @@ SQLite transaction 提供三平台一致的数据库原子性；本切片不声�
 
 该 PR 在 M2.4 消费者存在前保持 Draft。
 
-### M2.3 — Mutation execution admission
+### M2.3 — Mutation execution admission（当前实现切片）
 
 主要不变量：T1 前冻结 base workspace head、execution profile、operation identity 和 candidate lease；T1 后禁止切换
 attached/managed mode 或退回旧直接写路径。
@@ -186,6 +186,11 @@ attached/managed mode 或退回旧直接写路径。
 - 回滚：T1 前失败走标准 tool error；T1 后不确定状态保持 unsettled，交给 M2.4 收敛。
 
 该 PR 不新增第二套 workspace writer，只能消费 M2.1/M2.2 的 opaque capabilities。
+
+当前实现由 `ManagedWorkspaceOwner` 重新读取 canonical head，签发 owner-bound 独占 lease，并让 Tool Runtime
+把 exact `managed_mutation_v1` profile 与 T1 同时持久化。M2.1 online writer 与 rebuild 均拒绝缺少或不匹配
+该 profile 的 successor；能力缺失时工具在 T1 前失败，禁止静默 fallback。详细合同见
+[Managed Workspace Mutation Execution Admission v1](./runtime-managed-workspace-mutation-execution-admission-v1.zh-CN.md)。
 
 ### M2.4 — Write/Edit production composition
 
@@ -211,4 +216,6 @@ M2.4 不接 workspace-bound continuation；那属于 M3。
 - canonical origin 被篡改后 reader fail closed；
 - schema、SQLite multi-process 与既有 recovery 定向 suites 保持通过。
 
-这一组验证只证明 M2.1 的 persistence authority，不代表 M2 整体完成，也不提升当前用户可见 resume 能力。
+M2.3 另外验证 owner-bound 独占 admission、lease 生命周期、T1 profile、无 admission 时的 pre-T1 fail-closed、
+真实进程在 admission 后/T1 前退出后的 reopen，以及带 managed T1 的 SQLite successor crash/reopen。它仍不代表
+M2 整体完成，也不提升当前用户可见 resume 能力。
