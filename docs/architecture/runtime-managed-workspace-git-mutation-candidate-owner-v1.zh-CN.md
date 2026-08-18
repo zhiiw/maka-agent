@@ -121,10 +121,11 @@ receipt；discard 在 ref deletion 后被杀，新进程依 tombstone 幂等完�
 process-crash convergence 写成已证明能力。嵌套目录的新增、修改与删除均以递归 `diff-tree -r` 的文件路径作为
 receipt 证据，不能退化成顶层目录名。
 
-## 7. 留给 M2.3/M2.4 的边界
+## 7. 留给 M2.3a/M2.3b/M2.4 的边界
 
-M2.2 不证明变化一定由某一次 Write/Edit 造成。M2.3 必须在 T1 前冻结 base head、operation identity、
-execution profile 和 exclusive mutation scope；M2.4 必须核对正常工具 transform 的 expected result，调用
-M2.1 原子 bundle，并在真实 Host kill/reopen 测试中证明唯一 accepted successor。
+M2.2 不证明变化一定由某一次 Write/Edit 造成。M2.3a 必须把 T1 identity 与 durable exclusive reservation
+原子绑定并把 exact changed paths 带入 accepted truth；M2.3b 在 T1 前冻结 owner-bound execution admission；
+M2.4 必须核对正常工具 transform 的 expected result，调用 M2.1 原子 bundle，并在真实 Host kill/reopen
+测试中证明唯一 accepted successor。
 
 因此本切片保持 Draft；它没有生产 consumer，也不提升当前 Desktop 的 resume 能力。
