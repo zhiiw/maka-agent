@@ -9,6 +9,7 @@ export const RECOVERY_TEST_INVENTORIES = Object.freeze({
       'packages/storage/dist/__tests__/managed-mutation-candidate-authority.test.js',
     ]),
     expectedByPlatform: Object.freeze({
+      darwin: Object.freeze({ tests: 14, pass: 14, skipped: 0 }),
       linux: Object.freeze({ tests: 14, pass: 14, skipped: 0 }),
       win32: Object.freeze({ tests: 14, pass: 14, skipped: 0 }),
     }),
