@@ -45,8 +45,13 @@ import { computerUseModelCallArgs } from '@maka/core/computer-use';
 import type { SessionHeader } from '@maka/core/session';
 import type { ToolInvocationRecord } from '@maka/core/usage-stats/types';
 import { redactSecrets } from '@maka/core/redaction';
-import { TOOL_BOUNDARY_PROTOCOL_V1, type RuntimeEvent } from '@maka/core/runtime-event';
+import {
+  TOOL_BOUNDARY_PROTOCOL_V1,
+  type RuntimeEvent,
+  type RuntimeEventManagedWorkspaceMutationV1,
+} from '@maka/core/runtime-event';
 import { serializedByteLength } from '@maka/code-mode';
+import { isDeepStrictEqual } from 'node:util';
 
 import { recordToolArtifactsSafely, type ToolArtifactRecorder } from './tool-artifacts.js';
 import { computerActionFields, describeComputerUseArgsViolation } from './computer-use-codec.js';
@@ -135,6 +140,8 @@ export interface MakaTool<P = any, R = unknown> {
   };
   /** Crash-recovery contract used by the durable tool boundary. */
   recoveryMode?: ToolRecoveryMode;
+  /** Durable execution profile selected by the Host before T1. */
+  durableExecutionProfile?: 'managed_mutation_v1';
   /** Step-level admission contract. Exclusive tools cannot share an assistant step. */
   executionSemantics?: 'parallel' | 'exclusive_step';
   /** Nested CodeMode admission. Ordinary tools are nestable by default. */
@@ -435,6 +442,44 @@ export interface ToolRuntimeInput {
   recordToolArtifacts?: ToolArtifactRecorder;
   /** Optional Phase 2 T1/T2 commit boundary for hosts that persist RuntimeEvents. */
   runtimeCommitSink?: RuntimeCommitSink;
+  /** Host-owned managed mutation admission. It may never fall back after returning a profile. */
+  admitManagedMutation?: (input: {
+    readonly operationId: string;
+    readonly toolName: string;
+    readonly persistedArgs: unknown;
+    readonly abortSignal: AbortSignal;
+  }) => Promise<RuntimeManagedMutationAdmission>;
+}
+
+export interface RuntimeManagedMutationOperationValue<T> {
+  readonly result: T;
+  readonly outcome: {
+    readonly content: ToolResultContent;
+    readonly isError: boolean;
+    readonly durationMs: number;
+  };
+}
+
+export type RuntimeManagedMutationSettlement<T> =
+  | {
+      readonly kind: 'workspace_successor_committed';
+      readonly value: RuntimeManagedMutationOperationValue<T>;
+      readonly durableOutcome: RuntimeEvent;
+    }
+  | {
+      readonly kind: 'safely_discarded';
+      readonly error: unknown;
+      readonly durableOutcome: RuntimeEvent;
+    }
+  | { readonly kind: 'unsettled'; readonly error: unknown };
+
+export interface RuntimeManagedMutationAdmission {
+  readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceMutationV1>;
+  execute<T>(
+    operation: () => Promise<RuntimeManagedMutationOperationValue<T>>,
+  ): Promise<RuntimeManagedMutationSettlement<T>>;
+  /** Idempotent for an unused, failed-T1, or already executed admission. */
+  dispose(): Promise<void>;
 }
 
 interface DurableToolAttempt {
@@ -445,6 +490,12 @@ interface DurableToolAttempt {
     isError: boolean,
     durationMs?: number,
   ): Promise<{ id: string; operationId: string; ts: number }>;
+  adoptCommittedOutcome(
+    event: RuntimeEvent,
+    result: ToolResultContent,
+    isError: boolean,
+    durationMs: number,
+  ): { id: string; operationId: string; ts: number };
 }
 
 class RuntimeCommitBoundaryError extends Error {
@@ -455,6 +506,16 @@ class RuntimeCommitBoundaryError extends Error {
     const detail = cause instanceof Error ? cause.message : String(cause);
     super(`${phase} runtime commit failed: ${detail}`, { cause });
     this.name = 'RuntimeCommitBoundaryError';
+  }
+}
+
+class RuntimeManagedMutationUnsettledError extends Error {
+  constructor(cause: unknown) {
+    super(
+      `Managed workspace mutation remains unsettled: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+    this.name = 'RuntimeManagedMutationUnsettledError';
   }
 }
 
@@ -1242,8 +1303,38 @@ export class ToolRuntime {
       }
     }
 
+    let managedMutationAdmission: RuntimeManagedMutationAdmission | undefined;
+    if (tool.durableExecutionProfile === 'managed_mutation_v1') {
+      if (
+        (tool.name !== 'Write' && tool.name !== 'Edit') ||
+        tool.recoveryMode !== 'reconcile' ||
+        !dispatchOperationId ||
+        !this.input.runtimeCommitSink ||
+        !this.input.admitManagedMutation
+      ) {
+        const reason = 'Managed workspace mutation admission is unavailable before T1';
+        await refuseBeforeDispatch(reason);
+        this.recordLoopGateOutcome(callSignature, true);
+        return this.errorReturn(reason);
+      }
+      try {
+        managedMutationAdmission = await this.input.admitManagedMutation({
+          operationId: dispatchOperationId,
+          toolName: tool.name,
+          persistedArgs: structuredClone(persistedArgs),
+          abortSignal: ctx.abortSignal,
+        });
+      } catch (error) {
+        const reason = `Managed workspace mutation admission failed: ${formatSyntheticToolErrorText(error)}`;
+        await refuseBeforeDispatch(reason);
+        this.recordLoopGateOutcome(callSignature, true);
+        return this.errorReturn(reason);
+      }
+    }
+
     const reservedSubagentSlot = this.reserveSubagentSlot(tool);
     if (!reservedSubagentSlot) {
+      await managedMutationAdmission?.dispose();
       trace?.emit('tool', 'tool_failed', 'Tool execution rejected by runtime limit', {
         toolUseId,
         toolName: tool.name,
@@ -1263,11 +1354,15 @@ export class ToolRuntime {
         persistedArgs,
         modelFacingArgs,
         abortSignal: ctx.abortSignal,
+        ...(managedMutationAdmission
+          ? { managedMutation: managedMutationAdmission.durableDispatch }
+          : {}),
         ...(invocationId ? { invocationId } : {}),
         ...(runId ? { runId } : {}),
       });
     } catch (error) {
       if (reservedSubagentSlot) this.releaseSubagentSlot(tool);
+      await managedMutationAdmission?.dispose();
       throw error;
     }
     if (durableAttempt) {
@@ -1302,83 +1397,142 @@ export class ToolRuntime {
       try {
         const runId = this.input.runId;
         const executionBoundary = clientCapabilityBoundary ?? (await this.readExecutionBoundary());
-        const result = await tool.impl(structuredClone(executionArgs) as never, {
-          sessionId: this.input.sessionId,
-          turnId,
-          ...(runId ? { runId } : {}),
-          ...(this.input.orchestrationMode
-            ? { orchestrationMode: this.input.orchestrationMode }
-            : {}),
-          cwd: this.input.header.cwd,
-          executionBoundary,
-          permissionMode: this.input.header.permissionMode,
-          toolCallId: toolUseId,
-          // The id the call event actually carries, not the candidate: by here
-          // `prepareDurableToolAttempt` has pushed it on the dispatch lane.
-          ...(pushedCallEvent?.operationId ? { operationId: pushedCallEvent.operationId } : {}),
-          abortSignal: ctx.abortSignal,
-          emitOutput: output.emit,
-          ...(trace
-            ? {
-                emitRunTrace: (
-                  type:
-                    | 'tool_started'
-                    | 'tool_completed'
-                    | 'tool_failed'
-                    | 'skill_searched'
-                    | 'skill_loaded'
-                    | 'skill_load_failed',
-                  message: string,
-                  data?: Record<string, unknown>,
-                ) =>
-                  trace.emit(type.startsWith('skill_') ? 'skill' : 'tool', type, message, {
-                    toolUseId,
-                    toolName: tool.name,
-                    ...(data ?? {}),
-                  }),
-              }
-            : {}),
-          ...(this.input.listChildAgents ? { listChildAgents: this.input.listChildAgents } : {}),
-          ...(this.input.readChildAgentOutput
-            ? { readChildAgentOutput: this.input.readChildAgentOutput }
-            : {}),
-          ...this.buildChildAgentContext({
+        const invokeTool = () =>
+          tool.impl(structuredClone(executionArgs) as never, {
+            sessionId: this.input.sessionId,
             turnId,
+            ...(runId ? { runId } : {}),
+            ...(this.input.orchestrationMode
+              ? { orchestrationMode: this.input.orchestrationMode }
+              : {}),
+            cwd: this.input.header.cwd,
+            executionBoundary,
+            permissionMode: this.input.header.permissionMode,
+            toolCallId: toolUseId,
+            // The id the call event actually carries, not the candidate: by here
+            // `prepareDurableToolAttempt` has pushed it on the dispatch lane.
+            ...(pushedCallEvent?.operationId ? { operationId: pushedCallEvent.operationId } : {}),
             abortSignal: ctx.abortSignal,
-            trace,
-            toolUseId,
-            toolName: tool.name,
-            queue,
-            activityIdentity,
-          }),
-          askUserQuestion: (questions) =>
-            this.askUserQuestion(turnId, toolUseId, questions, ctx.abortSignal, queue),
-          requestSandboxBoundary: (expansion, justification) =>
-            this.requestSandboxBoundary(
+            emitOutput: output.emit,
+            ...(trace
+              ? {
+                  emitRunTrace: (
+                    type:
+                      | 'tool_started'
+                      | 'tool_completed'
+                      | 'tool_failed'
+                      | 'skill_searched'
+                      | 'skill_loaded'
+                      | 'skill_load_failed',
+                    message: string,
+                    data?: Record<string, unknown>,
+                  ) =>
+                    trace.emit(type.startsWith('skill_') ? 'skill' : 'tool', type, message, {
+                      toolUseId,
+                      toolName: tool.name,
+                      ...(data ?? {}),
+                    }),
+                }
+              : {}),
+            ...(this.input.listChildAgents ? { listChildAgents: this.input.listChildAgents } : {}),
+            ...(this.input.readChildAgentOutput
+              ? { readChildAgentOutput: this.input.readChildAgentOutput }
+              : {}),
+            ...this.buildChildAgentContext({
               turnId,
+              abortSignal: ctx.abortSignal,
+              trace,
               toolUseId,
-              expansion,
-              justification,
-              ctx.abortSignal,
+              toolName: tool.name,
               queue,
-            ),
-        });
-        if (
-          ctx.maxResultBytes !== undefined &&
-          serializedByteLength(result, ctx.maxResultBytes) > ctx.maxResultBytes
-        ) {
-          throw new ToolResultLimitError();
+              activityIdentity,
+            }),
+            askUserQuestion: (questions) =>
+              this.askUserQuestion(turnId, toolUseId, questions, ctx.abortSignal, queue),
+            requestSandboxBoundary: (expansion, justification) =>
+              this.requestSandboxBoundary(
+                turnId,
+                toolUseId,
+                expansion,
+                justification,
+                ctx.abortSignal,
+                queue,
+              ),
+          });
+        const prepareOperationValue = async (): Promise<
+          RuntimeManagedMutationOperationValue<unknown>
+        > => {
+          const result = await invokeTool();
+          if (
+            ctx.maxResultBytes !== undefined &&
+            serializedByteLength(result, ctx.maxResultBytes) > ctx.maxResultBytes
+          ) {
+            throw new ToolResultLimitError();
+          }
+          const content = coerceResultContent(result);
+          return {
+            result,
+            outcome: {
+              content,
+              isError: deriveToolResultStatus(content, result) !== 'success',
+              durationMs: this.input.now() - startedAt,
+            },
+          };
+        };
+        let operationValue: RuntimeManagedMutationOperationValue<unknown>;
+        let adoptedOutcomeEvent: RuntimeEvent | undefined;
+        if (managedMutationAdmission) {
+          let settlement: RuntimeManagedMutationSettlement<unknown>;
+          try {
+            settlement = await managedMutationAdmission.execute(prepareOperationValue);
+          } catch (error) {
+            // Once managed T1 is durable, an admission/owner failure may never
+            // fall through to the generic synthetic T2 path. Only the owner can
+            // prove that a successor was accepted or the candidate was safely
+            // discarded; every other failure remains unsettled for recovery.
+            throw new RuntimeManagedMutationUnsettledError(error);
+          }
+          if (settlement.kind === 'unsettled') {
+            throw new RuntimeManagedMutationUnsettledError(settlement.error);
+          }
+          if (settlement.kind === 'safely_discarded') {
+            const response = settlement.durableOutcome.content;
+            if (response?.kind !== 'function_response' || response.isError !== true) {
+              throw new RuntimeCommitBoundaryError(
+                'T2',
+                new Error('Managed safely-discarded settlement has no durable error outcome'),
+              );
+            }
+            operationValue = {
+              result: this.errorReturn(formatSyntheticToolErrorText(settlement.error)),
+              outcome: {
+                content: decodeCanonicalToolResultContent(response.result),
+                isError: true,
+                durationMs:
+                  typeof settlement.durableOutcome.actions?.stateDelta?.durationMs === 'number'
+                    ? settlement.durableOutcome.actions.stateDelta.durationMs
+                    : 0,
+              },
+            };
+          } else {
+            operationValue = settlement.value;
+          }
+          adoptedOutcomeEvent = settlement.durableOutcome;
+        } else {
+          operationValue = await prepareOperationValue();
         }
+        const { result, outcome } = operationValue;
         output.flush();
-        const durationMs = this.input.now() - startedAt;
-
-        const content = coerceResultContent(result);
-        const toolResultStatus = deriveToolResultStatus(content, result);
-        const durableOutcome = await durableAttempt?.commitOutcome(
-          content,
-          toolResultStatus !== 'success',
-          durationMs,
-        );
+        const { content, durationMs } = outcome;
+        const toolResultStatus = outcome.isError ? 'error' : 'success';
+        const durableOutcome = adoptedOutcomeEvent
+          ? durableAttempt?.adoptCommittedOutcome(
+              adoptedOutcomeEvent,
+              content,
+              outcome.isError,
+              durationMs,
+            )
+          : await durableAttempt?.commitOutcome(content, outcome.isError, durationMs);
         if (hasSandboxDenial(content)) {
           const denialKey = sandboxDenialKey(tool.name, this.input.header.cwd, executionArgs);
           this.recentSandboxDenials.add(denialKey);
@@ -1486,7 +1640,12 @@ export class ToolRuntime {
         pauseTarget?.resume();
       }
     } catch (err) {
-      if (err instanceof RuntimeCommitBoundaryError) throw err;
+      if (
+        err instanceof RuntimeCommitBoundaryError ||
+        err instanceof RuntimeManagedMutationUnsettledError
+      ) {
+        throw err;
+      }
       if (isInteractionControlError(err)) throw err;
       output.flush();
       const sandboxError = serializeSandboxError(err);
@@ -1621,6 +1780,7 @@ export class ToolRuntime {
     } finally {
       this.recordLoopGateOutcome(callSignature, attemptFailed);
       if (reservedSubagentSlot) this.releaseSubagentSlot(tool);
+      await managedMutationAdmission?.dispose();
     }
   }
 
@@ -1631,6 +1791,7 @@ export class ToolRuntime {
     /** The projection the model replays as its own call. */
     modelFacingArgs: unknown;
     abortSignal: AbortSignal;
+    managedMutation?: Readonly<RuntimeEventManagedWorkspaceMutationV1>;
     invocationId?: string;
     runId?: string;
   }): Promise<DurableToolAttempt | undefined> {
@@ -1715,6 +1876,7 @@ export class ToolRuntime {
           toolName: input.tool.name,
           canonicalArgsHash,
           recoveryMode,
+          ...(input.managedMutation ? { managedMutation: input.managedMutation } : {}),
         },
       },
       refs: {
@@ -1799,6 +1961,39 @@ export class ToolRuntime {
           operationId,
           ts: responseEvent.ts,
         };
+        this.durableToolAttempts.delete(
+          durableAttemptKey(input.startEvent.turnId, input.startEvent.toolUseId),
+        );
+        return committedOutcome;
+      },
+      adoptCommittedOutcome: (event, result, isError, durationMs) => {
+        if (committedOutcome) return committedOutcome;
+        const response = event.content;
+        const recordedDuration = event.actions?.stateDelta?.durationMs;
+        if (
+          event.id !== `${operationId}_response` ||
+          event.sessionId !== this.input.sessionId ||
+          event.invocationId !== invocationId ||
+          event.runId !== runId ||
+          event.turnId !== input.startEvent.turnId ||
+          event.partial ||
+          event.role !== 'tool' ||
+          event.author !== 'tool' ||
+          response?.kind !== 'function_response' ||
+          response.id !== input.startEvent.toolUseId ||
+          response.name !== input.tool.name ||
+          (response.isError === true) !== isError ||
+          !isDeepStrictEqual(response.result, result) ||
+          event.refs?.operationId !== operationId ||
+          event.refs.toolCallId !== input.startEvent.toolUseId ||
+          (recordedDuration !== undefined && recordedDuration !== durationMs)
+        ) {
+          throw new RuntimeCommitBoundaryError(
+            'T2',
+            new Error('Managed mutation settlement returned a mismatched durable outcome'),
+          );
+        }
+        committedOutcome = { id: event.id, operationId, ts: event.ts };
         this.durableToolAttempts.delete(
           durableAttemptKey(input.startEvent.turnId, input.startEvent.toolUseId),
         );

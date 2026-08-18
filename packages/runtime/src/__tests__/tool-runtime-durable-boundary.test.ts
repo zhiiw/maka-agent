@@ -10,7 +10,12 @@ import type {
   ToolOutcomeCommit,
   ToolPreparedCommit,
 } from '../runtime-commit-sink.js';
-import { ToolRuntime, type MakaTool } from '../tool-runtime.js';
+import {
+  ToolRuntime,
+  type MakaTool,
+  type RuntimeManagedMutationAdmission,
+  type ToolRuntimeInput,
+} from '../tool-runtime.js';
 
 describe('ToolRuntime durable boundary', () => {
   it('does not invoke the tool or publish a result when T1 fails', async () => {
@@ -176,6 +181,205 @@ describe('ToolRuntime durable boundary', () => {
     assert.equal(prepared[0]?.runtimeEvent.refs?.operationId, prepared[0]?.operationId);
     assert.equal(prepared[0]?.dispatchRuntimeEvent.refs?.operationId, prepared[0]?.operationId);
     assert.equal(outcomes[0]?.runtimeEvent.refs?.operationId, prepared[0]?.operationId);
+  });
+
+  it('adopts an owner-committed managed successor without invoking generic T2', async () => {
+    const order: string[] = [];
+    const prepared: ToolPreparedCommit[] = [];
+    let operationId = '';
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async (input) => {
+          prepared.push(input);
+          order.push('t1');
+          return { created: true, runtimeEventSeq: 1 };
+        },
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      order,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          order.push('admit');
+          return managedAdmission(async (operation) => {
+            order.push('lease-enter');
+            const value = await operation();
+            order.push('successor-bundle');
+            return {
+              kind: 'workspace_successor_committed',
+              value,
+              durableOutcome: managedOutcomeEvent(operationId, value.outcome.content, false),
+            };
+          }, order);
+        },
+      },
+    );
+    const managedTool = tool(() => {
+      order.push('impl');
+      return { ok: true };
+    });
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    assert.deepEqual(await harness.execute(managedTool), { ok: true });
+    assert.deepEqual(order, [
+      'admit',
+      't1',
+      'lease-enter',
+      'impl',
+      'successor-bundle',
+      'published-result',
+      'dispose',
+    ]);
+    assert.deepEqual(
+      prepared[0]?.dispatchRuntimeEvent.actions?.toolDispatch?.managedMutation,
+      managedMutationDispatch(),
+    );
+  });
+
+  it('leaves a managed T1 unsettled without publishing or writing generic T2', async () => {
+    let genericOutcomeCalls = 0;
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          genericOutcomeCalls += 1;
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async () =>
+          managedAdmission(async (operation) => {
+            await operation();
+            return { kind: 'unsettled', error: new Error('candidate state is unknown') };
+          }),
+      },
+    );
+    const managedTool = tool(() => ({ ok: true }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await assert.rejects(harness.execute(managedTool), /candidate state is unknown/i);
+    assert.equal(genericOutcomeCalls, 0);
+    assert.equal(
+      harness.events.some((event) => event.type === 'tool_result'),
+      false,
+    );
+    assert.equal(
+      harness.messages.some((message) => message.type === 'tool_result'),
+      false,
+    );
+  });
+
+  it('fail-stops a thrown managed settlement instead of falling back to generic T2', async () => {
+    let genericOutcomeCalls = 0;
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          genericOutcomeCalls += 1;
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async () =>
+          managedAdmission(async (operation) => {
+            await operation();
+            throw new Error('owner settlement channel failed');
+          }),
+      },
+    );
+    const managedTool = tool(() => ({ ok: true }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await assert.rejects(harness.execute(managedTool), /owner settlement channel failed/i);
+    assert.equal(genericOutcomeCalls, 0);
+    assert.equal(
+      harness.events.some((event) => event.type === 'tool_result'),
+      false,
+    );
+  });
+
+  it('adopts an owner-committed safe discard without invoking generic T2', async () => {
+    let genericOutcomeCalls = 0;
+    let operationId = '';
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          genericOutcomeCalls += 1;
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            await operation();
+            const result = { error: 'candidate was safely discarded' };
+            return {
+              kind: 'safely_discarded',
+              error: new Error(result.error),
+              durableOutcome: managedOutcomeEvent(
+                operationId,
+                { kind: 'json', value: result },
+                true,
+              ),
+            };
+          });
+        },
+      },
+    );
+    const managedTool = tool(() => ({ ok: true }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    assert.deepEqual(await harness.execute(managedTool), {
+      error: 'candidate was safely discarded',
+    });
+    assert.equal(genericOutcomeCalls, 0);
+    const published = harness.events.at(-1);
+    assert.equal(published?.type, 'tool_result');
+    assert.equal(published?.type === 'tool_result' && published.isError, true);
+  });
+
+  it('refuses a managed mutation before T1 when host admission is unavailable', async () => {
+    let preparedCalls = 0;
+    let implementationCalls = 0;
+    const harness = makeHarness({
+      commitToolPrepared: async () => {
+        preparedCalls += 1;
+        return { created: true, runtimeEventSeq: 1 };
+      },
+      commitToolOutcome: async () => ({ created: true, runtimeEventSeq: 2 }),
+    });
+    const managedTool = tool(() => {
+      implementationCalls += 1;
+      return { ok: true };
+    });
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    assert.deepEqual(await harness.execute(managedTool), {
+      error: 'Managed workspace mutation admission is unavailable before T1',
+    });
+    assert.equal(preparedCalls, 0);
+    assert.equal(implementationCalls, 0);
   });
 
   it('rejects an oversized nested result before durable publication', async () => {
@@ -498,7 +702,12 @@ describe('ToolRuntime durable boundary', () => {
 });
 
 // `null` means the turn carries no run id at all; `undefined` keeps the default.
-function makeHarness(sink: RuntimeCommitSink, order?: string[], runId: string | null = 'run-1') {
+function makeHarness(
+  sink: RuntimeCommitSink,
+  order?: string[],
+  runId: string | null = 'run-1',
+  overrides: Partial<ToolRuntimeInput> = {},
+) {
   const messages: StoredMessage[] = [];
   const events: SessionEvent[] = [];
   const runtime = createTestToolRuntime({
@@ -514,6 +723,7 @@ function makeHarness(sink: RuntimeCommitSink, order?: string[], runId: string | 
     getPermissionPauseTarget: () => null,
     ...(runId ? { runId } : {}),
     runtimeCommitSink: sink,
+    ...overrides,
   });
   return {
     messages,
@@ -558,6 +768,59 @@ function makeHarness(sink: RuntimeCommitSink, order?: string[], runId: string | 
           ...(maxResultBytes !== undefined ? { maxResultBytes } : {}),
         })
       ).result,
+  };
+}
+
+function managedAdmission(
+  execute: RuntimeManagedMutationAdmission['execute'],
+  order?: string[],
+): RuntimeManagedMutationAdmission {
+  return {
+    durableDispatch: managedMutationDispatch(),
+    execute,
+    dispose: async () => {
+      order?.push('dispose');
+    },
+  };
+}
+
+function managedOutcomeEvent(operationId: string, result: unknown, isError: boolean) {
+  return {
+    id: `${operationId}_response`,
+    invocationId: 'run-1',
+    runId: 'run-1',
+    sessionId: 'session-1',
+    turnId: 'turn-1',
+    ts: 100,
+    partial: false,
+    role: 'tool' as const,
+    author: 'tool' as const,
+    content: {
+      kind: 'function_response' as const,
+      id: 'provider-call-1',
+      name: 'Write',
+      result,
+      ...(isError ? { isError: true } : {}),
+    },
+    refs: { operationId, toolCallId: 'provider-call-1' },
+  };
+}
+
+function managedMutationDispatch() {
+  return {
+    protocol: 'managed_mutation_v1' as const,
+    repositoryId: 'repository_11111111111111111111111111111111',
+    workspaceId: 'workspace_22222222222222222222222222222222',
+    workspaceEpochId: 'epoch_33333333333333333333333333333333',
+    workspaceInstanceId: 'instance_44444444444444444444444444444444',
+    objectFormat: 'sha1' as const,
+    baseWorkspaceVersionId: 'version_55555555555555555555555555555555',
+    baseAcceptedEventId: 'baseline-event-1',
+    baseHeadRevision: 1,
+    baseCommitOid: '1'.repeat(40),
+    baseTreeOid: '2'.repeat(40),
+    expectedPaths: ['notes.txt'],
+    executionProfileDigest: `sha256:${'a'.repeat(64)}` as const,
   };
 }
 

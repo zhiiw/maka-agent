@@ -29,6 +29,10 @@ import {
   type ManagedWorkspaceWorkerBridgeInternal,
 } from './managed-workspace-worker-bridge-internal.js';
 import type { RuntimeWorkspaceVersionAuthorityStore } from '@maka/core/runtime-event-store';
+import {
+  isCanonicalManagedMutationPathV1,
+  type RuntimeEventManagedWorkspaceMutationV1,
+} from '@maka/core/runtime-event';
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import {
   assertInteractiveRootOwner,
@@ -41,8 +45,20 @@ import {
   assertWorkspaceBaselineAuthorityStoreRootInternal,
   bindWorkspaceBaselineAuthorityStoreRootInternal,
   commitWorkspaceBaselineInternal,
+  readActiveManagedMutationInternal,
   readWorkspaceHeadInternal,
 } from './workspace-version-authority-internal.js';
+import {
+  beginManagedWorkspaceMutationLeaseInternal,
+  cancelManagedWorkspaceMutationLeaseInternal,
+  finishManagedWorkspaceMutationLeaseInternal,
+  issueManagedWorkspaceMutationLeaseInternal,
+  issueManagedWorkspaceMutationScopeInternal,
+  requireManagedWorkspaceMutationLeaseInternal,
+  revokeManagedWorkspaceMutationScopeInternal,
+  type ManagedWorkspaceMutationLease,
+  type ManagedWorkspaceMutationScope,
+} from './managed-workspace-mutation-authority-internal.js';
 
 // RuntimeEvent order is assigned by the SQLite authority spine. M0 therefore
 // uses a protocol-fixed logical timestamp and keeps unauthenticated wall-clock
@@ -57,6 +73,23 @@ export type ManagedWorkspaceOwnerErrorCode =
   | 'managed_workspace_worker_unavailable'
   | 'managed_workspace_quarantined'
   | 'managed_workspace_execution_handle_invalid';
+
+export type ManagedWorkspaceMutationAdmissionErrorCode =
+  | 'managed_workspace_mutation_admission_invalid'
+  | 'managed_workspace_mutation_admission_conflict'
+  | 'managed_workspace_mutation_admission_aborted'
+  | 'managed_workspace_mutation_lease_invalid';
+
+export class ManagedWorkspaceMutationAdmissionError extends Error {
+  constructor(
+    readonly code: ManagedWorkspaceMutationAdmissionErrorCode,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'ManagedWorkspaceMutationAdmissionError';
+  }
+}
 
 export class ManagedWorkspaceOwnerError extends Error {
   constructor(
@@ -91,6 +124,18 @@ export interface OpenManagedWorkspaceBaselineResult {
   readonly executionHandle: ManagedWorkspaceExecutionHandle;
 }
 
+export interface ManagedWorkspaceMutationAdmissionInput {
+  readonly operationId: string;
+  readonly expectedPaths: readonly string[];
+  readonly executionProfileDigest: `sha256:${string}`;
+  readonly abortSignal?: AbortSignal;
+}
+
+export interface ManagedWorkspaceMutationAdmission {
+  readonly lease: ManagedWorkspaceMutationLease;
+  readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceMutationV1>;
+}
+
 export interface ManagedWorkspaceOwner {
   readonly state: 'ready' | 'closing' | 'closed';
   openManagedWorkspaceBaseline(
@@ -100,6 +145,15 @@ export interface ManagedWorkspaceOwner {
   withManagedWorkspaceExecution<T>(
     handle: ManagedWorkspaceExecutionHandle,
     operation: (scope: ManagedWorkspaceExecutionScope) => Promise<T>,
+  ): Promise<T>;
+  admitManagedWorkspaceMutation(
+    handle: ManagedWorkspaceExecutionHandle,
+    input: ManagedWorkspaceMutationAdmissionInput,
+  ): Promise<ManagedWorkspaceMutationAdmission>;
+  cancelManagedWorkspaceMutation(lease: ManagedWorkspaceMutationLease): Promise<void>;
+  withManagedWorkspaceMutation<T>(
+    lease: ManagedWorkspaceMutationLease,
+    operation: (scope: ManagedWorkspaceMutationScope) => Promise<T>,
   ): Promise<T>;
   executeReadOnlyFilesystemOperation(
     scope: ManagedWorkspaceExecutionScope,
@@ -115,6 +169,8 @@ export type {
   ManagedWorkspaceFilesystemWorker,
   ManagedWorkspaceReadOnlyOperation,
   ManagedWorkspaceReadOnlyResult,
+  ManagedWorkspaceMutationLease,
+  ManagedWorkspaceMutationScope,
   VerifiedGitRuntimeInput,
 };
 
@@ -176,6 +232,10 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
   #closeTask: Promise<void> | undefined;
   readonly #executionOwnerToken = {};
   readonly #workerBridge: ManagedWorkspaceWorkerBridgeInternal | undefined;
+  readonly #activeMutationByWorkspace = new Map<
+    string,
+    ManagedWorkspaceMutationLease | 'pending'
+  >();
 
   constructor(
     private readonly rootOwner: InteractiveRootOwner,
@@ -365,6 +425,162 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
     });
   }
 
+  async admitManagedWorkspaceMutation(
+    handle: ManagedWorkspaceExecutionHandle,
+    input: ManagedWorkspaceMutationAdmissionInput,
+  ): Promise<ManagedWorkspaceMutationAdmission> {
+    return this.#run(async () => {
+      throwIfMutationAdmissionAborted(input.abortSignal);
+      const frozen = snapshotMutationAdmissionInput(input);
+      let accepted;
+      try {
+        accepted = requireManagedWorkspaceExecutionHandleInternal(
+          this.#executionOwnerToken,
+          handle,
+        );
+      } catch (error) {
+        throw new ManagedWorkspaceMutationAdmissionError(
+          'managed_workspace_mutation_admission_invalid',
+          'Managed workspace mutation handle is invalid for this owner',
+          { cause: error },
+        );
+      }
+      assertExecutionCrossPlaneIdentity(accepted.binding, accepted.receipt, accepted.head);
+      const workspaceKey = accepted.binding.workspaceInstanceId;
+      if (this.#activeMutationByWorkspace.has(workspaceKey)) {
+        throw new ManagedWorkspaceMutationAdmissionError(
+          'managed_workspace_mutation_admission_conflict',
+          'A managed workspace mutation is already admitted for this workspace',
+        );
+      }
+      this.#activeMutationByWorkspace.set(workspaceKey, 'pending');
+      try {
+        await this.#assertCurrentRootIdentity();
+        await this.#verifyExecutionArtifactOrQuarantine(accepted.binding, accepted.receipt);
+        const currentHead = await readWorkspaceHeadInternal(
+          accepted.store,
+          accepted.binding.workspaceId,
+          accepted.binding.workspaceEpochId,
+        );
+        await assertWorkspaceBaselineAuthorityStoreRootInternal(
+          accepted.store,
+          this.rootOwner.capability.canonicalPath,
+        );
+        bindWorkspaceBaselineAuthorityStoreRootInternal(
+          accepted.store,
+          this.rootOwner.capability.rootId,
+        );
+        if (!currentHead || !sameWorkspaceHead(currentHead, accepted.head)) {
+          throw new ManagedWorkspaceMutationAdmissionError(
+            'managed_workspace_mutation_admission_invalid',
+            'Managed workspace mutation base no longer matches the canonical head',
+          );
+        }
+        const durableOwner = await readActiveManagedMutationInternal(
+          accepted.store,
+          accepted.binding.workspaceInstanceId,
+        );
+        if (durableOwner) {
+          throw new ManagedWorkspaceMutationAdmissionError(
+            'managed_workspace_mutation_admission_conflict',
+            `Managed workspace mutation ${durableOwner.operationId} already owns this workspace`,
+          );
+        }
+        throwIfMutationAdmissionAborted(input.abortSignal);
+        const durableDispatch = freezeManagedMutationDispatch({
+          protocol: 'managed_mutation_v1',
+          repositoryId: currentHead.repositoryId,
+          workspaceId: currentHead.workspaceId,
+          workspaceEpochId: currentHead.workspaceEpochId,
+          workspaceInstanceId: accepted.binding.workspaceInstanceId,
+          objectFormat: accepted.binding.objectFormat,
+          baseWorkspaceVersionId: currentHead.workspaceVersionId,
+          baseAcceptedEventId: currentHead.acceptedEventId,
+          baseHeadRevision: currentHead.revision,
+          baseCommitOid: currentHead.commitOid,
+          baseTreeOid: currentHead.treeOid,
+          expectedPaths: frozen.expectedPaths,
+          executionProfileDigest: frozen.executionProfileDigest,
+        });
+        const lease = issueManagedWorkspaceMutationLeaseInternal(this.#executionOwnerToken, {
+          binding: freezeManagedWorkspaceBinding(accepted.binding),
+          baseHead: freezeWorkspaceHead(currentHead),
+          operationId: frozen.operationId,
+          expectedPaths: frozen.expectedPaths,
+          executionProfileDigest: frozen.executionProfileDigest,
+          durableDispatch,
+        });
+        this.#activeMutationByWorkspace.set(workspaceKey, lease);
+        // A returned lease owns one lifecycle slot until execution or cancellation.
+        this.#activeOperations += 1;
+        return Object.freeze({ lease, durableDispatch });
+      } catch (error) {
+        this.#activeMutationByWorkspace.delete(workspaceKey);
+        throw error;
+      }
+    });
+  }
+
+  async cancelManagedWorkspaceMutation(lease: ManagedWorkspaceMutationLease): Promise<void> {
+    let state;
+    try {
+      state = requireManagedWorkspaceMutationLeaseInternal(this.#executionOwnerToken, lease);
+    } catch (error) {
+      throw new ManagedWorkspaceMutationAdmissionError(
+        'managed_workspace_mutation_lease_invalid',
+        'Managed workspace mutation lease is invalid or expired',
+        { cause: error },
+      );
+    }
+    if (this.#activeMutationByWorkspace.get(state.binding.workspaceInstanceId) !== lease) {
+      throw new ManagedWorkspaceMutationAdmissionError(
+        'managed_workspace_mutation_lease_invalid',
+        'Managed workspace mutation lease is not active for its workspace',
+      );
+    }
+    cancelManagedWorkspaceMutationLeaseInternal(this.#executionOwnerToken, lease);
+    this.#activeMutationByWorkspace.delete(state.binding.workspaceInstanceId);
+    this.#releaseActiveOperation();
+  }
+
+  async withManagedWorkspaceMutation<T>(
+    lease: ManagedWorkspaceMutationLease,
+    operation: (scope: ManagedWorkspaceMutationScope) => Promise<T>,
+  ): Promise<T> {
+    let state;
+    try {
+      state = requireManagedWorkspaceMutationLeaseInternal(this.#executionOwnerToken, lease);
+    } catch (error) {
+      throw new ManagedWorkspaceMutationAdmissionError(
+        'managed_workspace_mutation_lease_invalid',
+        'Managed workspace mutation lease is invalid, expired, or already executing',
+        { cause: error },
+      );
+    }
+    if (this.#activeMutationByWorkspace.get(state.binding.workspaceInstanceId) !== lease) {
+      throw new ManagedWorkspaceMutationAdmissionError(
+        'managed_workspace_mutation_lease_invalid',
+        'Managed workspace mutation lease is not active for its workspace',
+      );
+    }
+    beginManagedWorkspaceMutationLeaseInternal(this.#executionOwnerToken, lease);
+    const scope = issueManagedWorkspaceMutationScopeInternal(
+      this.#executionOwnerToken,
+      lease,
+      state,
+    );
+    try {
+      return await runWithStorageRootLease(this.rootOwner.lease, 'interactive', 'write', () =>
+        this.#executionContext.run(this.#executionOwnerToken, () => operation(scope)),
+      );
+    } finally {
+      revokeManagedWorkspaceMutationScopeInternal(this.#executionOwnerToken, scope);
+      finishManagedWorkspaceMutationLeaseInternal(this.#executionOwnerToken, lease);
+      this.#activeMutationByWorkspace.delete(state.binding.workspaceInstanceId);
+      this.#releaseActiveOperation();
+    }
+  }
+
   async executeReadOnlyFilesystemOperation(
     scope: ManagedWorkspaceExecutionScope,
     operation: ManagedWorkspaceReadOnlyOperation,
@@ -411,11 +627,15 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
     try {
       return await runWithStorageRootLease(this.rootOwner.lease, 'interactive', 'write', operation);
     } finally {
-      this.#activeOperations -= 1;
-      if (this.#activeOperations === 0) {
-        for (const resolve of this.#drainWaiters) resolve();
-        this.#drainWaiters.clear();
-      }
+      this.#releaseActiveOperation();
+    }
+  }
+
+  #releaseActiveOperation(): void {
+    this.#activeOperations -= 1;
+    if (this.#activeOperations === 0) {
+      for (const resolve of this.#drainWaiters) resolve();
+      this.#drainWaiters.clear();
     }
   }
 
@@ -512,6 +732,84 @@ function freezeManagedWorkspaceReceipt(
   receipt: ManagedWorkspaceBaselineReceiptV1,
 ): Readonly<ManagedWorkspaceBaselineReceiptV1> {
   return Object.freeze({ ...receipt, binding: freezeManagedWorkspaceBinding(receipt.binding) });
+}
+
+function snapshotMutationAdmissionInput(
+  input: ManagedWorkspaceMutationAdmissionInput,
+): Omit<ManagedWorkspaceMutationAdmissionInput, 'abortSignal'> {
+  let snapshot: unknown;
+  try {
+    snapshot = structuredClone({
+      operationId: input.operationId,
+      expectedPaths: [...input.expectedPaths],
+      executionProfileDigest: input.executionProfileDigest,
+    });
+  } catch (error) {
+    throw new ManagedWorkspaceMutationAdmissionError(
+      'managed_workspace_mutation_admission_invalid',
+      'Managed workspace mutation admission cannot be snapshotted',
+      { cause: error },
+    );
+  }
+  if (!isMutationAdmissionSnapshot(snapshot)) {
+    throw new ManagedWorkspaceMutationAdmissionError(
+      'managed_workspace_mutation_admission_invalid',
+      'Managed workspace mutation admission is invalid',
+    );
+  }
+  if (
+    !snapshot.expectedPaths.every(isCanonicalManagedMutationPathV1) ||
+    snapshot.expectedPaths.some(
+      (path, index) => index > 0 && snapshot.expectedPaths[index - 1]! >= path,
+    )
+  ) {
+    throw new ManagedWorkspaceMutationAdmissionError(
+      'managed_workspace_mutation_admission_invalid',
+      'Managed workspace mutation paths must be sorted canonical Git paths',
+    );
+  }
+  return Object.freeze({
+    operationId: snapshot.operationId,
+    expectedPaths: Object.freeze([...snapshot.expectedPaths]),
+    executionProfileDigest: snapshot.executionProfileDigest,
+  });
+}
+
+function isMutationAdmissionSnapshot(value: unknown): value is {
+  operationId: string;
+  expectedPaths: string[];
+  executionProfileDigest: `sha256:${string}`;
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).length === 3 &&
+    /^[A-Za-z0-9_-]{1,128}$/u.test(
+      typeof record.operationId === 'string' ? record.operationId : '',
+    ) &&
+    /^sha256:[0-9a-f]{64}$/u.test(
+      typeof record.executionProfileDigest === 'string' ? record.executionProfileDigest : '',
+    ) &&
+    Array.isArray(record.expectedPaths) &&
+    record.expectedPaths.length > 0 &&
+    record.expectedPaths.length <= 32 &&
+    record.expectedPaths.every((path) => typeof path === 'string')
+  );
+}
+
+function freezeManagedMutationDispatch(
+  dispatch: RuntimeEventManagedWorkspaceMutationV1,
+): Readonly<RuntimeEventManagedWorkspaceMutationV1> {
+  return Object.freeze({ ...dispatch, expectedPaths: Object.freeze([...dispatch.expectedPaths]) });
+}
+
+function throwIfMutationAdmissionAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw new ManagedWorkspaceMutationAdmissionError(
+    'managed_workspace_mutation_admission_aborted',
+    'Managed workspace mutation admission was cancelled before T1',
+    { cause: signal.reason },
+  );
 }
 
 function assertExecutionCrossPlaneIdentity(
