@@ -77,7 +77,6 @@ import {
   registerWorkspaceBaselineAuthorityWriterInternal,
   type WorkspaceSuccessorCommitInput,
   type WorkspaceSuccessorCommitResult,
-  WorkspaceStorageRootAdoptionRequiredError,
 } from './workspace-version-authority-internal.js';
 import type {
   ConversationCopyRuntimeEventBatch,
