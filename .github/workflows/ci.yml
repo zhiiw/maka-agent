@@ -24,11 +24,14 @@ jobs:
       storage_stress: ${{ steps.plan.outputs.storage_stress }}
       storybook: ${{ steps.plan.outputs.storybook }}
       unit: ${{ steps.plan.outputs.unit }}
+      workspace_tests_selected: ${{ steps.plan.outputs.workspace_tests_selected }}
       workspaces: ${{ steps.plan.outputs.workspaces }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Verify CI test planner contracts
+        run: node --test scripts/ci-test-plan.test.mjs
       - id: plan
         name: Select affected test surfaces
         env:
@@ -90,7 +93,7 @@ jobs:
         run: npx knip --workspace packages/ui
   test_workspaces:
     needs: changes
-    if: needs.changes.outputs.standard_workspaces != '' || needs.changes.outputs.recovery_inventory == 'true'
+    if: needs.changes.outputs.workspace_tests_selected == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -166,7 +169,7 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUNTIME_HOST_RESULT: ${{ needs.test_runtime_host.result }}
           RUNTIME_HOST_SELECTED: ${{ needs.changes.outputs.runtime_host }}
-          STANDARD_WORKSPACES: ${{ needs.changes.outputs.standard_workspaces }}
+          WORKSPACES_SELECTED: ${{ needs.changes.outputs.workspace_tests_selected }}
           WORKSPACES_RESULT: ${{ needs.test_workspaces.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
@@ -186,11 +189,7 @@ jobs:
               exit 1
             fi
           }
-          workspaces_selected="false"
-          if [[ -n "$STANDARD_WORKSPACES" ]]; then
-            workspaces_selected="true"
-          fi
-          require_lane "workspace tests" "$workspaces_selected" "$WORKSPACES_RESULT"
+          require_lane "workspace tests" "$WORKSPACES_SELECTED" "$WORKSPACES_RESULT"
           require_lane "Runtime Host tests" "$RUNTIME_HOST_SELECTED" "$RUNTIME_HOST_RESULT"
 
   # One Electron job: install once, run the (now small) e2e suite, then the

@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { RECOVERY_TEST_INVENTORIES } from './recovery-test-inventory.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultRepoRoot = dirname(dirname(scriptPath));
@@ -153,13 +154,9 @@ const STORAGE_STRESS_FILES = new Set([
   'packages/storage/src/__tests__/fixtures/root-resolver.ts',
 ]);
 
-const RECOVERY_INVENTORY_FILES = new Set([
-  '.github/workflows/ci.yml',
-  '.github/workflows/macos-recovery.yml',
-  '.github/workflows/windows-recovery.yml',
-  'scripts/recovery-test-inventory.mjs',
-  'scripts/run-recovery-test-inventory.mjs',
-]);
+const RECOVERY_INVENTORY_FILES = new Set(
+  RECOVERY_TEST_INVENTORIES['managed-workspace'].selectionFiles,
+);
 
 function normalizePath(path) {
   return path.split(sep).join('/').replace(/^\.\//, '');
@@ -236,6 +233,7 @@ export function planTests(changedFiles, options = {}) {
   const full = forceFull || files.some((path) => FULL_SUITE_FILES.has(path));
   if (full) {
     const workspaces = [...graph.dirs];
+    const lanes = workspaceLanes(workspaces, graph);
     return {
       astryxSurface: true,
       code: true,
@@ -252,8 +250,9 @@ export function planTests(changedFiles, options = {}) {
       windows: true,
       windowsRuntime: true,
       windowsStorage: true,
+      workspaceTestsSelected: true,
       workspaces,
-      ...workspaceLanes(workspaces, graph),
+      ...lanes,
     };
   }
 
@@ -309,6 +308,7 @@ export function planTests(changedFiles, options = {}) {
   // path/lock/crash-sensitive files only.
   const windowsStorage =
     windowsBaselineChanged || files.some((path) => isWindowsStorageSensitivePath(path));
+  const lanes = workspaceLanes(workspaces, graph);
 
   return {
     astryxSurface: files.some((path) => isAstryxSurfaceInventoryPath(path)),
@@ -332,8 +332,9 @@ export function planTests(changedFiles, options = {}) {
     windows,
     windowsRuntime,
     windowsStorage,
+    workspaceTestsSelected: lanes.standardWorkspaces.length > 0 || recoveryInventory,
     workspaces,
-    ...workspaceLanes(workspaces, graph),
+    ...lanes,
   };
 }
 
@@ -352,6 +353,7 @@ export function formatGitHubOutputs(plan) {
     `windows=${plan.windows}`,
     `windows_runtime=${plan.windowsRuntime}`,
     `windows_storage=${plan.windowsStorage}`,
+    `workspace_tests_selected=${plan.workspaceTestsSelected}`,
     `standard_workspaces=${plan.standardWorkspaces.join(',')}`,
     `workspaces=${plan.workspaces.join(',')}`,
   ].join('\n');
