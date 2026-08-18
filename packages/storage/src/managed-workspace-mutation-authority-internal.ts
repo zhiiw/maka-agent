@@ -1,6 +1,27 @@
+import { createHash } from 'node:crypto';
+import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
 import type { RuntimeEventManagedWorkspaceMutationV1 } from '@maka/core/runtime-event';
+import { createManagedExecutionBoundary } from '@maka/core/sandbox-boundary';
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import type { ManagedWorkspaceBinding } from './git-workspace-service.js';
+
+const MANAGED_MUTATION_EXECUTION_PROFILE_V1 = JSON.stringify({
+  protocol: 'managed_workspace_mutation_execution_profile_v1',
+  filesystemWorker: 'filesystem_worker_client_v1',
+  executionBoundary: createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 0),
+  detachedEffects: 'forbidden',
+});
+
+/**
+ * Digest of the single owner-controlled mutation profile supported by v1.
+ * The caller cannot supply policy fields or a digest. M2.4 must execute the
+ * opaque lease through the owner-owned worker boundary represented here.
+ */
+export function managedWorkspaceMutationExecutionProfileDigestInternal(): `sha256:${string}` {
+  return `sha256:${createHash('sha256')
+    .update(MANAGED_MUTATION_EXECUTION_PROFILE_V1, 'utf8')
+    .digest('hex')}`;
+}
 
 export interface ManagedWorkspaceMutationLease {
   readonly kind: 'managed_workspace_mutation_lease_v1';

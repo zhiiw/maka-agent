@@ -54,6 +54,7 @@ import {
   finishManagedWorkspaceMutationLeaseInternal,
   issueManagedWorkspaceMutationLeaseInternal,
   issueManagedWorkspaceMutationScopeInternal,
+  managedWorkspaceMutationExecutionProfileDigestInternal,
   requireManagedWorkspaceMutationLeaseInternal,
   revokeManagedWorkspaceMutationScopeInternal,
   type ManagedWorkspaceMutationLease,
@@ -78,6 +79,7 @@ export type ManagedWorkspaceMutationAdmissionErrorCode =
   | 'managed_workspace_mutation_admission_invalid'
   | 'managed_workspace_mutation_admission_conflict'
   | 'managed_workspace_mutation_admission_aborted'
+  | 'managed_workspace_mutation_profile_unavailable'
   | 'managed_workspace_mutation_lease_invalid';
 
 export class ManagedWorkspaceMutationAdmissionError extends Error {
@@ -127,7 +129,6 @@ export interface OpenManagedWorkspaceBaselineResult {
 export interface ManagedWorkspaceMutationAdmissionInput {
   readonly operationId: string;
   readonly expectedPaths: readonly string[];
-  readonly executionProfileDigest: `sha256:${string}`;
   readonly abortSignal?: AbortSignal;
 }
 
@@ -232,6 +233,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
   #closeTask: Promise<void> | undefined;
   readonly #executionOwnerToken = {};
   readonly #workerBridge: ManagedWorkspaceWorkerBridgeInternal | undefined;
+  readonly #mutationExecutionProfileDigest: `sha256:${string}` | undefined;
   readonly #activeMutationByWorkspace = new Map<
     string,
     ManagedWorkspaceMutationLease | 'pending'
@@ -254,6 +256,9 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
     );
     this.#workerBridge = filesystemWorker
       ? createManagedWorkspaceWorkerBridgeInternal(this.#executionOwnerToken, filesystemWorker)
+      : undefined;
+    this.#mutationExecutionProfileDigest = filesystemWorker
+      ? managedWorkspaceMutationExecutionProfileDigestInternal()
       : undefined;
   }
 
@@ -431,7 +436,15 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
   ): Promise<ManagedWorkspaceMutationAdmission> {
     return this.#run(async () => {
       throwIfMutationAdmissionAborted(input.abortSignal);
+      assertMutationAdmissionInputKeys(input);
       const frozen = snapshotMutationAdmissionInput(input);
+      const executionProfileDigest = this.#mutationExecutionProfileDigest;
+      if (!executionProfileDigest) {
+        throw new ManagedWorkspaceMutationAdmissionError(
+          'managed_workspace_mutation_profile_unavailable',
+          'Managed workspace mutation execution profile is unavailable for this owner',
+        );
+      }
       let accepted;
       try {
         accepted = requireManagedWorkspaceExecutionHandleInternal(
@@ -500,14 +513,14 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
           baseCommitOid: currentHead.commitOid,
           baseTreeOid: currentHead.treeOid,
           expectedPaths: frozen.expectedPaths,
-          executionProfileDigest: frozen.executionProfileDigest,
+          executionProfileDigest,
         });
         const lease = issueManagedWorkspaceMutationLeaseInternal(this.#executionOwnerToken, {
           binding: freezeManagedWorkspaceBinding(accepted.binding),
           baseHead: freezeWorkspaceHead(currentHead),
           operationId: frozen.operationId,
           expectedPaths: frozen.expectedPaths,
-          executionProfileDigest: frozen.executionProfileDigest,
+          executionProfileDigest,
           durableDispatch,
         });
         this.#activeMutationByWorkspace.set(workspaceKey, lease);
@@ -742,7 +755,6 @@ function snapshotMutationAdmissionInput(
     snapshot = structuredClone({
       operationId: input.operationId,
       expectedPaths: [...input.expectedPaths],
-      executionProfileDigest: input.executionProfileDigest,
     });
   } catch (error) {
     throw new ManagedWorkspaceMutationAdmissionError(
@@ -771,30 +783,41 @@ function snapshotMutationAdmissionInput(
   return Object.freeze({
     operationId: snapshot.operationId,
     expectedPaths: Object.freeze([...snapshot.expectedPaths]),
-    executionProfileDigest: snapshot.executionProfileDigest,
   });
 }
 
 function isMutationAdmissionSnapshot(value: unknown): value is {
   operationId: string;
   expectedPaths: string[];
-  executionProfileDigest: `sha256:${string}`;
 } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   return (
-    Object.keys(record).length === 3 &&
+    Object.keys(record).length === 2 &&
     /^[A-Za-z0-9_-]{1,128}$/u.test(
       typeof record.operationId === 'string' ? record.operationId : '',
-    ) &&
-    /^sha256:[0-9a-f]{64}$/u.test(
-      typeof record.executionProfileDigest === 'string' ? record.executionProfileDigest : '',
     ) &&
     Array.isArray(record.expectedPaths) &&
     record.expectedPaths.length > 0 &&
     record.expectedPaths.length <= 32 &&
     record.expectedPaths.every((path) => typeof path === 'string')
   );
+}
+
+function assertMutationAdmissionInputKeys(input: ManagedWorkspaceMutationAdmissionInput): void {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new ManagedWorkspaceMutationAdmissionError(
+      'managed_workspace_mutation_admission_invalid',
+      'Managed workspace mutation admission is invalid',
+    );
+  }
+  const allowed = new Set(['operationId', 'expectedPaths', 'abortSignal']);
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
+    throw new ManagedWorkspaceMutationAdmissionError(
+      'managed_workspace_mutation_admission_invalid',
+      'Managed workspace mutation admission contains unsupported caller-asserted fields',
+    );
+  }
 }
 
 function freezeManagedMutationDispatch(

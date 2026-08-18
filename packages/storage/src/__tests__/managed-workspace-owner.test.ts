@@ -14,6 +14,7 @@ import {
   openManagedWorkspaceOwner,
   type ManagedWorkspaceExecutionHandle,
   type ManagedWorkspaceExecutionScope,
+  type ManagedWorkspaceFilesystemWorker,
 } from '../managed-workspace-owner.js';
 import {
   managedWorkspaceExecutionAuthorityTestSupport,
@@ -131,6 +132,13 @@ test('creates an accepted managed baseline only through the active owner', async
     assert.notEqual(binding, receipt.binding);
     assert.deepEqual(binding, receipt.binding);
     assert.equal(existsSync(join(binding.worktreePath, '.maka-workspace.json')), false);
+    await assert.rejects(
+      owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+        operationId: 'operation_without_owned_worker_profile',
+        expectedPaths: ['tracked.txt'],
+      }),
+      isMutationAdmissionError('managed_workspace_mutation_profile_unavailable'),
+    );
     await owner.close();
   } finally {
     runtimeStore.close();
@@ -901,16 +909,24 @@ test('freezes one owner-bound managed mutation admission before T1', async () =>
         executablePath: gitExecutablePath,
         expectedSha256: gitExecutableSha256,
       },
+      filesystemWorker: managedFilesystemWorker(),
     });
     const accepted = await owner.openManagedWorkspaceBaseline(
       runtimeStore,
       openRequest(sourceRoot),
     );
+    await assert.rejects(
+      owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+        operationId: 'operation_m2_3_caller_asserted_profile',
+        expectedPaths: ['tracked.txt'],
+        executionProfileDigest: `sha256:${'9'.repeat(64)}`,
+      } as unknown as Parameters<typeof owner.admitManagedWorkspaceMutation>[1]),
+      isMutationAdmissionError('managed_workspace_mutation_admission_invalid'),
+    );
     const expectedPaths = ['tracked.txt'];
     const admission = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
       operationId: 'operation_m2_3_write_1',
       expectedPaths,
-      executionProfileDigest: `sha256:${'a'.repeat(64)}`,
     });
     expectedPaths[0] = 'caller-mutated.txt';
 
@@ -920,11 +936,14 @@ test('freezes one owner-bound managed mutation admission before T1', async () =>
       admission.durableDispatch.baseWorkspaceVersionId,
       accepted.head.workspaceVersionId,
     );
+    assert.equal(
+      admission.durableDispatch.executionProfileDigest,
+      'sha256:b34146d08a1bc4e3fd2cb3e60d924bf92f098cd2597717869f1ab6d9dc4f7e9d',
+    );
     await assert.rejects(
       owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
         operationId: 'operation_m2_3_write_2',
         expectedPaths: ['tracked.txt'],
-        executionProfileDigest: `sha256:${'b'.repeat(64)}`,
       }),
       isMutationAdmissionError('managed_workspace_mutation_admission_conflict'),
     );
@@ -933,7 +952,6 @@ test('freezes one owner-bound managed mutation admission before T1', async () =>
       owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
         operationId: 'operation_m2_3_invalid_path',
         expectedPaths: ['NODE_MODULES/pkg/index.js'],
-        executionProfileDigest: `sha256:${'c'.repeat(64)}`,
       }),
       isMutationAdmissionError('managed_workspace_mutation_admission_invalid'),
     );
@@ -942,7 +960,6 @@ test('freezes one owner-bound managed mutation admission before T1', async () =>
       {
         operationId: 'operation_m2_3_execute_once',
         expectedPaths: ['tracked.txt'],
-        executionProfileDigest: `sha256:${'e'.repeat(64)}`,
       },
     );
     assert.equal(
@@ -959,7 +976,6 @@ test('freezes one owner-bound managed mutation admission before T1', async () =>
     const drainingAdmission = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
       operationId: 'operation_m2_3_close_drain',
       expectedPaths: ['tracked.txt'],
-      executionProfileDigest: `sha256:${'f'.repeat(64)}`,
     });
     const closing = owner.close();
     assert.equal(
@@ -989,6 +1005,7 @@ test('rejects a new owner admission when a prepared T1 survives restart', async 
       executablePath: gitExecutablePath,
       expectedSha256: gitExecutableSha256,
     },
+    filesystemWorker: managedFilesystemWorker(),
   });
   const accepted = await firstOwner.openManagedWorkspaceBaseline(
     firstStore,
@@ -997,7 +1014,6 @@ test('rejects a new owner admission when a prepared T1 survives restart', async 
   const admission = await firstOwner.admitManagedWorkspaceMutation(accepted.executionHandle, {
     operationId: 'operation_m2_3_survives_restart',
     expectedPaths: ['tracked.txt'],
-    executionProfileDigest: `sha256:${'d'.repeat(64)}`,
   });
   await commitManagedMutationT1(
     firstStore,
@@ -1020,6 +1036,7 @@ test('rejects a new owner admission when a prepared T1 survives restart', async 
         executablePath: gitExecutablePath,
         expectedSha256: gitExecutableSha256,
       },
+      filesystemWorker: managedFilesystemWorker(),
     });
     const reopened = await secondOwner.openManagedWorkspaceBaseline(
       secondStore,
@@ -1029,7 +1046,6 @@ test('rejects a new owner admission when a prepared T1 survives restart', async 
       secondOwner.admitManagedWorkspaceMutation(reopened.executionHandle, {
         operationId: 'operation_m2_3_after_restart',
         expectedPaths: ['tracked.txt'],
-        executionProfileDigest: `sha256:${'e'.repeat(64)}`,
       }),
       isMutationAdmissionError('managed_workspace_mutation_admission_conflict'),
     );
@@ -1046,6 +1062,14 @@ function isOwnerError(code: string): (error: unknown) => boolean {
 
 function isMutationAdmissionError(code: string): (error: unknown) => boolean {
   return (error) => error instanceof Error && 'code' in error && error.code === code;
+}
+
+function managedFilesystemWorker(): ManagedWorkspaceFilesystemWorker {
+  return {
+    async execute() {
+      throw new Error('Managed filesystem worker is not used by admission-only tests');
+    },
+  };
 }
 
 async function commitManagedMutationT1(

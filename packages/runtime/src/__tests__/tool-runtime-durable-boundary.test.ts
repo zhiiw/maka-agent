@@ -332,7 +332,7 @@ describe('ToolRuntime durable boundary', () => {
             const result = { error: 'candidate was safely discarded' };
             return {
               kind: 'safely_discarded',
-              error: new Error(result.error),
+              providerResult: result,
               durableOutcome: managedOutcomeEvent(
                 operationId,
                 { kind: 'json', value: result },
@@ -355,6 +355,47 @@ describe('ToolRuntime durable boundary', () => {
     const published = harness.events.at(-1);
     assert.equal(published?.type, 'tool_result');
     assert.equal(published?.type === 'tool_result' && published.isError, true);
+  });
+
+  it('rejects a safe discard whose live error differs from its durable result', async () => {
+    let operationId = '';
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            await operation();
+            return {
+              kind: 'safely_discarded',
+              providerResult: { error: 'live provider error A' },
+              durableOutcome: managedOutcomeEvent(
+                operationId,
+                { kind: 'json', value: { error: 'durable replay error B' } },
+                true,
+              ),
+            };
+          });
+        },
+      },
+    );
+    const managedTool = tool(() => ({ ok: true }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await assert.rejects(harness.execute(managedTool), /mismatched durable outcome/i);
+    assert.equal(
+      harness.events.some((event) => event.type === 'tool_result'),
+      false,
+    );
   });
 
   it('refuses a managed mutation before T1 when host admission is unavailable', async () => {

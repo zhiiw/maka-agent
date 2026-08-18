@@ -468,7 +468,8 @@ export type RuntimeManagedMutationSettlement<T> =
     }
   | {
       readonly kind: 'safely_discarded';
-      readonly error: unknown;
+      /** Exact value returned to the provider and canonicalized for durable replay. */
+      readonly providerResult: unknown;
       readonly durableOutcome: RuntimeEvent;
     }
   | { readonly kind: 'unsettled'; readonly error: unknown };
@@ -1503,10 +1504,11 @@ export class ToolRuntime {
                 new Error('Managed safely-discarded settlement has no durable error outcome'),
               );
             }
+            const content = coerceResultContent(settlement.providerResult);
             operationValue = {
-              result: this.errorReturn(formatSyntheticToolErrorText(settlement.error)),
+              result: settlement.providerResult,
               outcome: {
-                content: decodeCanonicalToolResultContent(response.result),
+                content,
                 isError: true,
                 durationMs:
                   typeof settlement.durableOutcome.actions?.stateDelta?.durationMs === 'number'
