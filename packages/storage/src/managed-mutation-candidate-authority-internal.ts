@@ -33,11 +33,8 @@ export interface ManagedMutationCandidateReceiptV1 {
 }
 
 export interface ManagedMutationCandidateAuthorityInternal {
-  capture(
-    request: ManagedMutationCandidateRequest,
-    abortSignal?: AbortSignal,
-  ): Promise<ManagedMutationCandidateReceiptV1>;
-  discard(receipt: ManagedMutationCandidateReceiptV1, abortSignal?: AbortSignal): Promise<void>;
+  capture(request: ManagedMutationCandidateRequest): Promise<ManagedMutationCandidateReceiptV1>;
+  discard(receipt: ManagedMutationCandidateReceiptV1): Promise<void>;
 }
 
 const authorities = new WeakMap<GitWorkspaceService, ManagedMutationCandidateAuthorityInternal>();
