@@ -47,6 +47,23 @@ if (process.env.MAKA_GIT_WORKSPACE_ACTION === 'execution-admission') {
   throw new Error('Managed execution admission crash child missed its failpoint');
 }
 
+if (process.env.MAKA_GIT_WORKSPACE_ACTION === 'mutation-admission') {
+  const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+  if (!rootOwner) throw new Error('Unable to acquire mutation-admission crash-child root owner');
+  const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
+  const owner = await openManagedWorkspaceOwner({ rootOwner, gitRuntime });
+  const accepted = await owner.openManagedWorkspaceBaseline(runtimeStore, request);
+  await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+    operationId: 'operation-real-process-admission',
+    expectedPaths: ['tracked.txt'],
+    executionProfileDigest: `sha256:${'e'.repeat(64)}`,
+  });
+  writeSync(1, 'READY\n');
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+  throw new Error('Managed mutation admission crash child unexpectedly resumed');
+}
+
 const service = createGitWorkspaceService({
   storageRoot,
   gitRuntime,

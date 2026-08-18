@@ -45,7 +45,11 @@ import { computerUseModelCallArgs } from '@maka/core/computer-use';
 import type { SessionHeader } from '@maka/core/session';
 import type { ToolInvocationRecord } from '@maka/core/usage-stats/types';
 import { redactSecrets } from '@maka/core/redaction';
-import { TOOL_BOUNDARY_PROTOCOL_V1, type RuntimeEvent } from '@maka/core/runtime-event';
+import {
+  TOOL_BOUNDARY_PROTOCOL_V1,
+  type RuntimeEvent,
+  type RuntimeEventManagedWorkspaceMutationV1,
+} from '@maka/core/runtime-event';
 import { serializedByteLength } from '@maka/code-mode';
 
 import { recordToolArtifactsSafely, type ToolArtifactRecorder } from './tool-artifacts.js';
@@ -139,6 +143,8 @@ export interface MakaTool<P = any, R = unknown> {
   };
   /** Crash-recovery contract used by the durable tool boundary. */
   recoveryMode?: ToolRecoveryMode;
+  /** Durable execution profile selected before T1. M2.4 enables this for Write/Edit. */
+  durableExecutionProfile?: 'managed_mutation_v1';
   /** Step-level admission contract. Exclusive tools cannot share an assistant step. */
   executionSemantics?: 'parallel' | 'exclusive_step';
   /** Nested CodeMode admission. Ordinary tools are nestable by default. */
@@ -439,6 +445,20 @@ export interface ToolRuntimeInput {
   recordToolArtifacts?: ToolArtifactRecorder;
   /** Optional Phase 2 T1/T2 commit boundary for hosts that persist RuntimeEvents. */
   runtimeCommitSink?: RuntimeCommitSink;
+  /** Host-owned M2.3 admission. It must not fall back after returning a profile. */
+  admitManagedMutation?: (input: {
+    readonly operationId: string;
+    readonly toolName: string;
+    readonly persistedArgs: unknown;
+    readonly abortSignal: AbortSignal;
+  }) => Promise<RuntimeManagedMutationAdmission>;
+}
+
+export interface RuntimeManagedMutationAdmission {
+  readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceMutationV1>;
+  execute<T>(operation: () => Promise<T> | T): Promise<T>;
+  /** Idempotent for both an unused admission and an already executed one. */
+  dispose(): Promise<void>;
 }
 
 interface DurableToolAttempt {
@@ -1246,8 +1266,36 @@ export class ToolRuntime {
       }
     }
 
+    let managedMutationAdmission: RuntimeManagedMutationAdmission | undefined;
+    if (tool.durableExecutionProfile === 'managed_mutation_v1') {
+      if (
+        !dispatchOperationId ||
+        !this.input.runtimeCommitSink ||
+        !this.input.admitManagedMutation
+      ) {
+        const reason = 'Managed workspace mutation admission is unavailable before T1';
+        await refuseBeforeDispatch(reason);
+        this.recordLoopGateOutcome(callSignature, true);
+        return this.errorReturn(reason);
+      }
+      try {
+        managedMutationAdmission = await this.input.admitManagedMutation({
+          operationId: dispatchOperationId,
+          toolName: tool.name,
+          persistedArgs: structuredClone(persistedArgs),
+          abortSignal: ctx.abortSignal,
+        });
+      } catch (error) {
+        const reason = `Managed workspace mutation admission failed: ${formatSyntheticToolErrorText(error)}`;
+        await refuseBeforeDispatch(reason);
+        this.recordLoopGateOutcome(callSignature, true);
+        return this.errorReturn(reason);
+      }
+    }
+
     const reservedSubagentSlot = this.reserveSubagentSlot(tool);
     if (!reservedSubagentSlot) {
+      await managedMutationAdmission?.dispose();
       trace?.emit('tool', 'tool_failed', 'Tool execution rejected by runtime limit', {
         toolUseId,
         toolName: tool.name,
@@ -1267,11 +1315,15 @@ export class ToolRuntime {
         persistedArgs,
         modelFacingArgs,
         abortSignal: ctx.abortSignal,
+        ...(managedMutationAdmission
+          ? { managedMutation: managedMutationAdmission.durableDispatch }
+          : {}),
         ...(invocationId ? { invocationId } : {}),
         ...(runId ? { runId } : {}),
       });
     } catch (error) {
       if (reservedSubagentSlot) this.releaseSubagentSlot(tool);
+      await managedMutationAdmission?.dispose();
       throw error;
     }
     if (durableAttempt) {
@@ -1306,67 +1358,71 @@ export class ToolRuntime {
       try {
         const runId = this.input.runId;
         const executionBoundary = clientCapabilityBoundary ?? (await this.readExecutionBoundary());
-        const result = await tool.impl(structuredClone(executionArgs) as never, {
-          sessionId: this.input.sessionId,
-          turnId,
-          ...(runId ? { runId } : {}),
-          ...(this.input.orchestrationMode
-            ? { orchestrationMode: this.input.orchestrationMode }
-            : {}),
-          cwd: this.input.header.cwd,
-          executionBoundary,
-          permissionMode: this.input.header.permissionMode,
-          toolCallId: toolUseId,
-          // The id the call event actually carries, not the candidate: by here
-          // `prepareDurableToolAttempt` has pushed it on the dispatch lane.
-          ...(pushedCallEvent?.operationId ? { operationId: pushedCallEvent.operationId } : {}),
-          abortSignal: ctx.abortSignal,
-          emitOutput: output.emit,
-          ...(trace
-            ? {
-                emitRunTrace: (
-                  type:
-                    | 'tool_started'
-                    | 'tool_completed'
-                    | 'tool_failed'
-                    | 'skill_searched'
-                    | 'skill_loaded'
-                    | 'skill_load_failed',
-                  message: string,
-                  data?: Record<string, unknown>,
-                ) =>
-                  trace.emit(type.startsWith('skill_') ? 'skill' : 'tool', type, message, {
-                    toolUseId,
-                    toolName: tool.name,
-                    ...(data ?? {}),
-                  }),
-              }
-            : {}),
-          ...(this.input.listChildAgents ? { listChildAgents: this.input.listChildAgents } : {}),
-          ...(this.input.readChildAgentOutput
-            ? { readChildAgentOutput: this.input.readChildAgentOutput }
-            : {}),
-          ...this.buildChildAgentContext({
+        const invokeTool = () =>
+          tool.impl(structuredClone(executionArgs) as never, {
+            sessionId: this.input.sessionId,
             turnId,
+            ...(runId ? { runId } : {}),
+            ...(this.input.orchestrationMode
+              ? { orchestrationMode: this.input.orchestrationMode }
+              : {}),
+            cwd: this.input.header.cwd,
+            executionBoundary,
+            permissionMode: this.input.header.permissionMode,
+            toolCallId: toolUseId,
+            // The id the call event actually carries, not the candidate: by here
+            // `prepareDurableToolAttempt` has pushed it on the dispatch lane.
+            ...(pushedCallEvent?.operationId ? { operationId: pushedCallEvent.operationId } : {}),
             abortSignal: ctx.abortSignal,
-            trace,
-            toolUseId,
-            toolName: tool.name,
-            queue,
-            activityIdentity,
-          }),
-          askUserQuestion: (questions) =>
-            this.askUserQuestion(turnId, toolUseId, questions, ctx.abortSignal, queue),
-          requestSandboxBoundary: (expansion, justification) =>
-            this.requestSandboxBoundary(
+            emitOutput: output.emit,
+            ...(trace
+              ? {
+                  emitRunTrace: (
+                    type:
+                      | 'tool_started'
+                      | 'tool_completed'
+                      | 'tool_failed'
+                      | 'skill_searched'
+                      | 'skill_loaded'
+                      | 'skill_load_failed',
+                    message: string,
+                    data?: Record<string, unknown>,
+                  ) =>
+                    trace.emit(type.startsWith('skill_') ? 'skill' : 'tool', type, message, {
+                      toolUseId,
+                      toolName: tool.name,
+                      ...(data ?? {}),
+                    }),
+                }
+              : {}),
+            ...(this.input.listChildAgents ? { listChildAgents: this.input.listChildAgents } : {}),
+            ...(this.input.readChildAgentOutput
+              ? { readChildAgentOutput: this.input.readChildAgentOutput }
+              : {}),
+            ...this.buildChildAgentContext({
               turnId,
+              abortSignal: ctx.abortSignal,
+              trace,
               toolUseId,
-              expansion,
-              justification,
-              ctx.abortSignal,
+              toolName: tool.name,
               queue,
-            ),
-        });
+              activityIdentity,
+            }),
+            askUserQuestion: (questions) =>
+              this.askUserQuestion(turnId, toolUseId, questions, ctx.abortSignal, queue),
+            requestSandboxBoundary: (expansion, justification) =>
+              this.requestSandboxBoundary(
+                turnId,
+                toolUseId,
+                expansion,
+                justification,
+                ctx.abortSignal,
+                queue,
+              ),
+          });
+        const result = managedMutationAdmission
+          ? await managedMutationAdmission.execute(invokeTool)
+          : await invokeTool();
         if (
           ctx.maxResultBytes !== undefined &&
           serializedByteLength(result, ctx.maxResultBytes) > ctx.maxResultBytes
@@ -1625,6 +1681,7 @@ export class ToolRuntime {
     } finally {
       this.recordLoopGateOutcome(callSignature, attemptFailed);
       if (reservedSubagentSlot) this.releaseSubagentSlot(tool);
+      await managedMutationAdmission?.dispose();
     }
   }
 
@@ -1635,6 +1692,7 @@ export class ToolRuntime {
     /** The projection the model replays as its own call. */
     modelFacingArgs: unknown;
     abortSignal: AbortSignal;
+    managedMutation?: Readonly<RuntimeEventManagedWorkspaceMutationV1>;
     invocationId?: string;
     runId?: string;
   }): Promise<DurableToolAttempt | undefined> {
@@ -1719,6 +1777,7 @@ export class ToolRuntime {
           toolName: input.tool.name,
           canonicalArgsHash,
           recoveryMode,
+          ...(input.managedMutation ? { managedMutation: input.managedMutation } : {}),
         },
       },
       refs: {

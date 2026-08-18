@@ -885,6 +885,202 @@ test('rejects external drift instead of reopening a non-ready workspace', async 
   }
 });
 
+test('freezes one owner-bound managed mutation admission before its execution starts', async () => {
+  const root = await temporaryRoot();
+  const storageRoot = join(root, 'storage');
+  const sourceRoot = await createEligibleSource(join(root, 'source'));
+  const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(rootOwner);
+  const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
+  try {
+    const owner = await openManagedWorkspaceOwner({
+      rootOwner,
+      gitRuntime: {
+        executablePath: gitExecutablePath,
+        expectedSha256: gitExecutableSha256,
+      },
+    });
+    const accepted = await owner.openManagedWorkspaceBaseline(
+      runtimeStore,
+      openRequest(sourceRoot),
+    );
+
+    const expectedPaths = ['tracked.txt'];
+    const admission = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+      operationId: 'operation_m2_3_write_1',
+      expectedPaths,
+      executionProfileDigest: `sha256:${'a'.repeat(64)}`,
+    });
+    expectedPaths[0] = 'caller-mutated.txt';
+
+    assert.equal(admission.lease.kind, 'managed_workspace_mutation_lease_v1');
+    assert.deepEqual(admission.durableDispatch, {
+      protocol: 'managed_mutation_v1',
+      repositoryId: accepted.head.repositoryId,
+      workspaceId: accepted.head.workspaceId,
+      workspaceEpochId: accepted.head.workspaceEpochId,
+      workspaceInstanceId: openRequest(sourceRoot).workspaceInstanceId,
+      objectFormat: 'sha1',
+      baseWorkspaceVersionId: accepted.head.workspaceVersionId,
+      baseAcceptedEventId: accepted.head.acceptedEventId,
+      baseHeadRevision: accepted.head.revision,
+      baseCommitOid: accepted.head.commitOid,
+      baseTreeOid: accepted.head.treeOid,
+      expectedPaths: ['tracked.txt'],
+      executionProfileDigest: `sha256:${'a'.repeat(64)}`,
+    });
+    await owner.cancelManagedWorkspaceMutation(admission.lease);
+
+    const cancelled = new AbortController();
+    cancelled.abort(new Error('stop before T1'));
+    await assert.rejects(
+      owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+        operationId: 'operation_m2_3_cancelled',
+        expectedPaths: ['tracked.txt'],
+        executionProfileDigest: `sha256:${'a'.repeat(64)}`,
+        abortSignal: cancelled.signal,
+      }),
+      (error: unknown) =>
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'managed_workspace_mutation_admission_aborted',
+    );
+    await assert.rejects(
+      owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+        operationId: 'operation_m2_3_invalid_path',
+        expectedPaths: ['node_modules/pkg/index.js'],
+        executionProfileDigest: `sha256:${'a'.repeat(64)}`,
+      }),
+      (error: unknown) =>
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'managed_workspace_mutation_admission_invalid',
+    );
+    await assert.rejects(
+      owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+        operationId: 'operation_m2_3_oversized_path',
+        expectedPaths: ['x'.repeat(4097)],
+        executionProfileDigest: `sha256:${'a'.repeat(64)}`,
+      }),
+      (error: unknown) =>
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'managed_workspace_mutation_admission_invalid',
+    );
+    await owner.close();
+  } finally {
+    runtimeStore.close();
+    await rootOwner.close();
+  }
+});
+
+test('captures a candidate only inside the admitted mutation lease', async () => {
+  const root = await temporaryRoot();
+  const storageRoot = join(root, 'storage');
+  const sourceRoot = await createEligibleSource(join(root, 'source'));
+  const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(rootOwner);
+  const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
+  try {
+    const owner = await openManagedWorkspaceOwner({
+      rootOwner,
+      gitRuntime: {
+        executablePath: gitExecutablePath,
+        expectedSha256: gitExecutableSha256,
+      },
+    });
+    const accepted = await owner.openManagedWorkspaceBaseline(
+      runtimeStore,
+      openRequest(sourceRoot),
+    );
+    const { binding } = inspectManagedWorkspaceExecutionHandleInternal(accepted.executionHandle);
+    const admission = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+      operationId: 'operation_m2_3_edit_1',
+      expectedPaths: ['tracked.txt'],
+      executionProfileDigest: `sha256:${'b'.repeat(64)}`,
+    });
+
+    const receipt = await owner.withManagedWorkspaceMutation(admission.lease, async (scope) => {
+      assert.equal(scope.kind, 'managed_workspace_mutation_scope_v1');
+      await writeFile(join(binding.worktreePath, 'tracked.txt'), 'mutated\n', 'utf8');
+      const captured = await owner.captureManagedWorkspaceMutationCandidate(scope);
+      await owner.discardManagedWorkspaceMutationCandidate(scope, captured);
+      return captured;
+    });
+
+    assert.equal(receipt.operationId, 'operation_m2_3_edit_1');
+    assert.equal(receipt.baseHead.workspaceVersionId, accepted.head.workspaceVersionId);
+    assert.deepEqual(receipt.changedPaths, ['tracked.txt']);
+    assert.equal(receipt.executionProfileDigest, `sha256:${'b'.repeat(64)}`);
+    await assert.rejects(
+      owner.withManagedWorkspaceMutation(admission.lease, async () => undefined),
+      (error: unknown) =>
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'managed_workspace_mutation_lease_invalid',
+    );
+    await owner.close();
+  } finally {
+    runtimeStore.close();
+    await rootOwner.close();
+  }
+});
+
+test('holds one exclusive mutation lease until cancellation and owner close drains it', async () => {
+  const root = await temporaryRoot();
+  const storageRoot = join(root, 'storage');
+  const sourceRoot = await createEligibleSource(join(root, 'source'));
+  const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(rootOwner);
+  const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
+  let closing: Promise<void> | undefined;
+  try {
+    const owner = await openManagedWorkspaceOwner({
+      rootOwner,
+      gitRuntime: {
+        executablePath: gitExecutablePath,
+        expectedSha256: gitExecutableSha256,
+      },
+    });
+    const accepted = await owner.openManagedWorkspaceBaseline(
+      runtimeStore,
+      openRequest(sourceRoot),
+    );
+    const first = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+      operationId: 'operation_m2_3_exclusive_1',
+      expectedPaths: ['tracked.txt'],
+      executionProfileDigest: `sha256:${'c'.repeat(64)}`,
+    });
+
+    await assert.rejects(
+      owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+        operationId: 'operation_m2_3_exclusive_2',
+        expectedPaths: ['tracked.txt'],
+        executionProfileDigest: `sha256:${'d'.repeat(64)}`,
+      }),
+      (error: unknown) =>
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'managed_workspace_mutation_admission_conflict',
+    );
+    closing = owner.close();
+    assert.equal(
+      await Promise.race([closing.then(() => 'closed'), delay(250, 'pending')]),
+      'pending',
+    );
+    await owner.cancelManagedWorkspaceMutation(first.lease);
+    await closing;
+    assert.equal(owner.state, 'closed');
+  } finally {
+    await Promise.allSettled([closing].filter((value) => value !== undefined));
+    runtimeStore.close();
+    await rootOwner.close();
+  }
+});
+
 function isOwnerError(code: string): (error: unknown) => boolean {
   return (error) => error instanceof ManagedWorkspaceOwnerError && error.code === code;
 }

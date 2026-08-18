@@ -221,6 +221,28 @@ describe('workspace version persistence authority', () => {
     });
   });
 
+  it('rejects a successor whose T1 did not freeze the managed mutation profile', async () => {
+    await withDatabase(async ({ store }) => {
+      const { baseline, input } = await prepareSuccessorCommit(store, 1, {
+        omitManagedMutation: true,
+      });
+
+      await assert.rejects(
+        commitWorkspaceSuccessorInternal(store, input),
+        /managed mutation T1 identity/i,
+      );
+      assert.equal(
+        (await store.readToolOperation(input.toolOutcome.operationId))?.currentState,
+        'prepared',
+      );
+      assert.equal(
+        (await store.readWorkspaceHead(baseline.epoch.workspaceId, baseline.epoch.workspaceEpochId))
+          ?.workspaceVersionId,
+        baseline.baseline.workspaceVersionId,
+      );
+    });
+  });
+
   it('rolls back tool outcome, successor fact, projection, and head together', async () => {
     await withDatabase(async ({ dbPath, store, setFailpoint }) => {
       const { baseline, input } = await prepareSuccessorCommit(store);
@@ -713,6 +735,7 @@ async function withDatabase(
 async function prepareSuccessorCommit(
   store: ReturnType<typeof createSqliteRuntimeStore>,
   variant = 1,
+  options: { omitManagedMutation?: boolean } = {},
 ): Promise<{
   baseline: WorkspaceBaselineAuthorityInput;
   input: WorkspaceSuccessorCommitInput;
@@ -759,6 +782,25 @@ async function prepareSuccessorCommit(
           toolName: 'Write',
           canonicalArgsHash: argsHash,
           recoveryMode: 'reconcile',
+          ...(!options.omitManagedMutation
+            ? {
+                managedMutation: {
+                  protocol: 'managed_mutation_v1' as const,
+                  repositoryId: opened.head.repositoryId,
+                  workspaceId: opened.head.workspaceId,
+                  workspaceEpochId: opened.head.workspaceEpochId,
+                  workspaceInstanceId: baseline.epoch.workspaceInstanceId,
+                  objectFormat: baseline.epoch.objectFormat,
+                  baseWorkspaceVersionId: opened.head.workspaceVersionId,
+                  baseAcceptedEventId: opened.head.acceptedEventId,
+                  baseHeadRevision: opened.head.revision,
+                  baseCommitOid: opened.head.commitOid,
+                  baseTreeOid: opened.head.treeOid,
+                  expectedPaths: ['notes.txt'],
+                  executionProfileDigest: `sha256:${'a'.repeat(64)}` as const,
+                },
+              }
+            : {}),
         },
       },
       refs: { operationId, toolCallId },

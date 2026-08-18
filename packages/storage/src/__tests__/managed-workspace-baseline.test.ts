@@ -1022,6 +1022,66 @@ test('reissues execution authority after a real process crash during admission v
   }
 });
 
+test('releases an uncommitted mutation lease after a real process crash', {
+  timeout: 60_000,
+}, async () => {
+  const root = await temporaryRoot();
+  const storageRoot = join(root, 'storage');
+  const sourceRoot = await createEligibleSource(join(root, 'source'));
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('./fixtures/git-workspace-service-crash-child.js', import.meta.url))],
+    {
+      env: {
+        ...process.env,
+        MAKA_GIT_WORKSPACE_STORAGE: storageRoot,
+        MAKA_GIT_WORKSPACE_SOURCE: sourceRoot,
+        MAKA_GIT_WORKSPACE_EXECUTABLE: gitExecutablePath,
+        MAKA_GIT_WORKSPACE_SHA256: gitExecutableSha256,
+        MAKA_GIT_WORKSPACE_FAILPOINT: 'unused-for-mutation-admission',
+        MAKA_GIT_WORKSPACE_ACTION: 'mutation-admission',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    await waitForReady(child, 30_000);
+    child.kill('SIGKILL');
+    await waitForExit(child);
+
+    const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+    const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+    assert.ok(rootOwner);
+    const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
+    try {
+      const owner = await openManagedWorkspaceOwner({
+        rootOwner,
+        gitRuntime: {
+          executablePath: gitExecutablePath,
+          expectedSha256: gitExecutableSha256,
+        },
+      });
+      const reopened = await owner.openManagedWorkspaceBaseline(
+        runtimeStore,
+        openRequest(sourceRoot),
+      );
+      const retry = await owner.admitManagedWorkspaceMutation(reopened.executionHandle, {
+        operationId: 'operation-real-process-admission',
+        expectedPaths: ['tracked.txt'],
+        executionProfileDigest: `sha256:${'e'.repeat(64)}`,
+      });
+      assert.equal(retry.durableDispatch.baseWorkspaceVersionId, reopened.head.workspaceVersionId);
+      await owner.cancelManagedWorkspaceMutation(retry.lease);
+      await owner.close();
+    } finally {
+      runtimeStore.close();
+      await rootOwner.close();
+    }
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
+});
+
 test('rejects a source tree containing a non-UTF-8 Git path', {
   skip: process.platform === 'win32',
 }, async () => {

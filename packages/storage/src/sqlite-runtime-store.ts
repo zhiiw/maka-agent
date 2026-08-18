@@ -26,6 +26,7 @@ import {
   isTerminalRuntimeEvent,
   TOOL_BOUNDARY_PROTOCOL_V1,
   type RuntimeEvent,
+  type RuntimeEventManagedWorkspaceMutationV1,
   type ToolRecoveryMode,
 } from '@maka/core/runtime-event';
 import {
@@ -1320,6 +1321,26 @@ export class SqliteRuntimeStore
       ) {
         throw new Error('Workspace successor requires one prepared Write/Edit reconcile operation');
       }
+      const dispatchJson = this.readRuntimeEventJson(operation.dispatchEventId);
+      const dispatchEvent = dispatchJson
+        ? decodeRuntimeEvent(JSON.parse(dispatchJson) as unknown)
+        : undefined;
+      const epoch = before.baselines.find(
+        (candidate) =>
+          candidate.epoch.workspaceId === successor.workspaceId &&
+          candidate.epoch.workspaceEpochId === successor.workspaceEpochId,
+      )?.epoch;
+      if (
+        !epoch ||
+        !managedMutationMatchesSuccessor(
+          dispatchEvent?.actions?.toolDispatch?.managedMutation,
+          successor,
+          currentHead,
+          epoch.workspaceInstanceId,
+        )
+      ) {
+        throw new Error('Workspace successor requires a matching managed mutation T1 identity');
+      }
 
       const outcomeResult = this.commitToolOutcomeSync(toolOutcome);
       const successorSeq = this.insertRuntimeEvent(
@@ -1570,6 +1591,33 @@ export class SqliteRuntimeStore
       );
       const dispatch = operation?.dispatchEvent?.actions?.toolDispatch;
       const response = operation?.responseEvent;
+      const epoch = scan.baselines.find(
+        (candidate) =>
+          candidate.epoch.workspaceId === accepted.successor.workspaceId &&
+          candidate.epoch.workspaceEpochId === accepted.successor.workspaceEpochId,
+      )?.epoch;
+      const baseVersion = findWorkspaceAcceptedVersion(scan, accepted.successor.parents[0]);
+      const baseHead = baseVersion
+        ? {
+            repositoryId: baseVersion.repositoryId,
+            workspaceId: baseVersion.workspaceId,
+            workspaceEpochId: baseVersion.workspaceEpochId,
+            workspaceVersionId: baseVersion.workspaceVersionId,
+            acceptedEventId:
+              'origin' in baseVersion && baseVersion.origin.kind === 'baseline'
+                ? (scan.baselines.find(
+                    (candidate) =>
+                      candidate.baseline.workspaceVersionId === baseVersion.workspaceVersionId,
+                  )?.baselineAcceptedEventId ?? '')
+                : (scan.successors.find(
+                    (candidate) =>
+                      candidate.successor.workspaceVersionId === baseVersion.workspaceVersionId,
+                  )?.acceptedEventId ?? ''),
+            commitOid: baseVersion.commitOid,
+            treeOid: baseVersion.treeOid,
+            revision: accepted.successor.baseHeadRevision,
+          }
+        : undefined;
       if (
         !operation ||
         operation.issues.length > 0 ||
@@ -1578,6 +1626,17 @@ export class SqliteRuntimeStore
         dispatch.operationId !== origin.operationId ||
         dispatch.recoveryMode !== 'reconcile' ||
         (dispatch.toolName !== 'Write' && dispatch.toolName !== 'Edit') ||
+        !epoch ||
+        !baseHead ||
+        !managedMutationMatchesSuccessor(
+          dispatch.managedMutation,
+          {
+            ...accepted.successor,
+            parentWorkspaceVersionId: accepted.successor.parents[0],
+          },
+          baseHead,
+          epoch.workspaceInstanceId,
+        ) ||
         !response ||
         response.id !== origin.outcomeEventId ||
         response.content?.kind !== 'function_response' ||
@@ -3200,6 +3259,50 @@ export class SqliteRuntimeStore
       .get(operationId) as ToolOperationRow | undefined;
     return row ? toolOperationFromRow(row) : undefined;
   }
+}
+
+function findWorkspaceAcceptedVersion(
+  scan: ReturnType<typeof scanWorkspaceBaselineAuthority>,
+  workspaceVersionId: string,
+) {
+  for (const baseline of scan.baselines) {
+    if (baseline.baseline.workspaceVersionId === workspaceVersionId) return baseline.baseline;
+  }
+  for (const successor of scan.successors) {
+    if (successor.successor.workspaceVersionId === workspaceVersionId) return successor.successor;
+  }
+  return undefined;
+}
+
+function managedMutationMatchesSuccessor(
+  mutation: RuntimeEventManagedWorkspaceMutationV1 | undefined,
+  successor: {
+    readonly repositoryId: string;
+    readonly workspaceId: string;
+    readonly workspaceEpochId: string;
+    readonly objectFormat: 'sha1' | 'sha256';
+    readonly parentWorkspaceVersionId: string;
+    readonly baseAcceptedEventId: string;
+    readonly baseHeadRevision: number;
+    readonly executionProfileDigest: `sha256:${string}`;
+  },
+  baseHead: WorkspaceHeadRecordV1,
+  workspaceInstanceId: string,
+): boolean {
+  return (
+    mutation?.protocol === 'managed_mutation_v1' &&
+    mutation.repositoryId === successor.repositoryId &&
+    mutation.workspaceId === successor.workspaceId &&
+    mutation.workspaceEpochId === successor.workspaceEpochId &&
+    mutation.workspaceInstanceId === workspaceInstanceId &&
+    mutation.objectFormat === successor.objectFormat &&
+    mutation.baseWorkspaceVersionId === successor.parentWorkspaceVersionId &&
+    mutation.baseAcceptedEventId === successor.baseAcceptedEventId &&
+    mutation.baseHeadRevision === successor.baseHeadRevision &&
+    mutation.baseCommitOid === baseHead.commitOid &&
+    mutation.baseTreeOid === baseHead.treeOid &&
+    mutation.executionProfileDigest === successor.executionProfileDigest
+  );
 }
 
 interface ToolLedgerHealth {

@@ -21,6 +21,7 @@ import {
   type ManagedMutationCandidateReceiptV1,
   type ManagedMutationCandidateRequest,
 } from './managed-mutation-candidate-authority-internal.js';
+import { canonicalManagedMutationPath } from './managed-mutation-path-internal.js';
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 2 * 60 * 1_000;
@@ -3503,14 +3504,8 @@ function assertManagedTrackedPath(path: string): string {
 }
 
 function assertManagedMutationPath(path: string): string {
-  const normalized = assertManagedTrackedPath(path);
-  const firstSegment = normalized.split('/')[0]!;
-  if (
-    firstSegment === '.git' ||
-    (process.platform === 'win32'
-      ? firstSegment.toLowerCase() === 'node_modules'
-      : firstSegment === 'node_modules')
-  ) {
+  const normalized = canonicalManagedMutationPath(path);
+  if (normalized === undefined) {
     throw new GitWorkspaceServiceError(
       'managed_mutation_candidate_rejected',
       'Managed mutation path belongs to workspace control or dependency state',

@@ -10,7 +10,7 @@ import type {
   ToolOutcomeCommit,
   ToolPreparedCommit,
 } from '../runtime-commit-sink.js';
-import { ToolRuntime, type MakaTool } from '../tool-runtime.js';
+import { ToolRuntime, type MakaTool, type ToolRuntimeInput } from '../tool-runtime.js';
 
 describe('ToolRuntime durable boundary', () => {
   it('does not invoke the tool or publish a result when T1 fails', async () => {
@@ -176,6 +176,95 @@ describe('ToolRuntime durable boundary', () => {
     assert.equal(prepared[0]?.runtimeEvent.refs?.operationId, prepared[0]?.operationId);
     assert.equal(prepared[0]?.dispatchRuntimeEvent.refs?.operationId, prepared[0]?.operationId);
     assert.equal(outcomes[0]?.runtimeEvent.refs?.operationId, prepared[0]?.operationId);
+  });
+
+  it('freezes managed mutation admission in T1 and holds it through execution', async () => {
+    const order: string[] = [];
+    const prepared: ToolPreparedCommit[] = [];
+    let admittedOperationId: string | undefined;
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async (input) => {
+          prepared.push(input);
+          order.push('t1');
+          return { created: true, runtimeEventSeq: 1 };
+        },
+        commitToolOutcome: async () => {
+          order.push('t2');
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      order,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          admittedOperationId = input.operationId;
+          order.push('admit');
+          return {
+            durableDispatch: managedMutationDispatch(),
+            execute: async (operation) => {
+              order.push('lease-enter');
+              try {
+                return await operation();
+              } finally {
+                order.push('lease-exit');
+              }
+            },
+            dispose: async () => {
+              order.push('dispose');
+            },
+          };
+        },
+      },
+    );
+    const managedTool = tool(() => {
+      order.push('impl');
+      return { ok: true };
+    });
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await harness.execute(managedTool);
+
+    assert.deepEqual(order, [
+      'admit',
+      't1',
+      'lease-enter',
+      'impl',
+      'lease-exit',
+      't2',
+      'published-result',
+      'dispose',
+    ]);
+    assert.deepEqual(
+      prepared[0]?.dispatchRuntimeEvent.actions?.toolDispatch?.managedMutation,
+      managedMutationDispatch(),
+    );
+    assert.equal(admittedOperationId, prepared[0]?.operationId);
+  });
+
+  it('refuses a managed mutation before T1 when the host admission owner is unavailable', async () => {
+    let preparedCalls = 0;
+    let implementationCalls = 0;
+    const harness = makeHarness({
+      commitToolPrepared: async () => {
+        preparedCalls += 1;
+        return { created: true, runtimeEventSeq: 1 };
+      },
+      commitToolOutcome: async () => ({ created: true, runtimeEventSeq: 2 }),
+    });
+    const managedTool = tool(() => {
+      implementationCalls += 1;
+      return { ok: true };
+    });
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    const result = await harness.execute(managedTool);
+
+    assert.deepEqual(result, {
+      error: 'Managed workspace mutation admission is unavailable before T1',
+    });
+    assert.equal(preparedCalls, 0);
+    assert.equal(implementationCalls, 0);
   });
 
   it('rejects an oversized nested result before durable publication', async () => {
@@ -498,7 +587,12 @@ describe('ToolRuntime durable boundary', () => {
 });
 
 // `null` means the turn carries no run id at all; `undefined` keeps the default.
-function makeHarness(sink: RuntimeCommitSink, order?: string[], runId: string | null = 'run-1') {
+function makeHarness(
+  sink: RuntimeCommitSink,
+  order?: string[],
+  runId: string | null = 'run-1',
+  overrides: Partial<ToolRuntimeInput> = {},
+) {
   const messages: StoredMessage[] = [];
   const events: SessionEvent[] = [];
   const runtime = createTestToolRuntime({
@@ -514,6 +608,7 @@ function makeHarness(sink: RuntimeCommitSink, order?: string[], runId: string | 
     getPermissionPauseTarget: () => null,
     ...(runId ? { runId } : {}),
     runtimeCommitSink: sink,
+    ...overrides,
   });
   return {
     messages,
@@ -558,6 +653,24 @@ function makeHarness(sink: RuntimeCommitSink, order?: string[], runId: string | 
           ...(maxResultBytes !== undefined ? { maxResultBytes } : {}),
         })
       ).result,
+  };
+}
+
+function managedMutationDispatch() {
+  return {
+    protocol: 'managed_mutation_v1' as const,
+    repositoryId: 'repository_11111111111111111111111111111111',
+    workspaceId: 'workspace_22222222222222222222222222222222',
+    workspaceEpochId: 'epoch_33333333333333333333333333333333',
+    workspaceInstanceId: 'instance_44444444444444444444444444444444',
+    objectFormat: 'sha1' as const,
+    baseWorkspaceVersionId: 'version_55555555555555555555555555555555',
+    baseAcceptedEventId: 'baseline-event-1',
+    baseHeadRevision: 1,
+    baseCommitOid: '1'.repeat(40),
+    baseTreeOid: '2'.repeat(40),
+    expectedPaths: ['notes.txt'],
+    executionProfileDigest: `sha256:${'a'.repeat(64)}` as const,
   };
 }
 
