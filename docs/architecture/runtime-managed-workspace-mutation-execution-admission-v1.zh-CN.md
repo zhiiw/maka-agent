@@ -77,9 +77,10 @@ flowchart TD
 unsettled，不写 generic T2。
 
 `workspace_successor_committed` 只携带 `durableOutcome`，不得重新提交 provider value。Runtime 在调用真实 operation
-完成边界生成一次 canonical immutable snapshot：拒绝 cycle、`toJSON`、非 plain JSON container 和其他非 JSON
-值，复制 getter 在该边界产生的值并递归冻结所有可变节点。size check、canonical content、proof、message、telemetry
-和 provider 返回只能读取该 snapshot。
+完成边界用一次 bounded strict-JSON walker 同时执行 byte budget、类型校验、plain snapshot 和递归冻结。walker
+一旦超限立即停止，不会先复制完整对象；并拒绝 `undefined`、非有限数字、稀疏数组、accessor、cycle、`toJSON`、
+非 plain container 及其他非 JSON 值。canonical content、proof、message、telemetry 和 provider 返回只能读取该
+snapshot。
 Runtime 私有保存 snapshot，仅把隔离复制的 `content/isError/durationMs` proof 交给 owner 用于提交 successor。owner
 返回后，Runtime 用自己的 canonical outcome 校验 durable envelope；因此 owner 无法构造 live A / replay B，工具也
 无法通过事后修改原始返回对象改变已验证结果。
@@ -123,6 +124,7 @@ parent refs 和 duration。缺字段、多字段或任意值不同都 fail-stop�
 - success settlement 不能替换 Runtime-owned provider value，live 与 replay 内容不一致时 fail-stop；
 - terminal settlement 撤销 operation capability；detached operation 必须 join 后 fail-stop；
 - 工具事后修改原始 result 不得改变 durable、message、event 或 provider snapshot；
+- oversized result 必须在遍历越过 budget 前终止；strict-JSON 非法值不得进入 durable event；
 - safe-discard live result 与 durable content 不一致时 fail-stop；
 - getter/canonicalization 异常和超大 safe-discard 均不写 generic T2、不发布结果；
 - code-mode response 的 origin、hidden visibility、parent refs 与 duration 必须完整匹配；

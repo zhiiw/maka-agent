@@ -1474,25 +1474,29 @@ export class ToolRuntime {
           immutableSnapshot = false,
         ): Promise<RuntimeManagedMutationOperationValue<unknown>> => {
           const rawResult = await invokeTool();
-          const result = immutableSnapshot ? snapshotManagedToolResult(rawResult) : rawResult;
+          const result = immutableSnapshot
+            ? snapshotManagedToolResult(rawResult, ctx.maxResultBytes)
+            : rawResult;
           if (
+            !immutableSnapshot &&
             ctx.maxResultBytes !== undefined &&
             serializedByteLength(result, ctx.maxResultBytes) > ctx.maxResultBytes
           ) {
             throw new ToolResultLimitError();
           }
           const content = immutableSnapshot
-            ? deepFreezeRuntimeSnapshot(coerceResultContent(result))
+            ? Object.freeze(coerceResultContent(result))
             : coerceResultContent(result);
+          const outcome = {
+            content,
+            isError: deriveToolResultStatus(content, result) !== 'success',
+            durationMs: this.input.now() - startedAt,
+          };
           const value = {
             result,
-            outcome: {
-              content,
-              isError: deriveToolResultStatus(content, result) !== 'success',
-              durationMs: this.input.now() - startedAt,
-            },
+            outcome: immutableSnapshot ? Object.freeze(outcome) : outcome,
           };
-          return immutableSnapshot ? deepFreezeRuntimeSnapshot(value) : value;
+          return immutableSnapshot ? Object.freeze(value) : value;
         };
         let settledExecution:
           | {
@@ -1522,9 +1526,9 @@ export class ToolRuntime {
                 const value = await prepareOperationValue(true);
                 runtimeOwnedValue = value;
                 return {
-                  // The owner receives an isolated proof. Mutating it cannot
-                  // change Runtime's provider-facing value or canonical outcome.
-                  content: structuredClone(value.outcome.content),
+                  // The canonical content is already recursively immutable, so
+                  // the owner can read it without receiving a mutable alias.
+                  content: value.outcome.content,
                   isError: value.outcome.isError,
                   durationMs: value.outcome.durationMs,
                 };
@@ -3130,31 +3134,26 @@ function normalizeManagedMutationSettlement(
   if (!Object.hasOwn(record, 'providerResult')) {
     throw new Error('Managed safely-discarded settlement has no provider result');
   }
-  const providerResult = snapshotManagedToolResult(record.providerResult);
+  const providerResult = snapshotManagedToolResult(record.providerResult, maxResultBytes);
   const response = durableOutcome.content;
   if (response?.kind !== 'function_response' || response.isError !== true) {
     throw new Error('Managed safely-discarded settlement has no durable error outcome');
   }
-  if (
-    maxResultBytes !== undefined &&
-    serializedByteLength(providerResult, maxResultBytes) > maxResultBytes
-  ) {
-    throw new ToolResultLimitError();
-  }
-  const content = coerceResultContent(providerResult);
+  const content = Object.freeze(coerceResultContent(providerResult));
+  const outcome = Object.freeze({
+    content,
+    isError: true,
+    durationMs:
+      typeof durableOutcome.actions?.stateDelta?.durationMs === 'number'
+        ? durableOutcome.actions.stateDelta.durationMs
+        : 0,
+  });
   return {
     kind,
-    value: {
+    value: Object.freeze({
       result: providerResult,
-      outcome: {
-        content,
-        isError: true,
-        durationMs:
-          typeof durableOutcome.actions?.stateDelta?.durationMs === 'number'
-            ? durableOutcome.actions.stateDelta.durationMs
-            : 0,
-      },
-    },
+      outcome,
+    }),
     durableOutcome,
   };
 }
@@ -3177,30 +3176,165 @@ function coerceResultContent(raw: unknown): ToolResultContent {
 }
 
 /**
- * Takes one JSON-compatible, recursively frozen snapshot without retaining
- * tool/owner-owned object aliases. Validation rejects custom prototypes,
- * cycles, and toJSON values before they can create a live-only representation.
+ * Builds the one durable JSON representation while enforcing its byte budget.
+ * The walk stops at the first over-budget token and never retains a mutable
+ * tool/owner-owned object alias.
  */
-function snapshotManagedToolResult(value: unknown): unknown {
-  if (!Number.isFinite(serializedByteLength(value))) {
-    throw new Error('Managed tool result is not JSON-compatible');
+function snapshotManagedToolResult(value: unknown, maxBytes: number | undefined): unknown {
+  const budget: ManagedResultSnapshotBudget = {
+    bytes: 0,
+    limit:
+      maxBytes === undefined || maxBytes === Number.POSITIVE_INFINITY
+        ? Number.POSITIVE_INFINITY
+        : Number.isFinite(maxBytes) && maxBytes >= 0
+          ? Math.floor(maxBytes)
+          : 0,
+    active: new WeakSet<object>(),
+  };
+  return snapshotStrictJsonValue(value, budget, '$');
+}
+
+interface ManagedResultSnapshotBudget {
+  bytes: number;
+  limit: number;
+  active: WeakSet<object>;
+}
+
+function snapshotStrictJsonValue(
+  value: unknown,
+  budget: ManagedResultSnapshotBudget,
+  path: string,
+): unknown {
+  if (value === null) {
+    consumeManagedResultBytes(budget, 4);
+    return null;
   }
-  try {
-    const snapshot = structuredClone(value);
-    if (!Number.isFinite(serializedByteLength(snapshot))) {
-      throw new Error('Managed tool result snapshot is not JSON-compatible');
+  if (typeof value === 'string') {
+    consumeManagedJsonStringBytes(budget, value);
+    return value;
+  }
+  if (typeof value === 'boolean') {
+    consumeManagedResultBytes(budget, value ? 4 : 5);
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new Error(`Managed tool result must be strict JSON: ${path} is not finite`);
     }
-    return deepFreezeRuntimeSnapshot(snapshot);
-  } catch (error) {
-    throw new Error('Managed tool result could not be snapshotted', { cause: error });
+    const canonical = Object.is(value, -0) ? 0 : value;
+    consumeManagedResultBytes(budget, JSON.stringify(canonical).length);
+    return canonical;
+  }
+  if (value === undefined) {
+    throw new Error(`Managed tool result must be strict JSON: ${path} is undefined`);
+  }
+  if (typeof value !== 'object') {
+    throw new Error(`Managed tool result must be strict JSON: ${path} has an unsupported type`);
+  }
+  if (budget.active.has(value)) {
+    throw new Error(`Managed tool result must be strict JSON: ${path} is cyclic`);
+  }
+  if (!Array.isArray(value)) {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error(`Managed tool result must be strict JSON: ${path} is not a plain object`);
+    }
+  }
+  if ('toJSON' in value) {
+    throw new Error(`Managed tool result must be strict JSON: ${path} defines toJSON`);
+  }
+
+  budget.active.add(value);
+  try {
+    if (Array.isArray(value)) {
+      consumeManagedResultBytes(budget, 1);
+      const output: unknown[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        if (index > 0) consumeManagedResultBytes(budget, 1);
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor) {
+          throw new Error(`Managed tool result must be strict JSON: ${path} is a sparse array`);
+        }
+        if (!('value' in descriptor)) {
+          throw new Error(
+            `Managed tool result must be strict JSON: ${path}[${index}] is an accessor`,
+          );
+        }
+        output.push(snapshotStrictJsonValue(descriptor.value, budget, `${path}[${index}]`));
+      }
+      consumeManagedResultBytes(budget, 1);
+      return Object.freeze(output);
+    }
+
+    consumeManagedResultBytes(budget, 1);
+    const output: Record<string, unknown> = {};
+    let emitted = 0;
+    for (const key in value) {
+      if (!Object.hasOwn(value, key)) continue;
+      if (emitted > 0) consumeManagedResultBytes(budget, 1);
+      consumeManagedJsonStringBytes(budget, key);
+      consumeManagedResultBytes(budget, 1);
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !('value' in descriptor)) {
+        throw new Error(`Managed tool result must be strict JSON: ${path}.${key} is an accessor`);
+      }
+      Object.defineProperty(output, key, {
+        configurable: true,
+        enumerable: true,
+        value: snapshotStrictJsonValue(descriptor.value, budget, `${path}.${key}`),
+        writable: true,
+      });
+      emitted += 1;
+    }
+    consumeManagedResultBytes(budget, 1);
+    return Object.freeze(output);
+  } finally {
+    budget.active.delete(value);
   }
 }
 
-function deepFreezeRuntimeSnapshot<T>(value: T, seen = new WeakSet<object>()): T {
-  if (!value || typeof value !== 'object' || seen.has(value)) return value;
-  seen.add(value);
-  for (const nested of Object.values(value)) deepFreezeRuntimeSnapshot(nested, seen);
-  return Object.freeze(value);
+function consumeManagedJsonStringBytes(budget: ManagedResultSnapshotBudget, value: string): void {
+  consumeManagedResultBytes(budget, 1);
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    let bytes: number;
+    if (
+      code === 0x22 ||
+      code === 0x5c ||
+      code === 0x08 ||
+      code === 0x09 ||
+      code === 0x0a ||
+      code === 0x0c ||
+      code === 0x0d
+    ) {
+      bytes = 2;
+    } else if (code <= 0x1f) {
+      bytes = 6;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes = 4;
+        index += 1;
+      } else {
+        bytes = 6;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      bytes = 6;
+    } else if (code <= 0x7f) {
+      bytes = 1;
+    } else if (code <= 0x7ff) {
+      bytes = 2;
+    } else {
+      bytes = 3;
+    }
+    consumeManagedResultBytes(budget, bytes);
+  }
+  consumeManagedResultBytes(budget, 1);
+}
+
+function consumeManagedResultBytes(budget: ManagedResultSnapshotBudget, bytes: number): void {
+  if (budget.bytes > budget.limit - bytes) throw new ToolResultLimitError();
+  budget.bytes += bytes;
 }
 
 function coerceTerminalFailure(

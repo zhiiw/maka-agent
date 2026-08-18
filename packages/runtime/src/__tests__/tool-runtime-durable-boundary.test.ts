@@ -454,6 +454,50 @@ describe('ToolRuntime durable boundary', () => {
     });
   });
 
+  it('preserves JSON __proto__ keys as immutable data properties', async () => {
+    let operationId = '';
+    const resultWithProtoKey = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(resultWithProtoKey, '__proto__', {
+      enumerable: true,
+      value: { safe: true },
+    });
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            const proof = await operation();
+            return {
+              kind: 'workspace_successor_committed',
+              durableOutcome: managedOutcomeEvent(operationId, proof.content, false, {
+                durationMs: proof.durationMs,
+              }),
+            };
+          });
+        },
+      },
+    );
+    const managedTool = tool(() => resultWithProtoKey);
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    const result = (await harness.execute(managedTool)) as Record<string, unknown>;
+
+    assert.equal(Object.hasOwn(result, '__proto__'), true);
+    assert.deepEqual(result.__proto__, { safe: true });
+    assert.equal(Object.isFrozen(result.__proto__), true);
+    assert.equal(JSON.stringify(result), '{"__proto__":{"safe":true}}');
+  });
+
   it('adopts an owner-committed safe discard without invoking generic T2', async () => {
     let genericOutcomeCalls = 0;
     let operationId = '';
@@ -745,7 +789,7 @@ describe('ToolRuntime durable boundary', () => {
 
     await assert.rejects(
       harness.execute(managedTool),
-      /not JSON-compatible|provider result getter exploded|byte limit exceeded/i,
+      /strict JSON.*accessor|provider result getter exploded|byte limit exceeded/i,
     );
     assert.equal(genericOutcomeCalls, 0);
     assert.equal(
@@ -802,6 +846,130 @@ describe('ToolRuntime durable boundary', () => {
     assert.equal(genericOutcomeCalls, 0);
     assert.equal(JSON.stringify(harness.events).includes(oversized.error), false);
   });
+
+  it('stops snapshot traversal as soon as a managed result exceeds its byte budget', async () => {
+    let genericOutcomeCalls = 0;
+    let lateGetterReads = 0;
+    const oversizedResult = { payload: 'x'.repeat(128) } as Record<string, unknown>;
+    Object.defineProperty(oversizedResult, 'mustNotBeRead', {
+      enumerable: true,
+      get: () => {
+        lateGetterReads += 1;
+        throw new Error('snapshot walked past its byte budget');
+      },
+    });
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          genericOutcomeCalls += 1;
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async () =>
+          managedAdmission(async (operation) => {
+            await operation();
+            return { kind: 'unsettled', error: new Error('unreachable') };
+          }),
+      },
+    );
+    const managedTool = tool(() => oversizedResult);
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await assert.rejects(
+      harness.executeNested(managedTool, 32),
+      /tool result byte limit exceeded/i,
+    );
+    assert.equal(lateGetterReads, 0);
+    assert.equal(genericOutcomeCalls, 0);
+  });
+
+  it('rejects undefined fields instead of creating a non-canonical durable result', async () => {
+    let operationId = '';
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return managedAdmission(async (operation) => {
+            const proof = await operation();
+            return {
+              kind: 'workspace_successor_committed',
+              durableOutcome: managedOutcomeEvent(operationId, proof.content, false, {
+                durationMs: proof.durationMs,
+              }),
+            };
+          });
+        },
+      },
+    );
+    const managedTool = tool(() => ({ ok: true, missing: undefined }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    await assert.rejects(harness.execute(managedTool), /strict JSON.*undefined/i);
+    assert.equal(
+      harness.events.some((event) => event.type === 'tool_result'),
+      false,
+    );
+  });
+
+  for (const [description, makeResult, expectedError] of [
+    ['non-finite numbers', () => ({ n: Number.NaN }), /strict JSON.*not finite/i],
+    ['undefined array entries', () => ({ list: [undefined] }), /strict JSON.*undefined/i],
+    ['sparse arrays', () => ({ list: new Array<unknown>(1) }), /strict JSON.*sparse array/i],
+  ] as const) {
+    it(`rejects ${description} before accepting a managed durable result`, async () => {
+      let operationId = '';
+      const harness = makeHarness(
+        {
+          commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+          commitToolOutcome: async () => {
+            throw new Error('generic T2 must not settle a managed mutation');
+          },
+        },
+        undefined,
+        'run-1',
+        {
+          admitManagedMutation: async (input) => {
+            operationId = input.operationId;
+            return managedAdmission(async (operation) => {
+              const proof = await operation();
+              return {
+                kind: 'workspace_successor_committed',
+                durableOutcome: managedOutcomeEvent(operationId, proof.content, false, {
+                  durationMs: proof.durationMs,
+                }),
+              };
+            });
+          },
+        },
+      );
+      const managedTool = tool(() => makeResult());
+      managedTool.name = 'Write';
+      managedTool.recoveryMode = 'reconcile';
+      managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+      await assert.rejects(harness.execute(managedTool), expectedError);
+      assert.equal(
+        harness.events.some((event) => event.type === 'tool_result'),
+        false,
+      );
+    });
+  }
 
   it('rejects a durable managed response with a different code-mode envelope', async () => {
     let operationId = '';
