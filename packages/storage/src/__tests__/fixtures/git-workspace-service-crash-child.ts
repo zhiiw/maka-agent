@@ -1,4 +1,5 @@
 import { writeFileSync, writeSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { createGitWorkspaceService } from '../../git-workspace-service.js';
 import { requireManagedBaselineReceiptAuthorityInternal } from '../../managed-baseline-receipt-authority-internal.js';
@@ -69,6 +70,7 @@ if (process.env.MAKA_GIT_WORKSPACE_ACTION === 'managed-mutation-owner') {
           ok: true as const,
           path,
           bytes: Buffer.byteLength(input.operation.content, 'utf8'),
+          resultBlobOid: gitBlobOid(input.operation.content),
         };
       },
     },
@@ -157,6 +159,7 @@ if (
       revision: 1,
     },
     expectedPaths: ['docs/a.md'],
+    expectedBlobOid: gitBlobOid('candidate from child\n'),
     executionProfileDigest: `sha256:${'e'.repeat(64)}` as const,
   };
   writeFileSync(join(binding.worktreePath, 'docs', 'a.md'), 'candidate from child\n', 'utf8');
@@ -188,6 +191,14 @@ function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Missing ${name}`);
   return value;
+}
+
+function gitBlobOid(content: string): string {
+  const bytes = Buffer.from(content, 'utf8');
+  return createHash('sha1')
+    .update(`blob ${bytes.byteLength}\0`, 'utf8')
+    .update(bytes)
+    .digest('hex');
 }
 
 async function commitManagedMutationT1(

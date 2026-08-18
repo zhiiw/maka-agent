@@ -451,6 +451,7 @@ describe('RuntimeEvent actions', () => {
       baseHeadRevision: 1,
       baseCommitOid: '1'.repeat(40),
       baseTreeOid: '2'.repeat(40),
+      baseBlobOid: '3'.repeat(40),
       expectedPaths: ['src/a.ts'],
       executionProfileDigest: `sha256:${'a'.repeat(64)}`,
     } as const;
@@ -469,6 +470,21 @@ describe('RuntimeEvent actions', () => {
         .actions?.toolDispatch?.managedMutation,
       managedMutation,
     );
+    assert.equal(
+      decodeRuntimeEvent(
+        baseEvent({
+          role: 'system',
+          author: 'system',
+          actions: {
+            toolDispatch: {
+              ...toolDispatch,
+              managedMutation: { ...managedMutation, baseBlobOid: null },
+            },
+          },
+        }),
+      ).actions?.toolDispatch?.managedMutation?.baseBlobOid,
+      null,
+    );
     for (const invalid of [
       { ...managedMutation, expectedPaths: ['src/../secrets.txt'] },
       { ...managedMutation, expectedPaths: ['NoDe_MoDuLeS/pkg/index.js'] },
@@ -478,6 +494,7 @@ describe('RuntimeEvent actions', () => {
       { ...managedMutation, baseAcceptedEventId: 'event id with spaces' },
       { ...managedMutation, baseHeadRevision: 0 },
       { ...managedMutation, baseTreeOid: 'not-an-oid' },
+      { ...managedMutation, baseBlobOid: 'not-an-oid' },
       { ...managedMutation, extra: true },
     ]) {
       assert.throws(() =>

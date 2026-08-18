@@ -61,6 +61,7 @@ export interface ManagedMutationReservationRecordV1 {
   readonly baseHeadRevision: number;
   readonly baseCommitOid: string;
   readonly baseTreeOid: string;
+  readonly baseBlobOid: string | null;
   readonly expectedPaths: readonly string[];
   readonly executionProfileDigest: string;
   readonly reservedAt: number;

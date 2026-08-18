@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { glob as nodeGlob } from 'node:fs/promises';
 import { dirname, isAbsolute, parse, resolve } from 'node:path';
@@ -78,6 +79,7 @@ export async function executeFilesystemWorkerRequest(
         request.operation,
         request.operationBoundary,
         dependencies,
+        request.mutationEvidence,
       ),
     };
   } catch (error) {
@@ -95,6 +97,7 @@ export async function executeFilesystemOperation(
   operation: FilesystemWorkerOperation,
   operationBoundary: FilesystemWorkerRequest['operationBoundary'],
   dependencies: FilesystemWorkerOperationDependencies = {},
+  mutationEvidence?: FilesystemWorkerRequest['mutationEvidence'],
 ): Promise<FilesystemWorkerResult> {
   switch (operation.kind) {
     case 'read': {
@@ -140,13 +143,19 @@ export async function executeFilesystemOperation(
       // any other read failure leaves the previous state unknown, and
       // claiming `--- /dev/null` would report the file as created.
       let previous: 'new' | 'unknown' | string;
+      let previousBytes: Buffer | undefined;
       try {
-        previous = await fs.readFile(path, 'utf8');
+        previousBytes = await fs.readFile(path);
+        previous = previousBytes.toString('utf8');
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         previous = code === 'ENOENT' || code === 'ENOTDIR' ? 'new' : 'unknown';
       }
+      assertManagedMutationPreimage(previousBytes, mutationEvidence);
       await fs.writeFile(path, operation.content, 'utf8');
+      const resultBlobOid = mutationEvidence
+        ? gitBlobOid(Buffer.from(operation.content, 'utf8'), mutationEvidence.objectFormat)
+        : undefined;
       const diff =
         previous === 'unknown'
           ? undefined
@@ -157,6 +166,7 @@ export async function executeFilesystemOperation(
         path,
         bytes: Buffer.byteLength(operation.content, 'utf8'),
         ...(diff !== undefined ? { diff } : {}),
+        ...(resultBlobOid ? { resultBlobOid } : {}),
       };
     }
     case 'apply_patch': {
@@ -189,7 +199,9 @@ export async function executeFilesystemOperation(
         'write',
         operationBoundary,
       );
-      const content = await fs.readFile(path, 'utf8');
+      const contentBytes = await fs.readFile(path);
+      assertManagedMutationPreimage(contentBytes, mutationEvidence);
+      const content = contentBytes.toString('utf8');
       let edited: ReturnType<typeof computeEditedSource>;
       try {
         edited = computeEditedSource(
@@ -205,6 +217,9 @@ export async function executeFilesystemOperation(
         );
       }
       await fs.writeFile(path, edited.content, 'utf8');
+      const resultBlobOid = mutationEvidence
+        ? gitBlobOid(Buffer.from(edited.content, 'utf8'), mutationEvidence.objectFormat)
+        : undefined;
       const diff = createUnifiedDiff(path, content, edited.content);
       return {
         kind: 'edit',
@@ -215,6 +230,7 @@ export async function executeFilesystemOperation(
         startLine: edited.startLine,
         endLine: edited.endLine,
         ...(diff !== undefined ? { diff } : {}),
+        ...(resultBlobOid ? { resultBlobOid } : {}),
       };
     }
     case 'format_json': {
@@ -524,6 +540,32 @@ async function lstatTargetTypeOf(path: string): Promise<FilesystemWorkerTarget['
     if (nodeErrorCode(error) === 'ENOENT') return 'missing';
     throw error;
   }
+}
+
+function assertManagedMutationPreimage(
+  content: Buffer | undefined,
+  evidence: FilesystemWorkerRequest['mutationEvidence'],
+): void {
+  if (!evidence) return;
+  if (evidence.baseBlobOid === null) {
+    if (content === undefined) return;
+  } else if (
+    content !== undefined &&
+    gitBlobOid(content, evidence.objectFormat) === evidence.baseBlobOid
+  ) {
+    return;
+  }
+  throw operationError(
+    'path_changed',
+    'Managed mutation target changed after its durable base was admitted.',
+  );
+}
+
+function gitBlobOid(content: Buffer, objectFormat: 'sha1' | 'sha256'): string {
+  return createHash(objectFormat)
+    .update(`blob ${content.byteLength}\0`, 'utf8')
+    .update(content)
+    .digest('hex');
 }
 
 function nodeErrorCode(error: unknown): string | undefined {

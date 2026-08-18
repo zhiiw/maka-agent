@@ -264,6 +264,7 @@ test('freezes canonical Write/Edit admission from the owner-bound head and worke
       baseHeadRevision: accepted.head.revision,
       baseCommitOid: accepted.head.commitOid,
       baseTreeOid: accepted.head.treeOid,
+      baseBlobOid: null,
       expectedPaths: ['dir/tracked.txt'],
       executionProfileDigest: admission.durableDispatch.executionProfileDigest,
     });
@@ -276,14 +277,15 @@ test('freezes canonical Write/Edit admission from the owner-bound head and worke
       operationId: 'operation-managed-edit-1',
       toolName: 'Edit',
       persistedArgs: {
-        path: inputPath,
-        old_string: 'before',
+        path: 'tracked.txt',
+        old_string: 'tracked',
         new_string: 'after',
       },
       abortSignal: new AbortController().signal,
     });
-    assert.deepEqual(editAdmission.durableDispatch.expectedPaths, ['dir/tracked.txt']);
-    assert.equal(editAdmission.canonicalPath, 'dir/tracked.txt');
+    assert.deepEqual(editAdmission.durableDispatch.expectedPaths, ['tracked.txt']);
+    assert.equal(editAdmission.canonicalPath, 'tracked.txt');
+    assert.equal(editAdmission.durableDispatch.baseBlobOid, gitBlobOid('tracked\n'));
     await editAdmission.dispose();
     await owner.close();
   } finally {
@@ -322,6 +324,7 @@ test('accepts a worker-owned Write only after capturing its Git candidate', asyn
             ok: true as const,
             path: target,
             bytes: Buffer.byteLength(input.operation.content, 'utf8'),
+            resultBlobOid: gitBlobOid(input.operation.content),
           };
         },
       },
@@ -455,6 +458,104 @@ test('accepts a worker-owned Write only after capturing its Git candidate', asyn
   }
 });
 
+test('rejects an Edit candidate that incorporates same-path external content after T1', async () => {
+  const root = await temporaryRoot();
+  const storageRoot = join(root, 'storage');
+  const sourceRoot = await createEligibleSource(join(root, 'source'));
+  const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(rootOwner);
+  const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
+  const operationId = 'operation-managed-edit-same-path-drift';
+  const toolCallId = 'call-managed-edit-same-path-drift';
+  const args = { path: 'tracked.txt', old_string: 'tracked', new_string: 'updated' };
+  try {
+    const owner = await openManagedWorkspaceOwner({
+      rootOwner,
+      gitRuntime: {
+        executablePath: gitExecutablePath,
+        expectedSha256: gitExecutableSha256,
+      },
+      filesystemWorker: {
+        mutationExecutionProfileDigest: TEST_MUTATION_PROFILE,
+        async execute(input) {
+          assert.equal(input.operation.kind, 'edit');
+          if (input.operation.kind !== 'edit') throw new Error('expected Edit');
+          const target = join(input.cwd, input.operation.path);
+          const before = await readFile(target, 'utf8');
+          const after = before.replace(input.operation.oldString, input.operation.newString);
+          await writeFile(target, after, 'utf8');
+          return {
+            kind: 'edit' as const,
+            ok: true as const,
+            path: target,
+            replacements: 1 as const,
+            matchedVia: 'exact' as const,
+            startLine: 1,
+            endLine: 1,
+            // The worker proof names only this operation's exact transform;
+            // the candidate contains an externally injected suffix and must fail.
+            resultBlobOid: gitBlobOid('updated\n'),
+          };
+        },
+      },
+    });
+    const accepted = await owner.openManagedWorkspaceBaseline(
+      runtimeStore,
+      openRequest(sourceRoot),
+    );
+    const admission = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+      operationId,
+      toolName: 'Edit',
+      persistedArgs: args,
+      abortSignal: new AbortController().signal,
+    });
+    await commitManagedMutationT1(runtimeStore, admission.durableDispatch, {
+      operationId,
+      toolCallId,
+      toolName: 'Edit',
+      args,
+    });
+    const { binding } = inspectManagedWorkspaceExecutionHandleInternal(accepted.executionHandle);
+    await writeFile(join(binding.worktreePath, args.path), 'tracked\nEXTERNAL\n', 'utf8');
+
+    await assert.rejects(
+      admission.execute(async () => {
+        const result = await owner.executeManagedMutationFilesystemOperation(
+          {
+            kind: 'edit',
+            path: args.path,
+            oldString: args.old_string,
+            newString: args.new_string,
+          },
+          new AbortController().signal,
+        );
+        const content = { kind: 'json' as const, value: result };
+        return {
+          content,
+          isError: false,
+          durationMs: 1,
+          durableOutcome: managedMutationOutcome(operationId, toolCallId, content, false, 'Edit'),
+        };
+      }),
+      /worker result blob/u,
+    );
+    assert.equal(
+      (
+        await runtimeStore.readWorkspaceHead(
+          accepted.head.workspaceId,
+          accepted.head.workspaceEpochId,
+        )
+      )?.revision,
+      1,
+    );
+    await owner.close();
+  } finally {
+    runtimeStore.close();
+    await rootOwner.close();
+  }
+});
+
 test('atomically settles post-T1 failure and successful no-effect Writes without advancing the head', async () => {
   const root = await temporaryRoot();
   const storageRoot = join(root, 'storage');
@@ -485,6 +586,7 @@ test('atomically settles post-T1 failure and successful no-effect Writes without
             ok: true as const,
             path: target,
             bytes: Buffer.byteLength(input.operation.content, 'utf8'),
+            resultBlobOid: gitBlobOid(input.operation.content),
           };
         },
       },
@@ -1427,7 +1529,10 @@ async function commitManagedMutationT1(
   input: {
     operationId: string;
     toolCallId: string;
-    args: { path: string; content: string };
+    toolName?: 'Write' | 'Edit';
+    args:
+      | { path: string; content: string }
+      | { path: string; old_string: string; new_string: string };
   },
 ): Promise<void> {
   const identity = {
@@ -1436,7 +1541,8 @@ async function commitManagedMutationT1(
     runId: 'run-managed-mutation',
     turnId: 'turn-managed-mutation',
   };
-  const canonicalArgsHash = canonicalToolArgsHash('Write', input.args);
+  const toolName = input.toolName ?? 'Write';
+  const canonicalArgsHash = canonicalToolArgsHash(toolName, input.args);
   await store.commitToolPrepared({
     operationId: input.operationId,
     journalEventId: `${input.operationId}_prepared`,
@@ -1450,7 +1556,7 @@ async function commitManagedMutationT1(
       content: {
         kind: 'function_call',
         id: input.toolCallId,
-        name: 'Write',
+        name: toolName,
         args: input.args,
       },
       refs: { operationId: input.operationId, toolCallId: input.toolCallId },
@@ -1467,7 +1573,7 @@ async function commitManagedMutationT1(
           protocol: 't1_after_preflight_v1',
           operationId: input.operationId,
           providerToolCallId: input.toolCallId,
-          toolName: 'Write',
+          toolName,
           canonicalArgsHash,
           recoveryMode: 'reconcile',
           managedMutation,
@@ -1476,7 +1582,7 @@ async function commitManagedMutationT1(
       refs: { operationId: input.operationId, toolCallId: input.toolCallId },
     },
     providerToolCallId: input.toolCallId,
-    toolName: 'Write',
+    toolName,
     canonicalArgsHash,
     recoveryMode: 'reconcile',
     committedAt: 10,
@@ -1488,6 +1594,7 @@ function managedMutationOutcome(
   toolCallId: string,
   result: unknown,
   isError = false,
+  toolName: 'Write' | 'Edit' = 'Write',
 ): RuntimeEvent {
   return {
     id: `${operationId}_response`,
@@ -1504,13 +1611,21 @@ function managedMutationOutcome(
     content: {
       kind: 'function_response',
       id: toolCallId,
-      name: 'Write',
+      name: toolName,
       result,
       ...(isError ? { isError: true } : {}),
     },
     refs: { operationId, toolCallId },
     actions: { stateDelta: { durationMs: 1 } },
   };
+}
+
+function gitBlobOid(content: string): string {
+  const bytes = Buffer.from(content, 'utf8');
+  return createHash('sha1')
+    .update(`blob ${bytes.byteLength}\0`, 'utf8')
+    .update(bytes)
+    .digest('hex');
 }
 
 async function git(cwd: string, ...args: string[]): Promise<string> {

@@ -152,6 +152,11 @@ export type ManagedWorkspaceMutationSettlement =
       readonly durableOutcome: import('@maka/core/runtime-event').RuntimeEvent;
     };
 
+interface ManagedMutationExecutionContext {
+  readonly scope: ManagedWorkspaceExecutionScope;
+  resultBlobOid?: string;
+}
+
 export interface ManagedWorkspaceOwner {
   readonly state: 'ready' | 'closing' | 'closed';
   openManagedWorkspaceBaseline(
@@ -247,7 +252,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
   readonly #drainWaiters = new Set<() => void>();
   readonly #assertCurrentRootIdentity: () => Promise<void>;
   readonly #executionContext = new AsyncLocalStorage<object>();
-  readonly #mutationExecutionContext = new AsyncLocalStorage<ManagedWorkspaceExecutionScope>();
+  readonly #mutationExecutionContext = new AsyncLocalStorage<ManagedMutationExecutionContext>();
   #closeTask: Promise<void> | undefined;
   readonly #executionOwnerToken = {};
   readonly #workerBridge: ManagedWorkspaceWorkerBridgeInternal | undefined;
@@ -554,6 +559,17 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         );
       }
       const canonicalPath = canonicalManagedMutationPath(input.toolName, input.persistedArgs);
+      const baseBlobOid = await this.mutationCandidateAuthority.readBaseBlob(
+        accepted.binding,
+        currentHead,
+        canonicalPath,
+      );
+      if (input.toolName === 'Edit' && baseBlobOid === null) {
+        throw new ManagedWorkspaceOwnerError(
+          'managed_workspace_owner_unavailable',
+          'Managed Edit target is absent from the admitted base tree',
+        );
+      }
       input.abortSignal.throwIfAborted();
       const durableDispatch = Object.freeze({
         protocol: 'managed_mutation_v1' as const,
@@ -567,6 +583,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         baseHeadRevision: currentHead.revision,
         baseCommitOid: currentHead.commitOid,
         baseTreeOid: currentHead.treeOid,
+        baseBlobOid,
         expectedPaths: Object.freeze([canonicalPath]),
         executionProfileDigest: this.#workerBridge.mutationExecutionProfileDigest,
       });
@@ -596,10 +613,13 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
               head: freezeWorkspaceHead(currentHead),
               operationId: input.operationId,
               expectedPaths: durableDispatch.expectedPaths,
+              objectFormat: accepted.binding.objectFormat,
+              baseBlobOid,
             });
             try {
+              const executionContext: ManagedMutationExecutionContext = { scope };
               const proof = await this.#executionContext.run(this.#executionOwnerToken, () =>
-                this.#mutationExecutionContext.run(scope, operation),
+                this.#mutationExecutionContext.run(executionContext, operation),
               );
               if (proof.isError) {
                 await this.#requireReady(accepted.binding);
@@ -617,6 +637,12 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
                   durableOutcome: proof.durableOutcome,
                 });
               }
+              if (!executionContext.resultBlobOid) {
+                throw new ManagedWorkspaceOwnerError(
+                  'managed_workspace_owner_unavailable',
+                  'Managed mutation completed without an exact worker result blob',
+                );
+              }
               let candidate: ManagedMutationCandidateReceiptV1;
               try {
                 candidate = await this.mutationCandidateAuthority.capture({
@@ -624,6 +650,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
                   operationId: input.operationId,
                   baseHead: currentHead,
                   expectedPaths: durableDispatch.expectedPaths,
+                  expectedBlobOid: executionContext.resultBlobOid,
                   executionProfileDigest: durableDispatch.executionProfileDigest,
                 });
               } catch (error) {
@@ -632,6 +659,12 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
                   error.code !== 'managed_mutation_no_change'
                 ) {
                   throw error;
+                }
+                if (executionContext.resultBlobOid !== baseBlobOid) {
+                  throw new ManagedWorkspaceOwnerError(
+                    'managed_workspace_owner_unavailable',
+                    'Managed mutation no-change state conflicts with its worker result blob',
+                  );
                 }
                 await this.#requireReady(accepted.binding);
                 await commitManagedMutationTerminalInternal(accepted.store, {
@@ -740,14 +773,22 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         'Managed workspace filesystem worker is unavailable',
       );
     }
-    const scope = this.#mutationExecutionContext.getStore();
-    if (!scope) {
+    const context = this.#mutationExecutionContext.getStore();
+    if (!context) {
       throw new ManagedWorkspaceOwnerError(
         'managed_workspace_execution_handle_invalid',
         'Managed mutation worker is available only inside its active admission',
       );
     }
-    return await this.#workerBridge.executeMutation(scope, operation, abortSignal);
+    if (context.resultBlobOid) {
+      throw new ManagedWorkspaceOwnerError(
+        'managed_workspace_execution_handle_invalid',
+        'Managed mutation worker result was already consumed',
+      );
+    }
+    const result = await this.#workerBridge.executeMutation(context.scope, operation, abortSignal);
+    context.resultBlobOid = result.resultBlobOid;
+    return result;
   }
 
   close(): Promise<void> {
@@ -933,6 +974,7 @@ function assertManagedMutationReservation(
     reservation.baseHeadRevision !== dispatch.baseHeadRevision ||
     reservation.baseCommitOid !== dispatch.baseCommitOid ||
     reservation.baseTreeOid !== dispatch.baseTreeOid ||
+    reservation.baseBlobOid !== dispatch.baseBlobOid ||
     reservation.executionProfileDigest !== dispatch.executionProfileDigest ||
     reservation.expectedPaths.length !== dispatch.expectedPaths.length ||
     reservation.expectedPaths.some((path, index) => path !== dispatch.expectedPaths[index])

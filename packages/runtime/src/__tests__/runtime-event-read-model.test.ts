@@ -1705,6 +1705,7 @@ const ACTION_COVERAGE_SAMPLES: ActionCoverageSamples = {
         baseHeadRevision: 1,
         baseCommitOid: '1'.repeat(40),
         baseTreeOid: '2'.repeat(40),
+        baseBlobOid: '3'.repeat(40),
         expectedPaths: ['tracked.txt'],
         executionProfileDigest: `sha256:${'6'.repeat(64)}`,
       },

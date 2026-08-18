@@ -251,6 +251,8 @@ export interface RuntimeEventManagedWorkspaceMutationV1 {
   baseHeadRevision: number;
   baseCommitOid: string;
   baseTreeOid: string;
+  /** Git blob at expectedPaths[0] in baseTreeOid, or null when Write creates it. */
+  baseBlobOid: string | null;
   expectedPaths: readonly string[];
   executionProfileDigest: `sha256:${string}`;
 }
@@ -573,6 +575,7 @@ const RUNTIME_MANAGED_WORKSPACE_MUTATION_SHAPE =
       'baseHeadRevision',
       'baseCommitOid',
       'baseTreeOid',
+      'baseBlobOid',
       'expectedPaths',
       'executionProfileDigest',
     ],
@@ -880,6 +883,7 @@ function isRuntimeManagedWorkspaceMutation(
     value.baseHeadRevision < 1 ||
     typeof value.baseCommitOid !== 'string' ||
     typeof value.baseTreeOid !== 'string' ||
+    (value.baseBlobOid !== null && typeof value.baseBlobOid !== 'string') ||
     !isSha256Digest(value.executionProfileDigest) ||
     !Array.isArray(value.expectedPaths) ||
     value.expectedPaths.length === 0 ||
@@ -889,7 +893,13 @@ function isRuntimeManagedWorkspaceMutation(
   }
   const expectedPaths = value.expectedPaths;
   const oidPattern = value.objectFormat === 'sha1' ? /^[0-9a-f]{40}$/u : /^[0-9a-f]{64}$/u;
-  if (!oidPattern.test(value.baseCommitOid) || !oidPattern.test(value.baseTreeOid)) return false;
+  if (
+    !oidPattern.test(value.baseCommitOid) ||
+    !oidPattern.test(value.baseTreeOid) ||
+    (value.baseBlobOid !== null && !oidPattern.test(value.baseBlobOid))
+  ) {
+    return false;
+  }
   return (
     new Set(expectedPaths).size === expectedPaths.length &&
     expectedPaths.every(isCanonicalManagedMutationPathV1) &&

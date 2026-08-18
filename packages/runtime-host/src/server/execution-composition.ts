@@ -1779,11 +1779,18 @@ function adaptManagedWorkspaceFilesystemWorker(
       switch (result.kind) {
         case 'read':
         case 'read_image':
-        case 'write':
-        case 'edit':
         case 'glob':
         case 'grep':
           return result;
+        case 'write':
+        case 'edit':
+          if (!result.resultBlobOid) {
+            throw new RuntimeHostWorkspaceExecutionError(
+              'workspace_operation_denied',
+              'Managed mutation worker omitted its exact result blob identity',
+            );
+          }
+          return { ...result, resultBlobOid: result.resultBlobOid };
         default:
           throw new RuntimeHostWorkspaceExecutionError(
             'workspace_operation_denied',

@@ -58,6 +58,10 @@ export interface FilesystemWorkerExecuteInput {
   /** Explicit embedding policy. Mode-based defaults are compiled only when omitted. */
   permissionProfile?: PermissionProfile;
   abortSignal?: AbortSignal;
+  mutationEvidence?: {
+    readonly objectFormat: 'sha1' | 'sha256';
+    readonly baseBlobOid: string | null;
+  };
 }
 
 export type FilesystemWorkerClientErrorReason =
@@ -247,6 +251,7 @@ export class FilesystemWorkerClient {
         scope: target.scope,
         targetType: target.targetType,
       },
+      ...(input.mutationEvidence ? { mutationEvidence: input.mutationEvidence } : {}),
     } as const;
     const requestJson = JSON.stringify(request);
     if (Buffer.byteLength(requestJson, 'utf8') > FILESYSTEM_WORKER_MAX_REQUEST_BYTES) {

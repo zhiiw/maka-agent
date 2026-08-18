@@ -1615,6 +1615,16 @@ export class SqliteRuntimeStore
       if (!Array.isArray(expectedPaths) || expectedPaths.some((path) => typeof path !== 'string')) {
         throw new Error('Managed mutation reservation has invalid expected paths');
       }
+      const dispatchEvent = this.readRequiredRuntimeEvent(reservation.dispatch_event_id);
+      const mutation = dispatchEvent.actions?.toolDispatch?.managedMutation;
+      if (
+        !mutation ||
+        mutation.protocol !== 'managed_mutation_v1' ||
+        mutation.workspaceInstanceId !== reservation.workspace_instance_id ||
+        mutation.baseTreeOid !== reservation.base_tree_oid
+      ) {
+        throw new Error('Managed mutation reservation has invalid immutable dispatch evidence');
+      }
       return {
         workspaceInstanceId: reservation.workspace_instance_id,
         repositoryId: reservation.repository_id,
@@ -1627,6 +1637,7 @@ export class SqliteRuntimeStore
         baseHeadRevision: reservation.base_head_revision,
         baseCommitOid: reservation.base_commit_oid,
         baseTreeOid: reservation.base_tree_oid,
+        baseBlobOid: mutation.baseBlobOid,
         expectedPaths,
         executionProfileDigest: reservation.execution_profile_digest,
         reservedAt: reservation.reserved_at,

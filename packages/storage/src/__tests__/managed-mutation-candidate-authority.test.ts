@@ -151,7 +151,13 @@ describe('managed mutation candidate authority', () => {
       }
 
       const receipt = await requireManagedMutationCandidateAuthorityInternal(service).capture(
-        candidateRequest(binding, baseline, [relativePath], `operation-nested-${mutation}`),
+        candidateRequest(
+          binding,
+          baseline,
+          [relativePath],
+          `operation-nested-${mutation}`,
+          mutation === 'delete' ? null : `${mutation}\n`,
+        ),
       );
 
       assert.deepEqual(receipt.changedPaths, [relativePath]);
@@ -357,6 +363,7 @@ function candidateRequest(
   >,
   expectedPaths: readonly string[] = ['tracked.txt'],
   operationId = 'operation-candidate-1',
+  expectedContent: string | null = 'candidate\n',
 ) {
   return {
     binding,
@@ -372,8 +379,17 @@ function candidateRequest(
       revision: 1,
     },
     expectedPaths,
+    expectedBlobOid: expectedContent === null ? null : gitBlobOid(expectedContent),
     executionProfileDigest: `sha256:${'e'.repeat(64)}`,
   } as const;
+}
+
+function gitBlobOid(content: string): string {
+  const bytes = Buffer.from(content, 'utf8');
+  return createHash('sha1')
+    .update(`blob ${bytes.byteLength}\0`, 'utf8')
+    .update(bytes)
+    .digest('hex');
 }
 
 async function serviceAt(storageRoot: string): Promise<GitWorkspaceService> {

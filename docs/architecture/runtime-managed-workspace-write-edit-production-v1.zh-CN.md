@@ -13,9 +13,10 @@
 explicit managed-coding-v1 profile
   -> Host 打开同一个 owner-bound managed workspace execution handle
   -> owner 从真实 filesystem worker permission profile + protocol 计算 profile digest
-  -> T1 原子持久化 call + dispatch + exact base/path/profile + exclusive reservation
-  -> worker 只在该 admission 的 mutation scope 内执行
-  -> Git owner capture exact candidate
+  -> Git owner 从 accepted base tree 读取目标路径的 exact base blob
+  -> T1 原子持久化 call + dispatch + exact base tree/blob/path/profile + exclusive reservation
+  -> worker 在同一 transform 进程内先验证 base blob，再返回 exact result blob
+  -> Git owner capture candidate，并验证 immutable candidate tree 的目标 blob 等于 worker result blob
   -> SQLite 原子提交 exact T2 + successor fact + canonical head，并释放 reservation
   -> Git candidate 幂等 accept，将 worktree 投影到 SQLite accepted head
 ```
@@ -43,6 +44,12 @@ owner 和 successor 协议，因此不会暴露给 managed task；不能借由�
 SQLite successor 已提交而 Git accept 尚未完成时，系统已经拥有 canonical accepted truth。新进程重新打开
 workspace 时必须从 SQLite head 找到 operation-bound candidate，严格重验 commit/tree/path/profile 后再 accept；不得
 重新执行 Write/Edit。
+
+changed-path 集合不是内容因果证据。首版 Write/Edit 只允许一个 canonical path，T1 中的 `baseBlobOid`
+证明 operation 所面对的 preimage（新建文件为 `null`）；worker 的 `resultBlobOid` 证明同一份生产 transform
+生成的 exact after-image；candidate receipt 则把该 digest 绑定到 immutable Git tree。外部进程无论在 worker
+之前还是 worker 与 capture 之间修改同一路径，都会分别在 preimage 或 candidate blob 验证处 fail closed，不能
+仅因为 changed paths 仍然相同而进入 accepted successor。
 
 ## 3. 无副作用终态
 
@@ -84,6 +91,7 @@ T1 后取消不允许在 operation capability 之前短路。Runtime 仍调用�
 | T1 前 | 无 reservation | 明确失败，可重新 admission |
 | T1 后取消，worker 明确未产生 effect 且 Git clean | error T2 + terminal fact | 已收敛，head 不变 |
 | T1 后、worker 前/中，effect 不可证明 | reservation 保留 | park；M2.4 不自动猜测或覆盖 |
+| 同路径外部写入导致 base/result blob mismatch | reservation 保留 | park/quarantine；不得吸收到 successor |
 | worker error 且 Git owner 证明 clean base | error T2 + terminal fact | 已收敛，head 不变 |
 | success 但 tree 无变化 | success T2 + terminal fact | 已收敛，head 不变 |
 | candidate capture 后、SQLite commit 前 | T1 + candidate artifact | reservation 保留；不得对外宣称成功 |

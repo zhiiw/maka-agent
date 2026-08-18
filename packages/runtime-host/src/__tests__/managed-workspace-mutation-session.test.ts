@@ -63,6 +63,7 @@ test('binds read and mutation operations to one owner-issued managed handle', as
         ok: true as const,
         path: operation.path,
         bytes: 7,
+        resultBlobOid: '1'.repeat(40),
       };
     },
     async openManagedWorkspaceBaseline() {

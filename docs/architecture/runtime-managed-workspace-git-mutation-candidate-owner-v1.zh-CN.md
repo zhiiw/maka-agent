@@ -14,6 +14,7 @@
 ```text
 accepted base commit
   + declared changed paths
+  + exact resulting blob for the sole path
   + fixed candidate policy
   + execution profile digest
         ↓
@@ -39,6 +40,7 @@ config 和 storage-root writer lock。M2.2 通过 storage-internal `WeakMap` cap
 - worktree 是非 symlink 目录，common-dir 指向 Maka repository，worktree lock 仍存在；
 - worktree `HEAD`、managed head ref、base commit/tree 同时匹配；
 - status 只有声明的路径，没有 ignored、rename/copy 或额外变化；
+- 首版单文件 mutation 的 candidate tree 中，目标 blob 必须精确等于 worker result blob（删除为 absent）；
 - candidate 全树只有普通 blob mode `100644/100755`，没有 symlink、submodule、special mode、属性文件或大小写冲突；
 - candidate commit 只有一个 parent，且 commit identity/message 使用固定协议；
 - receipt 的 ref、commit、tree、parent、递归文件级 delta digest 和路径集合可从 Git object database 重算；
@@ -55,7 +57,7 @@ sequenceDiagram
   participant R as Maka Git Repository
   participant D as Durable Receipt Directory
 
-  C->>G: capture(binding, operation, baseHead, expectedPaths, profile)
+  C->>G: capture(binding, operation, baseHead, expectedPath, expectedBlob, profile)
   G->>G: acquire storage-root writer lock
   G->>G: verify binding, worktree owner, exact base and status
   G->>R: read-tree(base) into private temporary index
@@ -95,6 +97,7 @@ tombstone 在删除 ref 前落盘，所以崩溃后不会把“外部删 ref”�
 |---|---|---|
 | base/head/worktree owner 漂移 | `managed_workspace_drifted` 或 identity conflict | park；不发布 ref |
 | undeclared、ignored、dependency/control path | `managed_mutation_candidate_rejected` | 不发布 ref |
+| candidate 目标 blob 与 worker result blob 不同 | `managed_mutation_candidate_rejected` | 不发布 ref；park/quarantine |
 | symlink/submodule/special mode/attributes/case collision | reject | 不发布 receipt；已生成 object 可 GC |
 | 同 operation 已有不同 ref/receipt | identity conflict | fail closed |
 | ref 后崩溃 | ref 保留、receipt 缺失 | exact capture 重放 |
@@ -123,9 +126,9 @@ receipt 证据，不能退化成顶层目录名。
 
 ## 7. 留给 M2.3a/M2.3b/M2.4 的边界
 
-M2.2 不证明变化一定由某一次 Write/Edit 造成。M2.3a 必须把 T1 identity 与 durable exclusive reservation
+M2.2 单独不证明调用者提供的 expected blob 一定由某一次 Write/Edit 造成。M2.3a 必须把 T1 identity 与 durable exclusive reservation
 原子绑定并把 exact changed paths 带入 accepted truth；M2.3b 在 T1 前冻结 owner-bound execution admission；
-M2.4 必须核对正常工具 transform 的 expected result，调用 M2.1 原子 bundle，并在真实 Host kill/reopen
+M2.4 必须让真实 worker 验证 T1 base blob、返回 result blob，再由 candidate owner 核对 immutable tree，调用 M2.1 原子 bundle，并在真实 Host kill/reopen
 测试中证明唯一 accepted successor。
 
 因此本切片保持 Draft；它没有生产 consumer，也不提升当前 Desktop 的 resume 能力。

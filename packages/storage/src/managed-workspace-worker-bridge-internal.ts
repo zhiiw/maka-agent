@@ -56,6 +56,10 @@ interface ManagedWorkspaceFilesystemWorkerInput {
   readonly cwd: string;
   readonly executionBoundary: ExecutionBoundary;
   readonly abortSignal?: AbortSignal;
+  readonly mutationEvidence?: {
+    readonly objectFormat: 'sha1' | 'sha256';
+    readonly baseBlobOid: string | null;
+  };
 }
 
 export type ManagedWorkspaceReadOnlyResult =
@@ -75,6 +79,7 @@ export type ManagedWorkspaceMutationResult =
       readonly path: string;
       readonly bytes: number;
       readonly diff?: string;
+      readonly resultBlobOid: string;
     }
   | {
       readonly kind: 'edit';
@@ -85,6 +90,7 @@ export type ManagedWorkspaceMutationResult =
       readonly startLine: number;
       readonly endLine: number;
       readonly diff?: string;
+      readonly resultBlobOid: string;
     };
 
 export type ManagedWorkspaceFilesystemResult =
@@ -205,9 +211,17 @@ export function createManagedWorkspaceWorkerBridgeInternal(
           createWorkspaceWritePermissionProfile(),
           0,
         ),
+        mutationEvidence: {
+          objectFormat: state.objectFormat,
+          baseBlobOid: state.baseBlobOid,
+        },
         ...(abortSignal ? { abortSignal } : {}),
       });
-      if (!isMutationResult(result) || result.kind !== operation.kind) {
+      if (
+        !isMutationResult(result) ||
+        result.kind !== operation.kind ||
+        !blobOidMatchesObjectFormat(result.resultBlobOid, state.objectFormat)
+      ) {
         throw new ManagedWorkspaceWorkerBridgeError(
           'managed_workspace_operation_denied',
           'Managed workspace mutation worker returned a mismatched result',
@@ -246,4 +260,11 @@ function isMutationResult(
   input: ManagedWorkspaceFilesystemResult,
 ): input is ManagedWorkspaceMutationResult {
   return input.kind === 'write' || input.kind === 'edit';
+}
+
+function blobOidMatchesObjectFormat(oid: unknown, objectFormat: 'sha1' | 'sha256'): oid is string {
+  return (
+    typeof oid === 'string' &&
+    (objectFormat === 'sha1' ? /^[0-9a-f]{40}$/u : /^[0-9a-f]{64}$/u).test(oid)
+  );
 }

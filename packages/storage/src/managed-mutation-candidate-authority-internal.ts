@@ -6,6 +6,8 @@ export interface ManagedMutationCandidateRequest {
   readonly operationId: string;
   readonly baseHead: WorkspaceHeadRecordV1;
   readonly expectedPaths: readonly string[];
+  /** Exact resulting blob, or null when the sole declared path is deleted. */
+  readonly expectedBlobOid: string | null;
   readonly executionProfileDigest: `sha256:${string}`;
 }
 
@@ -29,10 +31,16 @@ export interface ManagedMutationCandidateReceiptV1 {
   readonly treeDeltaDigest: `sha256:${string}`;
   readonly changedPaths: readonly string[];
   readonly deletedPaths: readonly string[];
+  readonly expectedBlobOid: string | null;
   readonly executionProfileDigest: `sha256:${string}`;
 }
 
 export interface ManagedMutationCandidateAuthorityInternal {
+  readBaseBlob(
+    binding: ManagedWorkspaceBinding,
+    baseHead: WorkspaceHeadRecordV1,
+    path: string,
+  ): Promise<string | null>;
   capture(request: ManagedMutationCandidateRequest): Promise<ManagedMutationCandidateReceiptV1>;
   require(
     binding: ManagedWorkspaceBinding,

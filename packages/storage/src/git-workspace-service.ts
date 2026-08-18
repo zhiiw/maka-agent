@@ -14,6 +14,7 @@ import {
 import { dirname, isAbsolute, join, normalize, posix, relative, resolve } from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { isCanonicalManagedMutationPathV1 } from '@maka/core/runtime-event';
+import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import { withArtifactWriterLock } from './artifact-writer-lock.js';
 import { bundledGitEnvironment } from './dugite-native-environment.js';
 import { registerManagedBaselineReceiptAuthorityInternal } from './managed-baseline-receipt-authority-internal.js';
@@ -128,6 +129,7 @@ const MUTATION_CANDIDATE_RECEIPT_KEYS = [
   'treeDeltaDigest',
   'changedPaths',
   'deletedPaths',
+  'expectedBlobOid',
   'executionProfileDigest',
 ] as const;
 const MUTATION_CANDIDATE_POLICY_V1 = {
@@ -138,6 +140,7 @@ const MUTATION_CANDIDATE_POLICY_V1 = {
   symlinks: 'reject',
   submodules: 'reject',
   renames: 'reject',
+  content: 'exact_worker_result_blob',
   commitParents: 'exactly_one',
 } as const;
 const MUTATION_CANDIDATE_POLICY_HASH_V1 = hashCanonicalJson(MUTATION_CANDIDATE_POLICY_V1);
@@ -428,6 +431,8 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       verify: (receipt) => this.#verifyManagedWorkspaceBaselineReceipt(receipt),
     });
     registerManagedMutationCandidateAuthorityInternal(this, {
+      readBaseBlob: (binding, baseHead, path) =>
+        this.#readManagedMutationBaseBlob(binding, baseHead, path),
       capture: (request) => this.#captureManagedMutationCandidate(request),
       require: (binding, operationId) =>
         this.#requireManagedMutationCandidate(binding, operationId),
@@ -806,6 +811,13 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           );
         }
         await this.assertSupportedMutationCandidateTree(binding, candidateTreeOid, layout);
+        await this.assertManagedMutationCandidateBlob(
+          binding,
+          candidateTreeOid,
+          request.expectedPaths[0]!,
+          request.expectedBlobOid,
+          layout,
+        );
         const candidateCommitOid = (
           await this.runtime.run(
             [
@@ -862,6 +874,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           treeDeltaDigest: delta.treeDeltaDigest,
           changedPaths: delta.changedPaths,
           deletedPaths: delta.deletedPaths,
+          expectedBlobOid: request.expectedBlobOid,
           executionProfileDigest: request.executionProfileDigest,
         };
         await atomicWriteJson(receiptPath, receipt);
@@ -877,6 +890,51 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         await rm(indexPath, { force: true });
         await rm(`${indexPath}.lock`, { force: true });
       }
+    });
+  }
+
+  async #readManagedMutationBaseBlob(
+    binding: ManagedWorkspaceBinding,
+    baseHead: WorkspaceHeadRecordV1,
+    path: string,
+  ): Promise<string | null> {
+    const canonicalPath = assertManagedMutationPath(path);
+    const runtime = await this.runtime.verify();
+    return await withArtifactWriterLock(this.input.storageRoot, async (canonicalStorageRoot) => {
+      const layout = workspaceLayout(canonicalStorageRoot, binding);
+      const summary = await this.requireVerifiedMutationContext(binding, layout, runtime.digest);
+      const baselineReceipt = await readBaselineReceipt(layout.baselineReceiptPath);
+      if (!baselineReceipt) {
+        throw new GitWorkspaceServiceError(
+          'managed_workspace_unavailable',
+          'Canonical workspace baseline receipt is unavailable',
+        );
+      }
+      assertBaselineReceiptMatches(baselineReceipt, binding, summary);
+      assertCandidateBaseMatches(binding, baselineReceipt, baseHead);
+      const entries = parseTreeEntries(
+        await this.runtime.runBuffer(
+          [
+            '--literal-pathspecs',
+            '--git-dir',
+            binding.repositoryPath,
+            'ls-tree',
+            '-z',
+            baseHead.treeOid,
+            '--',
+            canonicalPath,
+          ],
+          layout.homePath,
+        ),
+      ).filter((entry) => entry.path === canonicalPath);
+      if (entries.length === 0) return null;
+      if (entries.length !== 1 || entries[0]!.objectType !== 'blob') {
+        throw new GitWorkspaceServiceError(
+          'managed_mutation_candidate_rejected',
+          'Managed mutation base path is not one regular Git blob',
+        );
+      }
+      return entries[0]!.oid;
     });
   }
 
@@ -986,6 +1044,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           operationId: receipt.operationId,
           baseHead: receipt.baseHead,
           expectedPaths: receipt.changedPaths,
+          expectedBlobOid: receipt.expectedBlobOid,
           executionProfileDigest: receipt.executionProfileDigest,
         },
         identity.ref,
@@ -1114,6 +1173,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           operationId,
           baseHead: receipt.baseHead,
           expectedPaths: receipt.changedPaths,
+          expectedBlobOid: receipt.expectedBlobOid,
           executionProfileDigest: receipt.executionProfileDigest,
         },
         identity.ref,
@@ -1351,6 +1411,13 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       receipt.candidateTreeOid,
       layout,
     );
+    await this.assertManagedMutationCandidateBlob(
+      storedBinding,
+      receipt.candidateTreeOid,
+      receipt.changedPaths[0]!,
+      receipt.expectedBlobOid,
+      layout,
+    );
     const delta = await this.readMutationDelta(
       storedBinding,
       receipt.baseHead.commitOid,
@@ -1365,6 +1432,42 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       throw new GitWorkspaceServiceError(
         'managed_workspace_identity_conflict',
         'Managed mutation candidate receipt does not match its Git delta',
+      );
+    }
+  }
+
+  private async assertManagedMutationCandidateBlob(
+    binding: ManagedWorkspaceBinding,
+    treeOid: string,
+    path: string,
+    expectedBlobOid: string | null,
+    layout: WorkspaceLayout,
+  ): Promise<void> {
+    const entries = parseTreeEntries(
+      await this.runtime.runBuffer(
+        [
+          '--literal-pathspecs',
+          '--git-dir',
+          binding.repositoryPath,
+          'ls-tree',
+          '-z',
+          treeOid,
+          '--',
+          path,
+        ],
+        layout.homePath,
+      ),
+    ).filter((entry) => entry.path === path);
+    const matches =
+      expectedBlobOid === null
+        ? entries.length === 0
+        : entries.length === 1 &&
+          entries[0]!.objectType === 'blob' &&
+          entries[0]!.oid === expectedBlobOid;
+    if (!matches) {
+      throw new GitWorkspaceServiceError(
+        'managed_mutation_candidate_rejected',
+        'Managed mutation candidate does not match its worker result blob',
       );
     }
   }
@@ -3100,6 +3203,7 @@ function assertMutationCandidateRequest(request: ManagedMutationCandidateRequest
       'operationId',
       'baseHead',
       'expectedPaths',
+      'expectedBlobOid',
       'executionProfileDigest',
     ])
   ) {
@@ -3112,9 +3216,10 @@ function assertMutationCandidateRequest(request: ManagedMutationCandidateRequest
   if (
     !/^[A-Za-z0-9_-]{1,128}$/u.test(request.operationId) ||
     !SHA256_PATTERN.test(request.executionProfileDigest) ||
+    (request.expectedBlobOid !== null &&
+      !oidMatchesObjectFormat(request.expectedBlobOid, request.binding.objectFormat)) ||
     !isWorkspaceHeadRecord(request.baseHead) ||
-    request.expectedPaths.length === 0 ||
-    request.expectedPaths.length > 32
+    request.expectedPaths.length !== 1
   ) {
     throw new GitWorkspaceServiceError(
       'managed_workspace_identity_conflict',
@@ -3241,8 +3346,12 @@ function isMutationCandidateReceipt(value: unknown): value is ManagedMutationCan
     typeof value.treeDeltaDigest === 'string' &&
     SHA256_PATTERN.test(value.treeDeltaDigest) &&
     isCanonicalPathArray(value.changedPaths, false) &&
+    value.changedPaths.length === 1 &&
     isCanonicalPathArray(value.deletedPaths, true) &&
     isPathSubset(value.deletedPaths, value.changedPaths) &&
+    (value.expectedBlobOid === null ||
+      (typeof value.expectedBlobOid === 'string' &&
+        oidMatchesObjectFormat(value.expectedBlobOid, value.objectFormat))) &&
     typeof value.executionProfileDigest === 'string' &&
     SHA256_PATTERN.test(value.executionProfileDigest)
   );
@@ -3268,6 +3377,7 @@ function assertMutationCandidateReceiptMatches(
     receipt.workspacePolicyHash !== workspacePolicyHash ||
     !isDeepStrictEqual(receipt.baseHead, request.baseHead) ||
     !sameStringSet(receipt.changedPaths, request.expectedPaths) ||
+    receipt.expectedBlobOid !== request.expectedBlobOid ||
     receipt.executionProfileDigest !== request.executionProfileDigest
   ) {
     throw new GitWorkspaceServiceError(
