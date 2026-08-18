@@ -1,6 +1,6 @@
 # Managed Workspace Mutation Version Authority v1
 
-- 状态：M2.1 实现完成；保持 stacked Draft，等待 M1.3 前置合并后从最新 `main` 重建最终 PR
+- 状态：M2.1 切片实现完成；已从最新 `upstream/main` 平铺重建，保持 Draft 等待 M2.4 生产消费者
 - 更新日期：2026-08-17
 - 主要不变量：工具成功结果、successor workspace fact、version projection 与 canonical head 推进只能全可见或全不可见
 - canonical source：immutable RuntimeEvents
