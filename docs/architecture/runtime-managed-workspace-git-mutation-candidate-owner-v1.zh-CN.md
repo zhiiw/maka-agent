@@ -119,7 +119,9 @@ tombstone 在删除 ref 前落盘，所以崩溃后不会把“外部删 ref”�
 
 进程崩溃承诺由真实 child-process kill/reopen 测试约束：capture 在 ref publication 后被杀，新进程补齐同一
 receipt；discard 在 ref deletion 后被杀，新进程依 tombstone 幂等完成清理；projection rotation 在保存旧目录及
-发布新目录两个点被杀，新进程只收敛投影且保留外部内容。统一的
+发布新目录两个点被杀，新进程只收敛投影且保留外部内容。rotation intent 同时绑定旧 worktree 根目录的
+device/inode identity；恢复拒绝预置 symlink/Windows junction，并且 projection owner 不再通过可替换 quarantine
+子路径删除 `.git`。统一的
 `scripts/recovery-test-inventory.mjs` 拥有 recovery suite 和三平台期望数量，Linux/macOS/Windows workflow 消费
 同一 inventory。嵌套目录的新增、修改与删除均以递归 `diff-tree -r` 的文件路径作为
 receipt 证据，不能退化成顶层目录名。

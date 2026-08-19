@@ -137,6 +137,52 @@ describe('managed mutation candidate authority', () => {
     );
   });
 
+  test('rejects a tampered Windows quarantine junction without deleting its target metadata', {
+    skip: process.platform !== 'win32',
+  }, async () => {
+    const root = await temporaryRoot();
+    const sourceRoot = await createEligibleSource(join(root, 'source'));
+    const service = await serviceAt(join(root, 'storage'));
+    const binding = await service.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+    const baseline = await requireManagedBaselineReceiptAuthorityInternal(service).issue(binding);
+    const authority = requireManagedMutationCandidateAuthorityInternal(service);
+    const receipt = await authority.capture(candidateRequest(binding, baseline));
+    const digest = receipt.candidateRef.split('/').at(-1)!;
+    const quarantineRoot = join(dirname(binding.worktreePath), 'projection-quarantine');
+    const externalWorktree = join(root, 'external-worktree');
+    const externalGitMetadata = join(externalWorktree, '.git');
+    await mkdir(quarantineRoot, { recursive: true });
+    await mkdir(externalWorktree);
+    await writeFile(externalGitMetadata, 'external git metadata\n', 'utf8');
+    await symlink(externalWorktree, join(quarantineRoot, digest), 'junction');
+
+    await assert.rejects(authority.accept(binding, receipt));
+    assert.equal(await readFile(externalGitMetadata, 'utf8'), 'external git metadata\n');
+  });
+
+  test('rejects a tampered POSIX quarantine symlink without deleting its target metadata', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const root = await temporaryRoot();
+    const sourceRoot = await createEligibleSource(join(root, 'source'));
+    const service = await serviceAt(join(root, 'storage'));
+    const binding = await service.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+    const baseline = await requireManagedBaselineReceiptAuthorityInternal(service).issue(binding);
+    const authority = requireManagedMutationCandidateAuthorityInternal(service);
+    const receipt = await authority.capture(candidateRequest(binding, baseline));
+    const digest = receipt.candidateRef.split('/').at(-1)!;
+    const quarantineRoot = join(dirname(binding.worktreePath), 'projection-quarantine');
+    const externalWorktree = join(root, 'external-worktree');
+    const externalGitMetadata = join(externalWorktree, '.git');
+    await mkdir(quarantineRoot, { recursive: true });
+    await mkdir(externalWorktree);
+    await writeFile(externalGitMetadata, 'external git metadata\n', 'utf8');
+    await symlink(externalWorktree, join(quarantineRoot, digest), 'dir');
+
+    await assert.rejects(authority.accept(binding, receipt));
+    assert.equal(await readFile(externalGitMetadata, 'utf8'), 'external git metadata\n');
+  });
+
   test('resumes projection rotation after the previous worktree was preserved', async () => {
     const root = await temporaryRoot();
     const sourceRoot = await createEligibleSource(join(root, 'source'));

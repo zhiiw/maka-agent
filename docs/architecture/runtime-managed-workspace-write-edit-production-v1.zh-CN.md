@@ -59,6 +59,11 @@ immutable Git tree。
 - candidate capture 后、projection publish 前发生 drift：旧目录整体移入 quarantine，外部内容原样保留；
 - 新 projection 发布后再发生 drift：最终验证拒绝，不运行 `reset --hard` 覆盖内容。
 
+rotation intent 在移动前持久化旧 worktree 根目录的 device/inode identity。恢复只接受同一非 symlink
+目录出现在确定性 quarantine path；预置 symlink、Windows junction 或其他 identity replacement 一律 fail closed。
+projection owner 不通过 quarantine 子路径删除 `.git` 或其他文件，旧目录作为完整树保留，避免路径在校验后再次
+被替换时产生越界删除。
+
 本协议明确禁止“校验 worktree preimage 后再原地覆盖”的 read-check-write，因为跨进程写入无法由进程内锁
 线性化。当前 bounded Git/worker transport 只支持 UTF-8 text；二进制或超过 transport 上限的目标在 T1 前
 fail closed。
@@ -108,7 +113,7 @@ T1 后取消不允许在 operation capability 之前短路。Runtime 仍调用�
 | success 但 tree 无变化 | success T2 + terminal fact | 已收敛，head 不变 |
 | candidate capture 后、SQLite commit 前 | T1 + candidate artifact | reservation 保留；不得对外宣称成功 |
 | SQLite successor commit 后、projection rotation intent 前 | accepted successor + candidate receipt | reopen 幂等 accept，不重跑工具 |
-| rotation 已保存旧目录、尚未发布新投影 | durable rotation intent + quarantined previous projection | reopen 发布新投影；旧内容仍可取回 |
+| rotation 已保存旧目录、尚未发布新投影 | durable rotation intent + identity-bound quarantined previous projection | reopen 重验目录 identity 后发布新投影；旧完整树仍可取回 |
 | rotation 已发布新投影、尚未推进 Git metadata/ref | durable rotation intent + 两份目录 | reopen 只推进 metadata/ref 并验证；不原地覆盖文件 |
 | Git accept 后、provider publication 前 | accepted successor | Runtime 采用 exact durable outcome；后续 replay 同值 |
 | 外部修改或 evidence mismatch | 不推进/不覆盖 | quarantine 或 park |
@@ -120,7 +125,7 @@ T1 后取消不允许在 operation capability 之前短路。Runtime 仍调用�
 | T1/reservation/terminal/successor SQLite 原子性 | 承诺 | 承诺 | 承诺 |
 | exact Write/Edit path + worker profile binding | 承诺 | 承诺 | 实现并由边界测试证明；当前 recovery runner 未打包 broker |
 | candidate capture/accept process-crash 收敛 | CI 证明 | CI 证明 | CI 证明 |
-| 外部并发写不被 projection rotation 覆盖 | rename 后旧 inode/目录进入 quarantine | rename 后旧 inode/目录进入 quarantine | 可 rename 时保留旧目录；打开句柄阻止 rename 时 fail closed |
+| 外部并发写不被 projection rotation 覆盖 | rename 后旧 inode/目录进入 quarantine；symlink tamper CI 拒绝 | rename 后旧 inode/目录进入 quarantine；symlink tamper CI 拒绝 | 可 rename 时保留旧目录；junction tamper 拒绝；打开句柄阻止 rename 时 fail closed |
 | 真实 Host/worker 在 successor commit 后 kill、reopen 不重跑 | CI 证明 | CI 证明 | release broker 存在；当前 recovery runner 明确 skip |
 | power-loss 后硬件永久写入顺序 | 不承诺 | 不承诺 | 不承诺 |
 

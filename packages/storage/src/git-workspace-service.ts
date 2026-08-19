@@ -421,10 +421,16 @@ interface ManagedMutationCandidateDiscardIntentV1 {
   readonly receipt: ManagedMutationCandidateReceiptV1;
 }
 
-interface ManagedMutationProjectionIntentV1 {
-  readonly schemaVersion: 1;
-  readonly protocol: 'maka_managed_mutation_projection_v1';
+interface ManagedMutationProjectionIntentV2 {
+  readonly schemaVersion: 2;
+  readonly protocol: 'maka_managed_mutation_projection_v2';
   readonly receipt: ManagedMutationCandidateReceiptV1;
+  readonly previousWorktreeIdentity: OwnedDirectoryIdentityV1;
+}
+
+interface OwnedDirectoryIdentityV1 {
+  readonly device: string;
+  readonly inode: string;
 }
 
 class GitWorkspaceServiceImpl implements GitWorkspaceService {
@@ -1219,10 +1225,11 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         encoding: 'utf8',
         flag: 'wx',
       });
-      const intent: ManagedMutationProjectionIntentV1 = {
-        schemaVersion: 1,
-        protocol: 'maka_managed_mutation_projection_v1',
+      const intent: ManagedMutationProjectionIntentV2 = {
+        schemaVersion: 2,
+        protocol: 'maka_managed_mutation_projection_v2',
         receipt,
+        previousWorktreeIdentity: await readOwnedDirectoryIdentity(binding.worktreePath),
       };
       await atomicWriteJson(paths.intentPath, intent);
       await this.input.failpoint?.('after_mutation_projection_intent');
@@ -1266,10 +1273,16 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           'Managed mutation projection lost both its current and previous worktree',
         );
       }
+      await assertOwnedDirectoryIdentity(binding.worktreePath, intent.previousWorktreeIdentity);
       await rename(binding.worktreePath, paths.previousPath);
       await this.input.failpoint?.('after_mutation_projection_previous');
     }
-    await rm(join(paths.previousPath, '.git'), { force: true });
+    // Never remove children through the quarantine pathname. The destination
+    // can be replaced by an external symlink/junction after any path-based
+    // check. Rotation therefore authenticates the renamed directory entry and
+    // leaves its complete tree intact; later quarantine lifecycle work must
+    // use an equally owner-bound primitive.
+    await assertOwnedDirectoryIdentity(paths.previousPath, intent.previousWorktreeIdentity);
 
     const stableAfterPrevious = await pathEntryExists(binding.worktreePath);
     if (!stableAfterPrevious) {
@@ -3318,15 +3331,16 @@ async function readMutationCandidateDiscardIntent(
 
 async function readMutationProjectionIntent(
   path: string,
-): Promise<ManagedMutationProjectionIntentV1 | undefined> {
+): Promise<ManagedMutationProjectionIntentV2 | undefined> {
   const value = await readJson(path);
   if (value === undefined) return undefined;
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ['schemaVersion', 'protocol', 'receipt']) ||
-    value.schemaVersion !== 1 ||
-    value.protocol !== 'maka_managed_mutation_projection_v1' ||
-    !isMutationCandidateReceipt(value.receipt)
+    !hasExactKeys(value, ['schemaVersion', 'protocol', 'receipt', 'previousWorktreeIdentity']) ||
+    value.schemaVersion !== 2 ||
+    value.protocol !== 'maka_managed_mutation_projection_v2' ||
+    !isMutationCandidateReceipt(value.receipt) ||
+    !isOwnedDirectoryIdentity(value.previousWorktreeIdentity)
   ) {
     throw new GitWorkspaceServiceError(
       'managed_workspace_identity_conflict',
@@ -3334,20 +3348,64 @@ async function readMutationProjectionIntent(
     );
   }
   return {
-    schemaVersion: 1,
-    protocol: 'maka_managed_mutation_projection_v1',
+    schemaVersion: 2,
+    protocol: 'maka_managed_mutation_projection_v2',
     receipt: value.receipt,
+    previousWorktreeIdentity: value.previousWorktreeIdentity,
   };
 }
 
 function assertMutationProjectionIntent(
-  intent: ManagedMutationProjectionIntentV1,
+  intent: ManagedMutationProjectionIntentV2,
   receipt: ManagedMutationCandidateReceiptV1,
 ): void {
   if (!isDeepStrictEqual(intent.receipt, receipt)) {
     throw new GitWorkspaceServiceError(
       'managed_workspace_identity_conflict',
       'Managed mutation projection intent changed identity',
+    );
+  }
+}
+
+function isOwnedDirectoryIdentity(value: unknown): value is OwnedDirectoryIdentityV1 {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ['device', 'inode']) &&
+    typeof value.device === 'string' &&
+    /^\d+$/u.test(value.device) &&
+    typeof value.inode === 'string' &&
+    /^\d+$/u.test(value.inode)
+  );
+}
+
+async function readOwnedDirectoryIdentity(path: string): Promise<OwnedDirectoryIdentityV1> {
+  try {
+    const info = await lstat(path, { bigint: true });
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error('not one regular non-symlink directory entry');
+    }
+    return {
+      device: info.dev.toString(10),
+      inode: info.ino.toString(10),
+    };
+  } catch (error) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      `Managed mutation projection directory changed identity: ${path}`,
+      { cause: error },
+    );
+  }
+}
+
+async function assertOwnedDirectoryIdentity(
+  path: string,
+  expected: OwnedDirectoryIdentityV1,
+): Promise<void> {
+  const actual = await readOwnedDirectoryIdentity(path);
+  if (actual.device !== expected.device || actual.inode !== expected.inode) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      `Managed mutation projection directory changed identity: ${path}`,
     );
   }
 }
