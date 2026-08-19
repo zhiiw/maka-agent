@@ -2,7 +2,9 @@ import type {
   WorkspaceBaselineAuthorityInput,
   WorkspaceBaselineCommitResult,
   WorkspaceHeadRecordV1,
+  WorkspaceSuccessorAuthorityInput,
 } from '@maka/core/workspace-version-authority';
+import type { RuntimeEvent } from '@maka/core/runtime-event';
 import { lstatSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { basename, dirname, join, normalize, resolve } from 'node:path';
@@ -13,6 +15,24 @@ type WorkspaceBaselineAuthorityWriter = (
   rootId: string,
 ) => Promise<WorkspaceBaselineCommitResult>;
 type WorkspaceStorageRootBinder = (rootId: string) => void;
+export interface WorkspaceSuccessorCommitInput {
+  successor: WorkspaceSuccessorAuthorityInput;
+  toolOutcome: {
+    operationId: string;
+    journalEventId: string;
+    runtimeEvent: RuntimeEvent;
+    committedAt: number;
+  };
+}
+export interface WorkspaceSuccessorCommitResult {
+  created: boolean;
+  head: WorkspaceHeadRecordV1;
+  outcomeRuntimeEventSeq: number;
+}
+type WorkspaceSuccessorAuthorityWriter = (
+  input: WorkspaceSuccessorCommitInput,
+  rootId: string,
+) => Promise<WorkspaceSuccessorCommitResult>;
 type WorkspaceHeadReader = (
   workspaceId: string,
   workspaceEpochId: string,
@@ -20,6 +40,7 @@ type WorkspaceHeadReader = (
 
 interface WorkspaceBaselineAuthorityRegistration {
   readonly writer: WorkspaceBaselineAuthorityWriter;
+  readonly successorWriter: WorkspaceSuccessorAuthorityWriter;
   readonly readHead: WorkspaceHeadReader;
   readonly bindStorageRoot: WorkspaceStorageRootBinder;
   readonly databasePath: string;
@@ -36,6 +57,7 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   store: object,
   databasePath: string,
   writer: WorkspaceBaselineAuthorityWriter,
+  successorWriter: WorkspaceSuccessorAuthorityWriter,
   bindStorageRoot: WorkspaceStorageRootBinder,
   readHead: WorkspaceHeadReader,
 ): void {
@@ -45,6 +67,7 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   const resolvedDatabasePath = resolve(databasePath);
   workspaceBaselineAuthorityWriters.set(store, {
     writer,
+    successorWriter,
     readHead,
     bindStorageRoot,
     databasePath: resolvedDatabasePath,
@@ -78,6 +101,18 @@ export function commitWorkspaceBaselineInternal(
     throw new Error('Workspace baseline authority store has no durable storage-root binding');
   }
   return registration.writer(input, registration.boundRootId);
+}
+
+export function commitWorkspaceSuccessorInternal(
+  store: object,
+  input: WorkspaceSuccessorCommitInput,
+): Promise<WorkspaceSuccessorCommitResult> {
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Workspace successor authority writer is unavailable');
+  if (!registration.boundRootId) {
+    throw new Error('Workspace successor authority store has no durable storage-root binding');
+  }
+  return registration.successorWriter(input, registration.boundRootId);
 }
 
 export function bindWorkspaceBaselineAuthorityStoreRootInternal(
