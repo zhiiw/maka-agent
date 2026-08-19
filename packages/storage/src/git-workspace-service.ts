@@ -11,11 +11,16 @@ import {
   rm,
   stat,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, join, normalize, relative, resolve } from 'node:path';
-import { promisify } from 'node:util';
+import { dirname, isAbsolute, join, normalize, posix, relative, resolve } from 'node:path';
+import { isDeepStrictEqual, promisify } from 'node:util';
 import { withArtifactWriterLock } from './artifact-writer-lock.js';
 import { bundledGitEnvironment } from './dugite-native-environment.js';
 import { registerManagedBaselineReceiptAuthorityInternal } from './managed-baseline-receipt-authority-internal.js';
+import {
+  registerManagedMutationCandidateAuthorityInternal,
+  type ManagedMutationCandidateReceiptV1,
+  type ManagedMutationCandidateRequest,
+} from './managed-mutation-candidate-authority-internal.js';
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 2 * 60 * 1_000;
@@ -25,6 +30,8 @@ const REPOSITORY_SCHEMA_VERSION = 1;
 const EPOCH_ARTIFACT_SCHEMA_VERSION = 1;
 const QUARANTINE_INTENT_SCHEMA_VERSION = 1;
 const BASELINE_RECEIPT_SCHEMA_VERSION = 1;
+const MUTATION_CANDIDATE_RECEIPT_SCHEMA_VERSION = 1;
+const MUTATION_CANDIDATE_DISCARD_INTENT_SCHEMA_VERSION = 1;
 const IDENTIFIER_PATTERN = /^(repository|workspace|epoch|instance)_[a-f0-9]{32}$/u;
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const OID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
@@ -100,6 +107,40 @@ const BASELINE_RECEIPT_KEYS = [
   'changedFileCount',
   'deletedFileCount',
 ] as const;
+const MUTATION_CANDIDATE_RECEIPT_KEYS = [
+  'schemaVersion',
+  'protocol',
+  'repositoryId',
+  'workspaceId',
+  'workspaceEpochId',
+  'workspaceInstanceId',
+  'operationId',
+  'baseHead',
+  'candidateRef',
+  'candidateCommitOid',
+  'candidateTreeOid',
+  'gitRuntimeSha256',
+  'objectFormat',
+  'materializationProfileDigest',
+  'workspacePolicyHash',
+  'candidatePolicyHash',
+  'treeDeltaDigest',
+  'changedPaths',
+  'deletedPaths',
+  'executionProfileDigest',
+] as const;
+const MUTATION_CANDIDATE_POLICY_V1 = {
+  protocol: 'maka_managed_mutation_candidate_policy_v1',
+  base: 'exact_accepted_workspace_head',
+  paths: 'exact_declared_regular_files',
+  ignoredPaths: 'reject',
+  symlinks: 'reject',
+  submodules: 'reject',
+  renames: 'reject',
+  commitParents: 'exactly_one',
+} as const;
+const MUTATION_CANDIDATE_POLICY_HASH_V1 = hashCanonicalJson(MUTATION_CANDIDATE_POLICY_V1);
+const MUTATION_CANDIDATE_MESSAGE_PREFIX = 'maka managed mutation candidate v1';
 const MATERIALIZATION_SEMANTICS = 'git_tree_materialized_with_fixed_config_v1';
 const MANAGED_BASELINE_POLICY_V1 = {
   protocol: 'maka_managed_workspace_baseline_policy_v1',
@@ -128,7 +169,8 @@ export type GitWorkspaceServiceErrorCode =
   | 'source_changed_during_baseline_import'
   | 'managed_workspace_identity_conflict'
   | 'managed_workspace_unavailable'
-  | 'managed_workspace_drifted';
+  | 'managed_workspace_drifted'
+  | 'managed_mutation_candidate_rejected';
 
 export class GitWorkspaceServiceError extends Error {
   constructor(
@@ -179,7 +221,9 @@ export type GitWorkspaceServiceFailpoint =
   | 'after_quarantine_move'
   | 'after_quarantine_binding_removed'
   | 'after_quarantine_pruned'
-  | 'after_baseline_receipt';
+  | 'after_baseline_receipt'
+  | 'after_mutation_candidate_ref'
+  | 'after_mutation_candidate_discard_ref';
 
 export interface ManagedWorkspaceIdentity {
   /**
@@ -351,10 +395,17 @@ interface WorkspaceLayout {
   readonly instanceRoot: string;
   readonly bindingPath: string;
   readonly baselineReceiptPath: string;
+  readonly mutationCandidateRoot: string;
   readonly worktreePath: string;
   readonly quarantineRoot: string;
   readonly quarantineIntentRoot: string;
   readonly quarantineIntentPath: string;
+}
+
+interface ManagedMutationCandidateDiscardIntentV1 {
+  readonly schemaVersion: 1;
+  readonly protocol: 'maka_managed_mutation_candidate_discard_v1';
+  readonly receipt: ManagedMutationCandidateReceiptV1;
 }
 
 class GitWorkspaceServiceImpl implements GitWorkspaceService {
@@ -372,6 +423,10 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       issue: (binding) => this.#createOrReuseManagedWorkspaceBaselineReceipt(binding),
       require: (request) => this.#requireManagedWorkspaceBaselineReceipt(request),
       verify: (receipt) => this.#verifyManagedWorkspaceBaselineReceipt(receipt),
+    });
+    registerManagedMutationCandidateAuthorityInternal(this, {
+      capture: (request) => this.#captureManagedMutationCandidate(request),
+      discard: (receipt) => this.#discardManagedMutationCandidate(receipt),
     });
   }
 
@@ -638,6 +693,493 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
     });
   }
 
+  async #captureManagedMutationCandidate(
+    input: ManagedMutationCandidateRequest,
+  ): Promise<ManagedMutationCandidateReceiptV1> {
+    const request = snapshotMutationCandidateRequest(input);
+    const runtime = await this.runtime.verify();
+    return withArtifactWriterLock(this.input.storageRoot, async (canonicalStorageRoot) => {
+      const { binding, baseHead } = request;
+      const layout = workspaceLayout(canonicalStorageRoot, binding);
+      const summary = await this.requireVerifiedMutationContext(binding, layout, runtime.digest);
+      const baselineReceipt = await readBaselineReceipt(layout.baselineReceiptPath);
+      if (!baselineReceipt) {
+        throw new GitWorkspaceServiceError(
+          'managed_workspace_unavailable',
+          'Canonical workspace baseline receipt is unavailable',
+        );
+      }
+      assertBaselineReceiptMatches(baselineReceipt, binding, summary);
+      assertCandidateBaseMatches(binding, baselineReceipt, baseHead);
+
+      await ensureOwnedDirectory(layout.mutationCandidateRoot, layout.instanceRoot);
+      const identity = mutationCandidateIdentity(request.operationId, binding.workspaceEpochId);
+      const receiptPath = join(layout.mutationCandidateRoot, `${identity.digest}.json`);
+      if (await readMutationCandidateDiscardIntent(`${receiptPath}.discard`)) {
+        throw new GitWorkspaceServiceError(
+          'managed_workspace_unavailable',
+          'Managed mutation candidate discard must finish before capture can resume',
+        );
+      }
+      const existing = await readMutationCandidateReceipt(receiptPath);
+      if (existing) {
+        assertMutationCandidateReceiptMatches(
+          existing,
+          request,
+          identity.ref,
+          baselineReceipt.policyHash,
+        );
+        await this.assertMutationCandidateArtifact(existing, layout);
+        return existing;
+      }
+
+      const mutation = await this.inspectMutationCandidateInput(request, layout);
+      const indexPath = join(layout.mutationCandidateRoot, `${identity.digest}.index`);
+      try {
+        await removeOwnedCandidateTemporaryFile(indexPath);
+        await removeOwnedCandidateTemporaryFile(`${indexPath}.lock`);
+        const indexEnv = { GIT_INDEX_FILE: indexPath };
+        await this.runtime.run(
+          ['--git-dir', binding.repositoryPath, 'read-tree', baseHead.commitOid],
+          layout.homePath,
+          indexEnv,
+        );
+        await this.runtime.run(
+          [
+            '--literal-pathspecs',
+            '-C',
+            binding.worktreePath,
+            'add',
+            '-A',
+            '--',
+            ...mutation.changedPaths,
+          ],
+          layout.homePath,
+          indexEnv,
+        );
+        const candidateTreeOid = (
+          await this.runtime.run(
+            ['--git-dir', binding.repositoryPath, 'write-tree'],
+            layout.homePath,
+            indexEnv,
+          )
+        ).trim();
+        if (candidateTreeOid === baseHead.treeOid) {
+          throw new GitWorkspaceServiceError(
+            'managed_workspace_drifted',
+            'Managed mutation did not produce a successor tree',
+          );
+        }
+        await this.assertSupportedMutationCandidateTree(binding, candidateTreeOid, layout);
+        const candidateCommitOid = (
+          await this.runtime.run(
+            [
+              '--git-dir',
+              binding.repositoryPath,
+              'commit-tree',
+              candidateTreeOid,
+              '-p',
+              baseHead.commitOid,
+              '-m',
+              mutationCandidateCommitMessage(identity.digest),
+            ],
+            layout.homePath,
+            deterministicMutationCommitEnvironment(),
+          )
+        ).trim();
+        await this.updateRefCas(
+          binding.repositoryPath,
+          identity.ref,
+          candidateCommitOid,
+          binding.objectFormat,
+          layout.homePath,
+        );
+        await this.input.failpoint?.('after_mutation_candidate_ref');
+        const delta = await this.readMutationDelta(
+          binding,
+          baseHead.commitOid,
+          candidateCommitOid,
+          layout,
+        );
+        if (!sameStringSet(delta.changedPaths, mutation.changedPaths)) {
+          throw new GitWorkspaceServiceError(
+            'managed_workspace_drifted',
+            'Managed mutation candidate changed an undeclared path',
+          );
+        }
+        const receipt: ManagedMutationCandidateReceiptV1 = {
+          schemaVersion: MUTATION_CANDIDATE_RECEIPT_SCHEMA_VERSION,
+          protocol: 'maka_managed_mutation_candidate_v1',
+          repositoryId: binding.repositoryId,
+          workspaceId: binding.workspaceId,
+          workspaceEpochId: binding.workspaceEpochId,
+          workspaceInstanceId: binding.workspaceInstanceId,
+          operationId: request.operationId,
+          baseHead: request.baseHead,
+          candidateRef: identity.ref,
+          candidateCommitOid,
+          candidateTreeOid,
+          gitRuntimeSha256: binding.gitRuntimeSha256,
+          objectFormat: binding.objectFormat,
+          materializationProfileDigest: binding.materializationProfileDigest,
+          workspacePolicyHash: baselineReceipt.policyHash,
+          candidatePolicyHash: MUTATION_CANDIDATE_POLICY_HASH_V1,
+          treeDeltaDigest: delta.treeDeltaDigest,
+          changedPaths: delta.changedPaths,
+          deletedPaths: delta.deletedPaths,
+          executionProfileDigest: request.executionProfileDigest,
+        };
+        await atomicWriteJson(receiptPath, receipt);
+        const durable = await readMutationCandidateReceipt(receiptPath);
+        if (!durable || !isDeepStrictEqual(durable, receipt)) {
+          throw new GitWorkspaceServiceError(
+            'managed_workspace_unavailable',
+            'Managed mutation candidate receipt did not become durable',
+          );
+        }
+        return durable;
+      } finally {
+        await rm(indexPath, { force: true });
+        await rm(`${indexPath}.lock`, { force: true });
+      }
+    });
+  }
+
+  async #discardManagedMutationCandidate(input: ManagedMutationCandidateReceiptV1): Promise<void> {
+    const receipt = snapshotMutationCandidateReceipt(input);
+    await withArtifactWriterLock(this.input.storageRoot, async (canonicalStorageRoot) => {
+      const layout = workspaceLayout(canonicalStorageRoot, receipt);
+      await assertOwnedManagedWorkspaceLayout(canonicalStorageRoot, layout);
+      await assertOwnedDirectoryEntry(layout.mutationCandidateRoot, layout.instanceRoot, true);
+      const identity = mutationCandidateIdentity(receipt.operationId, receipt.workspaceEpochId);
+      const receiptPath = join(layout.mutationCandidateRoot, `${identity.digest}.json`);
+      const intentPath = `${receiptPath}.discard`;
+      let intent = await readMutationCandidateDiscardIntent(intentPath);
+      if (!intent) {
+        const durable = await readMutationCandidateReceipt(receiptPath);
+        if (!durable || !isDeepStrictEqual(durable, receipt)) {
+          throw new GitWorkspaceServiceError(
+            'managed_workspace_identity_conflict',
+            'Managed mutation candidate receipt changed before discard',
+          );
+        }
+        await this.assertMutationCandidateArtifact(receipt, layout);
+        intent = {
+          schemaVersion: MUTATION_CANDIDATE_DISCARD_INTENT_SCHEMA_VERSION,
+          protocol: 'maka_managed_mutation_candidate_discard_v1',
+          receipt,
+        };
+        await atomicWriteJson(intentPath, intent);
+      } else if (!isDeepStrictEqual(intent.receipt, receipt)) {
+        throw new GitWorkspaceServiceError(
+          'managed_workspace_identity_conflict',
+          'Managed mutation candidate discard intent conflicts with its receipt',
+        );
+      }
+      const current = (
+        await this.runtime.run(
+          [
+            '--git-dir',
+            layout.repositoryPath,
+            'rev-parse',
+            '--verify',
+            '--quiet',
+            receipt.candidateRef,
+          ],
+          layout.homePath,
+          undefined,
+          [1],
+        )
+      ).trim();
+      if (current) {
+        if (current !== receipt.candidateCommitOid) {
+          throw new GitWorkspaceServiceError(
+            'managed_workspace_identity_conflict',
+            'Managed mutation candidate ref changed before discard',
+          );
+        }
+        await this.deleteRefCas(
+          layout.repositoryPath,
+          receipt.candidateRef,
+          receipt.candidateCommitOid,
+          layout.homePath,
+        );
+        await this.input.failpoint?.('after_mutation_candidate_discard_ref');
+      }
+      await rm(receiptPath, { force: true });
+      // Keep the intent as the durable discard tombstone. Exact retries
+      // must remain idempotent even when the previous process exited after
+      // removing both the ref and the live receipt.
+    });
+  }
+
+  private async inspectMutationCandidateInput(
+    request: ManagedMutationCandidateRequest,
+    layout: WorkspaceLayout,
+  ): Promise<{ changedPaths: readonly string[]; deletedPaths: readonly string[] }> {
+    const { binding, baseHead } = request;
+    if (!(await isNonSymlinkDirectory(binding.worktreePath))) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Managed mutation worktree is unavailable or has changed identity',
+      );
+    }
+    const [head, tree, headRef, status, commonDirRaw, worktreeList] = await Promise.all([
+      this.runtime.run(
+        ['-C', binding.worktreePath, 'rev-parse', '--verify', 'HEAD'],
+        layout.homePath,
+      ),
+      this.runtime.run(
+        ['-C', binding.worktreePath, 'rev-parse', '--verify', 'HEAD^{tree}'],
+        layout.homePath,
+      ),
+      this.runtime.run(
+        ['--git-dir', binding.repositoryPath, 'rev-parse', '--verify', binding.headRef],
+        layout.homePath,
+      ),
+      this.runtime.runBuffer(
+        [
+          '-C',
+          binding.worktreePath,
+          'status',
+          '--porcelain=v1',
+          '-z',
+          '--untracked-files=all',
+          '--ignored=matching',
+        ],
+        layout.homePath,
+      ),
+      this.runtime.run(
+        ['-C', binding.worktreePath, 'rev-parse', '--git-common-dir'],
+        layout.homePath,
+      ),
+      this.runtime.run(
+        ['--git-dir', binding.repositoryPath, 'worktree', 'list', '--porcelain'],
+        layout.homePath,
+      ),
+    ]);
+    const commonDir = await realpath(resolveGitPath(binding.worktreePath, commonDirRaw.trim()));
+    if (!samePath(commonDir, binding.repositoryPath)) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Managed mutation worktree is attached to a different repository',
+      );
+    }
+    assertWorktreeRegistrationLocked(
+      worktreeList,
+      binding.worktreePath,
+      worktreeLockReason(binding),
+    );
+    if (
+      head.trim() !== baseHead.commitOid ||
+      tree.trim() !== baseHead.treeOid ||
+      headRef.trim() !== baseHead.commitOid
+    ) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_drifted',
+        'Managed mutation base no longer matches the accepted workspace head',
+      );
+    }
+    const entries = parsePorcelainStatus(status);
+    if (entries.length === 0) {
+      throw new GitWorkspaceServiceError(
+        'managed_mutation_candidate_rejected',
+        'Managed mutation did not change the workspace',
+      );
+    }
+    if (entries.some((entry) => entry.status === '!!')) {
+      throw new GitWorkspaceServiceError(
+        'managed_mutation_candidate_rejected',
+        'Managed mutation touched an ignored path',
+      );
+    }
+    if (entries.some((entry) => /[RC]/u.test(entry.status))) {
+      throw new GitWorkspaceServiceError(
+        'managed_mutation_candidate_rejected',
+        'Managed mutation candidate does not accept rename or copy status',
+      );
+    }
+    const changedPaths = entries.map((entry) => entry.path).sort();
+    if (!sameStringSet(changedPaths, request.expectedPaths)) {
+      throw new GitWorkspaceServiceError(
+        'managed_mutation_candidate_rejected',
+        'Managed mutation changed an undeclared path',
+      );
+    }
+    return {
+      changedPaths,
+      deletedPaths: entries
+        .filter((entry) => entry.status.includes('D'))
+        .map((entry) => entry.path)
+        .sort(),
+    };
+  }
+
+  private async readMutationDelta(
+    binding: ManagedWorkspaceBinding,
+    baseCommitOid: string,
+    candidateCommitOid: string,
+    layout: WorkspaceLayout,
+  ): Promise<{
+    treeDeltaDigest: `sha256:${string}`;
+    changedPaths: readonly string[];
+    deletedPaths: readonly string[];
+  }> {
+    const [raw, names] = await Promise.all([
+      this.runtime.runBuffer(
+        [
+          '--git-dir',
+          binding.repositoryPath,
+          'diff-tree',
+          '-r',
+          '--raw',
+          '-z',
+          '--no-renames',
+          baseCommitOid,
+          candidateCommitOid,
+        ],
+        layout.homePath,
+      ),
+      this.runtime.runBuffer(
+        [
+          '--git-dir',
+          binding.repositoryPath,
+          'diff-tree',
+          '-r',
+          '--name-status',
+          '-z',
+          '--no-renames',
+          baseCommitOid,
+          candidateCommitOid,
+        ],
+        layout.homePath,
+      ),
+    ]);
+    const entries = parseNameStatus(names);
+    return {
+      treeDeltaDigest: `sha256:${createHash('sha256').update(raw).digest('hex')}`,
+      changedPaths: entries.map((entry) => entry.path).sort(),
+      deletedPaths: entries
+        .filter((entry) => entry.status === 'D')
+        .map((entry) => entry.path)
+        .sort(),
+    };
+  }
+
+  private async assertMutationCandidateArtifact(
+    receipt: ManagedMutationCandidateReceiptV1,
+    layout: WorkspaceLayout,
+  ): Promise<void> {
+    const storedBinding = await readBinding(layout.bindingPath);
+    if (
+      !storedBinding ||
+      storedBinding.repositoryId !== receipt.repositoryId ||
+      storedBinding.workspaceId !== receipt.workspaceId ||
+      storedBinding.workspaceEpochId !== receipt.workspaceEpochId ||
+      storedBinding.workspaceInstanceId !== receipt.workspaceInstanceId
+    ) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Managed mutation candidate lost its workspace binding',
+      );
+    }
+    const [ref, commit, tree, parent, body] = await Promise.all([
+      this.runtime.run(
+        ['--git-dir', layout.repositoryPath, 'rev-parse', '--verify', receipt.candidateRef],
+        layout.homePath,
+      ),
+      this.runtime.run(
+        ['--git-dir', layout.repositoryPath, 'rev-parse', '--verify', receipt.candidateCommitOid],
+        layout.homePath,
+      ),
+      this.runtime.run(
+        [
+          '--git-dir',
+          layout.repositoryPath,
+          'rev-parse',
+          '--verify',
+          `${receipt.candidateCommitOid}^{tree}`,
+        ],
+        layout.homePath,
+      ),
+      this.runtime.run(
+        [
+          '--git-dir',
+          layout.repositoryPath,
+          'rev-parse',
+          '--verify',
+          `${receipt.candidateCommitOid}^`,
+        ],
+        layout.homePath,
+      ),
+      this.runtime.run(
+        ['--git-dir', layout.repositoryPath, 'cat-file', 'commit', receipt.candidateCommitOid],
+        layout.homePath,
+      ),
+    ]);
+    const identity = mutationCandidateIdentity(receipt.operationId, receipt.workspaceEpochId);
+    if (
+      ref.trim() !== receipt.candidateCommitOid ||
+      commit.trim() !== receipt.candidateCommitOid ||
+      tree.trim() !== receipt.candidateTreeOid ||
+      parent.trim() !== receipt.baseHead.commitOid ||
+      !isOwnedMutationCandidateCommit(
+        body,
+        identity.digest,
+        receipt.baseHead.commitOid,
+        receipt.candidateTreeOid,
+      )
+    ) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Managed mutation candidate artifact changed after publication',
+      );
+    }
+    await this.assertSupportedMutationCandidateTree(
+      storedBinding,
+      receipt.candidateTreeOid,
+      layout,
+    );
+    const delta = await this.readMutationDelta(
+      storedBinding,
+      receipt.baseHead.commitOid,
+      receipt.candidateCommitOid,
+      layout,
+    );
+    if (
+      delta.treeDeltaDigest !== receipt.treeDeltaDigest ||
+      !isDeepStrictEqual(delta.changedPaths, receipt.changedPaths) ||
+      !isDeepStrictEqual(delta.deletedPaths, receipt.deletedPaths)
+    ) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Managed mutation candidate receipt does not match its Git delta',
+      );
+    }
+  }
+
+  private async assertSupportedMutationCandidateTree(
+    binding: ManagedWorkspaceBinding,
+    treeOid: string,
+    layout: WorkspaceLayout,
+  ): Promise<void> {
+    const entries = parseTreeEntries(
+      await this.runtime.runBuffer(
+        ['--git-dir', binding.repositoryPath, 'ls-tree', '-r', '-z', treeOid],
+        layout.homePath,
+      ),
+    );
+    try {
+      assertSupportedTree(entries);
+    } catch (error) {
+      throw new GitWorkspaceServiceError(
+        'managed_mutation_candidate_rejected',
+        'Managed mutation candidate contains an unsupported path or Git mode',
+        { cause: error },
+      );
+    }
+  }
+
   async #verifyManagedWorkspaceBaselineReceipt(
     receipt: ManagedWorkspaceBaselineReceiptV1,
   ): Promise<void> {
@@ -738,6 +1280,34 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         `Managed workspace contains unaccepted changes: ${binding.worktreePath}`,
       );
     }
+    return this.readBaselineTreeSummary(binding, layout);
+  }
+
+  private async requireVerifiedMutationContext(
+    binding: ManagedWorkspaceBinding,
+    layout: WorkspaceLayout,
+    runtimeDigest: `sha256:${string}`,
+  ): Promise<BaselineTreeSummary> {
+    await assertOwnedManagedWorkspaceLayout(this.input.storageRoot, layout);
+    assertBindingPaths(binding, layout);
+    const quarantined = await this.resumePendingQuarantine(binding, layout, runtimeDigest);
+    if (quarantined) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_unavailable',
+        `Managed workspace instance was quarantined: ${binding.workspaceInstanceId}`,
+      );
+    }
+    const stored = await readBinding(layout.bindingPath);
+    if (!stored || !sameBinding(stored, binding)) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_unavailable',
+        `Managed workspace binding is unavailable: ${binding.workspaceInstanceId}`,
+      );
+    }
+    const repository = await this.requireRepository(binding, layout);
+    assertBindingRepository(binding, repository);
+    const epoch = await this.requireEpochArtifact(binding, repository, layout);
+    assertBindingEpoch(binding, epoch);
     return this.readBaselineTreeSummary(binding, layout);
   }
 
@@ -1853,6 +2423,7 @@ function workspaceLayout(
     instanceRoot,
     bindingPath: join(instanceRoot, 'binding.json'),
     baselineReceiptPath: join(instanceRoot, 'baseline-receipt.json'),
+    mutationCandidateRoot: join(instanceRoot, 'mutation-candidates'),
     worktreePath: join(instanceRoot, 'worktree'),
     quarantineRoot: join(managedRoot, 'quarantine'),
     quarantineIntentRoot,
@@ -2021,6 +2592,39 @@ async function readBaselineReceipt(
   if (value === undefined) return undefined;
   assertBaselineReceiptShape(value);
   return value;
+}
+
+async function readMutationCandidateReceipt(
+  path: string,
+): Promise<ManagedMutationCandidateReceiptV1 | undefined> {
+  const value = await readJson(path);
+  if (value === undefined) return undefined;
+  assertMutationCandidateReceipt(value);
+  return value;
+}
+
+async function readMutationCandidateDiscardIntent(
+  path: string,
+): Promise<ManagedMutationCandidateDiscardIntentV1 | undefined> {
+  const value = await readJson(path);
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['schemaVersion', 'protocol', 'receipt']) ||
+    value.schemaVersion !== MUTATION_CANDIDATE_DISCARD_INTENT_SCHEMA_VERSION ||
+    value.protocol !== 'maka_managed_mutation_candidate_discard_v1' ||
+    !isMutationCandidateReceipt(value.receipt)
+  ) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Invalid managed mutation candidate discard intent',
+    );
+  }
+  return {
+    schemaVersion: 1,
+    protocol: 'maka_managed_mutation_candidate_discard_v1',
+    receipt: value.receipt,
+  };
 }
 
 async function readRepositoryRecord(path: string): Promise<ManagedRepositoryRecord | undefined> {
@@ -2241,6 +2845,246 @@ function assertBaselineReceiptMatches(
       'Managed workspace baseline receipt does not match its verified Git boundary',
     );
   }
+}
+
+function assertMutationCandidateRequest(request: ManagedMutationCandidateRequest): void {
+  if (
+    !isRecord(request) ||
+    !hasExactKeys(request, [
+      'binding',
+      'operationId',
+      'baseHead',
+      'expectedPaths',
+      'executionProfileDigest',
+    ])
+  ) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Invalid managed mutation candidate request envelope',
+    );
+  }
+  assertBindingShape(request.binding);
+  if (
+    !/^[A-Za-z0-9_-]{1,128}$/u.test(request.operationId) ||
+    !SHA256_PATTERN.test(request.executionProfileDigest) ||
+    !isWorkspaceHeadRecord(request.baseHead) ||
+    request.expectedPaths.length === 0 ||
+    request.expectedPaths.length > 32
+  ) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Invalid managed mutation candidate request',
+    );
+  }
+  const paths = request.expectedPaths.map(assertManagedMutationPath);
+  if (new Set(paths).size !== paths.length || !isDeepStrictEqual(paths, request.expectedPaths)) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Managed mutation candidate paths must be unique canonical Git paths',
+    );
+  }
+}
+
+function snapshotMutationCandidateRequest(
+  input: ManagedMutationCandidateRequest,
+): ManagedMutationCandidateRequest {
+  let snapshot: unknown;
+  try {
+    snapshot = structuredClone(input);
+  } catch (error) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Managed mutation candidate request cannot be snapshotted',
+      { cause: error },
+    );
+  }
+  assertMutationCandidateRequest(snapshot as ManagedMutationCandidateRequest);
+  return snapshot as ManagedMutationCandidateRequest;
+}
+
+function assertCandidateBaseMatches(
+  binding: ManagedWorkspaceBinding,
+  baselineReceipt: ManagedWorkspaceBaselineReceiptV1,
+  baseHead: ManagedMutationCandidateRequest['baseHead'],
+): void {
+  if (
+    baseHead.repositoryId !== binding.repositoryId ||
+    baseHead.workspaceId !== binding.workspaceId ||
+    baseHead.workspaceEpochId !== binding.workspaceEpochId ||
+    !oidMatchesObjectFormat(baseHead.commitOid, binding.objectFormat) ||
+    !oidMatchesObjectFormat(baseHead.treeOid, binding.objectFormat) ||
+    (baseHead.commitOid === binding.baselineCommitOid &&
+      (baseHead.workspaceVersionId !== baselineReceipt.workspaceVersionId ||
+        baseHead.acceptedEventId !== baselineReceipt.baselineAcceptedEventId ||
+        baseHead.treeOid !== binding.baselineTreeOid ||
+        baseHead.revision !== 1))
+  ) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Managed mutation base does not match its workspace authority',
+    );
+  }
+}
+
+function assertMutationCandidateReceipt(
+  value: unknown,
+): asserts value is ManagedMutationCandidateReceiptV1 {
+  if (!isMutationCandidateReceipt(value)) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Invalid managed mutation candidate receipt',
+    );
+  }
+}
+
+function snapshotMutationCandidateReceipt(
+  input: ManagedMutationCandidateReceiptV1,
+): ManagedMutationCandidateReceiptV1 {
+  let snapshot: unknown;
+  try {
+    snapshot = structuredClone(input);
+  } catch (error) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Managed mutation candidate receipt cannot be snapshotted',
+      { cause: error },
+    );
+  }
+  assertMutationCandidateReceipt(snapshot);
+  return snapshot;
+}
+
+function isMutationCandidateReceipt(value: unknown): value is ManagedMutationCandidateReceiptV1 {
+  if (!isRecord(value)) return false;
+  return (
+    hasExactKeys(value, MUTATION_CANDIDATE_RECEIPT_KEYS) &&
+    value.schemaVersion === MUTATION_CANDIDATE_RECEIPT_SCHEMA_VERSION &&
+    value.protocol === 'maka_managed_mutation_candidate_v1' &&
+    typeof value.repositoryId === 'string' &&
+    IDENTIFIER_PATTERN.test(value.repositoryId) &&
+    typeof value.workspaceId === 'string' &&
+    IDENTIFIER_PATTERN.test(value.workspaceId) &&
+    typeof value.workspaceEpochId === 'string' &&
+    IDENTIFIER_PATTERN.test(value.workspaceEpochId) &&
+    typeof value.workspaceInstanceId === 'string' &&
+    IDENTIFIER_PATTERN.test(value.workspaceInstanceId) &&
+    typeof value.operationId === 'string' &&
+    /^[A-Za-z0-9_-]{1,128}$/u.test(value.operationId) &&
+    isWorkspaceHeadRecord(value.baseHead) &&
+    value.baseHead.repositoryId === value.repositoryId &&
+    value.baseHead.workspaceId === value.workspaceId &&
+    value.baseHead.workspaceEpochId === value.workspaceEpochId &&
+    typeof value.candidateRef === 'string' &&
+    value.candidateRef ===
+      mutationCandidateIdentity(value.operationId, value.workspaceEpochId).ref &&
+    typeof value.candidateCommitOid === 'string' &&
+    OID_PATTERN.test(value.candidateCommitOid) &&
+    typeof value.candidateTreeOid === 'string' &&
+    OID_PATTERN.test(value.candidateTreeOid) &&
+    typeof value.gitRuntimeSha256 === 'string' &&
+    SHA256_PATTERN.test(value.gitRuntimeSha256) &&
+    (value.objectFormat === 'sha1' || value.objectFormat === 'sha256') &&
+    oidMatchesObjectFormat(value.baseHead.commitOid, value.objectFormat) &&
+    oidMatchesObjectFormat(value.baseHead.treeOid, value.objectFormat) &&
+    oidMatchesObjectFormat(value.candidateCommitOid, value.objectFormat) &&
+    oidMatchesObjectFormat(value.candidateTreeOid, value.objectFormat) &&
+    typeof value.materializationProfileDigest === 'string' &&
+    SHA256_PATTERN.test(value.materializationProfileDigest) &&
+    typeof value.workspacePolicyHash === 'string' &&
+    SHA256_PATTERN.test(value.workspacePolicyHash) &&
+    value.candidatePolicyHash === MUTATION_CANDIDATE_POLICY_HASH_V1 &&
+    typeof value.treeDeltaDigest === 'string' &&
+    SHA256_PATTERN.test(value.treeDeltaDigest) &&
+    isCanonicalPathArray(value.changedPaths, false) &&
+    isCanonicalPathArray(value.deletedPaths, true) &&
+    isPathSubset(value.deletedPaths, value.changedPaths) &&
+    typeof value.executionProfileDigest === 'string' &&
+    SHA256_PATTERN.test(value.executionProfileDigest)
+  );
+}
+
+function assertMutationCandidateReceiptMatches(
+  receipt: ManagedMutationCandidateReceiptV1,
+  request: ManagedMutationCandidateRequest,
+  candidateRef: string,
+  workspacePolicyHash: `sha256:${string}`,
+): void {
+  assertMutationCandidateReceipt(receipt);
+  if (
+    receipt.repositoryId !== request.binding.repositoryId ||
+    receipt.workspaceId !== request.binding.workspaceId ||
+    receipt.workspaceEpochId !== request.binding.workspaceEpochId ||
+    receipt.workspaceInstanceId !== request.binding.workspaceInstanceId ||
+    receipt.operationId !== request.operationId ||
+    receipt.candidateRef !== candidateRef ||
+    receipt.gitRuntimeSha256 !== request.binding.gitRuntimeSha256 ||
+    receipt.objectFormat !== request.binding.objectFormat ||
+    receipt.materializationProfileDigest !== request.binding.materializationProfileDigest ||
+    receipt.workspacePolicyHash !== workspacePolicyHash ||
+    !isDeepStrictEqual(receipt.baseHead, request.baseHead) ||
+    !sameStringSet(receipt.changedPaths, request.expectedPaths) ||
+    receipt.executionProfileDigest !== request.executionProfileDigest
+  ) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Managed mutation candidate receipt conflicts with its request',
+    );
+  }
+}
+
+function isWorkspaceHeadRecord(
+  value: unknown,
+): value is ManagedMutationCandidateRequest['baseHead'] {
+  if (!isRecord(value)) return false;
+  return (
+    hasExactKeys(value, [
+      'repositoryId',
+      'workspaceId',
+      'workspaceEpochId',
+      'workspaceVersionId',
+      'acceptedEventId',
+      'commitOid',
+      'treeOid',
+      'revision',
+    ]) &&
+    typeof value.repositoryId === 'string' &&
+    IDENTIFIER_PATTERN.test(value.repositoryId) &&
+    typeof value.workspaceId === 'string' &&
+    IDENTIFIER_PATTERN.test(value.workspaceId) &&
+    typeof value.workspaceEpochId === 'string' &&
+    IDENTIFIER_PATTERN.test(value.workspaceEpochId) &&
+    typeof value.workspaceVersionId === 'string' &&
+    /^version_[A-Za-z0-9_-]{1,120}$/u.test(value.workspaceVersionId) &&
+    typeof value.acceptedEventId === 'string' &&
+    /^[A-Za-z0-9_-]{1,128}$/u.test(value.acceptedEventId) &&
+    typeof value.commitOid === 'string' &&
+    OID_PATTERN.test(value.commitOid) &&
+    typeof value.treeOid === 'string' &&
+    OID_PATTERN.test(value.treeOid) &&
+    typeof value.revision === 'number' &&
+    Number.isSafeInteger(value.revision) &&
+    value.revision > 0
+  );
+}
+
+function isCanonicalPathArray(value: unknown, allowEmpty: boolean): value is readonly string[] {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0) || value.length > 32)
+    return false;
+  if (!value.every((path) => typeof path === 'string')) return false;
+  try {
+    const paths = value.map(assertManagedTrackedPath);
+    return new Set(paths).size === paths.length && isDeepStrictEqual(paths, value);
+  } catch {
+    return false;
+  }
+}
+
+function isPathSubset(subset: readonly string[], superset: readonly string[]): boolean {
+  return subset.every((path) => superset.includes(path));
+}
+
+function oidMatchesObjectFormat(value: string, objectFormat: 'sha1' | 'sha256'): boolean {
+  return value.length === (objectFormat === 'sha256' ? 64 : 40) && /^[a-f0-9]+$/u.test(value);
 }
 
 function deriveBaselineReceiptIdentities(binding: ManagedWorkspaceBinding): {
@@ -2499,6 +3343,7 @@ async function assertOwnedManagedWorkspaceLayout(
   await assertOwnedDirectoryEntry(layout.epochRoot, layout.managedRoot, false);
   await assertOwnedDirectoryEntry(layout.instanceRoot, layout.epochRoot, false);
   await assertOwnedDirectoryEntry(layout.worktreePath, layout.instanceRoot, false);
+  await assertOwnedDirectoryEntry(layout.mutationCandidateRoot, layout.instanceRoot, false);
 }
 
 async function assertOwnedDirectoryEntry(
@@ -2557,6 +3402,22 @@ async function pathEntryExists(path: string): Promise<boolean> {
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function removeOwnedCandidateTemporaryFile(path: string): Promise<void> {
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        `Managed mutation temporary index changed identity: ${path}`,
+      );
+    }
+    await rm(path, { force: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
   }
 }
@@ -2621,12 +3482,160 @@ function compactIdentity(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 20);
 }
 
+function assertManagedTrackedPath(path: string): string {
+  const normalized = path.replaceAll('\\', '/');
+  if (
+    !normalized ||
+    normalized.includes('\0') ||
+    normalized.includes(':') ||
+    normalized.startsWith('/') ||
+    normalized === '..' ||
+    normalized.startsWith('../') ||
+    normalized.includes('/../') ||
+    posix.normalize(normalized) !== normalized
+  ) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Managed workspace tracked file path is invalid',
+    );
+  }
+  return normalized;
+}
+
+function assertManagedMutationPath(path: string): string {
+  const normalized = assertManagedTrackedPath(path);
+  const firstSegment = normalized.split('/')[0]!;
+  if (
+    firstSegment === '.git' ||
+    (process.platform === 'win32'
+      ? firstSegment.toLowerCase() === 'node_modules'
+      : firstSegment === 'node_modules')
+  ) {
+    throw new GitWorkspaceServiceError(
+      'managed_mutation_candidate_rejected',
+      'Managed mutation path belongs to workspace control or dependency state',
+    );
+  }
+  return normalized;
+}
 function managedHeadRef(workspaceId: string, workspaceEpochId: string): string {
   return `refs/maka/workspaces/${workspaceId}/epochs/${workspaceEpochId}/head`;
 }
 
 function managedBaselineRef(workspaceEpochId: string): string {
   return `refs/maka/baselines/${workspaceEpochId}`;
+}
+
+function mutationCandidateIdentity(
+  operationId: string,
+  workspaceEpochId: string,
+): { digest: string; ref: string } {
+  const digest = createHash('sha256')
+    .update(
+      JSON.stringify({
+        protocol: 'maka_managed_mutation_candidate_identity_v1',
+        workspaceEpochId,
+        operationId,
+      }),
+    )
+    .digest('hex');
+  return {
+    digest,
+    ref: `refs/maka/candidates/${compactIdentity(workspaceEpochId)}/${digest}`,
+  };
+}
+
+function mutationCandidateCommitMessage(digest: string): string {
+  return `${MUTATION_CANDIDATE_MESSAGE_PREFIX}\nidentity ${digest}\n`;
+}
+
+function isOwnedMutationCandidateCommit(
+  raw: string,
+  digest: string,
+  baseCommitOid: string,
+  candidateTreeOid: string,
+): boolean {
+  const normalized = raw.replace(/\r\n/gu, '\n');
+  const separator = normalized.indexOf('\n\n');
+  if (separator < 0) return false;
+  const headers = normalized.slice(0, separator).split('\n');
+  const message = normalized.slice(separator + 2).trimEnd();
+  return (
+    headers.length === 4 &&
+    headers[0] === `tree ${candidateTreeOid}` &&
+    headers[1] === `parent ${baseCommitOid}` &&
+    headers[2] === 'author Maka Runtime <runtime@maka.invalid> 946684800 +0000' &&
+    headers[3] === 'committer Maka Runtime <runtime@maka.invalid> 946684800 +0000' &&
+    message === mutationCandidateCommitMessage(digest).trimEnd()
+  );
+}
+
+function deterministicMutationCommitEnvironment(): NodeJS.ProcessEnv {
+  return {
+    GIT_AUTHOR_NAME: 'Maka Runtime',
+    GIT_AUTHOR_EMAIL: 'runtime@maka.invalid',
+    GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z',
+    GIT_COMMITTER_NAME: 'Maka Runtime',
+    GIT_COMMITTER_EMAIL: 'runtime@maka.invalid',
+    GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z',
+  };
+}
+
+function parsePorcelainStatus(buffer: Buffer): readonly { status: string; path: string }[] {
+  const records = splitNulRecords(buffer);
+  const entries: { status: string; path: string }[] = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!;
+    if (record.length < 4 || record[2] !== ' ') {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Managed workspace returned malformed Git status',
+      );
+    }
+    const status = record.slice(0, 2);
+    const path = assertManagedTrackedPath(record.slice(3));
+    entries.push({ status, path });
+    if (/[RC]/u.test(status)) index += 1;
+  }
+  return entries;
+}
+
+function parseNameStatus(buffer: Buffer): readonly { status: string; path: string }[] {
+  const records = splitNulRecords(buffer);
+  if (records.length % 2 !== 0) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Managed mutation candidate returned malformed Git delta',
+    );
+  }
+  const entries: { status: string; path: string }[] = [];
+  for (let index = 0; index < records.length; index += 2) {
+    const status = records[index]!;
+    if (!/^[AMD]$/u.test(status)) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_drifted',
+        'Managed mutation candidate contains an unsupported Git delta',
+      );
+    }
+    entries.push({ status, path: assertManagedTrackedPath(records[index + 1]!) });
+  }
+  return entries;
+}
+
+function splitNulRecords(buffer: Buffer): string[] {
+  const records = buffer.toString('utf8').split('\0');
+  if (records.at(-1) === '') records.pop();
+  if (records.some((record) => record.includes('\uFFFD'))) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Managed workspace path is not lossless UTF-8',
+    );
+  }
+  return records;
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  return isDeepStrictEqual([...left].sort(), [...right].sort());
 }
 
 function worktreeLockReason(

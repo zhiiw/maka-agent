@@ -597,8 +597,8 @@ M2 按 owner 与原子边界拆成四个 stacked slices：
 1. **M2.1 mutation version persistence authority（当前切片）**：定义 successor fact/scanner，并在一个
    SQLite transaction 中原子提交 T2、`version_accepted`、version projection 和 head CAS；schema 13
    从 populated schema 12 保留 baseline/head；不接真实 Write/Edit；
-2. **M2.2 Git mutation candidate owner**：唯一拥有 operation-bound candidate ref/commit、delta/path
-   policy、artifact receipt 与 orphan GC；不写 T2；
+2. **M2.2 Git mutation candidate owner（当前实现切片）**：唯一拥有 operation-bound candidate
+   ref/commit、delta/path policy、artifact receipt 与基于 durable discard tombstone 的 orphan 回收；不写 T2；
 3. **M2.3 mutation execution admission**：T1 前冻结 base head、execution profile、operation identity 与
    candidate lease；T1 后禁止 silent fallback；
 4. **M2.4 Write/Edit production composition**：把 owner-bound worker、candidate capture 与 M2.1 bundle

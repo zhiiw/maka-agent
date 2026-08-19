@@ -160,7 +160,7 @@ SQLite transaction 提供三平台一致的数据库原子性；本切片不声�
 
 ## 7. 后续 PR 切片
 
-### M2.2 — Git mutation candidate owner
+### M2.2 — Git mutation candidate owner（当前实现切片）
 
 主要不变量：只有 Git artifact owner 能把一个 operation-bound candidate 证明为 base head 的合法 successor。
 
@@ -169,6 +169,9 @@ SQLite transaction 提供三平台一致的数据库原子性；本切片不声�
 - 失败状态：base drift、额外路径、ignored mutation、artifact missing、unknown metadata 全部 park/fail closed；
 - 回滚：未被 SQLite 接受的 candidate 是 orphan，可按 receipt/ref 证明后回收；
 - 不做：不写 T2，不推进 workspace head，不接 Desktop/CLI。
+
+详细合同见
+[Managed Workspace Git Mutation Candidate Owner v1](./runtime-managed-workspace-git-mutation-candidate-owner-v1.zh-CN.md)。
 
 该 PR 在 M2.4 消费者存在前保持 Draft。
 
