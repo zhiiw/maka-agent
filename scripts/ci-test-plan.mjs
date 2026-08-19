@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { RECOVERY_TEST_INVENTORIES } from './recovery-test-inventory.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultRepoRoot = dirname(dirname(scriptPath));
@@ -153,6 +154,10 @@ const STORAGE_STRESS_FILES = new Set([
   'packages/storage/src/__tests__/fixtures/root-resolver.ts',
 ]);
 
+const RECOVERY_INVENTORY_FILES = new Set(
+  RECOVERY_TEST_INVENTORIES['managed-workspace'].selectionFiles,
+);
+
 function normalizePath(path) {
   return path.split(sep).join('/').replace(/^\.\//, '');
 }
@@ -228,6 +233,7 @@ export function planTests(changedFiles, options = {}) {
   const full = forceFull || files.some((path) => FULL_SUITE_FILES.has(path));
   if (full) {
     const workspaces = [...graph.dirs];
+    const lanes = workspaceLanes(workspaces, graph);
     return {
       astryxSurface: true,
       code: true,
@@ -238,13 +244,15 @@ export function planTests(changedFiles, options = {}) {
       // Stress multipliers and native child-process lock probes run only when
       // their owning storage seam changes; making --full imply stress turned
       // every unrelated merge into a 10K-chunk pressure run.
+      recoveryInventory: true,
       storageStress: false,
       storybook: true,
       windows: true,
       windowsRuntime: true,
       windowsStorage: true,
+      workspaceTestsSelected: true,
       workspaces,
-      ...workspaceLanes(workspaces, graph),
+      ...lanes,
     };
   }
 
@@ -290,6 +298,8 @@ export function planTests(changedFiles, options = {}) {
 
   const workspaces = reverseDependencyClosure(directWorkspaces, graph);
   const storageStress = files.some((path) => STORAGE_STRESS_FILES.has(path));
+  const recoveryInventory =
+    storageStress || files.some((path) => RECOVERY_INVENTORY_FILES.has(path));
   const windowsBaselineChanged = files.includes('.github/workflows/windows-baseline.yml');
   const windows = code || files.some((path) => WINDOWS_BASELINE_FILES.has(path));
   const windowsRuntime = windowsBaselineChanged || workspaces.includes('packages/runtime');
@@ -298,6 +308,7 @@ export function planTests(changedFiles, options = {}) {
   // path/lock/crash-sensitive files only.
   const windowsStorage =
     windowsBaselineChanged || files.some((path) => isWindowsStorageSensitivePath(path));
+  const lanes = workspaceLanes(workspaces, graph);
 
   return {
     astryxSurface: files.some((path) => isAstryxSurfaceInventoryPath(path)),
@@ -312,6 +323,7 @@ export function planTests(changedFiles, options = {}) {
     // the cli workspace runs in the dependency closure, not only for direct
     // cli/runtime edits (e.g. a storage-only change still selects cli via runtime).
     runtimeSandbox: workspaces.includes('packages/cli'),
+    recoveryInventory,
     storageStress,
     // Storybook build + smoke: catalog/harness only. Not every desktop/ui/core
     // PR — product ship gates are typecheck, unit, and Electron e2e. See
@@ -320,8 +332,9 @@ export function planTests(changedFiles, options = {}) {
     windows,
     windowsRuntime,
     windowsStorage,
+    workspaceTestsSelected: lanes.standardWorkspaces.length > 0 || recoveryInventory,
     workspaces,
-    ...workspaceLanes(workspaces, graph),
+    ...lanes,
   };
 }
 
@@ -333,12 +346,14 @@ export function formatGitHubOutputs(plan) {
     `full=${plan.full}`,
     `runtime_host=${plan.runtimeHost}`,
     `runtime_sandbox=${plan.runtimeSandbox}`,
+    `recovery_inventory=${plan.recoveryInventory}`,
     `storage_stress=${plan.storageStress}`,
     `storybook=${plan.storybook}`,
     `unit=${plan.workspaces.length > 0}`,
     `windows=${plan.windows}`,
     `windows_runtime=${plan.windowsRuntime}`,
     `windows_storage=${plan.windowsStorage}`,
+    `workspace_tests_selected=${plan.workspaceTestsSelected}`,
     `standard_workspaces=${plan.standardWorkspaces.join(',')}`,
     `workspaces=${plan.workspaces.join(',')}`,
   ].join('\n');

@@ -26,8 +26,8 @@
 | `managed-dependency-environment`、bundled npm、worker bridge | 已合入 main 的 M1.3 前置，不从旧 M2 分支重复携带 |
 | Git candidate ref/commit、delta/path policy、orphan GC | M2.2 |
 | T1 mutation profile/base freeze、durable workspace reservation、accepted path truth | M2.3a |
-| owner-bound mutating admission、reopen active-reservation gate | M2.3b |
-| 真实 Write/Edit composition、Host crash/reopen | M2.4 |
+| Runtime managed settlement fail-stop、exact durable response adoption | M2.3b |
+| owner-bound mutation profile/worker、active-reservation admission、真实 Write/Edit composition | M2.4 |
 | continuation boundary 绑定 workspace version | M3 |
 | restore、rebaseline、publish、undo、replication | M4 |
 
@@ -58,8 +58,22 @@ M2.3a/M2.3b/M2.4。当前 M2.2 已从最新 `main` 重建，且相对 M2.1 不�
 | storage/core focused tests | schema、rollback、rebuild、真实 crash、双进程 exclusivity |
 | `runtime-managed-workspace-mutation-reservation-v1.zh-CN.md` | owner、原子边界、失败状态与平台矩阵 |
 
-M2.3a 不迁入 Runtime hook、ManagedWorkspaceOwner lease、candidate capture/discard 或真实 Write/Edit；前两项属于
-M2.3b，后两项属于 M2.4。
+M2.3a 不迁入 Runtime hook、ManagedWorkspaceOwner mutation lease、candidate capture/discard 或真实 Write/Edit；
+Runtime settlement hook 属于 M2.3b，其余三项由 M2.4 的真实 owner/consumer 一次性闭环。
+
+## M2.3b 增量归属
+
+| 路径 | 归属 | 不变量 |
+|---|---|---|
+| `packages/runtime/src/tool-runtime.ts` | M2.3b | managed T1 后整个 normalization/adoption/publication seam fail-stop；只采用 exact durable envelope |
+| `packages/runtime/src/__tests__/tool-runtime-durable-boundary.test.ts` | M2.3b | pre-T1 Host seam、success/discard adoption、size/canonicalization/envelope/unsettled fail-stop |
+| `scripts/recovery-test-inventory.mjs` | M2.3b evidence | 三平台统一纳入 SQLite T1 crash 与 multi-process reservation suite |
+| `.github/workflows/macos-recovery.yml` | M2.3b evidence | macOS 执行同一严格 recovery inventory |
+| `docs/architecture/runtime-managed-workspace-mutation-execution-admission-v1.zh-CN.md` | M2.3b | Runtime owner、失败状态、平台证据和 M2.4 seam |
+
+M2.3b 不迁入 `ManagedWorkspaceOwner` mutation lease/profile、built-in Write/Edit 标记、filesystem worker mutation、
+Git candidate capture/discard、successor/error bundle composition 或 Desktop/CLI wiring；这些共同构成 M2.4 的首个
+生产消费者。只读 worker 的存在不能签发 mutation profile，caller callback 也不能自证执行能力。
 
 ## Commit 映射
 
