@@ -1,7 +1,7 @@
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import type { GitWorkspaceService, ManagedWorkspaceBinding } from './git-workspace-service.js';
 
-export interface ManagedMutationCandidateRequest {
+export interface ManagedMutationCandidateIdentityRequest {
   readonly binding: ManagedWorkspaceBinding;
   readonly operationId: string;
   readonly baseHead: WorkspaceHeadRecordV1;
@@ -9,6 +9,16 @@ export interface ManagedMutationCandidateRequest {
   /** Exact resulting blob, or null when the sole declared path is deleted. */
   readonly expectedBlobOid: string | null;
   readonly executionProfileDigest: `sha256:${string}`;
+}
+
+export interface ManagedMutationCandidateRequest extends ManagedMutationCandidateIdentityRequest {
+  /** Runtime-owned transform output. Git authority re-hashes this input. */
+  readonly expectedContent: string | null;
+}
+
+export interface ManagedMutationBaseFileV1 {
+  readonly blobOid: string;
+  readonly content: string;
 }
 
 export interface ManagedMutationCandidateReceiptV1 {
@@ -36,11 +46,11 @@ export interface ManagedMutationCandidateReceiptV1 {
 }
 
 export interface ManagedMutationCandidateAuthorityInternal {
-  readBaseBlob(
+  readBaseFile(
     binding: ManagedWorkspaceBinding,
     baseHead: WorkspaceHeadRecordV1,
     path: string,
-  ): Promise<string | null>;
+  ): Promise<ManagedMutationBaseFileV1 | null>;
   capture(request: ManagedMutationCandidateRequest): Promise<ManagedMutationCandidateReceiptV1>;
   require(
     binding: ManagedWorkspaceBinding,

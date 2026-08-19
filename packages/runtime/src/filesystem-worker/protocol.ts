@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import { validateSandboxBoundaryExpansion } from '@maka/core/sandbox-boundary';
 
-// v6 binds managed Write/Edit to an exact Git preimage and result blob.
-export const FILESYSTEM_WORKER_PROTOCOL_VERSION = 6 as const;
+// v7 transforms managed Write/Edit from immutable Git content. The canonical
+// managed worktree is a projection and is never the mutation input/output.
+export const FILESYSTEM_WORKER_PROTOCOL_VERSION = 7 as const;
 
 const path = z.string().min(1).max(4096);
 const cwd = z.string().min(1).max(4096);
@@ -11,8 +12,10 @@ const GitBlobOidSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u);
 
 const ManagedMutationEvidenceSchema = z
   .object({
+    protocol: z.literal('detached_git_transform_v1'),
     objectFormat: GitObjectFormatSchema,
     baseBlobOid: GitBlobOidSchema.nullable(),
+    baseContent: z.string().nullable(),
   })
   .strict()
   .superRefine((evidence, context) => {
@@ -21,6 +24,9 @@ const ManagedMutationEvidenceSchema = z
       evidence.baseBlobOid.length !== (evidence.objectFormat === 'sha1' ? 40 : 64)
     ) {
       context.addIssue({ code: 'custom', message: 'Git blob OID does not match object format' });
+    }
+    if ((evidence.baseBlobOid === null) !== (evidence.baseContent === null)) {
+      context.addIssue({ code: 'custom', message: 'Git base blob and content must be paired' });
     }
   });
 
@@ -144,6 +150,16 @@ export const FilesystemWorkerRequestSchema = z
         message: 'Mutation evidence is permitted only for Write/Edit operations',
       });
     }
+    if (
+      request.mutationEvidence !== undefined &&
+      (request.expectedTarget.access !== 'read' ||
+        request.operationBoundary.filesystem?.entries.some((entry) => entry.access !== 'read'))
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Detached managed transforms must not receive filesystem write authority',
+      });
+    }
   });
 
 export const FilesystemWorkerResultSchema = z.discriminatedUnion('kind', [
@@ -163,6 +179,7 @@ export const FilesystemWorkerResultSchema = z.discriminatedUnion('kind', [
       bytes: z.number().int().nonnegative(),
       diff: z.string().optional(),
       resultBlobOid: GitBlobOidSchema.optional(),
+      resultContent: z.string().optional(),
     })
     .strict(),
   z.object({ kind: z.literal('apply_patch'), ok: z.literal(true), path: z.string() }).strict(),
@@ -177,6 +194,7 @@ export const FilesystemWorkerResultSchema = z.discriminatedUnion('kind', [
       endLine: z.number().int().positive(),
       diff: z.string().optional(),
       resultBlobOid: GitBlobOidSchema.optional(),
+      resultContent: z.string().optional(),
     })
     .strict(),
   z

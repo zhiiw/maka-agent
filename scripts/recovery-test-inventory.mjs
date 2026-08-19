@@ -50,12 +50,12 @@ export const RECOVERY_TEST_INVENTORIES = Object.freeze({
       'packages/runtime-host/dist/__tests__/managed-workspace-write-edit-crash.test.js',
     ]),
     expectedByPlatform: Object.freeze({
-      darwin: Object.freeze({ tests: 30, pass: 30, skipped: 0 }),
-      linux: Object.freeze({ tests: 30, pass: 30, skipped: 0 }),
+      darwin: Object.freeze({ tests: 31, pass: 31, skipped: 0 }),
+      linux: Object.freeze({ tests: 31, pass: 31, skipped: 0 }),
       // The Windows release contains the sandbox broker, but the recovery
       // runner does not currently build/package that Rust artifact. Keep the
       // full Host test visible as an explicit platform evidence gap.
-      win32: Object.freeze({ tests: 30, pass: 29, skipped: 1 }),
+      win32: Object.freeze({ tests: 31, pass: 30, skipped: 1 }),
     }),
   }),
 });

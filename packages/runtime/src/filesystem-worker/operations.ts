@@ -65,12 +65,14 @@ export async function executeFilesystemWorkerRequest(
   dependencies: FilesystemWorkerOperationDependencies = {},
 ): Promise<FilesystemWorkerResponse> {
   try {
-    await assertTargetUnchanged(
-      request.operation.cwd,
-      request.operation.path,
-      request.expectedTarget,
-      operationUsesDirectoryEntry(request.operation),
-    );
+    if (request.mutationEvidence?.protocol !== 'detached_git_transform_v1') {
+      await assertTargetUnchanged(
+        request.operation.cwd,
+        request.operation.path,
+        request.expectedTarget,
+        operationUsesDirectoryEntry(request.operation),
+      );
+    }
     return {
       version: FILESYSTEM_WORKER_PROTOCOL_VERSION,
       requestId: request.requestId,
@@ -132,27 +134,32 @@ export async function executeFilesystemOperation(
       return { kind: 'read', content: lines.slice(start, end).join('\n') };
     }
     case 'write': {
-      const path = await resolveWritableAllowed(
-        operation.cwd,
-        operation.path,
-        'Write',
-        operationBoundary,
-      );
+      const path = mutationEvidence
+        ? operation.path
+        : await resolveWritableAllowed(operation.cwd, operation.path, 'Write', operationBoundary);
       // Read-before-write: the diff of an overwrite is what tells the reader
       // what was lost. Only a missing file means the whole content is new —
       // any other read failure leaves the previous state unknown, and
       // claiming `--- /dev/null` would report the file as created.
       let previous: 'new' | 'unknown' | string;
       let previousBytes: Buffer | undefined;
-      try {
-        previousBytes = await fs.readFile(path);
-        previous = previousBytes.toString('utf8');
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        previous = code === 'ENOENT' || code === 'ENOTDIR' ? 'new' : 'unknown';
+      if (mutationEvidence) {
+        previousBytes =
+          mutationEvidence.baseContent === null
+            ? undefined
+            : Buffer.from(mutationEvidence.baseContent, 'utf8');
+        previous = mutationEvidence.baseContent ?? 'new';
+      } else {
+        try {
+          previousBytes = await fs.readFile(path);
+          previous = previousBytes.toString('utf8');
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          previous = code === 'ENOENT' || code === 'ENOTDIR' ? 'new' : 'unknown';
+        }
       }
       assertManagedMutationPreimage(previousBytes, mutationEvidence);
-      await fs.writeFile(path, operation.content, 'utf8');
+      if (!mutationEvidence) await fs.writeFile(path, operation.content, 'utf8');
       const resultBlobOid = mutationEvidence
         ? gitBlobOid(Buffer.from(operation.content, 'utf8'), mutationEvidence.objectFormat)
         : undefined;
@@ -167,6 +174,7 @@ export async function executeFilesystemOperation(
         bytes: Buffer.byteLength(operation.content, 'utf8'),
         ...(diff !== undefined ? { diff } : {}),
         ...(resultBlobOid ? { resultBlobOid } : {}),
+        ...(mutationEvidence ? { resultContent: operation.content } : {}),
       };
     }
     case 'apply_patch': {
@@ -192,14 +200,21 @@ export async function executeFilesystemOperation(
       return { kind: 'apply_patch', ok: true, path };
     }
     case 'edit': {
-      const path = await resolveExistingAllowed(
-        operation.cwd,
-        operation.path,
-        'Edit',
-        'write',
-        operationBoundary,
-      );
-      const contentBytes = await fs.readFile(path);
+      if (mutationEvidence?.baseContent === null) {
+        throw operationError('not_found', 'The requested path was not found.');
+      }
+      const path = mutationEvidence
+        ? operation.path
+        : await resolveExistingAllowed(
+            operation.cwd,
+            operation.path,
+            'Edit',
+            'write',
+            operationBoundary,
+          );
+      const contentBytes = mutationEvidence
+        ? Buffer.from(mutationEvidence.baseContent ?? '', 'utf8')
+        : await fs.readFile(path);
       assertManagedMutationPreimage(contentBytes, mutationEvidence);
       const content = contentBytes.toString('utf8');
       let edited: ReturnType<typeof computeEditedSource>;
@@ -216,7 +231,7 @@ export async function executeFilesystemOperation(
           error instanceof Error ? error.message : 'Edit could not be applied.',
         );
       }
-      await fs.writeFile(path, edited.content, 'utf8');
+      if (!mutationEvidence) await fs.writeFile(path, edited.content, 'utf8');
       const resultBlobOid = mutationEvidence
         ? gitBlobOid(Buffer.from(edited.content, 'utf8'), mutationEvidence.objectFormat)
         : undefined;
@@ -231,6 +246,7 @@ export async function executeFilesystemOperation(
         endLine: edited.endLine,
         ...(diff !== undefined ? { diff } : {}),
         ...(resultBlobOid ? { resultBlobOid } : {}),
+        ...(mutationEvidence ? { resultContent: edited.content } : {}),
       };
     }
     case 'format_json': {

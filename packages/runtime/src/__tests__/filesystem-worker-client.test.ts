@@ -8,6 +8,7 @@ import { createManagedExecutionBoundary } from '@maka/core/sandbox-boundary';
 import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
 import { MAX_READ_IMAGE_BYTES } from '@maka/core/attachments';
 import {
+  canReadPath,
   canWritePath,
   createReadOnlyPermissionProfile,
   type PermissionProfile,
@@ -141,6 +142,41 @@ describe('filesystem worker client permission snapshots', () => {
       isPathDenied,
     );
     assert.equal(requests.length, 0);
+  });
+
+  test('runs a detached managed transform with read-only filesystem authority', async () => {
+    const workspace = await temporaryDirectory('maka-worker-client-detached-transform-');
+    const target = join(workspace, 'tracked.txt');
+    await writeFile(target, 'external projection content\n', 'utf8');
+    const { client, requests, transforms } = fakeClient();
+
+    await client.execute({
+      operation: { kind: 'write', path: target, content: 'candidate\n' },
+      cwd: workspace,
+      executionBoundary: createManagedExecutionBoundary(createReadOnlyPermissionProfile(), 0),
+      mutationEvidence: {
+        protocol: 'detached_git_transform_v1',
+        objectFormat: 'sha1',
+        baseBlobOid: 'f572d396fae9206628714fb2ce00f72e94f2258f',
+        baseContent: 'tracked\n',
+      },
+    });
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]?.expectedTarget.access, 'read');
+    assert.deepEqual(requests[0]?.operationBoundary.filesystem?.entries, [
+      { path: target, access: 'read', scope: 'exact' },
+    ]);
+    const transform = transforms[0];
+    assert.ok(transform);
+    assert.equal(
+      canReadPath(transform.command.profile, target, transform.command.pathContext),
+      false,
+    );
+    assert.equal(
+      canWritePath(transform.command.profile, target, transform.command.pathContext),
+      false,
+    );
   });
 
   test('preserves an explicit exact deny without an additional-permission planner', async () => {

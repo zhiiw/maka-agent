@@ -2,10 +2,7 @@ import {
   createManagedExecutionBoundary,
   type ExecutionBoundary,
 } from '@maka/core/sandbox-boundary';
-import {
-  createReadOnlyPermissionProfile,
-  createWorkspaceWritePermissionProfile,
-} from '@maka/core/permission-profile';
+import { createReadOnlyPermissionProfile } from '@maka/core/permission-profile';
 import {
   requireManagedWorkspaceExecutionScopeInternal,
   type ManagedWorkspaceExecutionScope,
@@ -57,8 +54,10 @@ interface ManagedWorkspaceFilesystemWorkerInput {
   readonly executionBoundary: ExecutionBoundary;
   readonly abortSignal?: AbortSignal;
   readonly mutationEvidence?: {
+    readonly protocol: 'detached_git_transform_v1';
     readonly objectFormat: 'sha1' | 'sha256';
     readonly baseBlobOid: string | null;
+    readonly baseContent: string | null;
   };
 }
 
@@ -93,9 +92,17 @@ export type ManagedWorkspaceMutationResult =
       readonly resultBlobOid: string;
     };
 
+type ManagedWorkspaceMutationWorkerResult = ManagedWorkspaceMutationResult & {
+  readonly resultContent: string;
+};
+
+type ManagedWorkspaceMutationWorkerOutput = ManagedWorkspaceMutationResult & {
+  readonly resultContent?: string;
+};
+
 export type ManagedWorkspaceFilesystemResult =
   | ManagedWorkspaceReadOnlyResult
-  | ManagedWorkspaceMutationResult;
+  | ManagedWorkspaceMutationWorkerOutput;
 
 export interface ManagedWorkspaceFilesystemWorker {
   /** Host-issued digest of the exact worker protocol and mutation sandbox profile. */
@@ -104,8 +111,9 @@ export interface ManagedWorkspaceFilesystemWorker {
    * Resolves only after the one-shot filesystem operation and every process it
    * owns have reached a terminal lifecycle state. Implementations must not
    * return a detached filesystem effect to the caller. The production adapter
-   * satisfies this contract through FilesystemWorkerClient; M1.2 admits only
-   * read-only operations, so a host crash cannot leave a workspace mutation.
+   * satisfies this contract through FilesystemWorkerClient. Read operations
+   * use the owner-bound projection; mutation operations are pure transforms
+   * over immutable Git content and receive no workspace read/write authority.
    */
   execute(input: ManagedWorkspaceFilesystemWorkerInput): Promise<ManagedWorkspaceFilesystemResult>;
 }
@@ -133,7 +141,7 @@ export interface ManagedWorkspaceWorkerBridgeInternal {
     scope: ManagedWorkspaceExecutionScope,
     operation: ManagedWorkspaceMutationOperation,
     abortSignal?: AbortSignal,
-  ): Promise<ManagedWorkspaceMutationResult>;
+  ): Promise<ManagedWorkspaceMutationWorkerResult>;
 }
 
 /**
@@ -207,19 +215,19 @@ export function createManagedWorkspaceWorkerBridgeInternal(
       const result = await worker.execute({
         operation,
         cwd: state.cwd,
-        executionBoundary: createManagedExecutionBoundary(
-          createWorkspaceWritePermissionProfile(),
-          0,
-        ),
+        executionBoundary: createManagedExecutionBoundary(createReadOnlyPermissionProfile(), 0),
         mutationEvidence: {
+          protocol: 'detached_git_transform_v1',
           objectFormat: state.objectFormat,
           baseBlobOid: state.baseBlobOid,
+          baseContent: state.baseContent,
         },
         ...(abortSignal ? { abortSignal } : {}),
       });
       if (
         !isMutationResult(result) ||
         result.kind !== operation.kind ||
+        typeof result.resultContent !== 'string' ||
         !blobOidMatchesObjectFormat(result.resultBlobOid, state.objectFormat)
       ) {
         throw new ManagedWorkspaceWorkerBridgeError(
@@ -258,7 +266,7 @@ function isReadOnlyResult(
 
 function isMutationResult(
   input: ManagedWorkspaceFilesystemResult,
-): input is ManagedWorkspaceMutationResult {
+): input is ManagedWorkspaceMutationWorkerResult {
   return input.kind === 'write' || input.kind === 'edit';
 }
 

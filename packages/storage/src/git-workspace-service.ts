@@ -6,12 +6,14 @@ import {
   mkdir,
   open as openFile,
   readFile,
+  readdir,
   realpath,
   rename,
   rm,
   stat,
+  writeFile,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, join, normalize, posix, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, normalize, posix, relative, resolve, sep } from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { isCanonicalManagedMutationPathV1 } from '@maka/core/runtime-event';
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
@@ -21,6 +23,7 @@ import { registerManagedBaselineReceiptAuthorityInternal } from './managed-basel
 import {
   registerManagedMutationCandidateAuthorityInternal,
   type ManagedMutationCandidateReceiptV1,
+  type ManagedMutationCandidateIdentityRequest,
   type ManagedMutationCandidateRequest,
 } from './managed-mutation-candidate-authority-internal.js';
 
@@ -140,7 +143,8 @@ const MUTATION_CANDIDATE_POLICY_V1 = {
   symlinks: 'reject',
   submodules: 'reject',
   renames: 'reject',
-  content: 'exact_worker_result_blob',
+  content: 'runtime_result_content_rehashed_into_private_git_index',
+  worktreeInput: 'forbidden_projection_only',
   commitParents: 'exactly_one',
 } as const;
 const MUTATION_CANDIDATE_POLICY_HASH_V1 = hashCanonicalJson(MUTATION_CANDIDATE_POLICY_V1);
@@ -228,7 +232,10 @@ export type GitWorkspaceServiceFailpoint =
   | 'after_quarantine_pruned'
   | 'after_baseline_receipt'
   | 'after_mutation_candidate_ref'
-  | 'after_mutation_candidate_discard_ref';
+  | 'after_mutation_candidate_discard_ref'
+  | 'after_mutation_projection_intent'
+  | 'after_mutation_projection_previous'
+  | 'after_mutation_projection_publish';
 
 export interface ManagedWorkspaceIdentity {
   /**
@@ -401,6 +408,7 @@ interface WorkspaceLayout {
   readonly bindingPath: string;
   readonly baselineReceiptPath: string;
   readonly mutationCandidateRoot: string;
+  readonly projectionQuarantineRoot: string;
   readonly worktreePath: string;
   readonly quarantineRoot: string;
   readonly quarantineIntentRoot: string;
@@ -410,6 +418,12 @@ interface WorkspaceLayout {
 interface ManagedMutationCandidateDiscardIntentV1 {
   readonly schemaVersion: 1;
   readonly protocol: 'maka_managed_mutation_candidate_discard_v1';
+  readonly receipt: ManagedMutationCandidateReceiptV1;
+}
+
+interface ManagedMutationProjectionIntentV1 {
+  readonly schemaVersion: 1;
+  readonly protocol: 'maka_managed_mutation_projection_v1';
   readonly receipt: ManagedMutationCandidateReceiptV1;
 }
 
@@ -431,8 +445,8 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       verify: (receipt) => this.#verifyManagedWorkspaceBaselineReceipt(receipt),
     });
     registerManagedMutationCandidateAuthorityInternal(this, {
-      readBaseBlob: (binding, baseHead, path) =>
-        this.#readManagedMutationBaseBlob(binding, baseHead, path),
+      readBaseFile: (binding, baseHead, path) =>
+        this.#readManagedMutationBaseFile(binding, baseHead, path),
       capture: (request) => this.#captureManagedMutationCandidate(request),
       require: (binding, operationId) =>
         this.#requireManagedMutationCandidate(binding, operationId),
@@ -470,6 +484,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       const existingBinding = await readBinding(layout.bindingPath);
       if (existingBinding) {
         assertBindingMatches(existingBinding, input, layout, runtime.digest);
+        await this.resumePendingMutationProjection(existingBinding, layout);
         return this.adoptStoredBinding(input, existingBinding, layout);
       }
 
@@ -574,6 +589,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         );
       }
       assertBindingIdentity(binding, input, layout, runtime.digest);
+      await this.resumePendingMutationProjection(binding, layout);
       return this.adoptStoredBinding(input, binding, layout);
     });
   }
@@ -784,19 +800,50 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           layout.homePath,
           indexEnv,
         );
-        await this.runtime.run(
-          [
-            '--literal-pathspecs',
-            '-C',
-            binding.worktreePath,
-            'add',
-            '-A',
-            '--',
-            ...mutation.changedPaths,
-          ],
-          layout.homePath,
-          indexEnv,
-        );
+        const candidatePath = request.expectedPaths[0]!;
+        if (request.expectedContent === null) {
+          await this.runtime.runWithInput(
+            ['--git-dir', binding.repositoryPath, 'update-index', '--index-info'],
+            `0 ${'0'.repeat(binding.objectFormat === 'sha1' ? 40 : 64)}\t${candidatePath}\n`,
+            layout.homePath,
+            indexEnv,
+          );
+        } else {
+          const oid = (
+            await this.runtime.runWithInput(
+              ['--git-dir', binding.repositoryPath, 'hash-object', '-w', '--stdin'],
+              request.expectedContent,
+              layout.homePath,
+            )
+          ).trim();
+          if (oid !== request.expectedBlobOid) {
+            throw new GitWorkspaceServiceError(
+              'managed_workspace_identity_conflict',
+              'Managed mutation result content does not match its exact blob identity',
+            );
+          }
+          const mode = await this.readManagedMutationPathMode(
+            binding,
+            baseHead.treeOid,
+            candidatePath,
+            layout,
+          );
+          await this.runtime.run(
+            [
+              '--literal-pathspecs',
+              '--git-dir',
+              binding.repositoryPath,
+              'update-index',
+              '--add',
+              '--cacheinfo',
+              mode ?? '100644',
+              oid,
+              candidatePath,
+            ],
+            layout.homePath,
+            indexEnv,
+          );
+        }
         const candidateTreeOid = (
           await this.runtime.run(
             ['--git-dir', binding.repositoryPath, 'write-tree'],
@@ -893,11 +940,11 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
     });
   }
 
-  async #readManagedMutationBaseBlob(
+  async #readManagedMutationBaseFile(
     binding: ManagedWorkspaceBinding,
     baseHead: WorkspaceHeadRecordV1,
     path: string,
-  ): Promise<string | null> {
+  ): Promise<{ readonly blobOid: string; readonly content: string } | null> {
     const canonicalPath = assertManagedMutationPath(path);
     const runtime = await this.runtime.verify();
     return await withArtifactWriterLock(this.input.storageRoot, async (canonicalStorageRoot) => {
@@ -934,7 +981,19 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           'Managed mutation base path is not one regular Git blob',
         );
       }
-      return entries[0]!.oid;
+      const blobOid = entries[0]!.oid;
+      const bytes = await this.runtime.runBuffer(
+        ['--git-dir', binding.repositoryPath, 'cat-file', 'blob', blobOid],
+        layout.homePath,
+      );
+      const content = bytes.toString('utf8');
+      if (gitBlobOid(content, binding.objectFormat) !== blobOid) {
+        throw new GitWorkspaceServiceError(
+          'managed_mutation_candidate_rejected',
+          'Managed mutation base blob is not bounded canonical UTF-8 text',
+        );
+      }
+      return Object.freeze({ blobOid, content });
     });
   }
 
@@ -1051,53 +1110,195 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         baselineReceipt.policyHash,
       );
       await this.assertMutationCandidateArtifact(receipt, layout);
+      if (await isNonSymlinkDirectory(binding.worktreePath)) {
+        const [currentHead, currentHeadRef, currentStatus] = await Promise.all([
+          this.runtime.run(['-C', binding.worktreePath, 'rev-parse', 'HEAD'], layout.homePath),
+          this.runtime.run(
+            ['--git-dir', binding.repositoryPath, 'rev-parse', binding.headRef],
+            layout.homePath,
+          ),
+          this.runtime.run(
+            [
+              '-C',
+              binding.worktreePath,
+              'status',
+              '--porcelain=v1',
+              '--untracked-files=all',
+              '--ignored=matching',
+            ],
+            layout.homePath,
+          ),
+        ]);
+        if (
+          currentHead.trim() === receipt.candidateCommitOid &&
+          currentHeadRef.trim() === receipt.candidateCommitOid
+        ) {
+          if (currentStatus.trim() === '') return;
+          throw new GitWorkspaceServiceError(
+            'managed_workspace_drifted',
+            'Accepted managed projection contains later external changes',
+          );
+        }
+        if (
+          currentHead.trim() !== receipt.baseHead.commitOid ||
+          currentHeadRef.trim() !== receipt.baseHead.commitOid
+        ) {
+          throw new GitWorkspaceServiceError(
+            'managed_workspace_drifted',
+            'Managed projection no longer matches the candidate rotation base',
+          );
+        }
+      }
+      await this.prepareMutationProjection(binding, receipt, identity.digest, layout);
+      await this.convergeMutationProjection(binding, receipt, identity.digest, layout);
+    });
+  }
 
-      const [head, tree, headRef, status] = await Promise.all([
-        this.runtime.run(['-C', binding.worktreePath, 'rev-parse', 'HEAD'], layout.homePath),
-        this.runtime.run(['-C', binding.worktreePath, 'rev-parse', 'HEAD^{tree}'], layout.homePath),
-        this.runtime.run(
-          ['--git-dir', binding.repositoryPath, 'rev-parse', binding.headRef],
+  private async prepareMutationProjection(
+    binding: ManagedWorkspaceBinding,
+    receipt: ManagedMutationCandidateReceiptV1,
+    digest: string,
+    layout: WorkspaceLayout,
+  ): Promise<void> {
+    await ensureOwnedDirectory(layout.mutationCandidateRoot, layout.instanceRoot);
+    await ensureOwnedDirectory(layout.projectionQuarantineRoot, layout.instanceRoot);
+    const paths = mutationProjectionPaths(layout, digest);
+    const existing = await readMutationProjectionIntent(paths.intentPath);
+    if (existing) {
+      assertMutationProjectionIntent(existing, receipt);
+      return;
+    }
+    await rm(paths.stagingPath, { recursive: true, force: true });
+    await rm(paths.indexPath, { force: true });
+    await rm(`${paths.indexPath}.lock`, { force: true });
+    await mkdir(paths.stagingPath);
+    const indexEnv = { GIT_INDEX_FILE: paths.indexPath };
+    try {
+      await this.runtime.run(
+        ['--git-dir', binding.repositoryPath, 'read-tree', receipt.candidateCommitOid],
+        layout.homePath,
+        indexEnv,
+      );
+      await this.runtime.run(
+        [
+          '-C',
+          binding.worktreePath,
+          '-c',
+          'core.bare=false',
+          '--git-dir',
+          binding.repositoryPath,
+          '--work-tree',
+          binding.worktreePath,
+          'checkout-index',
+          '--all',
+          '--force',
+          `--prefix=${paths.stagingPath}${sep}`,
+        ],
+        layout.homePath,
+        indexEnv,
+      );
+      const gitDirectory = (
+        await this.runtime.run(
+          ['-C', binding.worktreePath, 'rev-parse', '--absolute-git-dir'],
           layout.homePath,
-        ),
-        this.runtime.runBuffer(
-          [
-            '--literal-pathspecs',
-            '-C',
-            binding.worktreePath,
-            'status',
-            '--porcelain=v1',
-            '-z',
-            '--untracked-files=all',
-            '--ignored=matching',
-          ],
+        )
+      ).trim();
+      const commonDirectory = (
+        await this.runtime.run(
+          ['-C', binding.worktreePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
           layout.homePath,
-        ),
-      ]);
+        )
+      ).trim();
+      if (!samePath(await realpath(commonDirectory), await realpath(binding.repositoryPath))) {
+        throw new GitWorkspaceServiceError(
+          'managed_workspace_identity_conflict',
+          'Managed projection Git metadata no longer belongs to its repository',
+        );
+      }
+      await writeFile(join(paths.stagingPath, '.git'), `gitdir: ${gitDirectory}\n`, {
+        encoding: 'utf8',
+        flag: 'wx',
+      });
+      const intent: ManagedMutationProjectionIntentV1 = {
+        schemaVersion: 1,
+        protocol: 'maka_managed_mutation_projection_v1',
+        receipt,
+      };
+      await atomicWriteJson(paths.intentPath, intent);
+      await this.input.failpoint?.('after_mutation_projection_intent');
+    } finally {
+      await rm(paths.indexPath, { force: true });
+      await rm(`${paths.indexPath}.lock`, { force: true });
+    }
+  }
+
+  private async convergeMutationProjection(
+    binding: ManagedWorkspaceBinding,
+    receipt: ManagedMutationCandidateReceiptV1,
+    digest: string,
+    layout: WorkspaceLayout,
+  ): Promise<void> {
+    const paths = mutationProjectionPaths(layout, digest);
+    const intent = await readMutationProjectionIntent(paths.intentPath);
+    if (!intent) {
+      const inspection = await this.inspectBinding(binding, layout);
       if (
-        head.trim() === receipt.candidateCommitOid &&
-        tree.trim() === receipt.candidateTreeOid &&
-        headRef.trim() === receipt.candidateCommitOid &&
-        status.length === 0
+        inspection.state === 'ready' &&
+        inspection.commitOid === receipt.candidateCommitOid &&
+        inspection.treeOid === receipt.candidateTreeOid
       ) {
         return;
       }
-      if (
-        head.trim() !== receipt.baseHead.commitOid ||
-        tree.trim() !== receipt.baseHead.treeOid ||
-        headRef.trim() !== receipt.baseHead.commitOid
-      ) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_unavailable',
+        'Managed mutation projection intent is unavailable',
+      );
+    }
+    assertMutationProjectionIntent(intent, receipt);
+
+    const stableExists = await pathEntryExists(binding.worktreePath);
+    const stagingExists = await pathEntryExists(paths.stagingPath);
+    const previousExists = await pathEntryExists(paths.previousPath);
+    if (!previousExists) {
+      if (!stableExists) {
         throw new GitWorkspaceServiceError(
-          'managed_workspace_drifted',
-          'Managed worktree no longer matches the candidate acceptance boundary',
+          'managed_workspace_unavailable',
+          'Managed mutation projection lost both its current and previous worktree',
         );
       }
-      const entries = parsePorcelainStatus(status);
-      if (!sameStringSet(entries.map((entry) => entry.path).sort(), receipt.changedPaths)) {
+      await rename(binding.worktreePath, paths.previousPath);
+      await this.input.failpoint?.('after_mutation_projection_previous');
+    }
+    await rm(join(paths.previousPath, '.git'), { force: true });
+
+    const stableAfterPrevious = await pathEntryExists(binding.worktreePath);
+    if (!stableAfterPrevious) {
+      if (!(await pathEntryExists(paths.stagingPath))) {
         throw new GitWorkspaceServiceError(
-          'managed_workspace_drifted',
-          'Managed worktree changed after candidate capture',
+          'managed_workspace_unavailable',
+          'Managed mutation projection staging tree is unavailable',
         );
       }
+      await rename(paths.stagingPath, binding.worktreePath);
+      await this.input.failpoint?.('after_mutation_projection_publish');
+    } else if (stagingExists || (await pathEntryExists(paths.stagingPath))) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_drifted',
+        'A concurrent writer recreated the managed projection during rotation',
+      );
+    }
+
+    await this.runtime.run(
+      ['-C', binding.worktreePath, 'reset', '--mixed', receipt.candidateCommitOid],
+      layout.homePath,
+    );
+    const headRef = (
+      await this.runtime.run(
+        ['--git-dir', binding.repositoryPath, 'rev-parse', binding.headRef],
+        layout.homePath,
+      )
+    ).trim();
+    if (headRef === receipt.baseHead.commitOid) {
       await this.updateExistingRefCas(
         binding.repositoryPath,
         binding.headRef,
@@ -1105,37 +1306,69 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         receipt.baseHead.commitOid,
         layout.homePath,
       );
-      await this.runtime.run(
-        ['-C', binding.worktreePath, 'reset', '--hard', receipt.candidateCommitOid],
-        layout.homePath,
+    } else if (headRef !== receipt.candidateCommitOid) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_drifted',
+        'Managed workspace head ref changed during projection rotation',
       );
-      const [acceptedHead, acceptedTree, acceptedStatus] = await Promise.all([
-        this.runtime.run(['-C', binding.worktreePath, 'rev-parse', 'HEAD'], layout.homePath),
-        this.runtime.run(['-C', binding.worktreePath, 'rev-parse', 'HEAD^{tree}'], layout.homePath),
-        this.runtime.run(
-          [
-            '--literal-pathspecs',
-            '-C',
-            binding.worktreePath,
-            'status',
-            '--porcelain=v1',
-            '--untracked-files=all',
-            '--ignored=matching',
-          ],
-          layout.homePath,
-        ),
-      ]);
-      if (
-        acceptedHead.trim() !== receipt.candidateCommitOid ||
-        acceptedTree.trim() !== receipt.candidateTreeOid ||
-        acceptedStatus.trim() !== ''
-      ) {
-        throw new GitWorkspaceServiceError(
-          'managed_workspace_drifted',
-          'Managed mutation candidate did not become the clean worktree head',
-        );
-      }
-    });
+    }
+    const inspection = await this.inspectBinding(binding, layout);
+    if (
+      inspection.state !== 'ready' ||
+      inspection.commitOid !== receipt.candidateCommitOid ||
+      inspection.treeOid !== receipt.candidateTreeOid
+    ) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_drifted',
+        `Managed mutation projection did not converge to the accepted candidate: ${JSON.stringify(inspection)}`,
+      );
+    }
+    await rm(paths.intentPath, { force: true });
+    await rm(paths.stagingPath, { recursive: true, force: true });
+  }
+
+  private async resumePendingMutationProjection(
+    binding: ManagedWorkspaceBinding,
+    layout: WorkspaceLayout,
+  ): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(layout.mutationCandidateRoot);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    const intents = names.filter((name) => name.endsWith('.projection.json'));
+    if (intents.length > 1) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Managed workspace has multiple pending projection rotations',
+      );
+    }
+    const name = intents[0];
+    if (!name) return;
+    const digest = name.slice(0, -'.projection.json'.length);
+    const intent = await readMutationProjectionIntent(join(layout.mutationCandidateRoot, name));
+    if (!intent) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Managed mutation projection intent is invalid',
+      );
+    }
+    assertMutationProjectionIntent(intent, intent.receipt);
+    if (
+      intent.receipt.repositoryId !== binding.repositoryId ||
+      intent.receipt.workspaceId !== binding.workspaceId ||
+      intent.receipt.workspaceEpochId !== binding.workspaceEpochId ||
+      intent.receipt.workspaceInstanceId !== binding.workspaceInstanceId
+    ) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Managed mutation projection intent belongs to another workspace',
+      );
+    }
+    await this.assertMutationCandidateArtifact(intent.receipt, layout);
+    await this.convergeMutationProjection(binding, intent.receipt, digest, layout);
   }
 
   async #requireManagedMutationCandidate(
@@ -1252,38 +1485,96 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       );
     }
     const entries = parsePorcelainStatus(status);
-    if (entries.length === 0) {
+    if (entries.length !== 0) {
+      throw new GitWorkspaceServiceError(
+        'managed_mutation_candidate_rejected',
+        'Managed mutation input projection contains external changes',
+      );
+    }
+    const baseBlob = await this.readTreeBlobOid(
+      binding,
+      baseHead.treeOid,
+      request.expectedPaths[0]!,
+      layout,
+    );
+    if (baseBlob === request.expectedBlobOid) {
       throw new GitWorkspaceServiceError(
         'managed_mutation_no_change',
         'Managed mutation did not change the workspace',
       );
     }
-    if (entries.some((entry) => entry.status === '!!')) {
-      throw new GitWorkspaceServiceError(
-        'managed_mutation_candidate_rejected',
-        'Managed mutation touched an ignored path',
-      );
-    }
-    if (entries.some((entry) => /[RC]/u.test(entry.status))) {
-      throw new GitWorkspaceServiceError(
-        'managed_mutation_candidate_rejected',
-        'Managed mutation candidate does not accept rename or copy status',
-      );
-    }
-    const changedPaths = entries.map((entry) => entry.path).sort();
-    if (!sameStringSet(changedPaths, request.expectedPaths)) {
-      throw new GitWorkspaceServiceError(
-        'managed_mutation_candidate_rejected',
-        'Managed mutation changed an undeclared path',
-      );
-    }
+    const changedPaths = request.expectedPaths;
     return {
       changedPaths,
-      deletedPaths: entries
-        .filter((entry) => entry.status.includes('D'))
-        .map((entry) => entry.path)
-        .sort(),
+      deletedPaths: request.expectedBlobOid === null ? changedPaths : [],
     };
+  }
+
+  private async readTreeBlobOid(
+    binding: ManagedWorkspaceBinding,
+    treeOid: string,
+    path: string,
+    layout: WorkspaceLayout,
+  ): Promise<string | null> {
+    const entries = parseTreeEntries(
+      await this.runtime.runBuffer(
+        [
+          '--literal-pathspecs',
+          '--git-dir',
+          binding.repositoryPath,
+          'ls-tree',
+          '-z',
+          treeOid,
+          '--',
+          path,
+        ],
+        layout.homePath,
+      ),
+    ).filter((entry) => entry.path === path);
+    if (entries.length === 0) return null;
+    if (entries.length !== 1 || entries[0]!.objectType !== 'blob') {
+      throw new GitWorkspaceServiceError(
+        'managed_mutation_candidate_rejected',
+        'Managed mutation path is not one regular Git blob',
+      );
+    }
+    return entries[0]!.oid;
+  }
+
+  private async readManagedMutationPathMode(
+    binding: ManagedWorkspaceBinding,
+    treeOid: string,
+    path: string,
+    layout: WorkspaceLayout,
+  ): Promise<string | null> {
+    const entries = parseTreeEntries(
+      await this.runtime.runBuffer(
+        [
+          '--literal-pathspecs',
+          '--git-dir',
+          binding.repositoryPath,
+          'ls-tree',
+          '-z',
+          treeOid,
+          '--',
+          path,
+        ],
+        layout.homePath,
+      ),
+    ).filter((entry) => entry.path === path);
+    if (entries.length === 0) return null;
+    const entry = entries[0]!;
+    if (
+      entries.length !== 1 ||
+      entry.objectType !== 'blob' ||
+      !['100644', '100755'].includes(entry.mode)
+    ) {
+      throw new GitWorkspaceServiceError(
+        'managed_mutation_candidate_rejected',
+        'Managed mutation path has an unsupported Git mode',
+      );
+    }
+    return entry.mode;
   }
 
   private async readMutationDelta(
@@ -2290,12 +2581,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         binding.worktreePath,
         worktreeLockReason(binding),
       );
-      if (
-        commitOid !== binding.baselineCommitOid ||
-        treeOid !== binding.baselineTreeOid ||
-        headRef !== binding.baselineCommitOid ||
-        status
-      ) {
+      if (commitOid !== headRef || status) {
         return { state: 'drifted', commitOid, treeOid, status };
       }
       return { state: 'ready', commitOid, treeOid };
@@ -2622,6 +2908,45 @@ class VerifiedGitRuntime {
     return stdout;
   }
 
+  async runWithInput(
+    args: readonly string[],
+    input: string | Buffer,
+    homePath?: string,
+    extraEnv?: NodeJS.ProcessEnv,
+  ): Promise<string> {
+    const runtime = await this.verify();
+    const hooksPath = homePath ? join(homePath, 'empty-hooks') : dirname(runtime.executablePath);
+    if (homePath) {
+      await mkdir(homePath, { recursive: true });
+      await mkdir(hooksPath, { recursive: true });
+    }
+    const child = spawn(runtime.executablePath, [...fixedGitArguments(hooksPath), ...args], {
+      cwd: homePath ?? dirname(runtime.executablePath),
+      env: {
+        ...extraEnv,
+        ...isolatedGitEnvironment(this.input, homePath ?? dirname(runtime.executablePath)),
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    if (!child.stdin) {
+      child.kill('SIGKILL');
+      throw new Error('Git input process did not create stdin');
+    }
+    const stdout = collectBoundedOutput(child.stdout, GIT_MAX_BUFFER_BYTES);
+    const stderr = collectBoundedStderr(child.stderr);
+    const timeout = setTimeout(() => child.kill('SIGKILL'), GIT_TIMEOUT_MS);
+    child.stdin.end(input);
+    try {
+      const code = await waitForChildExit(child);
+      const [output, errorOutput] = await Promise.all([stdout, stderr]);
+      if (code !== 0) throw new Error(`Git command failed (${String(code)}): ${errorOutput}`);
+      return output;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   async runOptional(
     args: readonly string[],
     acceptedMissingExitCode: number,
@@ -2772,6 +3097,7 @@ function workspaceLayout(
     bindingPath: join(instanceRoot, 'binding.json'),
     baselineReceiptPath: join(instanceRoot, 'baseline-receipt.json'),
     mutationCandidateRoot: join(instanceRoot, 'mutation-candidates'),
+    projectionQuarantineRoot: join(instanceRoot, 'projection-quarantine'),
     worktreePath: join(instanceRoot, 'worktree'),
     quarantineRoot: join(managedRoot, 'quarantine'),
     quarantineIntentRoot,
@@ -2780,6 +3106,21 @@ function workspaceLayout(
       `${compactIdentity(identity.workspaceInstanceId)}.json`,
     ),
   };
+}
+
+function mutationProjectionPaths(layout: WorkspaceLayout, digest: string) {
+  if (!/^[a-f0-9]{64}$/u.test(digest)) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Invalid managed mutation projection identity',
+    );
+  }
+  return {
+    intentPath: join(layout.mutationCandidateRoot, `${digest}.projection.json`),
+    stagingPath: join(layout.mutationCandidateRoot, `${digest}.projection-next`),
+    indexPath: join(layout.mutationCandidateRoot, `${digest}.projection.index`),
+    previousPath: join(layout.projectionQuarantineRoot, digest),
+  } as const;
 }
 
 function assertOpenIdentity(input: ManagedWorkspaceIdentity): void {
@@ -2973,6 +3314,42 @@ async function readMutationCandidateDiscardIntent(
     protocol: 'maka_managed_mutation_candidate_discard_v1',
     receipt: value.receipt,
   };
+}
+
+async function readMutationProjectionIntent(
+  path: string,
+): Promise<ManagedMutationProjectionIntentV1 | undefined> {
+  const value = await readJson(path);
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['schemaVersion', 'protocol', 'receipt']) ||
+    value.schemaVersion !== 1 ||
+    value.protocol !== 'maka_managed_mutation_projection_v1' ||
+    !isMutationCandidateReceipt(value.receipt)
+  ) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Invalid managed mutation projection intent',
+    );
+  }
+  return {
+    schemaVersion: 1,
+    protocol: 'maka_managed_mutation_projection_v1',
+    receipt: value.receipt,
+  };
+}
+
+function assertMutationProjectionIntent(
+  intent: ManagedMutationProjectionIntentV1,
+  receipt: ManagedMutationCandidateReceiptV1,
+): void {
+  if (!isDeepStrictEqual(intent.receipt, receipt)) {
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_identity_conflict',
+      'Managed mutation projection intent changed identity',
+    );
+  }
 }
 
 async function readRepositoryRecord(path: string): Promise<ManagedRepositoryRecord | undefined> {
@@ -3204,6 +3581,7 @@ function assertMutationCandidateRequest(request: ManagedMutationCandidateRequest
       'baseHead',
       'expectedPaths',
       'expectedBlobOid',
+      'expectedContent',
       'executionProfileDigest',
     ])
   ) {
@@ -3218,6 +3596,11 @@ function assertMutationCandidateRequest(request: ManagedMutationCandidateRequest
     !SHA256_PATTERN.test(request.executionProfileDigest) ||
     (request.expectedBlobOid !== null &&
       !oidMatchesObjectFormat(request.expectedBlobOid, request.binding.objectFormat)) ||
+    (request.expectedContent !== null && typeof request.expectedContent !== 'string') ||
+    (request.expectedBlobOid === null) !== (request.expectedContent === null) ||
+    (request.expectedContent !== null &&
+      request.expectedBlobOid !==
+        gitBlobOid(request.expectedContent, request.binding.objectFormat)) ||
     !isWorkspaceHeadRecord(request.baseHead) ||
     request.expectedPaths.length !== 1
   ) {
@@ -3359,7 +3742,7 @@ function isMutationCandidateReceipt(value: unknown): value is ManagedMutationCan
 
 function assertMutationCandidateReceiptMatches(
   receipt: ManagedMutationCandidateReceiptV1,
-  request: ManagedMutationCandidateRequest,
+  request: ManagedMutationCandidateIdentityRequest,
   candidateRef: string,
   workspacePolicyHash: `sha256:${string}`,
 ): void {
@@ -3385,6 +3768,14 @@ function assertMutationCandidateReceiptMatches(
       'Managed mutation candidate receipt conflicts with its request',
     );
   }
+}
+
+function gitBlobOid(content: string, objectFormat: 'sha1' | 'sha256'): string {
+  const bytes = Buffer.from(content, 'utf8');
+  return createHash(objectFormat)
+    .update(`blob ${bytes.byteLength}\0`, 'utf8')
+    .update(bytes)
+    .digest('hex');
 }
 
 function isWorkspaceHeadRecord(
@@ -3699,6 +4090,7 @@ async function assertOwnedManagedWorkspaceLayout(
   await assertOwnedDirectoryEntry(layout.instanceRoot, layout.epochRoot, false);
   await assertOwnedDirectoryEntry(layout.worktreePath, layout.instanceRoot, false);
   await assertOwnedDirectoryEntry(layout.mutationCandidateRoot, layout.instanceRoot, false);
+  await assertOwnedDirectoryEntry(layout.projectionQuarantineRoot, layout.instanceRoot, false);
 }
 
 async function assertOwnedDirectoryEntry(
@@ -4257,6 +4649,28 @@ function collectBoundedStderr(stream: NodeJS.ReadableStream | null): Promise<str
       if (output.length < 64 * 1024) output += String(chunk);
     });
     stream.on('end', () => resolve(output.slice(0, 64 * 1024).trim()));
+  });
+}
+
+function collectBoundedOutput(
+  stream: NodeJS.ReadableStream | null,
+  maxBytes: number,
+): Promise<string> {
+  if (!stream) return Promise.resolve('');
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    stream.on('data', (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buffer.byteLength;
+      if (bytes > maxBytes) {
+        reject(new Error('Git command output exceeded its byte limit'));
+        return;
+      }
+      chunks.push(buffer);
+    });
+    stream.on('error', reject);
+    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
   });
 }
 

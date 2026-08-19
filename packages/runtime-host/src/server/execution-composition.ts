@@ -3,7 +3,7 @@ import type { RuntimeExecutionConnection } from '@maka/core/llm-connections';
 import { generalizedErrorMessage } from '@maka/core/redaction';
 import { emptyPlanSessionState } from '@maka/core/plan';
 import type { PermissionMode } from '@maka/core/permission';
-import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
+import { createReadOnlyPermissionProfile } from '@maka/core/permission-profile';
 import { isDeepResearchSession } from '@maka/core/session';
 import { filterModelVisibleTaskLedgerTasks } from '@maka/core/task-ledger';
 import { AgentGraphCoordinator } from '@maka/runtime/stream-graph-coordinator';
@@ -1784,13 +1784,17 @@ function adaptManagedWorkspaceFilesystemWorker(
           return result;
         case 'write':
         case 'edit':
-          if (!result.resultBlobOid) {
+          if (!result.resultBlobOid || typeof result.resultContent !== 'string') {
             throw new RuntimeHostWorkspaceExecutionError(
               'workspace_operation_denied',
-              'Managed mutation worker omitted its exact result blob identity',
+              'Managed mutation worker omitted its exact result content or blob identity',
             );
           }
-          return { ...result, resultBlobOid: result.resultBlobOid };
+          return {
+            ...result,
+            resultBlobOid: result.resultBlobOid,
+            resultContent: result.resultContent,
+          };
         default:
           throw new RuntimeHostWorkspaceExecutionError(
             'workspace_operation_denied',
@@ -1806,7 +1810,10 @@ function managedMutationWorkerProfileDigest(): `sha256:${string}` {
     .update(
       JSON.stringify({
         protocol: 'maka_managed_workspace_mutation_worker_profile_v1',
-        permissionProfile: createWorkspaceWritePermissionProfile(),
+        requestPermissionProfile: createReadOnlyPermissionProfile(),
+        effectiveWorkspaceAccess: 'none_after_operation_scope_intersection_v1',
+        transformInput: 'immutable_git_base_content_v1',
+        transformOutput: 'exact_result_content_and_blob_oid_v1',
         workerProtocol: FILESYSTEM_WORKER_PROTOCOL_VERSION,
       }),
       'utf8',

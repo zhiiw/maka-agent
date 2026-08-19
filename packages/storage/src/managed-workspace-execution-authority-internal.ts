@@ -74,6 +74,7 @@ interface ManagedWorkspaceMutationScopeStateInternal {
   readonly expectedPaths: readonly string[];
   readonly objectFormat: 'sha1' | 'sha256';
   readonly baseBlobOid: string | null;
+  readonly baseContent: string | null;
 }
 
 export type ManagedWorkspaceExecutionScopeStateInternal =

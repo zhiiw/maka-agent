@@ -318,13 +318,13 @@ test('accepts a worker-owned Write only after capturing its Git candidate', asyn
           assert.equal(input.operation.kind, 'write');
           if (input.operation.kind !== 'write') throw new Error('expected Write');
           const target = join(input.cwd, input.operation.path);
-          await writeFile(target, input.operation.content, 'utf8');
           return {
             kind: 'write' as const,
             ok: true as const,
             path: target,
             bytes: Buffer.byteLength(input.operation.content, 'utf8'),
             resultBlobOid: gitBlobOid(input.operation.content),
+            resultContent: input.operation.content,
           };
         },
       },
@@ -458,7 +458,7 @@ test('accepts a worker-owned Write only after capturing its Git candidate', asyn
   }
 });
 
-test('rejects an Edit candidate that incorporates same-path external content after T1', async () => {
+test('rejects same-path external content without letting the detached Edit overwrite it', async () => {
   const root = await temporaryRoot();
   const storageRoot = join(root, 'storage');
   const sourceRoot = await createEligibleSource(join(root, 'source'));
@@ -482,9 +482,6 @@ test('rejects an Edit candidate that incorporates same-path external content aft
           assert.equal(input.operation.kind, 'edit');
           if (input.operation.kind !== 'edit') throw new Error('expected Edit');
           const target = join(input.cwd, input.operation.path);
-          const before = await readFile(target, 'utf8');
-          const after = before.replace(input.operation.oldString, input.operation.newString);
-          await writeFile(target, after, 'utf8');
           return {
             kind: 'edit' as const,
             ok: true as const,
@@ -493,9 +490,10 @@ test('rejects an Edit candidate that incorporates same-path external content aft
             matchedVia: 'exact' as const,
             startLine: 1,
             endLine: 1,
-            // The worker proof names only this operation's exact transform;
-            // the candidate contains an externally injected suffix and must fail.
+            // The detached transform is derived from Git base content and must
+            // not overwrite the externally modified projection.
             resultBlobOid: gitBlobOid('updated\n'),
+            resultContent: 'updated\n',
           };
         },
       },
@@ -538,7 +536,11 @@ test('rejects an Edit candidate that incorporates same-path external content aft
           durableOutcome: managedMutationOutcome(operationId, toolCallId, content, false, 'Edit'),
         };
       }),
-      /worker result blob/u,
+      /external changes/u,
+    );
+    assert.equal(
+      await readFile(join(binding.worktreePath, args.path), 'utf8'),
+      'tracked\nEXTERNAL\n',
     );
     assert.equal(
       (
@@ -580,13 +582,13 @@ test('atomically settles post-T1 failure and successful no-effect Writes without
           assert.equal(input.operation.kind, 'write');
           if (input.operation.kind !== 'write') throw new Error('expected Write');
           const target = join(input.cwd, input.operation.path);
-          await writeFile(target, input.operation.content, 'utf8');
           return {
             kind: 'write' as const,
             ok: true as const,
             path: target,
             bytes: Buffer.byteLength(input.operation.content, 'utf8'),
             resultBlobOid: gitBlobOid(input.operation.content),
+            resultContent: input.operation.content,
           };
         },
       },

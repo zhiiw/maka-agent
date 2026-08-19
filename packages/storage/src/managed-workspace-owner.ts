@@ -155,6 +155,7 @@ export type ManagedWorkspaceMutationSettlement =
 interface ManagedMutationExecutionContext {
   readonly scope: ManagedWorkspaceExecutionScope;
   resultBlobOid?: string;
+  resultContent?: string;
 }
 
 export interface ManagedWorkspaceOwner {
@@ -559,11 +560,12 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         );
       }
       const canonicalPath = canonicalManagedMutationPath(input.toolName, input.persistedArgs);
-      const baseBlobOid = await this.mutationCandidateAuthority.readBaseBlob(
+      const baseFile = await this.mutationCandidateAuthority.readBaseFile(
         accepted.binding,
         currentHead,
         canonicalPath,
       );
+      const baseBlobOid = baseFile?.blobOid ?? null;
       if (input.toolName === 'Edit' && baseBlobOid === null) {
         throw new ManagedWorkspaceOwnerError(
           'managed_workspace_owner_unavailable',
@@ -615,6 +617,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
               expectedPaths: durableDispatch.expectedPaths,
               objectFormat: accepted.binding.objectFormat,
               baseBlobOid,
+              baseContent: baseFile?.content ?? null,
             });
             try {
               const executionContext: ManagedMutationExecutionContext = { scope };
@@ -637,7 +640,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
                   durableOutcome: proof.durableOutcome,
                 });
               }
-              if (!executionContext.resultBlobOid) {
+              if (!executionContext.resultBlobOid || executionContext.resultContent === undefined) {
                 throw new ManagedWorkspaceOwnerError(
                   'managed_workspace_owner_unavailable',
                   'Managed mutation completed without an exact worker result blob',
@@ -651,6 +654,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
                   baseHead: currentHead,
                   expectedPaths: durableDispatch.expectedPaths,
                   expectedBlobOid: executionContext.resultBlobOid,
+                  expectedContent: executionContext.resultContent,
                   executionProfileDigest: durableDispatch.executionProfileDigest,
                 });
               } catch (error) {
@@ -788,7 +792,9 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
     }
     const result = await this.#workerBridge.executeMutation(context.scope, operation, abortSignal);
     context.resultBlobOid = result.resultBlobOid;
-    return result;
+    context.resultContent = result.resultContent;
+    const { resultContent: _resultContent, ...publicResult } = result;
+    return publicResult;
   }
 
   close(): Promise<void> {

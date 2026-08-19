@@ -59,8 +59,10 @@ export interface FilesystemWorkerExecuteInput {
   permissionProfile?: PermissionProfile;
   abortSignal?: AbortSignal;
   mutationEvidence?: {
+    readonly protocol: 'detached_git_transform_v1';
     readonly objectFormat: 'sha1' | 'sha256';
     readonly baseBlobOid: string | null;
+    readonly baseContent: string | null;
   };
 }
 
@@ -154,7 +156,8 @@ export class FilesystemWorkerClient {
     });
     if (!parsedOperation.success) throw clientError('invalid_operation', 'validation', requestId);
 
-    const access = operationAccess(parsedOperation.data.kind);
+    const detachedMutation = input.mutationEvidence?.protocol === 'detached_git_transform_v1';
+    const access = detachedMutation ? 'read' : operationAccess(parsedOperation.data.kind);
     const entryMode = operationUsesDirectoryEntry(parsedOperation.data);
     const target: FilesystemWorkerTarget & { writableAncestor?: string } = await (entryMode
       ? normalizeDirectoryEntryTarget({
@@ -231,11 +234,7 @@ export class FilesystemWorkerClient {
     const boundaryTarget = target.writableAncestor
       ? { path: target.writableAncestor, access: 'write' as const, scope: 'subtree' as const }
       : { path: target.enforcementPath, access, scope: target.scope };
-    const operationBoundary = {
-      filesystem: {
-        entries: [boundaryTarget],
-      },
-    } as const;
+    const operationBoundary = { filesystem: { entries: [boundaryTarget] } } as const;
     const operation = FilesystemWorkerOperationSchema.parse({
       ...parsedOperation.data,
       path: target.enforcementPath,
@@ -260,9 +259,13 @@ export class FilesystemWorkerClient {
 
     const launch = await this.input.getLaunchSpec();
     if (!launch.ok) throw clientError(launch.reason, 'launch', requestId, launch.message);
-    const workerProfile = deriveWorkerProfile(effectiveProfile, operationBoundary);
+    const workerProfile = deriveWorkerProfile(
+      effectiveProfile,
+      operationBoundary,
+      detachedMutation,
+    );
     const pinnedTarget =
-      platform === 'linux' && !entryMode && target.targetType !== 'missing'
+      !detachedMutation && platform === 'linux' && !entryMode && target.targetType !== 'missing'
         ? (() => {
             try {
               return pinExistingLinuxProfilePath({
@@ -281,7 +284,13 @@ export class FilesystemWorkerClient {
             }
           })()
         : undefined;
-    if (platform === 'linux' && !entryMode && target.targetType !== 'missing' && !pinnedTarget) {
+    if (
+      !detachedMutation &&
+      platform === 'linux' &&
+      !entryMode &&
+      target.targetType !== 'missing' &&
+      !pinnedTarget
+    ) {
       throw clientError(
         'path_changed',
         'validation',
@@ -487,21 +496,26 @@ function deriveWorkerProfile(
       ];
     };
   },
+  denyOperationTarget = false,
 ): PermissionProfile {
   if (profile.type !== 'managed' || profile.fileSystem.kind !== 'restricted') return profile;
-  const target = operationBoundary.filesystem.entries[0];
+  const target = denyOperationTarget ? undefined : operationBoundary.filesystem.entries[0];
   return {
     ...profile,
     fileSystem: {
       ...profile.fileSystem,
       entries: [
         ...profile.fileSystem.entries.filter((entry) => entry.access === 'deny'),
-        {
-          kind: 'path',
-          path: target.path,
-          access: target.access,
-          match: target.scope,
-        },
+        ...(target
+          ? [
+              {
+                kind: 'path' as const,
+                path: target.path,
+                access: target.access,
+                match: target.scope,
+              },
+            ]
+          : []),
       ],
     },
     network: { kind: 'restricted' },
