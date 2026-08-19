@@ -25,7 +25,8 @@
 |---|---|
 | `managed-dependency-environment`、bundled npm、worker bridge | 已合入 main 的 M1.3 前置，不从旧 M2 分支重复携带 |
 | Git candidate ref/commit、delta/path policy、orphan GC | M2.2 |
-| T1 mutation profile/base freeze、owner-bound mutating admission | M2.3 |
+| T1 mutation profile/base freeze、durable workspace reservation、accepted path truth | M2.3a |
+| owner-bound mutating admission、reopen active-reservation gate | M2.3b |
 | 真实 Write/Edit composition、Host crash/reopen | M2.4 |
 | continuation boundary 绑定 workspace version | M3 |
 | restore、rebaseline、publish、undo、replication | M4 |
@@ -43,7 +44,22 @@
 | `docs/architecture/runtime-managed-workspace-git-mutation-candidate-owner-v1.zh-CN.md` | M2.2 owner、发布顺序、失败状态和平台矩阵 |
 
 M2.2 仍不迁入 runtime protocol、Host lifecycle、Write/Edit composition 或 SQLite successor commit；这些分别属于
-M2.3/M2.4。当前 M2.2 已从最新 `main` 重建，且相对 M2.1 不重复携带 M1.3 文件。
+M2.3a/M2.3b/M2.4。当前 M2.2 已从最新 `main` 重建，且相对 M2.1 不重复携带 M1.3 文件。
+
+## M2.3a 增量归属
+
+| 文件 | 主要不变量 |
+|---|---|
+| `packages/core/src/runtime-event.ts` | T1-frozen managed mutation identity 与平台无关 path grammar |
+| `packages/core/src/workspace-version-authority.ts` | successor exact changed paths 进入 immutable accepted truth |
+| `packages/storage/src/sqlite-runtime-schema.ts` | schema 14 active reservation 与 changed-path projection |
+| `packages/storage/src/sqlite-runtime-store.ts` | T1 reservation、generic T2 fence、successor consume、canonical rebuild |
+| `packages/storage/src/workspace-version-authority-internal.ts` | 非 public active reservation reader capability |
+| storage/core focused tests | schema、rollback、rebuild、真实 crash、双进程 exclusivity |
+| `runtime-managed-workspace-mutation-reservation-v1.zh-CN.md` | owner、原子边界、失败状态与平台矩阵 |
+
+M2.3a 不迁入 Runtime hook、ManagedWorkspaceOwner lease、candidate capture/discard 或真实 Write/Edit；前两项属于
+M2.3b，后两项属于 M2.4。
 
 ## Commit 映射
 

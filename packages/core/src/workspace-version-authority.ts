@@ -1,4 +1,4 @@
-import type { RuntimeEvent } from './runtime-event.js';
+import { isCanonicalManagedMutationPathV1, type RuntimeEvent } from './runtime-event.js';
 
 export const WORKSPACE_EPOCH_OPENED_FACT_KIND = 'maka.workspace.epoch_opened' as const;
 export const WORKSPACE_BASELINE_ACCEPTED_FACT_KIND = 'maka.workspace.baseline_accepted' as const;
@@ -67,6 +67,7 @@ export interface WorkspaceSuccessorDescriptorV1 {
   treeOid: string;
   policyHash: `sha256:${string}`;
   treeDeltaDigest: `sha256:${string}`;
+  changedPaths: readonly string[];
   changedFileCount: number;
   deletedFileCount: number;
   executionProfileDigest: `sha256:${string}`;
@@ -93,6 +94,7 @@ export interface WorkspaceVersionAcceptedV1 {
   treeOid: string;
   policyHash: `sha256:${string}`;
   treeDeltaDigest: `sha256:${string}`;
+  changedPaths: readonly string[];
   changedFileCount: number;
   deletedFileCount: number;
   executionProfileDigest: `sha256:${string}`;
@@ -340,6 +342,7 @@ export function buildWorkspaceSuccessorAuthorityEvent(
     treeOid: input.successor.treeOid,
     policyHash: input.successor.policyHash,
     treeDeltaDigest: input.successor.treeDeltaDigest,
+    changedPaths: input.successor.changedPaths,
     changedFileCount: input.successor.changedFileCount,
     deletedFileCount: input.successor.deletedFileCount,
     executionProfileDigest: input.successor.executionProfileDigest,
@@ -823,6 +826,7 @@ function isWorkspaceVersionAcceptedV1(value: unknown): value is WorkspaceVersion
       'treeOid',
       'policyHash',
       'treeDeltaDigest',
+      'changedPaths',
       'changedFileCount',
       'deletedFileCount',
       'executionProfileDigest',
@@ -860,10 +864,18 @@ function isWorkspaceSuccessorDescriptor(value: unknown): value is WorkspaceSucce
     isGitOid(value.treeOid, value.objectFormat) &&
     isSha256Digest(value.policyHash) &&
     isSha256Digest(value.treeDeltaDigest) &&
+    isCanonicalManagedMutationPathSet(value.changedPaths) &&
     isNonNegativeSafeInteger(value.changedFileCount) &&
+    value.changedFileCount === value.changedPaths.length &&
     isNonNegativeSafeInteger(value.deletedFileCount) &&
     isSha256Digest(value.executionProfileDigest)
   );
+}
+
+function isCanonicalManagedMutationPathSet(value: unknown): value is readonly string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 32) return false;
+  if (!value.every(isCanonicalManagedMutationPathV1)) return false;
+  return value.every((path, index) => index === 0 || value[index - 1]! < path);
 }
 
 function isWorkspaceMutationOrigin(value: unknown): value is WorkspaceMutationOriginV1 {
