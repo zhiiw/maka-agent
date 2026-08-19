@@ -121,7 +121,13 @@ tombstone 在删除 ref 前落盘，所以崩溃后不会把“外部删 ref”�
 receipt；discard 在 ref deletion 后被杀，新进程依 tombstone 幂等完成清理；projection rotation 在保存旧目录及
 发布新目录两个点被杀，新进程只收敛投影且保留外部内容。rotation intent 同时绑定旧 worktree 根目录的
 device/inode identity；恢复拒绝预置 symlink/Windows junction，并且 projection owner 不再通过可替换 quarantine
-子路径删除 `.git`。统一的
+子路径删除 `.git`。
+
+旧投影与新 canonical projection 必须是两个独立的 linked worktree registration：Git owner 通过
+`git worktree move` 保存旧目录，通过 candidate commit 创建新的 detached staging worktree，再把 staging 移到
+canonical path。两者的 per-worktree gitdir、HEAD 与 index 不同；从 quarantine 执行 `reset`/`add` 不得改变
+canonical HEAD/index 或 managed ref。quarantine GC 将来必须先由 Git owner 撤销 registration，再清理目录，不能把
+locked quarantine 当普通缓存目录递归删除。统一的
 `scripts/recovery-test-inventory.mjs` 拥有 recovery suite 和三平台期望数量，Linux/macOS/Windows workflow 消费
 同一 inventory。嵌套目录的新增、修改与删除均以递归 `diff-tree -r` 的文件路径作为
 receipt 证据，不能退化成顶层目录名。

@@ -128,12 +128,60 @@ describe('managed mutation candidate authority', () => {
     await authority.accept(binding, receipt);
 
     assert.equal(await readFile(join(binding.worktreePath, 'tracked.txt'), 'utf8'), 'candidate\n');
-    const quarantineRoot = join(dirname(binding.worktreePath), 'projection-quarantine');
+    const quarantineRoot = projectionQuarantineRoot(binding);
     const quarantined = await readdir(quarantineRoot);
     assert.equal(quarantined.length, 1);
     assert.equal(
       await readFile(join(quarantineRoot, quarantined[0]!, 'tracked.txt'), 'utf8'),
       'external concurrent content\n',
+    );
+  });
+
+  test('isolates quarantined Git commands from the canonical projection authority', async () => {
+    const root = await temporaryRoot();
+    const sourceRoot = await createEligibleSource(join(root, 'source'));
+    const service = await serviceAt(join(root, 'storage'));
+    const binding = await service.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+    const baseline = await requireManagedBaselineReceiptAuthorityInternal(service).issue(binding);
+    const authority = requireManagedMutationCandidateAuthorityInternal(service);
+    const receipt = await authority.capture(candidateRequest(binding, baseline));
+
+    await writeFile(join(binding.worktreePath, 'tracked.txt'), 'external concurrent content\n');
+    await authority.accept(binding, receipt);
+
+    const quarantineRoot = projectionQuarantineRoot(binding);
+    const quarantined = join(quarantineRoot, (await readdir(quarantineRoot))[0]!);
+    assert.notEqual(
+      await realpath(
+        (
+          await git(quarantined, '-c', 'core.longpaths=true', 'rev-parse', '--absolute-git-dir')
+        ).trim(),
+      ),
+      await realpath((await git(binding.worktreePath, 'rev-parse', '--absolute-git-dir')).trim()),
+    );
+    const canonicalHead = (await git(binding.worktreePath, 'rev-parse', 'HEAD')).trim();
+    const managedRef = await gitBare(
+      binding.repositoryPath,
+      'rev-parse',
+      '--verify',
+      binding.headRef,
+    );
+    await git(
+      quarantined,
+      '-c',
+      'core.longpaths=true',
+      'reset',
+      '--mixed',
+      binding.baselineCommitOid,
+    );
+    await writeFile(join(quarantined, 'tracked.txt'), 'quarantined-only\n');
+    await git(quarantined, '-c', 'core.longpaths=true', 'add', 'tracked.txt');
+
+    assert.equal((await git(binding.worktreePath, 'rev-parse', 'HEAD')).trim(), canonicalHead);
+    assert.equal((await git(binding.worktreePath, 'status', '--porcelain=v1')).trim(), '');
+    assert.equal(
+      await gitBare(binding.repositoryPath, 'rev-parse', '--verify', binding.headRef),
+      managedRef,
     );
   });
 
@@ -148,13 +196,13 @@ describe('managed mutation candidate authority', () => {
     const authority = requireManagedMutationCandidateAuthorityInternal(service);
     const receipt = await authority.capture(candidateRequest(binding, baseline));
     const digest = receipt.candidateRef.split('/').at(-1)!;
-    const quarantineRoot = join(dirname(binding.worktreePath), 'projection-quarantine');
+    const quarantineRoot = projectionQuarantineRoot(binding);
     const externalWorktree = join(root, 'external-worktree');
     const externalGitMetadata = join(externalWorktree, '.git');
     await mkdir(quarantineRoot, { recursive: true });
     await mkdir(externalWorktree);
     await writeFile(externalGitMetadata, 'external git metadata\n', 'utf8');
-    await symlink(externalWorktree, join(quarantineRoot, digest), 'junction');
+    await symlink(externalWorktree, join(quarantineRoot, digest.slice(0, 20)), 'junction');
 
     await assert.rejects(authority.accept(binding, receipt));
     assert.equal(await readFile(externalGitMetadata, 'utf8'), 'external git metadata\n');
@@ -171,13 +219,13 @@ describe('managed mutation candidate authority', () => {
     const authority = requireManagedMutationCandidateAuthorityInternal(service);
     const receipt = await authority.capture(candidateRequest(binding, baseline));
     const digest = receipt.candidateRef.split('/').at(-1)!;
-    const quarantineRoot = join(dirname(binding.worktreePath), 'projection-quarantine');
+    const quarantineRoot = projectionQuarantineRoot(binding);
     const externalWorktree = join(root, 'external-worktree');
     const externalGitMetadata = join(externalWorktree, '.git');
     await mkdir(quarantineRoot, { recursive: true });
     await mkdir(externalWorktree);
     await writeFile(externalGitMetadata, 'external git metadata\n', 'utf8');
-    await symlink(externalWorktree, join(quarantineRoot, digest), 'dir');
+    await symlink(externalWorktree, join(quarantineRoot, digest.slice(0, 20)), 'dir');
 
     await assert.rejects(authority.accept(binding, receipt));
     assert.equal(await readFile(externalGitMetadata, 'utf8'), 'external git metadata\n');
@@ -216,12 +264,9 @@ describe('managed mutation candidate authority', () => {
     const restarted = await serviceAt(storageRoot);
     await restarted.openManagedWorkspaceFromBinding(openRequest(sourceRoot));
     assert.equal(await readFile(join(binding.worktreePath, 'tracked.txt'), 'utf8'), 'candidate\n');
-    const previous = await readdir(join(dirname(binding.worktreePath), 'projection-quarantine'));
+    const previous = await readdir(projectionQuarantineRoot(binding));
     assert.equal(
-      await readFile(
-        join(dirname(binding.worktreePath), 'projection-quarantine', previous[0]!, 'tracked.txt'),
-        'utf8',
-      ),
+      await readFile(join(projectionQuarantineRoot(binding), previous[0]!, 'tracked.txt'), 'utf8'),
       'external before crash\n',
     );
   });
@@ -492,15 +537,10 @@ describe('managed mutation candidate authority', () => {
           await readFile(join(binding.worktreePath, 'docs', 'a.md'), 'utf8'),
           'candidate from child\n',
         );
-        const previous = await readdir(
-          join(dirname(binding.worktreePath), 'projection-quarantine'),
-        );
+        const previous = await readdir(projectionQuarantineRoot(binding));
         const preserved = await Promise.all(
           previous.map((name) =>
-            readFile(
-              join(dirname(binding.worktreePath), 'projection-quarantine', name, 'docs', 'a.md'),
-              'utf8',
-            ),
+            readFile(join(projectionQuarantineRoot(binding), name, 'docs', 'a.md'), 'utf8'),
           ),
         );
         assert.ok(preserved.includes('external before crash\n'));
@@ -745,4 +785,9 @@ async function gitBare(repositoryPath: string, ...args: string[]): Promise<strin
     },
   );
   return stdout.trim();
+}
+
+function projectionQuarantineRoot(binding: ManagedWorkspaceBinding): string {
+  // repository.git is <managed-root>/r/<repository-id>/repository.git.
+  return join(dirname(dirname(dirname(binding.repositoryPath))), 'q');
 }
