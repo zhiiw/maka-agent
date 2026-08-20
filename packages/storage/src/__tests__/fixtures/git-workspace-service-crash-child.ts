@@ -1,4 +1,5 @@
 import { writeFileSync, writeSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { createGitWorkspaceService } from '../../git-workspace-service.js';
 import { requireManagedBaselineReceiptAuthorityInternal } from '../../managed-baseline-receipt-authority-internal.js';
@@ -6,6 +7,8 @@ import { requireManagedMutationCandidateAuthorityInternal } from '../../managed-
 import { openManagedWorkspaceOwner } from '../../managed-workspace-owner.js';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '../../root-authority.js';
 import { createSqliteRuntimeStore } from '../../sqlite-runtime-store.js';
+import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
+import type { RuntimeEventManagedWorkspaceMutationV1 } from '@maka/core/runtime-event';
 
 const storageRoot = requiredEnv('MAKA_GIT_WORKSPACE_STORAGE');
 const gitRuntime = {
@@ -47,6 +50,88 @@ if (process.env.MAKA_GIT_WORKSPACE_ACTION === 'execution-admission') {
   throw new Error('Managed execution admission crash child missed its failpoint');
 }
 
+if (process.env.MAKA_GIT_WORKSPACE_ACTION === 'managed-mutation-owner') {
+  const capability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+  if (!rootOwner) throw new Error('Unable to acquire crash-child root owner');
+  const runtimeStore = createSqliteRuntimeStore(join(storageRoot, 'runtime.sqlite'));
+  const owner = await openManagedWorkspaceOwner({
+    rootOwner,
+    gitRuntime,
+    failpoint,
+    filesystemWorker: {
+      mutationExecutionProfileDigest: `sha256:${'a'.repeat(64)}`,
+      async execute(input) {
+        if (input.operation.kind !== 'write') throw new Error('Expected managed Write');
+        const path = join(input.cwd, input.operation.path);
+        return {
+          kind: 'write' as const,
+          ok: true as const,
+          path,
+          bytes: Buffer.byteLength(input.operation.content, 'utf8'),
+          resultBlobOid: gitBlobOid(input.operation.content),
+          resultContent: input.operation.content,
+        };
+      },
+    },
+  });
+  const accepted = await owner.openManagedWorkspaceBaseline(runtimeStore, request);
+  const operationId = 'operation-real-process-managed-write';
+  const toolCallId = 'call-real-process-managed-write';
+  const args = { path: 'tracked.txt', content: 'accepted before process crash\n' };
+  const admission = await owner.admitManagedWorkspaceMutation(accepted.executionHandle, {
+    operationId,
+    toolName: 'Write',
+    persistedArgs: args,
+    abortSignal: new AbortController().signal,
+  });
+  await commitManagedMutationT1(runtimeStore, admission.durableDispatch, {
+    operationId,
+    toolCallId,
+    args,
+  });
+  await admission.execute(async () => {
+    const result = await owner.executeManagedMutationFilesystemOperation({
+      kind: 'write',
+      path: args.path,
+      content: args.content,
+    });
+    if (result.kind !== 'write') throw new Error('Expected managed Write result');
+    const content = {
+      kind: 'file_write' as const,
+      path: result.path,
+      bytes: result.bytes,
+    };
+    return {
+      content,
+      isError: false,
+      durationMs: 1,
+      durableOutcome: {
+        id: `${operationId}_response`,
+        sessionId: 'session-real-process-managed-write',
+        invocationId: 'invocation-real-process-managed-write',
+        runId: 'run-real-process-managed-write',
+        turnId: 'turn-real-process-managed-write',
+        ts: 20,
+        partial: false,
+        role: 'tool' as const,
+        author: 'tool' as const,
+        origin: 'provider' as const,
+        modelVisibility: 'visible' as const,
+        content: {
+          kind: 'function_response' as const,
+          id: toolCallId,
+          name: 'Write',
+          result: content,
+        },
+        refs: { operationId, toolCallId },
+        actions: { stateDelta: { durationMs: 1 } },
+      },
+    };
+  });
+  throw new Error('Managed mutation owner crash child missed its failpoint');
+}
+
 const service = createGitWorkspaceService({
   storageRoot,
   gitRuntime,
@@ -57,7 +142,8 @@ const binding = await service.createManagedWorkspaceFromSource(request);
 
 if (
   process.env.MAKA_GIT_WORKSPACE_ACTION === 'mutation-capture' ||
-  process.env.MAKA_GIT_WORKSPACE_ACTION === 'mutation-discard'
+  process.env.MAKA_GIT_WORKSPACE_ACTION === 'mutation-discard' ||
+  process.env.MAKA_GIT_WORKSPACE_ACTION === 'mutation-accept'
 ) {
   const baseline = await requireManagedBaselineReceiptAuthorityInternal(service).issue(binding);
   const candidateRequest = {
@@ -74,18 +160,25 @@ if (
       revision: 1,
     },
     expectedPaths: ['docs/a.md'],
+    expectedBlobOid: gitBlobOid('candidate from child\n'),
+    expectedContent: 'candidate from child\n',
     executionProfileDigest: `sha256:${'e'.repeat(64)}` as const,
   };
-  writeFileSync(join(binding.worktreePath, 'docs', 'a.md'), 'candidate from child\n', 'utf8');
   const outputPath = requiredEnv('MAKA_GIT_WORKSPACE_MUTATION_OUTPUT');
   if (process.env.MAKA_GIT_WORKSPACE_ACTION === 'mutation-capture') {
     writeFileSync(outputPath, `${JSON.stringify({ candidateRequest })}\n`, 'utf8');
     await requireManagedMutationCandidateAuthorityInternal(service).capture(candidateRequest);
-  } else {
+  } else if (process.env.MAKA_GIT_WORKSPACE_ACTION === 'mutation-discard') {
     const receipt =
       await requireManagedMutationCandidateAuthorityInternal(service).capture(candidateRequest);
     writeFileSync(outputPath, `${JSON.stringify({ binding, receipt })}\n`, 'utf8');
     await requireManagedMutationCandidateAuthorityInternal(service).discard(receipt);
+  } else {
+    const authority = requireManagedMutationCandidateAuthorityInternal(service);
+    const receipt = await authority.capture(candidateRequest);
+    writeFileSync(join(binding.worktreePath, 'docs', 'a.md'), 'external before crash\n', 'utf8');
+    writeFileSync(outputPath, `${JSON.stringify({ binding, receipt })}\n`, 'utf8');
+    await authority.accept(binding, receipt);
   }
   throw new Error('Managed mutation crash child missed its failpoint');
 }
@@ -105,4 +198,74 @@ function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Missing ${name}`);
   return value;
+}
+
+function gitBlobOid(content: string): string {
+  const bytes = Buffer.from(content, 'utf8');
+  return createHash('sha1')
+    .update(`blob ${bytes.byteLength}\0`, 'utf8')
+    .update(bytes)
+    .digest('hex');
+}
+
+async function commitManagedMutationT1(
+  store: ReturnType<typeof createSqliteRuntimeStore>,
+  managedMutation: Readonly<RuntimeEventManagedWorkspaceMutationV1>,
+  input: {
+    operationId: string;
+    toolCallId: string;
+    args: { path: string; content: string };
+  },
+): Promise<void> {
+  const identity = {
+    sessionId: 'session-real-process-managed-write',
+    invocationId: 'invocation-real-process-managed-write',
+    runId: 'run-real-process-managed-write',
+    turnId: 'turn-real-process-managed-write',
+  };
+  const canonicalArgsHash = canonicalToolArgsHash('Write', input.args);
+  await store.commitToolPrepared({
+    operationId: input.operationId,
+    journalEventId: `${input.operationId}_prepared`,
+    runtimeEvent: {
+      id: `${input.operationId}_call`,
+      ...identity,
+      ts: 10,
+      partial: false,
+      role: 'model',
+      author: 'agent',
+      content: {
+        kind: 'function_call',
+        id: input.toolCallId,
+        name: 'Write',
+        args: input.args,
+      },
+      refs: { operationId: input.operationId, toolCallId: input.toolCallId },
+    },
+    dispatchRuntimeEvent: {
+      id: `${input.operationId}_dispatch`,
+      ...identity,
+      ts: 10,
+      partial: false,
+      role: 'system',
+      author: 'system',
+      actions: {
+        toolDispatch: {
+          protocol: 't1_after_preflight_v1',
+          operationId: input.operationId,
+          providerToolCallId: input.toolCallId,
+          toolName: 'Write',
+          canonicalArgsHash,
+          recoveryMode: 'reconcile',
+          managedMutation,
+        },
+      },
+      refs: { operationId: input.operationId, toolCallId: input.toolCallId },
+    },
+    providerToolCallId: input.toolCallId,
+    toolName: 'Write',
+    canonicalArgsHash,
+    recoveryMode: 'reconcile',
+    committedAt: 10,
+  });
 }

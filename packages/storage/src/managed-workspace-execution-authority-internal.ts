@@ -4,6 +4,7 @@ import type {
   ManagedWorkspaceBaselineReceiptV1,
   ManagedWorkspaceBinding,
 } from './git-workspace-service.js';
+import type { ManagedMutationCandidateReceiptV1 } from './managed-mutation-candidate-authority-internal.js';
 
 export interface ManagedWorkspaceExecutionHandle {
   readonly kind: 'managed_workspace_execution_handle_v1';
@@ -32,6 +33,20 @@ export interface ManagedWorkspaceExecutionAuthorityStateInternal {
   readonly binding: Readonly<ManagedWorkspaceBinding>;
   readonly receipt: Readonly<ManagedWorkspaceBaselineReceiptV1>;
   readonly head: Readonly<WorkspaceHeadRecordV1>;
+  readonly candidateReceipt?: Readonly<ManagedMutationCandidateReceiptV1>;
+}
+
+export function advanceManagedWorkspaceExecutionHandleInternal(
+  ownerToken: object,
+  handle: ManagedWorkspaceExecutionHandle,
+  head: Readonly<WorkspaceHeadRecordV1>,
+  candidateReceipt: Readonly<ManagedMutationCandidateReceiptV1>,
+): void {
+  const state = states.get(handle);
+  if (!state || state.ownerToken !== ownerToken) {
+    throw new Error('Managed workspace execution handle is invalid for this owner');
+  }
+  states.set(handle, { ...state, head, candidateReceipt, ownerToken });
 }
 
 const states = new WeakMap<
@@ -41,13 +56,30 @@ const states = new WeakMap<
   }
 >();
 
-export interface ManagedWorkspaceExecutionScopeStateInternal {
+interface ManagedWorkspaceReadOnlyScopeStateInternal {
   readonly provisioning: 'canonical_tree_only_v1';
   readonly workspaceEffect: 'none';
   readonly cwd: string;
   readonly binding: Readonly<ManagedWorkspaceBinding>;
   readonly head: Readonly<WorkspaceHeadRecordV1>;
 }
+
+interface ManagedWorkspaceMutationScopeStateInternal {
+  readonly provisioning: 'canonical_tree_only_v1';
+  readonly workspaceEffect: 'mutation';
+  readonly cwd: string;
+  readonly binding: Readonly<ManagedWorkspaceBinding>;
+  readonly head: Readonly<WorkspaceHeadRecordV1>;
+  readonly operationId: string;
+  readonly expectedPaths: readonly string[];
+  readonly objectFormat: 'sha1' | 'sha256';
+  readonly baseBlobOid: string | null;
+  readonly baseContent: string | null;
+}
+
+export type ManagedWorkspaceExecutionScopeStateInternal =
+  | ManagedWorkspaceReadOnlyScopeStateInternal
+  | ManagedWorkspaceMutationScopeStateInternal;
 
 const scopes = new WeakMap<
   object,

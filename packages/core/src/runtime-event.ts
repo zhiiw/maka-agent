@@ -251,8 +251,25 @@ export interface RuntimeEventManagedWorkspaceMutationV1 {
   baseHeadRevision: number;
   baseCommitOid: string;
   baseTreeOid: string;
+  /** Git blob at expectedPaths[0] in baseTreeOid, or null when Write creates it. */
+  baseBlobOid: string | null;
   expectedPaths: readonly string[];
   executionProfileDigest: `sha256:${string}`;
+}
+
+/**
+ * Immutable proof that a managed mutation reached a terminal no-effect state.
+ * The dedicated SQLite workspace writer is the only authority allowed to
+ * persist this fact together with the exact tool response and reservation
+ * release.
+ */
+export interface RuntimeEventManagedWorkspaceMutationTerminalV1 {
+  protocol: 'managed_mutation_terminal_v1';
+  disposition: 'operation_failed_no_effect_committed' | 'no_workspace_change_committed';
+  operationId: string;
+  dispatchEventId: string;
+  outcomeEventId: string;
+  mutation: RuntimeEventManagedWorkspaceMutationV1;
 }
 
 export interface RuntimeEventProtocolMarker {
@@ -330,6 +347,8 @@ export interface RuntimeEventActions {
   continuationStart?: RuntimeEventContinuationStartV2;
   /** Reserved workspace authority fact; only its atomic SQLite writer may persist it. */
   workspaceFact?: RuntimeEventWorkspaceFactEnvelope;
+  /** Reserved terminal no-effect fact for an exact managed mutation T1. */
+  managedMutationTerminal?: RuntimeEventManagedWorkspaceMutationTerminalV1;
 }
 
 // ============================================================================
@@ -517,6 +536,7 @@ const RUNTIME_ACTIONS_SHAPE = defineObjectShape<RuntimeEventActions>()(
     'runtimeProtocol',
     'continuationStart',
     'workspaceFact',
+    'managedMutationTerminal',
   ],
 );
 const ANSWER_ACCEPTED_IDENTITY_SHAPE = defineObjectShape<RuntimeEventAnswerAcceptedIdentity>()(
@@ -555,9 +575,15 @@ const RUNTIME_MANAGED_WORKSPACE_MUTATION_SHAPE =
       'baseHeadRevision',
       'baseCommitOid',
       'baseTreeOid',
+      'baseBlobOid',
       'expectedPaths',
       'executionProfileDigest',
     ],
+    [],
+  );
+const RUNTIME_MANAGED_WORKSPACE_MUTATION_TERMINAL_SHAPE =
+  defineObjectShape<RuntimeEventManagedWorkspaceMutationTerminalV1>()(
+    ['protocol', 'disposition', 'operationId', 'dispatchEventId', 'outcomeEventId', 'mutation'],
     [],
   );
 const RUNTIME_PROTOCOL_MARKER_SHAPE = defineObjectShape<RuntimeEventProtocolMarker>()(
@@ -767,7 +793,10 @@ function isRuntimeEventActions(value: unknown): value is RuntimeEventActions {
     (value.runtimeProtocol === undefined || isRuntimeProtocolMarker(value.runtimeProtocol)) &&
     (value.continuationStart === undefined ||
       isRuntimeContinuationStart(value.continuationStart)) &&
-    (value.workspaceFact === undefined || isRuntimeEventWorkspaceFactEnvelope(value.workspaceFact))
+    (value.workspaceFact === undefined ||
+      isRuntimeEventWorkspaceFactEnvelope(value.workspaceFact)) &&
+    (value.managedMutationTerminal === undefined ||
+      isRuntimeManagedWorkspaceMutationTerminal(value.managedMutationTerminal))
   );
 }
 
@@ -854,6 +883,7 @@ function isRuntimeManagedWorkspaceMutation(
     value.baseHeadRevision < 1 ||
     typeof value.baseCommitOid !== 'string' ||
     typeof value.baseTreeOid !== 'string' ||
+    (value.baseBlobOid !== null && typeof value.baseBlobOid !== 'string') ||
     !isSha256Digest(value.executionProfileDigest) ||
     !Array.isArray(value.expectedPaths) ||
     value.expectedPaths.length === 0 ||
@@ -863,11 +893,36 @@ function isRuntimeManagedWorkspaceMutation(
   }
   const expectedPaths = value.expectedPaths;
   const oidPattern = value.objectFormat === 'sha1' ? /^[0-9a-f]{40}$/u : /^[0-9a-f]{64}$/u;
-  if (!oidPattern.test(value.baseCommitOid) || !oidPattern.test(value.baseTreeOid)) return false;
+  if (
+    !oidPattern.test(value.baseCommitOid) ||
+    !oidPattern.test(value.baseTreeOid) ||
+    (value.baseBlobOid !== null && !oidPattern.test(value.baseBlobOid))
+  ) {
+    return false;
+  }
   return (
     new Set(expectedPaths).size === expectedPaths.length &&
     expectedPaths.every(isCanonicalManagedMutationPathV1) &&
     expectedPaths.every((path, index) => index === 0 || expectedPaths[index - 1]! < path)
+  );
+}
+
+export function isRuntimeManagedWorkspaceMutationTerminal(
+  value: unknown,
+): value is RuntimeEventManagedWorkspaceMutationTerminalV1 {
+  return (
+    isRecord(value) &&
+    hasExactShape(value, RUNTIME_MANAGED_WORKSPACE_MUTATION_TERMINAL_SHAPE) &&
+    value.protocol === 'managed_mutation_terminal_v1' &&
+    (value.disposition === 'operation_failed_no_effect_committed' ||
+      value.disposition === 'no_workspace_change_committed') &&
+    typeof value.operationId === 'string' &&
+    value.operationId.length > 0 &&
+    typeof value.dispatchEventId === 'string' &&
+    value.dispatchEventId.length > 0 &&
+    typeof value.outcomeEventId === 'string' &&
+    value.outcomeEventId.length > 0 &&
+    isRuntimeManagedWorkspaceMutation(value.mutation)
   );
 }
 

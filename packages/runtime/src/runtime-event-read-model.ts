@@ -303,6 +303,13 @@ export function projectRuntimeEventsToStoredMessages(
       projected = true;
     }
 
+    if (event.actions?.managedMutationTerminal) {
+      // The exact function_response owns the provider-visible result. This
+      // storage-owned fact only proves that the managed reservation ended
+      // without advancing the canonical workspace head.
+      projected = true;
+    }
+
     if (event.actions?.artifactDelta) {
       // Artifact counters are storage bookkeeping. The tool result that owns the
       // artifact owns its row; this delta has none of its own.

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import {
   createGitWorkspaceService,
   type CreateManagedWorkspaceFromSourceInput,
@@ -14,6 +15,7 @@ import {
   type ManagedBaselineReceiptAuthorityInternal,
 } from './managed-baseline-receipt-authority-internal.js';
 import {
+  advanceManagedWorkspaceExecutionHandleInternal,
   issueManagedWorkspaceExecutionHandleInternal,
   issueManagedWorkspaceExecutionScopeInternal,
   requireManagedWorkspaceExecutionHandleInternal,
@@ -22,14 +24,28 @@ import {
   type ManagedWorkspaceExecutionScope,
 } from './managed-workspace-execution-authority-internal.js';
 import {
+  requireManagedMutationCandidateAuthorityInternal,
+  type ManagedMutationCandidateAuthorityInternal,
+  type ManagedMutationCandidateReceiptV1,
+} from './managed-mutation-candidate-authority-internal.js';
+import {
   createManagedWorkspaceWorkerBridgeInternal,
   type ManagedWorkspaceFilesystemWorker,
+  type ManagedWorkspaceMutationOperation,
+  type ManagedWorkspaceMutationResult,
   type ManagedWorkspaceReadOnlyOperation,
   type ManagedWorkspaceReadOnlyResult,
   type ManagedWorkspaceWorkerBridgeInternal,
 } from './managed-workspace-worker-bridge-internal.js';
 import type { RuntimeWorkspaceVersionAuthorityStore } from '@maka/core/runtime-event-store';
-import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
+import {
+  isCanonicalManagedMutationPathV1,
+  type RuntimeEventManagedWorkspaceMutationV1,
+} from '@maka/core/runtime-event';
+import type {
+  WorkspaceHeadRecordV1,
+  WorkspaceVersionRecordV1,
+} from '@maka/core/workspace-version-authority';
 import {
   assertInteractiveRootOwner,
   authenticateInteractiveRootOwner,
@@ -41,8 +57,13 @@ import {
   assertWorkspaceBaselineAuthorityStoreRootInternal,
   bindWorkspaceBaselineAuthorityStoreRootInternal,
   commitWorkspaceBaselineInternal,
+  commitManagedMutationTerminalInternal,
+  commitWorkspaceSuccessorInternal,
+  readActiveManagedMutationInternal,
   readWorkspaceHeadInternal,
 } from './workspace-version-authority-internal.js';
+import type { InteractiveExecutionStoresWriter } from './execution-stores.js';
+import { requireExecutionStoresWorkspaceAuthorityInternal } from './execution-stores-workspace-authority-internal.js';
 
 // RuntimeEvent order is assigned by the SQLite authority spine. M0 therefore
 // uses a protocol-fixed logical timestamp and keeps unauthenticated wall-clock
@@ -81,7 +102,9 @@ export type ManagedWorkspaceOwnerFailpoint =
   | 'after_initial_store_root_validation'
   | 'after_baseline_authority_commit'
   | 'after_post_commit_artifact_verification'
-  | 'after_execution_artifact_verification';
+  | 'after_execution_artifact_verification'
+  | 'after_managed_successor_commit'
+  | 'after_managed_candidate_accept';
 
 export type OpenManagedWorkspaceBaselineInput = CreateManagedWorkspaceFromSourceInput;
 
@@ -91,21 +114,77 @@ export interface OpenManagedWorkspaceBaselineResult {
   readonly executionHandle: ManagedWorkspaceExecutionHandle;
 }
 
+export interface AdmitManagedWorkspaceMutationInput {
+  readonly operationId: string;
+  readonly toolName: 'Write' | 'Edit';
+  readonly persistedArgs: unknown;
+  readonly abortSignal: AbortSignal;
+}
+
+export interface ManagedWorkspaceMutationAdmission {
+  readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceMutationV1>;
+  readonly canonicalPath: string;
+  execute(
+    operation: () => Promise<ManagedWorkspaceMutationOperationProof>,
+  ): Promise<ManagedWorkspaceMutationSettlement>;
+  /** Idempotent before T1 or after an admission is otherwise abandoned. */
+  dispose(): Promise<void>;
+}
+
+export interface ManagedWorkspaceMutationOperationProof {
+  readonly content: unknown;
+  readonly isError: boolean;
+  readonly durationMs: number;
+  readonly durableOutcome: import('@maka/core/runtime-event').RuntimeEvent;
+}
+
+export type ManagedWorkspaceMutationSettlement =
+  | {
+      readonly kind: 'workspace_successor_committed';
+      readonly durableOutcome: import('@maka/core/runtime-event').RuntimeEvent;
+    }
+  | {
+      readonly kind: 'no_workspace_change_committed';
+      readonly durableOutcome: import('@maka/core/runtime-event').RuntimeEvent;
+    }
+  | {
+      readonly kind: 'operation_failed_no_effect_committed';
+      readonly durableOutcome: import('@maka/core/runtime-event').RuntimeEvent;
+    };
+
+interface ManagedMutationExecutionContext {
+  readonly scope: ManagedWorkspaceExecutionScope;
+  resultBlobOid?: string;
+  resultContent?: string;
+}
+
 export interface ManagedWorkspaceOwner {
   readonly state: 'ready' | 'closing' | 'closed';
   openManagedWorkspaceBaseline(
     store: RuntimeWorkspaceVersionAuthorityStore,
     input: OpenManagedWorkspaceBaselineInput,
   ): Promise<OpenManagedWorkspaceBaselineResult>;
+  openManagedWorkspaceBaselineFromExecutionStores(
+    stores: InteractiveExecutionStoresWriter,
+    input: OpenManagedWorkspaceBaselineInput,
+  ): Promise<OpenManagedWorkspaceBaselineResult>;
   withManagedWorkspaceExecution<T>(
     handle: ManagedWorkspaceExecutionHandle,
     operation: (scope: ManagedWorkspaceExecutionScope) => Promise<T>,
   ): Promise<T>;
+  admitManagedWorkspaceMutation(
+    handle: ManagedWorkspaceExecutionHandle,
+    input: AdmitManagedWorkspaceMutationInput,
+  ): Promise<ManagedWorkspaceMutationAdmission>;
   executeReadOnlyFilesystemOperation(
     scope: ManagedWorkspaceExecutionScope,
     operation: ManagedWorkspaceReadOnlyOperation,
     abortSignal?: AbortSignal,
   ): Promise<ManagedWorkspaceReadOnlyResult>;
+  executeManagedMutationFilesystemOperation(
+    operation: ManagedWorkspaceMutationOperation,
+    abortSignal?: AbortSignal,
+  ): Promise<ManagedWorkspaceMutationResult>;
   close(): Promise<void>;
 }
 
@@ -151,6 +230,7 @@ export async function openManagedWorkspaceOwner(
       rootOwner,
       service,
       requireManagedBaselineReceiptAuthorityInternal(service),
+      requireManagedMutationCandidateAuthorityInternal(service),
       input.failpoint,
       input.filesystemWorker,
     );
@@ -173,6 +253,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
   readonly #drainWaiters = new Set<() => void>();
   readonly #assertCurrentRootIdentity: () => Promise<void>;
   readonly #executionContext = new AsyncLocalStorage<object>();
+  readonly #mutationExecutionContext = new AsyncLocalStorage<ManagedMutationExecutionContext>();
   #closeTask: Promise<void> | undefined;
   readonly #executionOwnerToken = {};
   readonly #workerBridge: ManagedWorkspaceWorkerBridgeInternal | undefined;
@@ -181,6 +262,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
     private readonly rootOwner: InteractiveRootOwner,
     private readonly service: GitWorkspaceService,
     private readonly receiptAuthority: ManagedBaselineReceiptAuthorityInternal,
+    private readonly mutationCandidateAuthority: ManagedMutationCandidateAuthorityInternal,
     private readonly failpoint?: (point: ManagedWorkspaceOwnerFailpoint) => void | Promise<void>,
     filesystemWorker?: ManagedWorkspaceFilesystemWorker,
   ) {
@@ -217,23 +299,34 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
         input.workspaceId,
         input.workspaceEpochId,
       );
-      const receipt = existingHead ? await this.receiptAuthority.require(input) : undefined;
-      const binding = receipt
-        ? await this.#openReadyBinding(receipt.binding)
-        : await this.#requireReady(await this.service.createManagedWorkspaceFromSource(input));
-      const durableReceipt = receipt ?? (await this.receiptAuthority.issue(binding));
-      if (
-        existingHead &&
-        (existingHead.workspaceVersionId !== durableReceipt.workspaceVersionId ||
-          existingHead.acceptedEventId !== durableReceipt.baselineAcceptedEventId ||
-          existingHead.commitOid !== binding.baselineCommitOid ||
-          existingHead.treeOid !== binding.baselineTreeOid)
-      ) {
-        throw new ManagedWorkspaceOwnerError(
-          'managed_workspace_owner_unavailable',
-          'Canonical workspace head does not match its durable Git baseline receipt',
+      const receipt = existingHead
+        ? await this.receiptAuthority.loadAcceptedContext(input)
+        : undefined;
+      let acceptedCandidate: ManagedMutationCandidateReceiptV1 | undefined;
+      let binding: ManagedWorkspaceBinding;
+      if (!receipt) {
+        binding = await this.#requireReady(
+          await this.service.createManagedWorkspaceFromSource(input),
         );
+      } else if (isBaselineWorkspaceHead(existingHead!, receipt, receipt.binding)) {
+        binding = await this.#openReadyBinding(receipt.binding);
+      } else {
+        binding = receipt.binding;
+        const version = await store.readWorkspaceVersion(existingHead!.workspaceVersionId);
+        if (!version || version.origin.kind !== 'tool_mutation') {
+          throw new ManagedWorkspaceOwnerError(
+            'managed_workspace_owner_unavailable',
+            'Canonical managed workspace successor evidence is unavailable',
+          );
+        }
+        acceptedCandidate = await this.mutationCandidateAuthority.require(
+          binding,
+          version.origin.operationId,
+        );
+        assertAcceptedSuccessorCandidate(binding, existingHead!, version, acceptedCandidate);
+        await this.mutationCandidateAuthority.accept(binding, acceptedCandidate);
       }
+      const durableReceipt = receipt ?? (await this.receiptAuthority.issue(binding));
       const committed = await commitWorkspaceBaselineInternal(store, {
         epochOpenedEventId: durableReceipt.epochOpenedEventId,
         baselineAcceptedEventId: durableReceipt.baselineAcceptedEventId,
@@ -272,7 +365,11 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
       // Canonical acceptance never makes a missing Git artifact acceptable.
       // Reverify after the SQLite transaction so post-accept artifact loss is
       // reported fail-closed instead of returning a usable workspace head.
-      await this.receiptAuthority.verify(durableReceipt);
+      if (acceptedCandidate) {
+        await this.mutationCandidateAuthority.accept(binding, acceptedCandidate);
+      } else {
+        await this.receiptAuthority.verify(durableReceipt);
+      }
       await this.failpoint?.('after_post_commit_artifact_verification');
       // The root marker is mutable host state and is not covered by receipt
       // verification. Revalidate its identity at the final return gate without
@@ -289,9 +386,22 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
           binding: internalBinding,
           receipt: internalReceipt,
           head: internalHead,
+          ...(acceptedCandidate
+            ? { candidateReceipt: Object.freeze(structuredClone(acceptedCandidate)) }
+            : {}),
         }),
       };
     });
+  }
+
+  openManagedWorkspaceBaselineFromExecutionStores(
+    stores: InteractiveExecutionStoresWriter,
+    input: OpenManagedWorkspaceBaselineInput,
+  ): Promise<OpenManagedWorkspaceBaselineResult> {
+    return this.openManagedWorkspaceBaseline(
+      requireExecutionStoresWorkspaceAuthorityInternal(stores),
+      input,
+    );
   }
 
   async withManagedWorkspaceExecution<T>(
@@ -312,12 +422,17 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
           { cause: error },
         );
       }
-      assertExecutionCrossPlaneIdentity(accepted.binding, accepted.receipt, accepted.head);
+      assertExecutionCrossPlaneIdentity(
+        accepted.binding,
+        accepted.receipt,
+        accepted.head,
+        accepted.candidateReceipt,
+      );
       // Test builds with a failpoint retain a preliminary proof so crash tests
       // can stop after a real, completed artifact verification. The ordinary
       // production path performs only the final proof below.
       if (this.failpoint) {
-        await this.#verifyExecutionArtifactOrQuarantine(accepted.binding, accepted.receipt);
+        await this.#verifyExecutionStateOrQuarantine(accepted);
         await this.failpoint('after_execution_artifact_verification');
       }
 
@@ -325,7 +440,7 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
       // proof bundle. Verify the durable Git artifact first, then make the
       // immutable workspace head the final durable reread before scope issue.
       await this.#assertCurrentRootIdentity();
-      await this.#verifyExecutionArtifactOrQuarantine(accepted.binding, accepted.receipt);
+      await this.#verifyExecutionStateOrQuarantine(accepted);
       const currentHead = await readWorkspaceHeadInternal(
         accepted.store,
         accepted.binding.workspaceId,
@@ -348,7 +463,12 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
           'Managed workspace execution handle no longer matches the canonical workspace head',
         );
       }
-      assertExecutionCrossPlaneIdentity(accepted.binding, accepted.receipt, currentHead);
+      assertExecutionCrossPlaneIdentity(
+        accepted.binding,
+        accepted.receipt,
+        currentHead,
+        accepted.candidateReceipt,
+      );
       const binding = accepted.binding;
       const scope = issueManagedWorkspaceExecutionScopeInternal(this.#executionOwnerToken, {
         provisioning: 'canonical_tree_only_v1',
@@ -365,6 +485,274 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
     });
   }
 
+  async admitManagedWorkspaceMutation(
+    handle: ManagedWorkspaceExecutionHandle,
+    input: AdmitManagedWorkspaceMutationInput,
+  ): Promise<ManagedWorkspaceMutationAdmission> {
+    return this.#run(async () => {
+      input.abortSignal.throwIfAborted();
+      if (!this.#workerBridge) {
+        throw new ManagedWorkspaceOwnerError(
+          'managed_workspace_worker_unavailable',
+          'Managed workspace mutation requires the sandboxed filesystem worker',
+        );
+      }
+      if (!/^[A-Za-z0-9_-]{1,128}$/u.test(input.operationId)) {
+        throw new ManagedWorkspaceOwnerError(
+          'managed_workspace_execution_handle_invalid',
+          'Managed workspace mutation operation identity is invalid',
+        );
+      }
+      let accepted;
+      try {
+        accepted = requireManagedWorkspaceExecutionHandleInternal(
+          this.#executionOwnerToken,
+          handle,
+        );
+      } catch (error) {
+        throw new ManagedWorkspaceOwnerError(
+          'managed_workspace_execution_handle_invalid',
+          'Managed workspace execution handle is invalid for this owner',
+          { cause: error },
+        );
+      }
+      assertExecutionCrossPlaneIdentity(
+        accepted.binding,
+        accepted.receipt,
+        accepted.head,
+        accepted.candidateReceipt,
+      );
+      await this.#assertCurrentRootIdentity();
+      await this.#verifyExecutionStateOrQuarantine(accepted);
+      const currentHead = await readWorkspaceHeadInternal(
+        accepted.store,
+        accepted.binding.workspaceId,
+        accepted.binding.workspaceEpochId,
+      );
+      await assertWorkspaceBaselineAuthorityStoreRootInternal(
+        accepted.store,
+        this.rootOwner.capability.canonicalPath,
+      );
+      bindWorkspaceBaselineAuthorityStoreRootInternal(
+        accepted.store,
+        this.rootOwner.capability.rootId,
+      );
+      if (!currentHead || !sameWorkspaceHead(currentHead, accepted.head)) {
+        throw new ManagedWorkspaceOwnerError(
+          'managed_workspace_owner_unavailable',
+          'Managed mutation base no longer matches the canonical workspace head',
+        );
+      }
+      assertExecutionCrossPlaneIdentity(
+        accepted.binding,
+        accepted.receipt,
+        currentHead,
+        accepted.candidateReceipt,
+      );
+      const active = await readActiveManagedMutationInternal(
+        accepted.store,
+        accepted.binding.workspaceInstanceId,
+      );
+      if (active) {
+        throw new ManagedWorkspaceOwnerError(
+          'managed_workspace_owner_unavailable',
+          `Managed workspace already has active mutation ${active.operationId}`,
+        );
+      }
+      const canonicalPath = canonicalManagedMutationPath(input.toolName, input.persistedArgs);
+      const baseFile = await this.mutationCandidateAuthority.readBaseFile(
+        accepted.binding,
+        currentHead,
+        canonicalPath,
+      );
+      const baseBlobOid = baseFile?.blobOid ?? null;
+      if (input.toolName === 'Edit' && baseBlobOid === null) {
+        throw new ManagedWorkspaceOwnerError(
+          'managed_workspace_owner_unavailable',
+          'Managed Edit target is absent from the admitted base tree',
+        );
+      }
+      input.abortSignal.throwIfAborted();
+      const durableDispatch = Object.freeze({
+        protocol: 'managed_mutation_v1' as const,
+        repositoryId: accepted.binding.repositoryId,
+        workspaceId: accepted.binding.workspaceId,
+        workspaceEpochId: accepted.binding.workspaceEpochId,
+        workspaceInstanceId: accepted.binding.workspaceInstanceId,
+        objectFormat: accepted.binding.objectFormat,
+        baseWorkspaceVersionId: currentHead.workspaceVersionId,
+        baseAcceptedEventId: currentHead.acceptedEventId,
+        baseHeadRevision: currentHead.revision,
+        baseCommitOid: currentHead.commitOid,
+        baseTreeOid: currentHead.treeOid,
+        baseBlobOid,
+        expectedPaths: Object.freeze([canonicalPath]),
+        executionProfileDigest: this.#workerBridge.mutationExecutionProfileDigest,
+      });
+      let state: 'open' | 'executing' | 'closed' = 'open';
+      const execute = async (
+        operation: () => Promise<ManagedWorkspaceMutationOperationProof>,
+      ): Promise<ManagedWorkspaceMutationSettlement> => {
+        if (state !== 'open') {
+          throw new ManagedWorkspaceOwnerError(
+            'managed_workspace_owner_unavailable',
+            'Managed workspace mutation admission is no longer active',
+          );
+        }
+        state = 'executing';
+        try {
+          return await this.#run(async () => {
+            const reservation = await readActiveManagedMutationInternal(
+              accepted.store,
+              accepted.binding.workspaceInstanceId,
+            );
+            assertManagedMutationReservation(reservation, input.operationId, durableDispatch);
+            const scope = issueManagedWorkspaceExecutionScopeInternal(this.#executionOwnerToken, {
+              provisioning: 'canonical_tree_only_v1',
+              workspaceEffect: 'mutation',
+              cwd: accepted.binding.worktreePath,
+              binding: accepted.binding,
+              head: freezeWorkspaceHead(currentHead),
+              operationId: input.operationId,
+              expectedPaths: durableDispatch.expectedPaths,
+              objectFormat: accepted.binding.objectFormat,
+              baseBlobOid,
+              baseContent: baseFile?.content ?? null,
+            });
+            try {
+              const executionContext: ManagedMutationExecutionContext = { scope };
+              const proof = await this.#executionContext.run(this.#executionOwnerToken, () =>
+                this.#mutationExecutionContext.run(executionContext, operation),
+              );
+              if (proof.isError) {
+                await this.#requireReady(accepted.binding);
+                await commitManagedMutationTerminalInternal(accepted.store, {
+                  disposition: 'operation_failed_no_effect_committed',
+                  toolOutcome: {
+                    operationId: input.operationId,
+                    journalEventId: `${input.operationId}_outcome`,
+                    runtimeEvent: proof.durableOutcome,
+                    committedAt: proof.durableOutcome.ts,
+                  },
+                });
+                return Object.freeze({
+                  kind: 'operation_failed_no_effect_committed' as const,
+                  durableOutcome: proof.durableOutcome,
+                });
+              }
+              if (!executionContext.resultBlobOid || executionContext.resultContent === undefined) {
+                throw new ManagedWorkspaceOwnerError(
+                  'managed_workspace_owner_unavailable',
+                  'Managed mutation completed without an exact worker result blob',
+                );
+              }
+              let candidate: ManagedMutationCandidateReceiptV1;
+              try {
+                candidate = await this.mutationCandidateAuthority.capture({
+                  binding: accepted.binding,
+                  operationId: input.operationId,
+                  baseHead: currentHead,
+                  expectedPaths: durableDispatch.expectedPaths,
+                  expectedBlobOid: executionContext.resultBlobOid,
+                  expectedContent: executionContext.resultContent,
+                  executionProfileDigest: durableDispatch.executionProfileDigest,
+                });
+              } catch (error) {
+                if (
+                  !(error instanceof GitWorkspaceServiceError) ||
+                  error.code !== 'managed_mutation_no_change'
+                ) {
+                  throw error;
+                }
+                if (executionContext.resultBlobOid !== baseBlobOid) {
+                  throw new ManagedWorkspaceOwnerError(
+                    'managed_workspace_owner_unavailable',
+                    'Managed mutation no-change state conflicts with its worker result blob',
+                  );
+                }
+                await this.#requireReady(accepted.binding);
+                await commitManagedMutationTerminalInternal(accepted.store, {
+                  disposition: 'no_workspace_change_committed',
+                  toolOutcome: {
+                    operationId: input.operationId,
+                    journalEventId: `${input.operationId}_outcome`,
+                    runtimeEvent: proof.durableOutcome,
+                    committedAt: proof.durableOutcome.ts,
+                  },
+                });
+                return Object.freeze({
+                  kind: 'no_workspace_change_committed' as const,
+                  durableOutcome: proof.durableOutcome,
+                });
+              }
+              const identity = successorIdentity(candidate);
+              const committed = await commitWorkspaceSuccessorInternal(accepted.store, {
+                successor: {
+                  acceptedEventId: identity.acceptedEventId,
+                  committedAt: proof.durableOutcome.ts,
+                  successor: {
+                    repositoryId: candidate.repositoryId,
+                    workspaceId: candidate.workspaceId,
+                    workspaceEpochId: candidate.workspaceEpochId,
+                    workspaceVersionId: identity.workspaceVersionId,
+                    objectFormat: candidate.objectFormat,
+                    parentWorkspaceVersionId: currentHead.workspaceVersionId,
+                    baseAcceptedEventId: currentHead.acceptedEventId,
+                    baseHeadRevision: currentHead.revision,
+                    commitOid: candidate.candidateCommitOid,
+                    treeOid: candidate.candidateTreeOid,
+                    policyHash: candidate.workspacePolicyHash,
+                    treeDeltaDigest: candidate.treeDeltaDigest,
+                    changedPaths: candidate.changedPaths,
+                    changedFileCount: candidate.changedPaths.length,
+                    deletedFileCount: candidate.deletedPaths.length,
+                    executionProfileDigest: candidate.executionProfileDigest,
+                  },
+                  origin: {
+                    operationId: input.operationId,
+                    dispatchEventId: reservation!.dispatchEventId,
+                    outcomeEventId: proof.durableOutcome.id,
+                  },
+                },
+                toolOutcome: {
+                  operationId: input.operationId,
+                  journalEventId: `${input.operationId}_outcome`,
+                  runtimeEvent: proof.durableOutcome,
+                  committedAt: proof.durableOutcome.ts,
+                },
+              });
+              await this.failpoint?.('after_managed_successor_commit');
+              await this.mutationCandidateAuthority.accept(accepted.binding, candidate);
+              await this.failpoint?.('after_managed_candidate_accept');
+              advanceManagedWorkspaceExecutionHandleInternal(
+                this.#executionOwnerToken,
+                handle,
+                freezeWorkspaceHead(committed.head),
+                Object.freeze(structuredClone(candidate)),
+              );
+              return Object.freeze({
+                kind: 'workspace_successor_committed' as const,
+                durableOutcome: proof.durableOutcome,
+              });
+            } finally {
+              revokeManagedWorkspaceExecutionScopeInternal(this.#executionOwnerToken, scope);
+            }
+          });
+        } finally {
+          state = 'closed';
+        }
+      };
+      return Object.freeze({
+        durableDispatch,
+        canonicalPath,
+        execute,
+        async dispose() {
+          if (state === 'open') state = 'closed';
+        },
+      });
+    });
+  }
+
   async executeReadOnlyFilesystemOperation(
     scope: ManagedWorkspaceExecutionScope,
     operation: ManagedWorkspaceReadOnlyOperation,
@@ -377,6 +765,36 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
       );
     }
     return await this.#workerBridge.execute(scope, operation, abortSignal);
+  }
+
+  async executeManagedMutationFilesystemOperation(
+    operation: ManagedWorkspaceMutationOperation,
+    abortSignal?: AbortSignal,
+  ): Promise<ManagedWorkspaceMutationResult> {
+    if (!this.#workerBridge) {
+      throw new ManagedWorkspaceOwnerError(
+        'managed_workspace_worker_unavailable',
+        'Managed workspace filesystem worker is unavailable',
+      );
+    }
+    const context = this.#mutationExecutionContext.getStore();
+    if (!context) {
+      throw new ManagedWorkspaceOwnerError(
+        'managed_workspace_execution_handle_invalid',
+        'Managed mutation worker is available only inside its active admission',
+      );
+    }
+    if (context.resultBlobOid) {
+      throw new ManagedWorkspaceOwnerError(
+        'managed_workspace_execution_handle_invalid',
+        'Managed mutation worker result was already consumed',
+      );
+    }
+    const result = await this.#workerBridge.executeMutation(context.scope, operation, abortSignal);
+    context.resultBlobOid = result.resultBlobOid;
+    context.resultContent = result.resultContent;
+    const { resultContent: _resultContent, ...publicResult } = result;
+    return publicResult;
   }
 
   close(): Promise<void> {
@@ -483,6 +901,119 @@ class ManagedWorkspaceOwnerImpl implements ManagedWorkspaceOwner {
       );
     }
   }
+
+  async #verifyExecutionStateOrQuarantine(
+    accepted: ReturnType<typeof requireManagedWorkspaceExecutionHandleInternal>,
+  ): Promise<void> {
+    if (!accepted.candidateReceipt) {
+      await this.#verifyExecutionArtifactOrQuarantine(accepted.binding, accepted.receipt);
+      return;
+    }
+    try {
+      await this.mutationCandidateAuthority.accept(accepted.binding, accepted.candidateReceipt);
+    } catch (error) {
+      if (
+        !(error instanceof GitWorkspaceServiceError) ||
+        error.code !== 'managed_workspace_drifted'
+      ) {
+        throw error;
+      }
+      const quarantine = await this.service.quarantineManagedWorkspace(
+        accepted.binding,
+        'external_workspace_drift',
+      );
+      throw new ManagedWorkspaceOwnerError(
+        'managed_workspace_quarantined',
+        `Managed workspace drift was quarantined at ${quarantine.quarantinePath}`,
+        { cause: error },
+      );
+    }
+  }
+}
+
+function canonicalManagedMutationPath(toolName: 'Write' | 'Edit', persistedArgs: unknown): string {
+  if (!persistedArgs || typeof persistedArgs !== 'object' || Array.isArray(persistedArgs)) {
+    throw new ManagedWorkspaceOwnerError(
+      'managed_workspace_owner_unavailable',
+      `Managed ${toolName} arguments are invalid`,
+    );
+  }
+  const record = persistedArgs as Record<string, unknown>;
+  const expectedKeys =
+    toolName === 'Write' ? ['content', 'path'] : ['new_string', 'old_string', 'path'];
+  if (
+    Object.keys(record).sort().join('\0') !== expectedKeys.join('\0') ||
+    typeof record.path !== 'string' ||
+    (toolName === 'Write' && typeof record.content !== 'string') ||
+    (toolName === 'Edit' &&
+      (typeof record.old_string !== 'string' || typeof record.new_string !== 'string'))
+  ) {
+    throw new ManagedWorkspaceOwnerError(
+      'managed_workspace_owner_unavailable',
+      `Managed ${toolName} arguments are invalid`,
+    );
+  }
+  const path = process.platform === 'win32' ? record.path.replaceAll('\\', '/') : record.path;
+  if (!isCanonicalManagedMutationPathV1(path)) {
+    throw new ManagedWorkspaceOwnerError(
+      'managed_workspace_owner_unavailable',
+      'Managed workspace mutation path is not a canonical tracked file path',
+    );
+  }
+  return path;
+}
+
+function assertManagedMutationReservation(
+  reservation: Awaited<ReturnType<typeof readActiveManagedMutationInternal>>,
+  operationId: string,
+  dispatch: RuntimeEventManagedWorkspaceMutationV1,
+): void {
+  if (
+    !reservation ||
+    reservation.operationId !== operationId ||
+    reservation.workspaceInstanceId !== dispatch.workspaceInstanceId ||
+    reservation.repositoryId !== dispatch.repositoryId ||
+    reservation.workspaceId !== dispatch.workspaceId ||
+    reservation.workspaceEpochId !== dispatch.workspaceEpochId ||
+    reservation.baseWorkspaceVersionId !== dispatch.baseWorkspaceVersionId ||
+    reservation.baseAcceptedEventId !== dispatch.baseAcceptedEventId ||
+    reservation.baseHeadRevision !== dispatch.baseHeadRevision ||
+    reservation.baseCommitOid !== dispatch.baseCommitOid ||
+    reservation.baseTreeOid !== dispatch.baseTreeOid ||
+    reservation.baseBlobOid !== dispatch.baseBlobOid ||
+    reservation.executionProfileDigest !== dispatch.executionProfileDigest ||
+    reservation.expectedPaths.length !== dispatch.expectedPaths.length ||
+    reservation.expectedPaths.some((path, index) => path !== dispatch.expectedPaths[index])
+  ) {
+    throw new ManagedWorkspaceOwnerError(
+      'managed_workspace_owner_unavailable',
+      'Managed mutation reservation does not match its owner-issued admission',
+    );
+  }
+}
+
+function successorIdentity(receipt: {
+  readonly operationId: string;
+  readonly workspaceEpochId: string;
+  readonly candidateCommitOid: string;
+  readonly candidateTreeOid: string;
+}): { acceptedEventId: string; workspaceVersionId: string } {
+  const digest = createHash('sha256')
+    .update(
+      JSON.stringify({
+        protocol: 'maka_managed_workspace_successor_identity_v1',
+        operationId: receipt.operationId,
+        workspaceEpochId: receipt.workspaceEpochId,
+        candidateCommitOid: receipt.candidateCommitOid,
+        candidateTreeOid: receipt.candidateTreeOid,
+      }),
+      'utf8',
+    )
+    .digest('hex');
+  return {
+    acceptedEventId: `workspace-successor-${digest.slice(0, 32)}`,
+    workspaceVersionId: `version_${digest.slice(32)}`,
+  };
 }
 
 function sameWorkspaceHead(left: WorkspaceHeadRecordV1, right: WorkspaceHeadRecordV1): boolean {
@@ -514,21 +1045,90 @@ function freezeManagedWorkspaceReceipt(
   return Object.freeze({ ...receipt, binding: freezeManagedWorkspaceBinding(receipt.binding) });
 }
 
+function isBaselineWorkspaceHead(
+  head: WorkspaceHeadRecordV1,
+  receipt: ManagedWorkspaceBaselineReceiptV1,
+  binding: ManagedWorkspaceBinding,
+): boolean {
+  return (
+    head.workspaceVersionId === receipt.workspaceVersionId &&
+    head.acceptedEventId === receipt.baselineAcceptedEventId &&
+    head.commitOid === binding.baselineCommitOid &&
+    head.treeOid === binding.baselineTreeOid &&
+    head.revision === 1
+  );
+}
+
+function assertAcceptedSuccessorCandidate(
+  binding: ManagedWorkspaceBinding,
+  head: WorkspaceHeadRecordV1,
+  version: WorkspaceVersionRecordV1,
+  candidate: ManagedMutationCandidateReceiptV1,
+): void {
+  if (version.protocol !== 'workspace_version_accepted_v1') {
+    throw new ManagedWorkspaceOwnerError(
+      'managed_workspace_owner_unavailable',
+      'Canonical successor does not match its owner-derived Git candidate',
+    );
+  }
+  const changedPathsMatch =
+    version.changedPaths.length === candidate.changedPaths.length &&
+    version.changedPaths.every((path, index) => path === candidate.changedPaths[index]);
+  if (
+    version.repositoryId !== binding.repositoryId ||
+    version.workspaceId !== binding.workspaceId ||
+    version.workspaceEpochId !== binding.workspaceEpochId ||
+    version.workspaceVersionId !== head.workspaceVersionId ||
+    version.acceptedEventId !== head.acceptedEventId ||
+    version.commitOid !== head.commitOid ||
+    version.treeOid !== head.treeOid ||
+    version.origin.operationId !== candidate.operationId ||
+    version.parents[0] !== candidate.baseHead.workspaceVersionId ||
+    version.baseAcceptedEventId !== candidate.baseHead.acceptedEventId ||
+    version.baseHeadRevision !== candidate.baseHead.revision ||
+    head.revision !== candidate.baseHead.revision + 1 ||
+    candidate.candidateCommitOid !== head.commitOid ||
+    candidate.candidateTreeOid !== head.treeOid ||
+    version.policyHash !== candidate.workspacePolicyHash ||
+    version.treeDeltaDigest !== candidate.treeDeltaDigest ||
+    version.executionProfileDigest !== candidate.executionProfileDigest ||
+    version.changedFileCount !== candidate.changedPaths.length ||
+    version.deletedFileCount !== candidate.deletedPaths.length ||
+    !changedPathsMatch
+  ) {
+    throw new ManagedWorkspaceOwnerError(
+      'managed_workspace_owner_unavailable',
+      'Canonical successor does not match its owner-derived Git candidate',
+    );
+  }
+}
+
 function assertExecutionCrossPlaneIdentity(
   binding: ManagedWorkspaceBinding,
   receipt: ManagedWorkspaceBaselineReceiptV1,
   head: Readonly<WorkspaceHeadRecordV1>,
+  candidateReceipt?: Readonly<ManagedMutationCandidateReceiptV1>,
 ): void {
-  if (
+  const commonMismatch =
     !sameManagedWorkspaceBinding(binding, receipt.binding) ||
     head.repositoryId !== binding.repositoryId ||
     head.workspaceId !== binding.workspaceId ||
-    head.workspaceEpochId !== binding.workspaceEpochId ||
-    head.workspaceVersionId !== receipt.workspaceVersionId ||
-    head.acceptedEventId !== receipt.baselineAcceptedEventId ||
-    head.commitOid !== binding.baselineCommitOid ||
-    head.treeOid !== binding.baselineTreeOid
-  ) {
+    head.workspaceEpochId !== binding.workspaceEpochId;
+  const baselineMismatch =
+    !candidateReceipt &&
+    (head.workspaceVersionId !== receipt.workspaceVersionId ||
+      head.acceptedEventId !== receipt.baselineAcceptedEventId ||
+      head.commitOid !== binding.baselineCommitOid ||
+      head.treeOid !== binding.baselineTreeOid);
+  const candidateMismatch =
+    candidateReceipt &&
+    (candidateReceipt.repositoryId !== binding.repositoryId ||
+      candidateReceipt.workspaceId !== binding.workspaceId ||
+      candidateReceipt.workspaceEpochId !== binding.workspaceEpochId ||
+      candidateReceipt.workspaceInstanceId !== binding.workspaceInstanceId ||
+      candidateReceipt.candidateCommitOid !== head.commitOid ||
+      candidateReceipt.candidateTreeOid !== head.treeOid);
+  if (commonMismatch || baselineMismatch || candidateMismatch) {
     throw new ManagedWorkspaceOwnerError(
       'managed_workspace_owner_unavailable',
       'Managed workspace execution evidence does not identify one exact accepted boundary',

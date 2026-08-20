@@ -14,4 +14,9 @@ export function assertNoReservedWorkspaceAuthorityAppend(event: RuntimeEvent): v
   if (event.sessionId === WORKSPACE_AUTHORITY_SESSION_ID) {
     throw new Error('RuntimeEvent targets the reserved workspace authority stream');
   }
+  if (event.actions?.managedMutationTerminal !== undefined) {
+    throw new Error(
+      'Managed mutation terminal facts require the atomic workspace settlement writer',
+    );
+  }
 }

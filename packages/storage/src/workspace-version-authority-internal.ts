@@ -29,10 +29,22 @@ export interface WorkspaceSuccessorCommitResult {
   head: WorkspaceHeadRecordV1;
   outcomeRuntimeEventSeq: number;
 }
+export interface ManagedMutationTerminalCommitInput {
+  readonly disposition: 'operation_failed_no_effect_committed' | 'no_workspace_change_committed';
+  readonly toolOutcome: WorkspaceSuccessorCommitInput['toolOutcome'];
+}
+export interface ManagedMutationTerminalCommitResult {
+  readonly created: boolean;
+  readonly outcomeRuntimeEventSeq: number;
+}
 type WorkspaceSuccessorAuthorityWriter = (
   input: WorkspaceSuccessorCommitInput,
   rootId: string,
 ) => Promise<WorkspaceSuccessorCommitResult>;
+type ManagedMutationTerminalWriter = (
+  input: ManagedMutationTerminalCommitInput,
+  rootId: string,
+) => Promise<ManagedMutationTerminalCommitResult>;
 type WorkspaceHeadReader = (
   workspaceId: string,
   workspaceEpochId: string,
@@ -49,6 +61,7 @@ export interface ManagedMutationReservationRecordV1 {
   readonly baseHeadRevision: number;
   readonly baseCommitOid: string;
   readonly baseTreeOid: string;
+  readonly baseBlobOid: string | null;
   readonly expectedPaths: readonly string[];
   readonly executionProfileDigest: string;
   readonly reservedAt: number;
@@ -60,6 +73,7 @@ type ManagedMutationReservationReader = (
 interface WorkspaceBaselineAuthorityRegistration {
   readonly writer: WorkspaceBaselineAuthorityWriter;
   readonly successorWriter: WorkspaceSuccessorAuthorityWriter;
+  readonly terminalWriter: ManagedMutationTerminalWriter;
   readonly readHead: WorkspaceHeadReader;
   readonly readActiveManagedMutation: ManagedMutationReservationReader;
   readonly bindStorageRoot: WorkspaceStorageRootBinder;
@@ -78,6 +92,7 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   databasePath: string,
   writer: WorkspaceBaselineAuthorityWriter,
   successorWriter: WorkspaceSuccessorAuthorityWriter,
+  terminalWriter: ManagedMutationTerminalWriter,
   bindStorageRoot: WorkspaceStorageRootBinder,
   readHead: WorkspaceHeadReader,
   readActiveManagedMutation: ManagedMutationReservationReader,
@@ -89,6 +104,7 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   workspaceBaselineAuthorityWriters.set(store, {
     writer,
     successorWriter,
+    terminalWriter,
     readHead,
     readActiveManagedMutation,
     bindStorageRoot,
@@ -144,6 +160,18 @@ export function commitWorkspaceSuccessorInternal(
     throw new Error('Workspace successor authority store has no durable storage-root binding');
   }
   return registration.successorWriter(input, registration.boundRootId);
+}
+
+export function commitManagedMutationTerminalInternal(
+  store: object,
+  input: ManagedMutationTerminalCommitInput,
+): Promise<ManagedMutationTerminalCommitResult> {
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Managed mutation terminal authority writer is unavailable');
+  if (!registration.boundRootId) {
+    throw new Error('Workspace successor authority store has no durable storage-root binding');
+  }
+  return registration.terminalWriter(input, registration.boundRootId);
 }
 
 export function bindWorkspaceBaselineAuthorityStoreRootInternal(

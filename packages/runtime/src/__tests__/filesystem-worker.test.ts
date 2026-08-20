@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, parse } from 'node:path';
@@ -405,6 +406,90 @@ describe('filesystem worker operations', () => {
     assert.equal(response.result.diff, undefined);
   });
 
+  test('transforms managed Edit from immutable Git content without writing the worktree', async () => {
+    const root = await temporaryDirectory('maka-worker-managed-edit-');
+    const target = join(root, 'tracked.txt');
+    await writeFile(target, 'tracked\nEXTERNAL\n', 'utf8');
+
+    const drifted = await executeFilesystemWorkerRequest(
+      requestFor(
+        {
+          kind: 'edit',
+          cwd: root,
+          path: target,
+          oldString: 'tracked',
+          newString: 'updated',
+        },
+        { enforcementPath: target, access: 'read', scope: 'exact', targetType: 'file' },
+        target,
+        {
+          protocol: 'detached_git_transform_v1',
+          objectFormat: 'sha1',
+          baseBlobOid: gitBlobOid('tracked\n'),
+          baseContent: 'tracked\n',
+        },
+      ),
+    );
+    assert.equal(drifted.ok, true);
+    if (!drifted.ok || drifted.result.kind !== 'edit') return;
+    assert.equal(drifted.result.resultBlobOid, gitBlobOid('updated\n'));
+    assert.equal(drifted.result.resultContent, 'updated\n');
+    assert.equal(await readFile(target, 'utf8'), 'tracked\nEXTERNAL\n');
+
+    await writeFile(target, 'tracked\n', 'utf8');
+    const accepted = await executeFilesystemWorkerRequest(
+      requestFor(
+        {
+          kind: 'edit',
+          cwd: root,
+          path: target,
+          oldString: 'tracked',
+          newString: 'updated',
+        },
+        { enforcementPath: target, access: 'read', scope: 'exact', targetType: 'file' },
+        target,
+        {
+          protocol: 'detached_git_transform_v1',
+          objectFormat: 'sha1',
+          baseBlobOid: gitBlobOid('tracked\n'),
+          baseContent: 'tracked\n',
+        },
+      ),
+    );
+    assert.equal(accepted.ok, true);
+    if (!accepted.ok || accepted.result.kind !== 'edit') return;
+    assert.equal(accepted.result.resultBlobOid, gitBlobOid('updated\n'));
+    assert.equal(accepted.result.resultContent, 'updated\n');
+    assert.equal(await readFile(target, 'utf8'), 'tracked\n');
+  });
+
+  test('keeps missing-file Edit semantics in the detached managed transform', async () => {
+    const root = await temporaryDirectory('maka-worker-managed-missing-edit-');
+    const target = join(root, 'missing.txt');
+    const response = await executeFilesystemWorkerRequest(
+      requestFor(
+        {
+          kind: 'edit',
+          cwd: root,
+          path: target,
+          oldString: 'old',
+          newString: 'new',
+        },
+        { enforcementPath: target, access: 'read', scope: 'exact', targetType: 'missing' },
+        target,
+        {
+          protocol: 'detached_git_transform_v1',
+          objectFormat: 'sha1',
+          baseBlobOid: null,
+          baseContent: null,
+        },
+      ),
+    );
+
+    assert.equal(response.ok, false);
+    if (!response.ok) assert.equal(response.error.code, 'not_found');
+  });
+
   test('omits the diff when FormatJson leaves the file unchanged', async () => {
     const root = await temporaryDirectory('maka-worker-format-same-');
     const target = join(root, 'data.json');
@@ -467,6 +552,7 @@ function requestFor(
   operation: FilesystemWorkerOperation,
   expectedTarget: FilesystemWorkerTarget,
   permissionPath = operation.path,
+  mutationEvidence?: FilesystemWorkerRequest['mutationEvidence'],
 ): FilesystemWorkerRequest {
   const operationBoundary: FilesystemWorkerRequest['operationBoundary'] = {
     filesystem: {
@@ -485,7 +571,16 @@ function requestFor(
     operation,
     operationBoundary,
     expectedTarget,
+    ...(mutationEvidence ? { mutationEvidence } : {}),
   };
+}
+
+function gitBlobOid(content: string): string {
+  const bytes = Buffer.from(content, 'utf8');
+  return createHash('sha1')
+    .update(`blob ${bytes.byteLength}\0`, 'utf8')
+    .update(bytes)
+    .digest('hex');
 }
 
 async function temporaryDirectory(prefix: string): Promise<string> {

@@ -12,11 +12,24 @@ const HEADLESS_CODING_V1_TOOL_NAMES = [
   'apply_patch',
 ] as const;
 
+// M2.4 exposes only operations whose workspace effects are owned by the
+// managed read bridge or the Write/Edit successor protocol. Bash and
+// apply_patch remain unavailable until they have an equivalent effect owner.
+const MANAGED_CODING_V1_TOOL_NAMES = ['Read', 'Write', 'Edit', 'Glob', 'Grep'] as const;
+
 const HEADLESS_CODING_V1_SYSTEM_PROMPT = [
   'Complete the task by acting with the available tools, not by narrating.',
   'Prefer Read, Glob, and Grep for inspection, Edit and Write for file changes, and Bash for shell commands and tests.',
   'Verify the result when practical.',
   'Stop when the task is complete.',
+].join('\n');
+
+const MANAGED_CODING_V1_SYSTEM_PROMPT = [
+  'Complete the task by acting with the available tools, not by narrating.',
+  'Use Read, Glob, and Grep for inspection, and Edit or Write for file changes.',
+  'All project operations run in a Maka-owned isolated Git workspace.',
+  'Shell commands and patch tools are unavailable in this execution profile.',
+  'Stop when the requested file changes are complete.',
 ].join('\n');
 
 const HEADLESS_CODING_V1_BASH_DESCRIPTION =
@@ -46,6 +59,13 @@ export function hostedExecutionRunProfile(
       memoryExtraction: false,
     };
   }
+  if (profile === 'managed-coding-v1') {
+    return {
+      toolNames: MANAGED_CODING_V1_TOOL_NAMES,
+      systemPrompt: MANAGED_CODING_V1_SYSTEM_PROMPT,
+      memoryExtraction: false,
+    };
+  }
   profile satisfies never;
   throw new Error('Unknown Session tool profile');
 }
@@ -60,13 +80,21 @@ export function projectHostedExecutionTools(
 ): readonly MakaTool[] {
   if (profile === undefined) return tools;
   hostedExecutionRunProfile(profile);
-  return tools.map((tool) =>
-    tool.name === 'Bash'
-      ? {
-          ...tool,
-          description: HEADLESS_CODING_V1_BASH_DESCRIPTION,
-          parameters: HEADLESS_CODING_V1_BASH_PARAMETERS,
-        }
-      : tool,
-  );
+  return tools.map((tool) => {
+    if (tool.name === 'Bash') {
+      return {
+        ...tool,
+        description: HEADLESS_CODING_V1_BASH_DESCRIPTION,
+        parameters: HEADLESS_CODING_V1_BASH_PARAMETERS,
+      };
+    }
+    if (profile === 'managed-coding-v1' && (tool.name === 'Write' || tool.name === 'Edit')) {
+      return {
+        ...tool,
+        recoveryMode: 'reconcile' as const,
+        durableExecutionProfile: 'managed_mutation_v1' as const,
+      };
+    }
+    return tool;
+  });
 }

@@ -1686,6 +1686,31 @@ const ACTION_COVERAGE_SAMPLES: ActionCoverageSamples = {
       },
     },
   },
+  managedMutationTerminal: {
+    action: {
+      protocol: 'managed_mutation_terminal_v1',
+      disposition: 'operation_failed_no_effect_committed',
+      operationId: 'coverage-op',
+      dispatchEventId: 'coverage-dispatch',
+      outcomeEventId: 'coverage-outcome',
+      mutation: {
+        protocol: 'managed_mutation_v1',
+        repositoryId: `repository_${'1'.repeat(32)}`,
+        workspaceId: `workspace_${'2'.repeat(32)}`,
+        workspaceEpochId: `epoch_${'3'.repeat(32)}`,
+        workspaceInstanceId: `instance_${'4'.repeat(32)}`,
+        objectFormat: 'sha1',
+        baseWorkspaceVersionId: `version_${'5'.repeat(32)}`,
+        baseAcceptedEventId: 'coverage-base',
+        baseHeadRevision: 1,
+        baseCommitOid: '1'.repeat(40),
+        baseTreeOid: '2'.repeat(40),
+        baseBlobOid: '3'.repeat(40),
+        expectedPaths: ['tracked.txt'],
+        executionProfileDigest: `sha256:${'6'.repeat(64)}`,
+      },
+    },
+  },
   runtimeProtocol: { action: { toolBoundary: 't1_after_preflight_v1' } },
 };
 

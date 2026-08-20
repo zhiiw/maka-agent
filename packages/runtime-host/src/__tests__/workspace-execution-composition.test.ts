@@ -12,6 +12,8 @@ import {
   RuntimeHostWorkspaceExecutionError,
 } from '../server/workspace-execution-composition.js';
 
+const TEST_MUTATION_PROFILE = `sha256:${'a'.repeat(64)}` as const;
+
 test('keeps attached and managed execution profiles explicit', async () => {
   const calls: string[] = [];
   const handle = Object.freeze({ kind: 'managed_workspace_execution_handle_v1' as const });
@@ -19,6 +21,7 @@ test('keeps attached and managed execution profiles explicit', async () => {
   const managedOwner = fakeManagedOwner({ handle, scope, calls });
   const composition = createRuntimeHostWorkspaceExecutionComposition({
     filesystemWorker: {
+      mutationExecutionProfileDigest: TEST_MUTATION_PROFILE,
       async execute(input) {
         calls.push(`worker:${input.cwd}:${input.operation.kind}`);
         return { kind: 'read', content: 'attached' };
@@ -47,6 +50,7 @@ test('never falls back a managed profile to attached execution', async () => {
   let workerCalls = 0;
   const composition = createRuntimeHostWorkspaceExecutionComposition({
     filesystemWorker: {
+      mutationExecutionProfileDigest: TEST_MUTATION_PROFILE,
       async execute() {
         workerCalls += 1;
         return { kind: 'read', content: 'unsafe fallback' };
@@ -71,6 +75,7 @@ test('rejects forged or malformed profiles before worker dispatch', async () => 
   let workerCalls = 0;
   const composition = createRuntimeHostWorkspaceExecutionComposition({
     filesystemWorker: {
+      mutationExecutionProfileDigest: TEST_MUTATION_PROFILE,
       async execute() {
         workerCalls += 1;
         return { kind: 'read', content: 'unsafe' };
@@ -137,6 +142,12 @@ function fakeManagedOwner(input: {
     async openManagedWorkspaceBaseline() {
       throw new Error('not used');
     },
+    async openManagedWorkspaceBaselineFromExecutionStores() {
+      throw new Error('not used');
+    },
+    async admitManagedWorkspaceMutation() {
+      throw new Error('not used');
+    },
     async withManagedWorkspaceExecution(handle, operation) {
       assert.equal(handle, input.handle);
       input.calls.push('managed:admit');
@@ -147,6 +158,9 @@ function fakeManagedOwner(input: {
       input.calls.push('managed:read');
       await input.workerBlocked;
       return { kind: 'read', content: 'managed' };
+    },
+    async executeManagedMutationFilesystemOperation() {
+      throw new Error('not used');
     },
     async close() {
       input.calls.push('managed:close');

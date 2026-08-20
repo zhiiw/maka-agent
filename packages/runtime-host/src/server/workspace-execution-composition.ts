@@ -134,12 +134,19 @@ export function createRuntimeHostWorkspaceExecutionComposition(
             'Attached workspace filesystem worker is unavailable',
           );
         }
-        return await input.filesystemWorker.execute({
+        const result = await input.filesystemWorker.execute({
           operation,
           cwd: profile.cwd,
           executionBoundary: createManagedExecutionBoundary(createReadOnlyPermissionProfile(), 0),
           ...(abortSignal ? { abortSignal } : {}),
         });
+        if (!isReadOnlyResult(result)) {
+          throw new RuntimeHostWorkspaceExecutionError(
+            'workspace_operation_denied',
+            `Read-only execution returned mutating result ${result.kind}`,
+          );
+        }
+        return result;
       } finally {
         finishOperation();
       }
@@ -161,6 +168,17 @@ function isReadOnlyOperation(input: unknown): input is ManagedWorkspaceReadOnlyO
   if (!input || typeof input !== 'object') return false;
   const kind = (input as { kind?: unknown }).kind;
   return kind === 'read' || kind === 'glob' || kind === 'grep';
+}
+
+function isReadOnlyResult(
+  input: Awaited<ReturnType<ManagedWorkspaceFilesystemWorker['execute']>>,
+): input is ManagedWorkspaceReadOnlyResult {
+  return (
+    input.kind === 'read' ||
+    input.kind === 'read_image' ||
+    input.kind === 'glob' ||
+    input.kind === 'grep'
+  );
 }
 
 function isWorkspaceExecutionProfile(

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { glob as nodeGlob } from 'node:fs/promises';
 import { dirname, isAbsolute, parse, resolve } from 'node:path';
@@ -64,12 +65,14 @@ export async function executeFilesystemWorkerRequest(
   dependencies: FilesystemWorkerOperationDependencies = {},
 ): Promise<FilesystemWorkerResponse> {
   try {
-    await assertTargetUnchanged(
-      request.operation.cwd,
-      request.operation.path,
-      request.expectedTarget,
-      operationUsesDirectoryEntry(request.operation),
-    );
+    if (request.mutationEvidence?.protocol !== 'detached_git_transform_v1') {
+      await assertTargetUnchanged(
+        request.operation.cwd,
+        request.operation.path,
+        request.expectedTarget,
+        operationUsesDirectoryEntry(request.operation),
+      );
+    }
     return {
       version: FILESYSTEM_WORKER_PROTOCOL_VERSION,
       requestId: request.requestId,
@@ -78,6 +81,7 @@ export async function executeFilesystemWorkerRequest(
         request.operation,
         request.operationBoundary,
         dependencies,
+        request.mutationEvidence,
       ),
     };
   } catch (error) {
@@ -95,6 +99,7 @@ export async function executeFilesystemOperation(
   operation: FilesystemWorkerOperation,
   operationBoundary: FilesystemWorkerRequest['operationBoundary'],
   dependencies: FilesystemWorkerOperationDependencies = {},
+  mutationEvidence?: FilesystemWorkerRequest['mutationEvidence'],
 ): Promise<FilesystemWorkerResult> {
   switch (operation.kind) {
     case 'read': {
@@ -129,24 +134,35 @@ export async function executeFilesystemOperation(
       return { kind: 'read', content: lines.slice(start, end).join('\n') };
     }
     case 'write': {
-      const path = await resolveWritableAllowed(
-        operation.cwd,
-        operation.path,
-        'Write',
-        operationBoundary,
-      );
+      const path = mutationEvidence
+        ? operation.path
+        : await resolveWritableAllowed(operation.cwd, operation.path, 'Write', operationBoundary);
       // Read-before-write: the diff of an overwrite is what tells the reader
       // what was lost. Only a missing file means the whole content is new —
       // any other read failure leaves the previous state unknown, and
       // claiming `--- /dev/null` would report the file as created.
       let previous: 'new' | 'unknown' | string;
-      try {
-        previous = await fs.readFile(path, 'utf8');
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        previous = code === 'ENOENT' || code === 'ENOTDIR' ? 'new' : 'unknown';
+      let previousBytes: Buffer | undefined;
+      if (mutationEvidence) {
+        previousBytes =
+          mutationEvidence.baseContent === null
+            ? undefined
+            : Buffer.from(mutationEvidence.baseContent, 'utf8');
+        previous = mutationEvidence.baseContent ?? 'new';
+      } else {
+        try {
+          previousBytes = await fs.readFile(path);
+          previous = previousBytes.toString('utf8');
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          previous = code === 'ENOENT' || code === 'ENOTDIR' ? 'new' : 'unknown';
+        }
       }
-      await fs.writeFile(path, operation.content, 'utf8');
+      assertManagedMutationPreimage(previousBytes, mutationEvidence);
+      if (!mutationEvidence) await fs.writeFile(path, operation.content, 'utf8');
+      const resultBlobOid = mutationEvidence
+        ? gitBlobOid(Buffer.from(operation.content, 'utf8'), mutationEvidence.objectFormat)
+        : undefined;
       const diff =
         previous === 'unknown'
           ? undefined
@@ -157,6 +173,8 @@ export async function executeFilesystemOperation(
         path,
         bytes: Buffer.byteLength(operation.content, 'utf8'),
         ...(diff !== undefined ? { diff } : {}),
+        ...(resultBlobOid ? { resultBlobOid } : {}),
+        ...(mutationEvidence ? { resultContent: operation.content } : {}),
       };
     }
     case 'apply_patch': {
@@ -182,14 +200,23 @@ export async function executeFilesystemOperation(
       return { kind: 'apply_patch', ok: true, path };
     }
     case 'edit': {
-      const path = await resolveExistingAllowed(
-        operation.cwd,
-        operation.path,
-        'Edit',
-        'write',
-        operationBoundary,
-      );
-      const content = await fs.readFile(path, 'utf8');
+      if (mutationEvidence?.baseContent === null) {
+        throw operationError('not_found', 'The requested path was not found.');
+      }
+      const path = mutationEvidence
+        ? operation.path
+        : await resolveExistingAllowed(
+            operation.cwd,
+            operation.path,
+            'Edit',
+            'write',
+            operationBoundary,
+          );
+      const contentBytes = mutationEvidence
+        ? Buffer.from(mutationEvidence.baseContent ?? '', 'utf8')
+        : await fs.readFile(path);
+      assertManagedMutationPreimage(contentBytes, mutationEvidence);
+      const content = contentBytes.toString('utf8');
       let edited: ReturnType<typeof computeEditedSource>;
       try {
         edited = computeEditedSource(
@@ -204,7 +231,10 @@ export async function executeFilesystemOperation(
           error instanceof Error ? error.message : 'Edit could not be applied.',
         );
       }
-      await fs.writeFile(path, edited.content, 'utf8');
+      if (!mutationEvidence) await fs.writeFile(path, edited.content, 'utf8');
+      const resultBlobOid = mutationEvidence
+        ? gitBlobOid(Buffer.from(edited.content, 'utf8'), mutationEvidence.objectFormat)
+        : undefined;
       const diff = createUnifiedDiff(path, content, edited.content);
       return {
         kind: 'edit',
@@ -215,6 +245,8 @@ export async function executeFilesystemOperation(
         startLine: edited.startLine,
         endLine: edited.endLine,
         ...(diff !== undefined ? { diff } : {}),
+        ...(resultBlobOid ? { resultBlobOid } : {}),
+        ...(mutationEvidence ? { resultContent: edited.content } : {}),
       };
     }
     case 'format_json': {
@@ -524,6 +556,32 @@ async function lstatTargetTypeOf(path: string): Promise<FilesystemWorkerTarget['
     if (nodeErrorCode(error) === 'ENOENT') return 'missing';
     throw error;
   }
+}
+
+function assertManagedMutationPreimage(
+  content: Buffer | undefined,
+  evidence: FilesystemWorkerRequest['mutationEvidence'],
+): void {
+  if (!evidence) return;
+  if (evidence.baseBlobOid === null) {
+    if (content === undefined) return;
+  } else if (
+    content !== undefined &&
+    gitBlobOid(content, evidence.objectFormat) === evidence.baseBlobOid
+  ) {
+    return;
+  }
+  throw operationError(
+    'path_changed',
+    'Managed mutation target changed after its durable base was admitted.',
+  );
+}
+
+function gitBlobOid(content: Buffer, objectFormat: 'sha1' | 'sha256'): string {
+  return createHash(objectFormat)
+    .update(`blob ${content.byteLength}\0`, 'utf8')
+    .update(content)
+    .digest('hex');
 }
 
 function nodeErrorCode(error: unknown): string | undefined {

@@ -34,6 +34,8 @@ jobs:
         run: |
           npm run build -w @maka/core
           npm run build -w @maka/storage
+          npm run build -w @maka/runtime
+          npm run build -w @maka/runtime-host
 
       - name: Verify managed workspace crash recovery
         run: node scripts/run-recovery-test-inventory.mjs managed-workspace
