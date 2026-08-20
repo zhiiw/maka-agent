@@ -8,6 +8,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -271,6 +272,192 @@ describe('managed mutation candidate authority', () => {
     );
   });
 
+  test('rebuilds an incomplete staging registration after worktree add is interrupted', async () => {
+    const root = await temporaryRoot();
+    const sourceRoot = await createEligibleSource(join(root, 'source'));
+    const storageRoot = join(root, 'storage');
+    const interrupted = createGitWorkspaceService({
+      storageRoot,
+      gitRuntime: {
+        executablePath: gitExecutablePath,
+        expectedSha256: gitExecutableSha256,
+      },
+      failpoint(point) {
+        if (point === 'after_mutation_projection_intent') {
+          throw new Error('simulated process stop before staging registration');
+        }
+      },
+    });
+    const binding = await interrupted.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+    const baseline =
+      await requireManagedBaselineReceiptAuthorityInternal(interrupted).issue(binding);
+    const authority = requireManagedMutationCandidateAuthorityInternal(interrupted);
+    const receipt = await authority.capture(candidateRequest(binding, baseline));
+    await writeFile(join(binding.worktreePath, 'tracked.txt'), 'external before add crash\n');
+
+    await assert.rejects(
+      authority.accept(binding, receipt),
+      /simulated process stop before staging registration/u,
+    );
+    const stagingPath = projectionStagingPath(binding, receipt);
+    await gitBare(
+      binding.repositoryPath,
+      'worktree',
+      'add',
+      '--quiet',
+      '--detach',
+      '--no-checkout',
+      stagingPath,
+      receipt.candidateCommitOid,
+    );
+
+    const restarted = await serviceAt(storageRoot);
+    await restarted.openManagedWorkspaceFromBinding(openRequest(sourceRoot));
+    assert.equal(await readFile(join(binding.worktreePath, 'tracked.txt'), 'utf8'), 'candidate\n');
+    assert.equal((await git(binding.worktreePath, 'status', '--porcelain=v1')).trim(), '');
+  });
+
+  test('repairs a projection registration after its directory rename is interrupted', async () => {
+    const root = await temporaryRoot();
+    const sourceRoot = await createEligibleSource(join(root, 'source'));
+    const storageRoot = join(root, 'storage');
+    const interrupted = createGitWorkspaceService({
+      storageRoot,
+      gitRuntime: {
+        executablePath: gitExecutablePath,
+        expectedSha256: gitExecutableSha256,
+      },
+      failpoint(point) {
+        if (point === 'after_mutation_projection_intent') {
+          throw new Error('simulated process stop before projection rename');
+        }
+      },
+    });
+    const binding = await interrupted.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+    const baseline =
+      await requireManagedBaselineReceiptAuthorityInternal(interrupted).issue(binding);
+    const authority = requireManagedMutationCandidateAuthorityInternal(interrupted);
+    const receipt = await authority.capture(candidateRequest(binding, baseline));
+    await writeFile(join(binding.worktreePath, 'tracked.txt'), 'external before rename crash\n');
+
+    await assert.rejects(
+      authority.accept(binding, receipt),
+      /simulated process stop before projection rename/u,
+    );
+    const previousPath = projectionPreviousPath(binding, receipt);
+    await gitBare(binding.repositoryPath, 'worktree', 'unlock', binding.worktreePath);
+    await rename(binding.worktreePath, previousPath);
+
+    const restarted = await serviceAt(storageRoot);
+    await restarted.openManagedWorkspaceFromBinding(openRequest(sourceRoot));
+    assert.equal(await readFile(join(binding.worktreePath, 'tracked.txt'), 'utf8'), 'candidate\n');
+    assert.equal(
+      await readFile(join(previousPath, 'tracked.txt'), 'utf8'),
+      'external before rename crash\n',
+    );
+  });
+
+  test('repairs a projection path when registration advanced before the directory', async () => {
+    const root = await temporaryRoot();
+    const sourceRoot = await createEligibleSource(join(root, 'source'));
+    const storageRoot = join(root, 'storage');
+    const interrupted = createGitWorkspaceService({
+      storageRoot,
+      gitRuntime: {
+        executablePath: gitExecutablePath,
+        expectedSha256: gitExecutableSha256,
+      },
+      failpoint(point) {
+        if (point === 'after_mutation_projection_intent') {
+          throw new Error('simulated process stop before reverse registration split');
+        }
+      },
+    });
+    const binding = await interrupted.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+    const baseline =
+      await requireManagedBaselineReceiptAuthorityInternal(interrupted).issue(binding);
+    const authority = requireManagedMutationCandidateAuthorityInternal(interrupted);
+    const receipt = await authority.capture(candidateRequest(binding, baseline));
+    await assert.rejects(
+      authority.accept(binding, receipt),
+      /simulated process stop before reverse registration split/u,
+    );
+    const previousPath = projectionPreviousPath(binding, receipt);
+    await gitBare(binding.repositoryPath, 'worktree', 'unlock', binding.worktreePath);
+    await rename(binding.worktreePath, previousPath);
+    await gitBare(binding.repositoryPath, 'worktree', 'repair', previousPath);
+    await rename(previousPath, binding.worktreePath);
+
+    const restarted = await serviceAt(storageRoot);
+    await restarted.openManagedWorkspaceFromBinding(openRequest(sourceRoot));
+    assert.equal(await readFile(join(binding.worktreePath, 'tracked.txt'), 'utf8'), 'candidate\n');
+  });
+
+  test('rebuilds path-only and registration-only staging fragments', async () => {
+    for (const fragment of ['path-only', 'registration-only'] as const) {
+      const root = await temporaryRoot();
+      const sourceRoot = await createEligibleSource(join(root, `source-${fragment}`));
+      const storageRoot = join(root, `storage-${fragment}`);
+      const interrupted = createGitWorkspaceService({
+        storageRoot,
+        gitRuntime: {
+          executablePath: gitExecutablePath,
+          expectedSha256: gitExecutableSha256,
+        },
+        failpoint(point) {
+          if (point === 'after_mutation_projection_intent') {
+            throw new Error(`simulated process stop before ${fragment} fragment`);
+          }
+        },
+      });
+      const binding = await interrupted.createManagedWorkspaceFromSource(openRequest(sourceRoot));
+      const baseline =
+        await requireManagedBaselineReceiptAuthorityInternal(interrupted).issue(binding);
+      const authority = requireManagedMutationCandidateAuthorityInternal(interrupted);
+      const receipt = await authority.capture(candidateRequest(binding, baseline));
+      await assert.rejects(
+        authority.accept(binding, receipt),
+        new RegExp(`simulated process stop before ${fragment} fragment`, 'u'),
+      );
+      const stagingPath = projectionStagingPath(binding, receipt);
+      if (fragment === 'path-only') {
+        await mkdir(stagingPath);
+        await writeFile(join(stagingPath, 'partial-marker.txt'), 'preserve me\n');
+      } else {
+        await gitBare(
+          binding.repositoryPath,
+          'worktree',
+          'add',
+          '--quiet',
+          '--detach',
+          '--no-checkout',
+          stagingPath,
+          receipt.candidateCommitOid,
+        );
+        await rename(stagingPath, join(root, 'registration-path-disappeared'));
+      }
+
+      const restarted = await serviceAt(storageRoot);
+      await restarted.openManagedWorkspaceFromBinding(openRequest(sourceRoot));
+      assert.equal(
+        await readFile(join(binding.worktreePath, 'tracked.txt'), 'utf8'),
+        'candidate\n',
+      );
+      if (fragment === 'path-only') {
+        const quarantined = await readdir(projectionQuarantineRoot(binding));
+        const preserved = await Promise.all(
+          quarantined.map((name) =>
+            readFile(
+              join(projectionQuarantineRoot(binding), name, 'partial-marker.txt'),
+              'utf8',
+            ).catch(() => undefined),
+          ),
+        );
+        assert.ok(preserved.includes('preserve me\n'));
+      }
+    }
+  });
+
   test('converges the same candidate when the process stops after ref publication', async () => {
     const root = await temporaryRoot();
     const sourceRoot = await createEligibleSource(join(root, 'source'));
@@ -508,7 +695,10 @@ describe('managed mutation candidate authority', () => {
     timeout: 120_000,
   }, async () => {
     for (const failpoint of [
+      'after_mutation_projection_staging_registered',
+      'after_mutation_projection_previous_renamed',
       'after_mutation_projection_previous',
+      'after_mutation_projection_publish_renamed',
       'after_mutation_projection_publish',
     ] as const) {
       const root = await temporaryRoot();
@@ -540,7 +730,9 @@ describe('managed mutation candidate authority', () => {
         const previous = await readdir(projectionQuarantineRoot(binding));
         const preserved = await Promise.all(
           previous.map((name) =>
-            readFile(join(projectionQuarantineRoot(binding), name, 'docs', 'a.md'), 'utf8'),
+            readFile(join(projectionQuarantineRoot(binding), name, 'docs', 'a.md'), 'utf8').catch(
+              () => undefined,
+            ),
           ),
         );
         assert.ok(preserved.includes('external before crash\n'));
@@ -692,7 +884,10 @@ function spawnMutationCrashChild(input: {
   failpoint:
     | 'after_mutation_candidate_ref'
     | 'after_mutation_candidate_discard_ref'
+    | 'after_mutation_projection_staging_registered'
+    | 'after_mutation_projection_previous_renamed'
     | 'after_mutation_projection_previous'
+    | 'after_mutation_projection_publish_renamed'
     | 'after_mutation_projection_publish';
   sourceRoot: string;
   storageRoot: string;
@@ -790,4 +985,20 @@ async function gitBare(repositoryPath: string, ...args: string[]): Promise<strin
 function projectionQuarantineRoot(binding: ManagedWorkspaceBinding): string {
   // repository.git is <managed-root>/r/<repository-id>/repository.git.
   return join(dirname(dirname(dirname(binding.repositoryPath))), 'q');
+}
+
+function projectionStagingPath(
+  binding: ManagedWorkspaceBinding,
+  receipt: ManagedMutationCandidateReceiptV1,
+): string {
+  const digest = receipt.candidateRef.split('/').at(-1)!;
+  return join(dirname(dirname(dirname(binding.repositoryPath))), 'p', digest.slice(0, 20));
+}
+
+function projectionPreviousPath(
+  binding: ManagedWorkspaceBinding,
+  receipt: ManagedMutationCandidateReceiptV1,
+): string {
+  const digest = receipt.candidateRef.split('/').at(-1)!;
+  return join(projectionQuarantineRoot(binding), digest.slice(0, 20));
 }

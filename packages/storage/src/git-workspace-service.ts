@@ -234,7 +234,10 @@ export type GitWorkspaceServiceFailpoint =
   | 'after_mutation_candidate_ref'
   | 'after_mutation_candidate_discard_ref'
   | 'after_mutation_projection_intent'
+  | 'after_mutation_projection_staging_registered'
+  | 'after_mutation_projection_previous_renamed'
   | 'after_mutation_projection_previous'
+  | 'after_mutation_projection_publish_renamed'
   | 'after_mutation_projection_publish';
 
 export interface ManagedWorkspaceIdentity {
@@ -1219,6 +1222,18 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       await assertOwnedDirectoryIdentity(paths.previousPath, intent.previousWorktreeIdentity);
     }
 
+    if (previousExists && stableExists) {
+      await this.relocateManagedProjectionWorktree(
+        binding,
+        paths.stagingPath,
+        binding.worktreePath,
+        receipt.candidateCommitOid,
+        mutationProjectionStagingLockReason(digest),
+        worktreeLockReason(binding),
+        'after_mutation_projection_publish_renamed',
+        layout,
+      );
+    }
     const stableRegistration = stableExists
       ? await this.readProjectionWorktreeRegistration(binding, binding.worktreePath, layout)
       : undefined;
@@ -1235,19 +1250,20 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
         );
       }
       await assertOwnedDirectoryIdentity(binding.worktreePath, intent.previousWorktreeIdentity);
-      await this.moveManagedProjectionWorktree(
+      await this.relocateManagedProjectionWorktree(
         binding,
         binding.worktreePath,
         paths.previousPath,
         receipt.baseHead.commitOid,
         worktreeLockReason(binding),
         mutationProjectionQuarantineLockReason(digest),
+        'after_mutation_projection_previous_renamed',
         layout,
       );
       await this.input.failpoint?.('after_mutation_projection_previous');
     }
     await assertOwnedDirectoryIdentity(paths.previousPath, intent.previousWorktreeIdentity);
-    await this.requireProjectionWorktreeRegistration(
+    await this.repairAndRequireProjectionWorktreeRegistration(
       binding,
       paths.previousPath,
       receipt.baseHead.commitOid,
@@ -1263,13 +1279,14 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           'Managed mutation projection staging tree is unavailable',
         );
       }
-      await this.moveManagedProjectionWorktree(
+      await this.relocateManagedProjectionWorktree(
         binding,
         paths.stagingPath,
         binding.worktreePath,
         receipt.candidateCommitOid,
         mutationProjectionStagingLockReason(digest),
         worktreeLockReason(binding),
+        'after_mutation_projection_publish_renamed',
         layout,
       );
       await this.input.failpoint?.('after_mutation_projection_publish');
@@ -1280,7 +1297,7 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
       );
     }
 
-    await this.requireProjectionWorktreeRegistration(
+    await this.repairAndRequireProjectionWorktreeRegistration(
       binding,
       binding.worktreePath,
       receipt.candidateCommitOid,
@@ -1328,18 +1345,75 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
     layout: WorkspaceLayout,
   ): Promise<void> {
     const paths = mutationProjectionPaths(layout, digest);
-    const existing = await this.readProjectionWorktreeRegistration(
-      binding,
-      paths.stagingPath,
-      layout,
-    );
-    if (!existing) {
-      if (await pathEntryExists(paths.stagingPath)) {
-        throw new GitWorkspaceServiceError(
-          'managed_workspace_identity_conflict',
-          'Managed mutation projection staging path is not an owned Git worktree',
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const registration = await this.readProjectionWorktreeRegistration(
+        binding,
+        paths.stagingPath,
+        layout,
+      );
+      const pathExists = await pathEntryExists(paths.stagingPath);
+
+      if (registration && !pathExists) {
+        if (registration.lockReason !== undefined) {
+          throw new GitWorkspaceServiceError(
+            'managed_workspace_identity_conflict',
+            'Missing projection staging path still has a locked Git registration',
+          );
+        }
+        await this.runtime.run(
+          ['--git-dir', binding.repositoryPath, 'worktree', 'prune', '--expire=now'],
+          layout.homePath,
         );
+        if (await this.readProjectionWorktreeRegistration(binding, paths.stagingPath, layout)) {
+          throw new GitWorkspaceServiceError(
+            'managed_workspace_identity_conflict',
+            'Incomplete projection staging registration could not be pruned',
+          );
+        }
+        continue;
       }
+
+      if (pathExists) {
+        await assertOwnedDirectoryEntry(paths.stagingPath, layout.projectionStagingRoot, true);
+        if (
+          registration?.headOid === receipt.candidateCommitOid &&
+          (registration.lockReason === undefined ||
+            registration.lockReason === mutationProjectionStagingLockReason(digest))
+        ) {
+          const [tree, status] = await Promise.all([
+            this.runtime.run(
+              ['-C', paths.stagingPath, 'rev-parse', '--verify', 'HEAD^{tree}'],
+              layout.homePath,
+            ),
+            this.readProjectionWorktreeStatus(paths.stagingPath, layout),
+          ]);
+          if (tree.trim() === receipt.candidateTreeOid && status === '') {
+            await this.ensureProjectionWorktreeLock(
+              binding,
+              paths.stagingPath,
+              receipt.candidateCommitOid,
+              mutationProjectionStagingLockReason(digest),
+              layout,
+            );
+            return;
+          }
+        } else if (registration) {
+          throw new GitWorkspaceServiceError(
+            'managed_workspace_identity_conflict',
+            'Incomplete projection staging registration changed identity',
+          );
+        }
+        await this.preserveIncompleteProjectionStaging(
+          binding,
+          paths.stagingPath,
+          registration,
+          receipt.candidateCommitOid,
+          digest,
+          layout,
+        );
+        continue;
+      }
+
       await this.runtime.run(
         [
           '--git-dir',
@@ -1348,81 +1422,225 @@ class GitWorkspaceServiceImpl implements GitWorkspaceService {
           'add',
           '--quiet',
           '--detach',
+          '--no-checkout',
           paths.stagingPath,
           receipt.candidateCommitOid,
         ],
         layout.homePath,
       );
+      await this.input.failpoint?.('after_mutation_projection_staging_registered');
+      await this.runtime.run(
+        ['-C', paths.stagingPath, 'reset', '--hard', receipt.candidateCommitOid],
+        layout.homePath,
+      );
+      const [tree, status] = await Promise.all([
+        this.runtime.run(
+          ['-C', paths.stagingPath, 'rev-parse', '--verify', 'HEAD^{tree}'],
+          layout.homePath,
+        ),
+        this.readProjectionWorktreeStatus(paths.stagingPath, layout),
+      ]);
+      if (tree.trim() !== receipt.candidateTreeOid || status !== '') {
+        throw new GitWorkspaceServiceError(
+          'managed_workspace_identity_conflict',
+          'New projection staging worktree did not materialize the candidate',
+        );
+      }
+      await this.ensureProjectionWorktreeLock(
+        binding,
+        paths.stagingPath,
+        receipt.candidateCommitOid,
+        mutationProjectionStagingLockReason(digest),
+        layout,
+      );
+      return;
     }
-    await this.ensureProjectionWorktreeLock(
+    throw new GitWorkspaceServiceError(
+      'managed_workspace_unavailable',
+      'Managed mutation projection staging did not converge',
+    );
+  }
+
+  private async preserveIncompleteProjectionStaging(
+    binding: ManagedWorkspaceBinding,
+    stagingPath: string,
+    registration: WorktreeRegistration | undefined,
+    expectedHead: string,
+    digest: string,
+    layout: WorkspaceLayout,
+  ): Promise<void> {
+    if (registration) {
+      if (
+        registration.headOid !== expectedHead ||
+        (registration.lockReason !== undefined &&
+          registration.lockReason !== mutationProjectionStagingLockReason(digest))
+      ) {
+        throw new GitWorkspaceServiceError(
+          'managed_workspace_identity_conflict',
+          'Incomplete projection staging artifact changed Git identity',
+        );
+      }
+      if (registration.lockReason !== undefined) {
+        await this.runtime.run(
+          ['--git-dir', binding.repositoryPath, 'worktree', 'unlock', stagingPath],
+          layout.homePath,
+        );
+      }
+    }
+    const preservedPath = await moveToQuarantine(
+      stagingPath,
+      layout.projectionQuarantineRoot,
+      `partial-projection-${digest}`,
+    );
+    if (registration || (await pathEntryExists(join(preservedPath, '.git')))) {
+      try {
+        await this.runtime.run(
+          ['--git-dir', binding.repositoryPath, 'worktree', 'repair', preservedPath],
+          layout.homePath,
+        );
+      } catch (error) {
+        // A path-only interruption may contain an incomplete or absent `.git`
+        // pointer with no central registration to repair. The whole directory
+        // is already quarantined and cannot alias the future canonical
+        // worktree, so retain it as inert evidence. A known registration must
+        // always remain repairable.
+        if (registration) throw error;
+      }
+    }
+    const preservedRegistration = await this.readProjectionWorktreeRegistration(
       binding,
-      paths.stagingPath,
-      receipt.candidateCommitOid,
-      mutationProjectionStagingLockReason(digest),
+      preservedPath,
       layout,
     );
-    const [tree, status] = await Promise.all([
-      this.runtime.run(
-        ['-C', paths.stagingPath, 'rev-parse', '--verify', 'HEAD^{tree}'],
-        layout.homePath,
-      ),
-      this.runtime.run(
+    if (preservedRegistration) {
+      await this.ensureProjectionWorktreeLock(
+        binding,
+        preservedPath,
+        expectedHead,
+        mutationProjectionPartialLockReason(digest),
+        layout,
+      );
+    }
+    await this.runtime.run(
+      ['--git-dir', binding.repositoryPath, 'worktree', 'prune', '--expire=now'],
+      layout.homePath,
+    );
+    if (await this.readProjectionWorktreeRegistration(binding, stagingPath, layout)) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Incomplete projection staging registration still owns its source path',
+      );
+    }
+  }
+
+  private async readProjectionWorktreeStatus(
+    worktreePath: string,
+    layout: WorkspaceLayout,
+  ): Promise<string> {
+    return (
+      await this.runtime.run(
         [
           '-C',
-          paths.stagingPath,
+          worktreePath,
           'status',
           '--porcelain=v1',
           '--untracked-files=all',
           '--ignored=matching',
         ],
         layout.homePath,
-      ),
-    ]);
-    if (tree.trim() !== receipt.candidateTreeOid || status.trim() !== '') {
-      throw new GitWorkspaceServiceError(
-        'managed_workspace_identity_conflict',
-        'Managed mutation projection staging worktree changed identity',
-      );
-    }
+      )
+    ).trim();
   }
 
-  private async moveManagedProjectionWorktree(
+  private async relocateManagedProjectionWorktree(
     binding: ManagedWorkspaceBinding,
     sourcePath: string,
     targetPath: string,
     expectedHead: string,
     sourceLockReason: string,
     targetLockReason: string,
+    afterRenameFailpoint:
+      | 'after_mutation_projection_previous_renamed'
+      | 'after_mutation_projection_publish_renamed',
     layout: WorkspaceLayout,
   ): Promise<void> {
-    const registration = await this.requireProjectionWorktreeRegistration(
-      binding,
-      sourcePath,
-      expectedHead,
-      sourceLockReason,
-      layout,
-    );
-    if (registration.lockReason !== undefined) {
-      await this.runtime.run(
-        ['--git-dir', binding.repositoryPath, 'worktree', 'unlock', sourcePath],
-        layout.homePath,
+    const sourceExists = await pathEntryExists(sourcePath);
+    const targetExists = await pathEntryExists(targetPath);
+    if (sourceExists && targetExists) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Projection relocation source and target both exist',
       );
     }
+    if (!sourceExists && !targetExists) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_unavailable',
+        'Projection relocation lost both source and target paths',
+      );
+    }
+
+    if (sourceExists) {
+      // Repair is deliberately driven from the directory that actually
+      // exists. A prior killed repair may already name the target in central
+      // registration metadata even though the atomic rename still presents
+      // the source path.
+      await this.runtime.run(
+        ['--git-dir', binding.repositoryPath, 'worktree', 'repair', sourcePath],
+        layout.homePath,
+      );
+      const registration = await this.requireProjectionWorktreeRegistration(
+        binding,
+        sourcePath,
+        expectedHead,
+        sourceLockReason,
+        layout,
+      );
+      if (registration.lockReason !== undefined) {
+        await this.runtime.run(
+          ['--git-dir', binding.repositoryPath, 'worktree', 'unlock', sourcePath],
+          layout.homePath,
+        );
+      }
+      await rename(sourcePath, targetPath);
+      await this.input.failpoint?.(afterRenameFailpoint);
+    }
+
     await this.runtime.run(
-      ['--git-dir', binding.repositoryPath, 'worktree', 'move', sourcePath, targetPath],
+      ['--git-dir', binding.repositoryPath, 'worktree', 'repair', targetPath],
       layout.homePath,
     );
+    await this.ensureProjectionWorktreeLock(
+      binding,
+      targetPath,
+      expectedHead,
+      targetLockReason,
+      layout,
+    );
+    if (await this.readProjectionWorktreeRegistration(binding, sourcePath, layout)) {
+      throw new GitWorkspaceServiceError(
+        'managed_workspace_identity_conflict',
+        'Projection relocation retained its obsolete source registration',
+      );
+    }
+  }
+
+  private async repairAndRequireProjectionWorktreeRegistration(
+    binding: ManagedWorkspaceBinding,
+    worktreePath: string,
+    expectedHead: string,
+    expectedLockReason: string,
+    layout: WorkspaceLayout,
+  ): Promise<WorktreeRegistration> {
     await this.runtime.run(
-      [
-        '--git-dir',
-        binding.repositoryPath,
-        'worktree',
-        'lock',
-        '--reason',
-        targetLockReason,
-        targetPath,
-      ],
+      ['--git-dir', binding.repositoryPath, 'worktree', 'repair', worktreePath],
       layout.homePath,
+    );
+    return this.requireProjectionWorktreeRegistration(
+      binding,
+      worktreePath,
+      expectedHead,
+      expectedLockReason,
+      layout,
     );
   }
 
@@ -4626,6 +4844,10 @@ function mutationProjectionStagingLockReason(digest: string): string {
 
 function mutationProjectionQuarantineLockReason(digest: string): string {
   return `maka mutation projection quarantine ${digest}`;
+}
+
+function mutationProjectionPartialLockReason(digest: string): string {
+  return `maka mutation projection partial ${digest}`;
 }
 
 function assertWorktreeRegistrationLocked(

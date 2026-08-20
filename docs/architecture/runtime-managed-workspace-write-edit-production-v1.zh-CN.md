@@ -61,10 +61,16 @@ immutable Git tree。
 
 rotation intent 在移动前持久化旧 worktree 根目录的 device/inode identity。恢复只接受同一非 symlink
 目录出现在确定性 quarantine path；预置 symlink、Windows junction 或其他 identity replacement 一律 fail closed。
-rotation 不再用文件系统 rename 复制同一份 `.git` 控制能力，而由 Git owner 执行两次 `git worktree move`：旧投影
-移动为 locked quarantined linked worktree，新 candidate 先物化为具有独立 per-worktree gitdir 的 detached linked
-worktree，再移动到 canonical path。这样 quarantine 保留全部外部用户字节，但其中的 `reset`、`add` 等普通 Git
-命令只能改变 quarantine 自己的 HEAD/index，不能改变 canonical projection 的 HEAD/index 或 managed ref。
+rotation 不把 `git worktree add/move` 当作原子动作。Git owner 先用 `worktree add --no-checkout` 只分配 staging
+registration，再单独物化 candidate；registration-only、path-only、registration+incomplete checkout 三种中断状态
+都由同一 reconciler 观察。incomplete staging 整体移入 partial quarantine，缺失路径的 unlocked registration 由
+`worktree prune` 收敛，然后从 immutable candidate 重建，不在半成品上执行覆盖式猜测。
+
+发布只使用同一文件系统内的原子目录 rename。rename 后 registration 暂时仍可能指向旧路径，Git owner 根据真实存在
+的 source/target path 幂等执行 `git worktree repair`，再验证 HEAD、index 和 lock。旧投影因此成为 locked
+quarantined linked worktree，新 candidate 成为具有独立 per-worktree gitdir 的 canonical linked worktree。这样
+quarantine 保留全部外部用户字节，但其中的 `reset`、`add` 等普通 Git 命令只能改变 quarantine 自己的 HEAD/index，
+不能改变 canonical projection 的 HEAD/index 或 managed ref。
 
 staging/quarantine 目录名只使用 operation digest 的固定长度前缀以避免 Windows `MAX_PATH`；完整 digest 仍保存在
 durable intent、receipt 和 lock reason 中，路径名本身不承担 artifact identity。projection owner 不通过可替换的
@@ -120,7 +126,9 @@ T1 后取消不允许在 operation capability 之前短路。Runtime 仍调用�
 | success 但 tree 无变化 | success T2 + terminal fact | 已收敛，head 不变 |
 | candidate capture 后、SQLite commit 前 | T1 + candidate artifact | reservation 保留；不得对外宣称成功 |
 | SQLite successor commit 后、projection rotation intent 前 | accepted successor + candidate receipt | reopen 幂等 accept，不重跑工具 |
+| staging registration 已创建、checkout 未完成 | durable rotation intent + partial linked-worktree state | 按 path/registration 矩阵整体保留 partial artifact、prune stale registration，再从 candidate 重建 |
 | rotation 已保存旧目录、尚未发布新投影 | durable rotation intent + identity-bound、独立 gitdir 的 quarantined linked worktree | reopen 重验目录与 Git registration/lock 后发布新投影；旧完整树仍可取回 |
+| 目录 rename 已完成、registration 仍指向旧路径 | durable rotation intent + atomic path state | 对实际存在路径重放 `worktree repair`，随后重验 HEAD/index/lock；不重跑工具 |
 | rotation 已发布新投影、尚未推进 managed ref | durable rotation intent + 两个独立 linked worktree | reopen 重验各自 HEAD/index/lock，只推进 managed ref；不原地覆盖文件 |
 | Git accept 后、provider publication 前 | accepted successor | Runtime 采用 exact durable outcome；后续 replay 同值 |
 | 外部修改或 evidence mismatch | 不推进/不覆盖 | quarantine 或 park |
@@ -132,13 +140,14 @@ T1 后取消不允许在 operation capability 之前短路。Runtime 仍调用�
 | T1/reservation/terminal/successor SQLite 原子性 | 承诺 | 承诺 | 承诺 |
 | exact Write/Edit path + worker profile binding | 承诺 | 承诺 | 实现并由边界测试证明；当前 recovery runner 未打包 broker |
 | candidate capture/accept process-crash 收敛 | CI 证明 | CI 证明 | CI 证明 |
-| 外部并发写不被 projection rotation 覆盖 | Git worktree move 后旧 inode/目录进入独立 quarantine；symlink tamper CI 拒绝 | Git worktree move 后旧 inode/目录进入独立 quarantine；symlink tamper CI 拒绝 | 可 move 时保留旧目录；junction tamper 拒绝；打开句柄阻止 move 时 fail closed |
+| 外部并发写不被 projection rotation 覆盖 | atomic rename + worktree repair；旧 inode/目录进入独立 quarantine；symlink tamper CI 拒绝 | atomic rename + worktree repair；旧 inode/目录进入独立 quarantine；symlink tamper CI 拒绝 | 可 rename 时保留旧目录；junction tamper 拒绝；打开句柄阻止 rename 时 fail closed |
 | quarantine Git 控制能力 | 独立 per-worktree HEAD/index；reset/add 隔离测试 | 独立 per-worktree HEAD/index；同一协议 | 独立 per-worktree HEAD/index；同一协议 |
 | 真实 Host/worker 在 successor commit 后 kill、reopen 不重跑 | CI 证明 | CI 证明 | release broker 存在；当前 recovery runner 明确 skip |
 | power-loss 后硬件永久写入顺序 | 不承诺 | 不承诺 | 不承诺 |
 
-统一 recovery inventory 执行真实 child process kill/reopen，并覆盖旧 projection 已移动及新 projection 已发布两个
-rotation crash 点。Linux/macOS 的组合测试经过 Runtime Host、ToolRuntime、
+统一 recovery inventory 执行真实 child process kill/reopen，并覆盖 staging registration 已分配、旧 projection
+rename 后 repair 前、旧 projection 已 repair、新 projection rename 后 repair 前及新 projection 已 repair 五个 rotation
+crash 点；确定性矩阵测试另覆盖 path-only 与 registration-only fragment。Linux/macOS 的组合测试经过 Runtime Host、ToolRuntime、
 真实 `FilesystemWorkerClient`、Git owner 与 SQLite authority，并在 reopen 后执行一个真实 `edit_conflict`，证明 worker
 reject 能收敛为 no-effect error terminal；Windows runner 仍执行 30 条 SQLite/Git crash 用例，但
 因没有构建发布包内的 Rust sandbox broker，完整 Host/worker 用例以一个显式 skip 记录，不能表述为已由该 lane 证明。

@@ -123,11 +123,15 @@ receipt；discard 在 ref deletion 后被杀，新进程依 tombstone 幂等完�
 device/inode identity；恢复拒绝预置 symlink/Windows junction，并且 projection owner 不再通过可替换 quarantine
 子路径删除 `.git`。
 
-旧投影与新 canonical projection 必须是两个独立的 linked worktree registration：Git owner 通过
-`git worktree move` 保存旧目录，通过 candidate commit 创建新的 detached staging worktree，再把 staging 移到
-canonical path。两者的 per-worktree gitdir、HEAD 与 index 不同；从 quarantine 执行 `reset`/`add` 不得改变
-canonical HEAD/index 或 managed ref。quarantine GC 将来必须先由 Git owner 撤销 registration，再清理目录，不能把
-locked quarantine 当普通缓存目录递归删除。统一的
+旧投影与新 canonical projection 必须是两个独立的 linked worktree registration。Git owner 不把 porcelain
+`worktree add/move` 视为原子事务：staging 以 `worktree add --no-checkout` 分离 registration 与 materialization；
+半完成 path/registration 由 durable intent 驱动的 reconciler 整体保留或 prune 后重建。旧目录与 staging 的发布只用
+原子 rename，随后对实际存在的路径幂等执行 `worktree repair` 并重验 HEAD/index/lock。因此 Git command 内部中断不会
+要求重新执行 Write/Edit，也不会把 partial checkout 当成完整 artifact。
+
+两份 projection 的 per-worktree gitdir、HEAD 与 index 不同；从 quarantine 执行 `reset`/`add` 不得改变 canonical
+HEAD/index 或 managed ref。quarantine GC 将来必须先由 Git owner 撤销 registration，再清理目录，不能把 locked
+quarantine 或 partial staging 当普通缓存目录递归删除。统一的
 `scripts/recovery-test-inventory.mjs` 拥有 recovery suite 和三平台期望数量，Linux/macOS/Windows workflow 消费
 同一 inventory。嵌套目录的新增、修改与删除均以递归 `diff-tree -r` 的文件路径作为
 receipt 证据，不能退化成顶层目录名。
