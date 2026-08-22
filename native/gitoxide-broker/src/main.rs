@@ -27,6 +27,11 @@ enum Request {
         protocol_version: u8,
         repository_path: PathBuf,
     },
+    InspectSourceEligibility {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        expected_head_commit_oid: String,
+    },
     ImportSourceHead {
         protocol_version: u8,
         source_repository_path: PathBuf,
@@ -72,6 +77,24 @@ enum Response<'a> {
         reason: &'static str,
         object_format: String,
         supported_object_formats: [&'static str; 1],
+    },
+    #[serde(rename_all = "camelCase")]
+    SourceEligible {
+        protocol_version: u8,
+        object_format: &'static str,
+        state: &'static str,
+        head_commit_oid: String,
+        head_tree_oid: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    SourceIneligible {
+        protocol_version: u8,
+        object_format: &'static str,
+        state: &'static str,
+        reason: &'static str,
+        expected_head_commit_oid: String,
+        actual_head_commit_oid: String,
+        path: String,
     },
     #[serde(rename_all = "camelCase")]
     SourceImported {
@@ -167,6 +190,14 @@ fn run() -> Result<ExitCode, &'static str> {
             assert_protocol_version(protocol_version)?;
             inspect_repository(repository_path)
         }
+        Request::InspectSourceEligibility {
+            protocol_version,
+            repository_path,
+            expected_head_commit_oid,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            inspect_source_eligibility(repository_path, expected_head_commit_oid)
+        }
         Request::ImportSourceHead {
             protocol_version,
             source_repository_path,
@@ -235,6 +266,24 @@ fn open_repository(repository_path: PathBuf) -> Result<gix::Repository, &'static
         .to_thread_local())
 }
 
+fn open_source_observation_repository(
+    repository_path: PathBuf,
+) -> Result<gix::Repository, &'static str> {
+    fn reject_repository_runtime_config(metadata: &gix::config::file::Metadata) -> bool {
+        !matches!(
+            metadata.source,
+            gix::config::Source::Local | gix::config::Source::Worktree
+        )
+    }
+
+    Ok(gix::open::Options::isolated()
+        .strict_config(true)
+        .filter_config_section(reject_repository_runtime_config)
+        .open(repository_path)
+        .map_err(|_| "source_observation_open_failed")?
+        .to_thread_local())
+}
+
 fn inspect_repository(repository_path: PathBuf) -> Result<ExitCode, &'static str> {
     let repository = open_repository(repository_path)?;
 
@@ -276,6 +325,162 @@ fn inspect_repository(repository_path: PathBuf) -> Result<ExitCode, &'static str
             Ok(ExitCode::from(2))
         }
     }
+}
+
+fn inspect_source_eligibility(
+    repository_path: PathBuf,
+    expected_head_commit_oid: String,
+) -> Result<ExitCode, &'static str> {
+    use gix::bstr::ByteSlice;
+
+    let requested_root =
+        fs::canonicalize(&repository_path).map_err(|_| "source_repository_root_unavailable")?;
+    let repository = open_repository(repository_path)?;
+    let actual_root = fs::canonicalize(repository.workdir().ok_or("source_worktree_unavailable")?)
+        .map_err(|_| "source_repository_root_unavailable")?;
+    if !same_platform_path(&requested_root, &actual_root) {
+        return Err("source_repository_not_worktree_root");
+    }
+    if repository
+        .common_dir()
+        .join("objects/info/alternates")
+        .exists()
+    {
+        return Err("unsafe_source_object_alternates");
+    }
+    if has_unsafe_source_runtime_config(&repository)? {
+        return Err("unsafe_source_configuration");
+    }
+    let references = repository
+        .references()
+        .map_err(|_| "source_references_unavailable")?;
+    let mut replacements = references
+        .prefixed("refs/replace/")
+        .map_err(|_| "source_references_unavailable")?;
+    if let Some(reference) = replacements.next() {
+        reference.map_err(|_| "source_references_unavailable")?;
+        return Err("unsafe_source_replace_ref");
+    }
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let expected_head = gix::hash::ObjectId::from_hex(expected_head_commit_oid.as_bytes())
+        .map_err(|_| "invalid_source_head_commit_oid")?;
+    if expected_head.kind() != gix::hash::Kind::Sha1 {
+        return Err("invalid_source_head_commit_oid");
+    }
+    let actual_head = repository
+        .head_commit()
+        .map_err(|_| "source_head_commit_unavailable")?;
+    let actual_head_oid = actual_head.id().detach();
+    if actual_head_oid != expected_head {
+        write_response(&Response::SourceIneligible {
+            protocol_version: PROTOCOL_VERSION,
+            object_format: "sha1",
+            state: "ineligible",
+            reason: "source_head_commit_mismatch",
+            expected_head_commit_oid: expected_head.to_string(),
+            actual_head_commit_oid: actual_head_oid.to_string(),
+            path: String::new(),
+        });
+        return Ok(ExitCode::from(3));
+    }
+    let head_tree_oid = actual_head
+        .tree_id()
+        .map_err(|_| "source_head_tree_unavailable")?
+        .detach();
+
+    // Status hashing must not execute repository-defined clean/process filters.
+    // Reopen the same worktree while rejecting Local/Worktree runtime config.
+    // This can conservatively reject repositories that depend on autocrlf or custom
+    // filters, but it cannot grant their commands an execution capability.
+    let repository = open_source_observation_repository(
+        repository
+            .workdir()
+            .ok_or("source_worktree_unavailable")?
+            .to_owned(),
+    )?;
+
+    let mut status = repository
+        .status(gix::progress::Discard)
+        .map_err(|_| "source_status_unavailable")?
+        .untracked_files(gix::status::UntrackedFiles::Files)
+        .index_worktree_rewrites(None)
+        .index_worktree_submodules(None)
+        .into_iter(Vec::new())
+        .map_err(|_| "source_status_unavailable")?;
+    if let Some(item) = status.next() {
+        let item = item.map_err(|_| "source_status_unavailable")?;
+        let path = item
+            .location()
+            .to_str()
+            .map_err(|_| "unsupported_source_path")?
+            .to_owned();
+        write_response(&Response::SourceIneligible {
+            protocol_version: PROTOCOL_VERSION,
+            object_format: "sha1",
+            state: "ineligible",
+            reason: "source_not_clean",
+            expected_head_commit_oid: expected_head.to_string(),
+            actual_head_commit_oid: actual_head_oid.to_string(),
+            path,
+        });
+        return Ok(ExitCode::from(3));
+    }
+
+    write_response(&Response::SourceEligible {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        state: "clean",
+        head_commit_oid: actual_head_oid.to_string(),
+        head_tree_oid: head_tree_oid.to_string(),
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+fn has_unsafe_source_runtime_config(repository: &gix::Repository) -> Result<bool, &'static str> {
+    use gix::bstr::ByteSlice;
+
+    let config = repository.config_snapshot();
+    for section in config.sections() {
+        if !matches!(
+            section.meta().source,
+            gix::config::Source::Local | gix::config::Source::Worktree
+        ) {
+            continue;
+        }
+        let name = section
+            .header()
+            .name()
+            .to_str()
+            .map_err(|_| "source_configuration_invalid")?
+            .to_ascii_lowercase();
+        let body = section.body();
+        let unsafe_section = match name.as_str() {
+            "include" | "includeif" | "filter" => true,
+            "extensions" => {
+                body.value("objectFormat").is_some() || body.value("partialClone").is_some()
+            }
+            "core" => body.value("fsmonitor").is_some(),
+            "remote" => body.value("promisor").is_some(),
+            _ => false,
+        };
+        if unsafe_section {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(windows)]
+fn same_platform_path(left: &Path, right: &Path) -> bool {
+    left.to_string_lossy()
+        .eq_ignore_ascii_case(&right.to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn same_platform_path(left: &Path, right: &Path) -> bool {
+    left == right
 }
 
 fn import_source_head(

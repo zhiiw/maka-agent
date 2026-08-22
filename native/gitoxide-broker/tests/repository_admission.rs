@@ -270,6 +270,225 @@ fn an_interrupted_source_import_is_discardable_and_retryable() {
 }
 
 #[test]
+fn admits_a_clean_source_while_ignoring_ignored_dependency_files() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    fs::write(fixture.root.join(".gitignore"), b"node_modules/\n").unwrap();
+    fixture.git(["add", ".gitignore"]);
+    fixture.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "ignore dependency files",
+    ]);
+    fs::create_dir(fixture.root.join("node_modules")).unwrap();
+    fs::write(
+        fixture.root.join("node_modules/cache.js"),
+        b"ignored dependency\n",
+    )
+    .unwrap();
+    let expected_head = fixture.git_output(["rev-parse", "HEAD"]);
+
+    let output = inspect_source_eligibility(&fixture, &expected_head);
+
+    assert!(
+        output.status.success(),
+        "eligibility failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "source_eligible");
+    assert_eq!(response["headCommitOid"], expected_head);
+    assert_eq!(response["state"], "clean");
+}
+
+#[test]
+fn rejects_a_tracked_source_worktree_modification() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let expected_head = fixture.git_output(["rev-parse", "HEAD"]);
+    fs::write(fixture.root.join("hello.txt"), b"dirty tracked content\n").unwrap();
+
+    let output = inspect_source_eligibility(&fixture, &expected_head);
+
+    assert_eq!(output.status.code(), Some(3));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "source_ineligible");
+    assert_eq!(response["reason"], "source_not_clean");
+    assert_eq!(response["path"], "hello.txt");
+}
+
+#[test]
+fn rejects_a_staged_source_index_change() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let expected_head = fixture.git_output(["rev-parse", "HEAD"]);
+    fs::write(fixture.root.join("staged.txt"), b"staged source change\n").unwrap();
+    fixture.git(["add", "staged.txt"]);
+
+    let output = inspect_source_eligibility(&fixture, &expected_head);
+
+    assert_eq!(output.status.code(), Some(3));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "source_ineligible");
+    assert_eq!(response["reason"], "source_not_clean");
+    assert_eq!(response["path"], "staged.txt");
+}
+
+#[test]
+fn rejects_an_untracked_source_path() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let expected_head = fixture.git_output(["rev-parse", "HEAD"]);
+    fs::write(fixture.root.join("untracked.txt"), b"untracked source\n").unwrap();
+
+    let output = inspect_source_eligibility(&fixture, &expected_head);
+
+    assert_eq!(output.status.code(), Some(3));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "source_ineligible");
+    assert_eq!(response["reason"], "source_not_clean");
+    assert_eq!(response["path"], "untracked.txt");
+}
+
+#[test]
+fn source_eligibility_never_executes_repository_filter_drivers() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    fs::write(
+        fixture.root.join(".gitattributes"),
+        b"hello.txt filter=evil\n",
+    )
+    .unwrap();
+    fixture.git(["add", ".gitattributes"]);
+    fixture.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "filter fixture",
+    ]);
+    let marker = fixture.root.join(".git/filter-invoked");
+    #[cfg(windows)]
+    let driver = {
+        let script = fixture.root.join(".git/evil-filter.cmd");
+        fs::write(
+            &script,
+            format!("@echo off\r\necho invoked>\"{}\"\r\n", marker.display()),
+        )
+        .unwrap();
+        script.to_string_lossy().replace('\\', "/")
+    };
+    #[cfg(unix)]
+    let driver = {
+        use std::os::unix::fs::PermissionsExt;
+        let script = fixture.root.join(".git/evil-filter.sh");
+        fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf invoked > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        script.to_string_lossy().into_owned()
+    };
+    fixture.git(["config", "filter.evil.clean", driver.as_str()]);
+    fs::write(fixture.root.join("hello.txt"), b"dirty filter target\n").unwrap();
+    let expected_head = fixture.git_output(["rev-parse", "HEAD"]);
+
+    let output = inspect_source_eligibility(&fixture, &expected_head);
+
+    assert_eq!(output.status.code(), Some(1));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["reason"], "unsafe_source_configuration");
+    assert!(
+        !marker.exists(),
+        "repository-defined filter driver executed"
+    );
+}
+
+#[test]
+fn rejects_source_eligibility_when_head_has_advanced() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let stale_head = fixture.git_output(["rev-parse", "HEAD"]);
+    fs::write(fixture.root.join("advance.txt"), b"advance\n").unwrap();
+    fixture.git(["add", "advance.txt"]);
+    fixture.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "advance eligibility head",
+    ]);
+    let actual_head = fixture.git_output(["rev-parse", "HEAD"]);
+
+    let output = inspect_source_eligibility(&fixture, &stale_head);
+
+    assert_eq!(output.status.code(), Some(3));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "source_ineligible");
+    assert_eq!(response["reason"], "source_head_commit_mismatch");
+    assert_eq!(response["expectedHeadCommitOid"], stale_head);
+    assert_eq!(response["actualHeadCommitOid"], actual_head);
+}
+
+#[test]
+fn rejects_a_repository_subdirectory_as_the_source_root() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    fs::create_dir(fixture.root.join("nested")).unwrap();
+    let expected_head = fixture.git_output(["rev-parse", "HEAD"]);
+
+    let output = invoke_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "inspect_source_eligibility",
+        "repositoryPath": fixture.root.join("nested"),
+        "expectedHeadCommitOid": expected_head,
+    }));
+
+    assert_eq!(output.status.code(), Some(1));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["reason"], "repository_open_failed");
+}
+
+#[test]
+fn rejects_source_object_alternates() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let alternate = RepositoryFixture::sha1_with_commit();
+    let expected_head = fixture.git_output(["rev-parse", "HEAD"]);
+    fs::write(
+        fixture.root.join(".git/objects/info/alternates"),
+        alternate
+            .root
+            .join(".git/objects")
+            .to_string_lossy()
+            .as_bytes(),
+    )
+    .unwrap();
+
+    let output = inspect_source_eligibility(&fixture, &expected_head);
+
+    assert_eq!(output.status.code(), Some(1));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["reason"], "unsafe_source_object_alternates");
+}
+
+#[test]
+fn rejects_source_replace_refs() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let expected_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let replace_ref = format!("refs/replace/{expected_head}");
+    fixture.git(["update-ref", replace_ref.as_str(), expected_head.as_str()]);
+
+    let output = inspect_source_eligibility(&fixture, &expected_head);
+
+    assert_eq!(output.status.code(), Some(1));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["reason"], "unsafe_source_replace_ref");
+}
+
+#[test]
 fn publishes_a_successor_only_from_the_exact_base_commit() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let base_commit = fixture.git_output(["rev-parse", "HEAD"]);
@@ -836,6 +1055,15 @@ fn observe_projection(
         "repositoryPath": fixture.root,
         "acceptedCommitOid": accepted_commit,
         "projectionPath": projection,
+    }))
+}
+
+fn inspect_source_eligibility(fixture: &RepositoryFixture, expected_head: &str) -> Output {
+    invoke_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "inspect_source_eligibility",
+        "repositoryPath": fixture.root,
+        "expectedHeadCommitOid": expected_head,
     }))
 }
 
