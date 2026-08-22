@@ -1,13 +1,19 @@
 use std::{
-    io::{self, Read},
-    path::PathBuf,
+    collections::HashSet,
+    fs::{self, OpenOptions},
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 const PROTOCOL_VERSION: u8 = 1;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
+const MAX_PROJECTION_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PROJECTION_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_PROJECTION_FILES: u64 = 200_000;
 
 #[derive(Deserialize)]
 #[serde(
@@ -28,6 +34,12 @@ enum Request {
         target_ref: String,
         path: String,
         content: String,
+    },
+    MaterializeProjection {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_commit_oid: String,
+        destination_path: PathBuf,
     },
 }
 
@@ -67,6 +79,16 @@ enum Response<'a> {
         expected_base_commit_oid: String,
         actual_base_commit_oid: String,
         target_ref: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    ProjectionMaterialized {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        destination_path: PathBuf,
+        files_materialized: u64,
+        bytes_written: u64,
     },
     #[serde(rename_all = "camelCase")]
     BrokerError {
@@ -114,6 +136,15 @@ fn run() -> Result<ExitCode, &'static str> {
                 path,
                 content,
             )
+        }
+        Request::MaterializeProjection {
+            protocol_version,
+            repository_path,
+            accepted_commit_oid,
+            destination_path,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            materialize_projection(repository_path, accepted_commit_oid, destination_path)
         }
     }
 }
@@ -303,6 +334,167 @@ fn is_canonical_successor_path(path: &str) -> bool {
                 && component != ".."
                 && !component.eq_ignore_ascii_case(".git")
         })
+}
+
+#[derive(Default)]
+struct ProjectionStats {
+    files: u64,
+    bytes: u64,
+    folded_paths: HashSet<String>,
+}
+
+fn materialize_projection(
+    repository_path: PathBuf,
+    accepted_commit_oid: String,
+    destination_path: PathBuf,
+) -> Result<ExitCode, &'static str> {
+    let repository = open_repository(repository_path)?;
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let accepted_commit = gix::hash::ObjectId::from_hex(accepted_commit_oid.as_bytes())
+        .map_err(|_| "invalid_accepted_commit_oid")?;
+    if accepted_commit.kind() != gix::hash::Kind::Sha1 {
+        return Err("invalid_accepted_commit_oid");
+    }
+    let accepted_tree = repository
+        .find_commit(accepted_commit)
+        .map_err(|_| "accepted_commit_unavailable")?
+        .tree_id()
+        .map_err(|_| "accepted_tree_unavailable")?
+        .detach();
+
+    fs::create_dir(&destination_path).map_err(|error| match error.kind() {
+        io::ErrorKind::AlreadyExists => "projection_destination_not_fresh",
+        _ => "projection_destination_create_failed",
+    })?;
+    let mut stats = ProjectionStats::default();
+    materialize_tree(
+        &repository,
+        accepted_tree,
+        &destination_path,
+        "",
+        &mut stats,
+    )?;
+
+    write_response(&Response::ProjectionMaterialized {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        accepted_commit_oid: accepted_commit.to_string(),
+        accepted_tree_oid: accepted_tree.to_string(),
+        destination_path,
+        files_materialized: stats.files,
+        bytes_written: stats.bytes,
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+fn materialize_tree(
+    repository: &gix::Repository,
+    tree_oid: gix::hash::ObjectId,
+    destination: &Path,
+    prefix: &str,
+    stats: &mut ProjectionStats,
+) -> Result<(), &'static str> {
+    let tree = repository
+        .find_tree(tree_oid)
+        .map_err(|_| "projection_tree_unavailable")?;
+    for entry in tree.iter() {
+        let entry = entry.map_err(|_| "projection_tree_invalid")?;
+        let component =
+            std::str::from_utf8(entry.filename()).map_err(|_| "unsupported_projection_path")?;
+        if !is_supported_projection_component(component) {
+            return Err("unsupported_projection_path");
+        }
+        let relative_path = if prefix.is_empty() {
+            component.to_owned()
+        } else {
+            format!("{prefix}/{component}")
+        };
+        let folded_path: String = relative_path.nfc().flat_map(char::to_lowercase).collect();
+        if !stats.folded_paths.insert(folded_path) {
+            return Err("projection_path_collision");
+        }
+        let output_path = destination.join(component);
+        match entry.mode().kind() {
+            gix::objs::tree::EntryKind::Tree => {
+                fs::create_dir(&output_path).map_err(|_| "projection_directory_create_failed")?;
+                materialize_tree(
+                    repository,
+                    entry.object_id(),
+                    &output_path,
+                    &relative_path,
+                    stats,
+                )?;
+            }
+            gix::objs::tree::EntryKind::Blob | gix::objs::tree::EntryKind::BlobExecutable => {
+                stats.files = stats
+                    .files
+                    .checked_add(1)
+                    .filter(|count| *count <= MAX_PROJECTION_FILES)
+                    .ok_or("projection_file_limit_exceeded")?;
+                let header = entry
+                    .id()
+                    .header()
+                    .map_err(|_| "projection_blob_unavailable")?;
+                if header.kind() != gix::objs::Kind::Blob
+                    || header.size() > MAX_PROJECTION_FILE_BYTES
+                {
+                    return Err("projection_file_limit_exceeded");
+                }
+                stats.bytes = stats
+                    .bytes
+                    .checked_add(header.size())
+                    .filter(|bytes| *bytes <= MAX_PROJECTION_BYTES)
+                    .ok_or("projection_byte_limit_exceeded")?;
+                let blob = entry
+                    .object()
+                    .map_err(|_| "projection_blob_unavailable")?
+                    .try_into_blob()
+                    .map_err(|_| "projection_blob_invalid")?;
+                let mut output = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&output_path)
+                    .map_err(|_| "projection_file_create_failed")?;
+                output
+                    .write_all(&blob.data)
+                    .map_err(|_| "projection_file_write_failed")?;
+                drop(output);
+                set_projection_mode(
+                    &output_path,
+                    entry.mode().kind() == gix::objs::tree::EntryKind::BlobExecutable,
+                )?;
+            }
+            _ => return Err("unsupported_projection_entry_kind"),
+        }
+    }
+    Ok(())
+}
+
+fn is_supported_projection_component(component: &str) -> bool {
+    !component.is_empty()
+        && component != "."
+        && component != ".."
+        && !component.contains('/')
+        && !component.contains('\\')
+        && !component.contains('\0')
+        && !component.eq_ignore_ascii_case(".git")
+        && !component.eq_ignore_ascii_case(".gitattributes")
+}
+
+#[cfg(unix)]
+fn set_projection_mode(path: &Path, executable: bool) -> Result<(), &'static str> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = if executable { 0o755 } else { 0o644 };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|_| "projection_mode_update_failed")
+}
+
+#[cfg(not(unix))]
+fn set_projection_mode(_path: &Path, _executable: bool) -> Result<(), &'static str> {
+    Ok(())
 }
 
 fn read_request() -> Result<Request, &'static str> {
