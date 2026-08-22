@@ -79,6 +79,9 @@ broker 为 12,131,840 bytes（约 11.57 MiB），比 source-import probe 增加 
 3.69 MiB）。这说明 source status 是目前体积增长最大的单项，生产打包时值得单独 strip/LTO，并评估
 是否把 eligibility 做成独立按需组件；无需因此绑定完整 Git CLI。
 
+同一 Windows artifact 经 `llvm-strip --strip-all` 后为 8,770,560 bytes（约 8.36 MiB），说明约
+3.21 MiB 是可在 release pipeline 去除的符号开销；正式包体预算应以签名后的三平台 strip 产物为准。
+
 对 151 个 locked package 的 license metadata 复核未发现只能按 GPL/AGPL/LGPL 分发的依赖；所有
 表达式都提供 MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 或 public-domain 类可选路径。`r-efi` 的
 SPDX 表达式包含 LGPL 作为 `OR` 选项，同时也明确提供 MIT/Apache-2.0，因此不会强制选择 LGPL。
