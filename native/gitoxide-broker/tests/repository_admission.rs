@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -61,6 +61,212 @@ fn rejects_sha256_before_returning_a_repository_capability() {
             "supportedObjectFormats": ["sha1"],
         })
     );
+}
+
+#[test]
+fn imports_an_exact_source_head_into_a_fresh_managed_repository() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    fs::create_dir_all(fixture.root.join("docs")).unwrap();
+    fs::write(fixture.root.join("docs/guide.txt"), b"nested guide\n").unwrap();
+    fs::write(fixture.root.join("script.sh"), b"#!/bin/sh\necho hello\n").unwrap();
+    fixture.git(["add", "docs/guide.txt", "script.sh"]);
+    fixture.git(["update-index", "--chmod=+x", "script.sh"]);
+    fixture.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "source import fixture",
+    ]);
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let source_tree = fixture.git_output(["rev-parse", "HEAD^{tree}"]);
+    let destination = fixture.root.join("managed.git");
+    let baseline_ref = "refs/maka/baseline";
+
+    let output = invoke_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "import_source_head",
+        "sourceRepositoryPath": fixture.root,
+        "expectedSourceHeadCommitOid": source_head,
+        "destinationRepositoryPath": destination,
+        "baselineRef": baseline_ref,
+    }));
+
+    assert!(
+        output.status.success(),
+        "broker failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "source_imported");
+    assert_eq!(response["objectFormat"], "sha1");
+    assert_eq!(response["sourceHeadCommitOid"], source_head);
+    assert_eq!(response["sourceTreeOid"], source_tree);
+    assert_eq!(response["baselineTreeOid"], source_tree);
+    assert_eq!(response["baselineRef"], baseline_ref);
+    assert_eq!(response["filesImported"], 3);
+    assert_eq!(response["bytesImported"], 50);
+
+    let baseline_commit = response["baselineCommitOid"].as_str().unwrap();
+    assert_ne!(baseline_commit, source_head);
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", baseline_ref]),
+        baseline_commit
+    );
+    assert_eq!(
+        git_bare_output(
+            &destination,
+            ["rev-parse", &format!("{baseline_commit}^{{tree}}")]
+        ),
+        source_tree
+    );
+    assert_eq!(
+        git_bare_bytes(
+            &destination,
+            ["show", &format!("{baseline_commit}:docs/guide.txt")]
+        ),
+        b"nested guide\n"
+    );
+    assert!(
+        git_bare_output(
+            &destination,
+            ["ls-tree", baseline_commit, "--", "script.sh"]
+        )
+        .starts_with("100755 blob ")
+    );
+    assert!(!git_bare_succeeds(
+        &destination,
+        ["cat-file", "-e", source_head.as_str()]
+    ));
+    assert!(!destination.join("objects/info/alternates").exists());
+    assert_eq!(fs::read_dir(destination.join("hooks")).unwrap().count(), 0);
+}
+
+#[test]
+fn rejects_a_stale_source_head_before_creating_the_destination() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let stale_head = fixture.git_output(["rev-parse", "HEAD"]);
+    fs::write(fixture.root.join("new.txt"), b"new source head\n").unwrap();
+    fixture.git(["add", "new.txt"]);
+    fixture.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "advance source",
+    ]);
+    let destination = fixture.root.join("managed.git");
+
+    let output = invoke_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "import_source_head",
+        "sourceRepositoryPath": fixture.root,
+        "expectedSourceHeadCommitOid": stale_head,
+        "destinationRepositoryPath": destination,
+        "baselineRef": "refs/maka/baseline",
+    }));
+
+    assert_eq!(output.status.code(), Some(1));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "broker_error");
+    assert_eq!(response["reason"], "source_head_commit_mismatch");
+    assert!(!destination.exists());
+}
+
+#[test]
+fn refuses_to_take_over_a_preexisting_import_destination() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("managed.git");
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("external.txt"), b"preserve me\n").unwrap();
+
+    let output = invoke_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "import_source_head",
+        "sourceRepositoryPath": fixture.root,
+        "expectedSourceHeadCommitOid": source_head,
+        "destinationRepositoryPath": destination,
+        "baselineRef": "refs/maka/baseline",
+    }));
+
+    assert_eq!(output.status.code(), Some(1));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["reason"], "import_destination_not_fresh");
+    assert_eq!(
+        fs::read(destination.join("external.txt")).unwrap(),
+        b"preserve me\n"
+    );
+    assert!(!destination.join("HEAD").exists());
+}
+
+#[test]
+fn an_interrupted_source_import_is_discardable_and_retryable() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let large_bytes = vec![0x41; 64 * 1024 * 1024];
+    fs::write(fixture.root.join("large.bin"), &large_bytes).unwrap();
+    fixture.git(["add", "large.bin"]);
+    fixture.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "large source import fixture",
+    ]);
+    drop(large_bytes);
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let interrupted_destination = fixture.root.join("managed-interrupted.git");
+    let mut child = spawn_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "import_source_head",
+        "sourceRepositoryPath": fixture.root,
+        "expectedSourceHeadCommitOid": source_head,
+        "destinationRepositoryPath": interrupted_destination,
+        "baselineRef": "refs/maka/baseline",
+    }));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !interrupted_destination.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "source import did not start in time"
+        );
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "broker exited before it could be killed"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    child.kill().unwrap();
+    assert!(!child.wait().unwrap().success());
+
+    fs::remove_dir_all(&interrupted_destination).unwrap();
+    let retry_destination = fixture.root.join("managed-retry.git");
+    let output = invoke_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "import_source_head",
+        "sourceRepositoryPath": fixture.root,
+        "expectedSourceHeadCommitOid": source_head,
+        "destinationRepositoryPath": retry_destination,
+        "baselineRef": "refs/maka/baseline",
+    }));
+    assert!(
+        output.status.success(),
+        "retry failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "source_imported");
+    assert_eq!(response["filesImported"], 2);
+    assert_eq!(response["bytesImported"], 64 * 1024 * 1024 + 16);
 }
 
 #[test]
@@ -657,6 +863,39 @@ fn spawn_broker(request: serde_json::Value) -> Child {
         .write_all(serde_json::to_string(&request).unwrap().as_bytes())
         .unwrap();
     child
+}
+
+fn git_bare_output<const N: usize>(repository: &Path, args: [&str; N]) -> String {
+    String::from_utf8(git_bare_bytes(repository, args))
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+fn git_bare_bytes<const N: usize>(repository: &Path, args: [&str; N]) -> Vec<u8> {
+    let output = Command::new("git")
+        .arg("--git-dir")
+        .arg(repository)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "bare Git command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn git_bare_succeeds<const N: usize>(repository: &Path, args: [&str; N]) -> bool {
+    Command::new("git")
+        .arg("--git-dir")
+        .arg(repository)
+        .args(args)
+        .output()
+        .unwrap()
+        .status
+        .success()
 }
 
 struct RepositoryFixture {
