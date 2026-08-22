@@ -473,6 +473,166 @@ fn an_interrupted_projection_is_discardable_and_retryable() {
     );
 }
 
+#[test]
+fn observes_an_exact_projection_as_clean() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let accepted_commit = fixture.git_output(["rev-parse", "HEAD"]);
+    let projection = fixture.root.join("projection");
+    let materialized = invoke_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "materialize_projection",
+        "repositoryPath": fixture.root,
+        "acceptedCommitOid": accepted_commit,
+        "destinationPath": projection,
+    }));
+    assert!(materialized.status.success());
+
+    let output = invoke_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "observe_projection",
+        "repositoryPath": fixture.root,
+        "acceptedCommitOid": accepted_commit,
+        "projectionPath": projection,
+    }));
+
+    assert!(
+        output.status.success(),
+        "observer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "projection_observed");
+    assert_eq!(response["state"], "clean");
+    assert_eq!(response["acceptedCommitOid"], accepted_commit);
+    assert_eq!(response["filesObserved"], 1);
+    assert_eq!(response["bytesRead"], 16);
+}
+
+#[test]
+fn detects_same_size_content_drift_against_the_accepted_blob() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let accepted_commit = fixture.git_output(["rev-parse", "HEAD"]);
+    let projection = fixture.root.join("projection");
+    assert!(
+        invoke_broker(serde_json::json!({
+            "protocolVersion": 1,
+            "operation": "materialize_projection",
+            "repositoryPath": fixture.root,
+            "acceptedCommitOid": accepted_commit,
+            "destinationPath": projection,
+        }))
+        .status
+        .success()
+    );
+    fs::write(projection.join("hello.txt"), b"evil! from sha1\n").unwrap();
+
+    let output = invoke_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "observe_projection",
+        "repositoryPath": fixture.root,
+        "acceptedCommitOid": accepted_commit,
+        "projectionPath": projection,
+    }));
+
+    assert_eq!(output.status.code(), Some(3));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "projection_drifted");
+    assert_eq!(response["state"], "drifted");
+    assert_eq!(response["reason"], "expected_file_content_mismatch");
+    assert_eq!(response["path"], "hello.txt");
+    assert_eq!(response["acceptedCommitOid"], accepted_commit);
+}
+
+#[test]
+fn detects_a_missing_tracked_path() {
+    let (fixture, accepted_commit, projection) = materialized_sha1_projection();
+    fs::remove_file(projection.join("hello.txt")).unwrap();
+
+    let output = observe_projection(&fixture, &accepted_commit, &projection);
+
+    assert_eq!(output.status.code(), Some(3));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["reason"], "expected_path_missing_or_unreadable");
+    assert_eq!(response["path"], "hello.txt");
+}
+
+#[test]
+fn detects_an_untracked_projection_path() {
+    let (fixture, accepted_commit, projection) = materialized_sha1_projection();
+    fs::write(projection.join("external.txt"), b"external\n").unwrap();
+
+    let output = observe_projection(&fixture, &accepted_commit, &projection);
+
+    assert_eq!(output.status.code(), Some(3));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["reason"], "unexpected_projection_path");
+    assert_eq!(response["path"], "external.txt");
+}
+
+#[test]
+fn detects_a_tracked_path_replaced_by_a_directory() {
+    let (fixture, accepted_commit, projection) = materialized_sha1_projection();
+    fs::remove_file(projection.join("hello.txt")).unwrap();
+    fs::create_dir(projection.join("hello.txt")).unwrap();
+
+    let output = observe_projection(&fixture, &accepted_commit, &projection);
+
+    assert_eq!(output.status.code(), Some(3));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["reason"], "expected_file_type_mismatch");
+    assert_eq!(response["path"], "hello.txt");
+}
+
+#[cfg(unix)]
+#[test]
+fn detects_executable_mode_drift() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (fixture, accepted_commit, projection) = materialized_sha1_projection();
+    fs::set_permissions(
+        projection.join("hello.txt"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let output = observe_projection(&fixture, &accepted_commit, &projection);
+
+    assert_eq!(output.status.code(), Some(3));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["reason"], "expected_file_mode_mismatch");
+    assert_eq!(response["path"], "hello.txt");
+}
+
+fn materialized_sha1_projection() -> (RepositoryFixture, String, PathBuf) {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let accepted_commit = fixture.git_output(["rev-parse", "HEAD"]);
+    let projection = fixture.root.join("projection");
+    let output = invoke_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "materialize_projection",
+        "repositoryPath": fixture.root,
+        "acceptedCommitOid": accepted_commit,
+        "destinationPath": projection,
+    }));
+    assert!(output.status.success());
+    (fixture, accepted_commit, projection)
+}
+
+fn observe_projection(
+    fixture: &RepositoryFixture,
+    accepted_commit: &str,
+    projection: &PathBuf,
+) -> Output {
+    invoke_broker(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "observe_projection",
+        "repositoryPath": fixture.root,
+        "acceptedCommitOid": accepted_commit,
+        "projectionPath": projection,
+    }))
+}
+
 fn invoke_broker(request: serde_json::Value) -> Output {
     spawn_broker(request).wait_with_output().unwrap()
 }

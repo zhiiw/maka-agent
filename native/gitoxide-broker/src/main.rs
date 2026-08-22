@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
@@ -40,6 +40,12 @@ enum Request {
         repository_path: PathBuf,
         accepted_commit_oid: String,
         destination_path: PathBuf,
+    },
+    ObserveProjection {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_commit_oid: String,
+        projection_path: PathBuf,
     },
 }
 
@@ -89,6 +95,28 @@ enum Response<'a> {
         destination_path: PathBuf,
         files_materialized: u64,
         bytes_written: u64,
+    },
+    #[serde(rename_all = "camelCase")]
+    ProjectionObserved {
+        protocol_version: u8,
+        object_format: &'static str,
+        state: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        projection_path: PathBuf,
+        files_observed: u64,
+        bytes_read: u64,
+    },
+    #[serde(rename_all = "camelCase")]
+    ProjectionDrifted {
+        protocol_version: u8,
+        object_format: &'static str,
+        state: &'static str,
+        reason: &'static str,
+        path: String,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        projection_path: PathBuf,
     },
     #[serde(rename_all = "camelCase")]
     BrokerError {
@@ -145,6 +173,15 @@ fn run() -> Result<ExitCode, &'static str> {
         } => {
             assert_protocol_version(protocol_version)?;
             materialize_projection(repository_path, accepted_commit_oid, destination_path)
+        }
+        Request::ObserveProjection {
+            protocol_version,
+            repository_path,
+            accepted_commit_oid,
+            projection_path,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            observe_projection(repository_path, accepted_commit_oid, projection_path)
         }
     }
 }
@@ -341,6 +378,7 @@ struct ProjectionStats {
     files: u64,
     bytes: u64,
     folded_paths: HashSet<String>,
+    expected_paths: HashSet<String>,
 }
 
 fn materialize_projection(
@@ -415,6 +453,7 @@ fn materialize_tree(
         if !stats.folded_paths.insert(folded_path) {
             return Err("projection_path_collision");
         }
+        stats.expected_paths.insert(relative_path.clone());
         let output_path = destination.join(component);
         match entry.mode().kind() {
             gix::objs::tree::EntryKind::Tree => {
@@ -481,6 +520,312 @@ fn is_supported_projection_component(component: &str) -> bool {
         && !component.contains('\0')
         && !component.eq_ignore_ascii_case(".git")
         && !component.eq_ignore_ascii_case(".gitattributes")
+}
+
+struct ProjectionDrift {
+    reason: &'static str,
+    path: String,
+}
+
+fn observe_projection(
+    repository_path: PathBuf,
+    accepted_commit_oid: String,
+    projection_path: PathBuf,
+) -> Result<ExitCode, &'static str> {
+    let repository = open_repository(repository_path)?;
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let accepted_commit = gix::hash::ObjectId::from_hex(accepted_commit_oid.as_bytes())
+        .map_err(|_| "invalid_accepted_commit_oid")?;
+    if accepted_commit.kind() != gix::hash::Kind::Sha1 {
+        return Err("invalid_accepted_commit_oid");
+    }
+    let accepted_tree = repository
+        .find_commit(accepted_commit)
+        .map_err(|_| "accepted_commit_unavailable")?
+        .tree_id()
+        .map_err(|_| "accepted_tree_unavailable")?
+        .detach();
+
+    let root_metadata =
+        fs::symlink_metadata(&projection_path).map_err(|_| "projection_unreadable")?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return projection_drifted(
+            accepted_commit,
+            accepted_tree,
+            projection_path,
+            ProjectionDrift {
+                reason: "projection_root_type_mismatch",
+                path: String::new(),
+            },
+        );
+    }
+
+    let mut stats = ProjectionStats::default();
+    if let Err(drift) =
+        observe_expected_tree(&repository, accepted_tree, &projection_path, "", &mut stats)
+    {
+        return projection_drifted(accepted_commit, accepted_tree, projection_path, drift);
+    }
+    if let Err(drift) = reject_extra_projection_paths(&projection_path, "", &stats.expected_paths) {
+        return projection_drifted(accepted_commit, accepted_tree, projection_path, drift);
+    }
+
+    write_response(&Response::ProjectionObserved {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        state: "clean",
+        accepted_commit_oid: accepted_commit.to_string(),
+        accepted_tree_oid: accepted_tree.to_string(),
+        projection_path,
+        files_observed: stats.files,
+        bytes_read: stats.bytes,
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+fn observe_expected_tree(
+    repository: &gix::Repository,
+    tree_oid: gix::hash::ObjectId,
+    projection: &Path,
+    prefix: &str,
+    stats: &mut ProjectionStats,
+) -> Result<(), ProjectionDrift> {
+    let tree = repository
+        .find_tree(tree_oid)
+        .map_err(|_| ProjectionDrift {
+            reason: "expected_tree_unavailable",
+            path: prefix.to_owned(),
+        })?;
+    for entry in tree.iter() {
+        let entry = entry.map_err(|_| ProjectionDrift {
+            reason: "expected_tree_invalid",
+            path: prefix.to_owned(),
+        })?;
+        let component = std::str::from_utf8(entry.filename()).map_err(|_| ProjectionDrift {
+            reason: "unsupported_projection_path",
+            path: prefix.to_owned(),
+        })?;
+        if !is_supported_projection_component(component) {
+            return Err(ProjectionDrift {
+                reason: "unsupported_projection_path",
+                path: prefix.to_owned(),
+            });
+        }
+        let relative_path = if prefix.is_empty() {
+            component.to_owned()
+        } else {
+            format!("{prefix}/{component}")
+        };
+        let folded_path: String = relative_path.nfc().flat_map(char::to_lowercase).collect();
+        if !stats.folded_paths.insert(folded_path) {
+            return Err(ProjectionDrift {
+                reason: "projection_path_collision",
+                path: relative_path,
+            });
+        }
+        stats.expected_paths.insert(relative_path.clone());
+        let output_path = projection.join(component);
+        let metadata = fs::symlink_metadata(&output_path).map_err(|_| ProjectionDrift {
+            reason: "expected_path_missing_or_unreadable",
+            path: relative_path.clone(),
+        })?;
+        match entry.mode().kind() {
+            gix::objs::tree::EntryKind::Tree => {
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(ProjectionDrift {
+                        reason: "expected_directory_type_mismatch",
+                        path: relative_path,
+                    });
+                }
+                observe_expected_tree(
+                    repository,
+                    entry.object_id(),
+                    &output_path,
+                    &relative_path,
+                    stats,
+                )?;
+            }
+            gix::objs::tree::EntryKind::Blob | gix::objs::tree::EntryKind::BlobExecutable => {
+                observe_expected_blob(&entry, &metadata, &output_path, &relative_path, stats)?;
+            }
+            _ => {
+                return Err(ProjectionDrift {
+                    reason: "unsupported_projection_entry_kind",
+                    path: relative_path,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn observe_expected_blob(
+    entry: &gix::object::tree::EntryRef<'_, '_>,
+    metadata: &fs::Metadata,
+    output_path: &Path,
+    relative_path: &str,
+    stats: &mut ProjectionStats,
+) -> Result<(), ProjectionDrift> {
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(ProjectionDrift {
+            reason: "expected_file_type_mismatch",
+            path: relative_path.to_owned(),
+        });
+    }
+    let header = entry.id().header().map_err(|_| ProjectionDrift {
+        reason: "expected_blob_unavailable",
+        path: relative_path.to_owned(),
+    })?;
+    if header.kind() != gix::objs::Kind::Blob
+        || header.size() > MAX_PROJECTION_FILE_BYTES
+        || metadata.len() != header.size()
+    {
+        return Err(ProjectionDrift {
+            reason: "expected_file_size_mismatch",
+            path: relative_path.to_owned(),
+        });
+    }
+    stats.files = stats
+        .files
+        .checked_add(1)
+        .filter(|count| *count <= MAX_PROJECTION_FILES)
+        .ok_or_else(|| ProjectionDrift {
+            reason: "projection_file_limit_exceeded",
+            path: relative_path.to_owned(),
+        })?;
+    stats.bytes = stats
+        .bytes
+        .checked_add(header.size())
+        .filter(|bytes| *bytes <= MAX_PROJECTION_BYTES)
+        .ok_or_else(|| ProjectionDrift {
+            reason: "projection_byte_limit_exceeded",
+            path: relative_path.to_owned(),
+        })?;
+    let input = File::open(output_path).map_err(|_| ProjectionDrift {
+        reason: "expected_file_unreadable",
+        path: relative_path.to_owned(),
+    })?;
+    let opened_metadata = input.metadata().map_err(|_| ProjectionDrift {
+        reason: "expected_file_unreadable",
+        path: relative_path.to_owned(),
+    })?;
+    if !opened_metadata.is_file() || opened_metadata.len() != header.size() {
+        return Err(ProjectionDrift {
+            reason: "expected_file_size_mismatch",
+            path: relative_path.to_owned(),
+        });
+    }
+    let mut bytes = Vec::with_capacity(header.size() as usize);
+    input
+        .take(header.size() + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ProjectionDrift {
+            reason: "expected_file_unreadable",
+            path: relative_path.to_owned(),
+        })?;
+    if bytes.len() as u64 != header.size() {
+        return Err(ProjectionDrift {
+            reason: "expected_file_size_mismatch",
+            path: relative_path.to_owned(),
+        });
+    }
+    let actual_oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &bytes)
+        .map_err(|_| ProjectionDrift {
+            reason: "expected_file_hash_failed",
+            path: relative_path.to_owned(),
+        })?;
+    if actual_oid != entry.object_id() {
+        return Err(ProjectionDrift {
+            reason: "expected_file_content_mismatch",
+            path: relative_path.to_owned(),
+        });
+    }
+    if !projection_mode_matches(
+        &opened_metadata,
+        entry.mode().kind() == gix::objs::tree::EntryKind::BlobExecutable,
+    ) {
+        return Err(ProjectionDrift {
+            reason: "expected_file_mode_mismatch",
+            path: relative_path.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn reject_extra_projection_paths(
+    projection: &Path,
+    prefix: &str,
+    expected_paths: &HashSet<String>,
+) -> Result<(), ProjectionDrift> {
+    let entries = fs::read_dir(projection).map_err(|_| ProjectionDrift {
+        reason: "projection_directory_unreadable",
+        path: prefix.to_owned(),
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|_| ProjectionDrift {
+            reason: "projection_directory_unreadable",
+            path: prefix.to_owned(),
+        })?;
+        let component = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| ProjectionDrift {
+                reason: "unexpected_non_utf8_path",
+                path: prefix.to_owned(),
+            })?;
+        let relative_path = if prefix.is_empty() {
+            component
+        } else {
+            format!("{prefix}/{component}")
+        };
+        if !expected_paths.contains(&relative_path) {
+            return Err(ProjectionDrift {
+                reason: "unexpected_projection_path",
+                path: relative_path,
+            });
+        }
+        let file_type = entry.file_type().map_err(|_| ProjectionDrift {
+            reason: "projection_path_unreadable",
+            path: relative_path.clone(),
+        })?;
+        if file_type.is_dir() {
+            reject_extra_projection_paths(&entry.path(), &relative_path, expected_paths)?;
+        }
+    }
+    Ok(())
+}
+
+fn projection_drifted(
+    accepted_commit: gix::hash::ObjectId,
+    accepted_tree: gix::hash::ObjectId,
+    projection_path: PathBuf,
+    drift: ProjectionDrift,
+) -> Result<ExitCode, &'static str> {
+    write_response(&Response::ProjectionDrifted {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        state: "drifted",
+        reason: drift.reason,
+        path: drift.path,
+        accepted_commit_oid: accepted_commit.to_string(),
+        accepted_tree_oid: accepted_tree.to_string(),
+        projection_path,
+    });
+    Ok(ExitCode::from(3))
+}
+
+#[cfg(unix)]
+fn projection_mode_matches(metadata: &fs::Metadata, executable: bool) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    (metadata.permissions().mode() & 0o111 != 0) == executable
+}
+
+#[cfg(not(unix))]
+fn projection_mode_matches(_metadata: &fs::Metadata, _executable: bool) -> bool {
+    true
 }
 
 #[cfg(unix)]
