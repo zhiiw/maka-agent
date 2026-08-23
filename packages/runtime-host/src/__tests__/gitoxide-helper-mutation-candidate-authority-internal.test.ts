@@ -221,7 +221,7 @@ async function candidateFixture(t: TestContext) {
   });
   assert.equal(admitted.kind, 'accepted');
   if (admitted.kind !== 'accepted') return undefined;
-  const baseHead: WorkspaceHeadRecordV1 = {
+  const sourceHead: WorkspaceHeadRecordV1 = {
     repositoryId: `repository_${'1'.repeat(32)}`,
     workspaceId: `workspace_${'2'.repeat(32)}`,
     workspaceEpochId: `epoch_${'3'.repeat(32)}`,
@@ -231,7 +231,7 @@ async function candidateFixture(t: TestContext) {
     treeOid: git(sourceRoot, ['rev-parse', 'HEAD^{tree}']),
     revision: 1,
   };
-  const repositoryPath = gitoxideManagedRepositoryPathInternal(storageRoot, baseHead);
+  const repositoryPath = gitoxideManagedRepositoryPathInternal(storageRoot, sourceHead);
   await mkdir(dirname(repositoryPath), { recursive: true });
   const imported = await importAdmittedGitoxideRepositoryInternal({
     ...helper,
@@ -241,8 +241,13 @@ async function candidateFixture(t: TestContext) {
     destinationRepositoryPath: repositoryPath,
     baselineRef: 'refs/maka/accepted',
   });
-  assert.equal(imported.baselineCommitOid, baseHead.commitOid);
-  assert.equal(imported.baselineTreeOid, baseHead.treeOid);
+  assert.equal(imported.sourceHeadCommitOid, sourceHead.commitOid);
+  assert.equal(imported.sourceTreeOid, sourceHead.treeOid);
+  const baseHead: WorkspaceHeadRecordV1 = {
+    ...sourceHead,
+    commitOid: imported.baselineCommitOid,
+    treeOid: imported.baselineTreeOid,
+  };
   return { helper, storageRoot, repositoryPath, baseHead };
 }
 
