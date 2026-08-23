@@ -25,6 +25,7 @@ import type {
 } from '@maka/core/agent-run';
 import type { RuntimeEvent, ToolBoundaryProtocol } from '@maka/core/runtime-event';
 import type { RuntimeEventStore } from '@maka/core/runtime-event-store';
+import { digestWorkspaceBoundContinuationBoundary } from '@maka/core/runtime-boundary';
 import type { RunCompositionSnapshot } from '@maka/core/run-composition';
 import { decodeRunCompositionSnapshot } from '@maka/core/run-composition';
 import { DurableStoreWriteError, RunSealedError } from '@maka/core/runtime-event-store';
@@ -1116,9 +1117,16 @@ export class AgentRun {
             continuationSource:
               continuation.claimId && continuation.boundary
                 ? {
-                    protocol: 'continuation_source_v2' as const,
+                    protocol: continuation.workspaceBoundary
+                      ? ('continuation_source_v3' as const)
+                      : ('continuation_source_v2' as const),
                     claimId: continuation.claimId,
-                    boundaryDigest: continuation.boundary.manifestDigest,
+                    boundaryDigest: continuation.workspaceBoundary
+                      ? digestWorkspaceBoundContinuationBoundary(
+                          continuation.boundary,
+                          continuation.workspaceBoundary,
+                        )
+                      : continuation.boundary.manifestDigest,
                     sourceInvocationId: continuation.sourceInvocationId,
                     sourceRunId: continuation.sourceRunId,
                     sourceTurnId: continuation.sourceTurnId,

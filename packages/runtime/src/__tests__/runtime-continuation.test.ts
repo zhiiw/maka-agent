@@ -25,6 +25,7 @@ import {
   createRuntimeBoundaryCursor,
   runtimePrefixSegment,
   type ImmutableRuntimePrefixV1,
+  type ManagedWorkspaceContinuationBoundaryV1,
 } from '@maka/core/runtime-boundary';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { AgentRunHeader } from '@maka/core/agent-run';
@@ -335,6 +336,89 @@ test('RuntimeContinuationPlanner reads the durable source boundary and allocates
       availableToolNames: [],
     },
   });
+});
+
+test('RuntimeContinuationPlanner binds managed continuation admission to the observed accepted head', async () => {
+  const sourcePrefix = immutablePrefix([
+    event({
+      id: 'source-user',
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text: 'continue managed work' },
+    }),
+    event({
+      id: 'source-terminal',
+      role: 'system',
+      author: 'system',
+      status: 'failed',
+      actions: { endInvocation: true },
+    }),
+  ]);
+  const workspaceBoundary = managedWorkspaceBoundary();
+  let readWorkspaceClaim = false;
+  const ids = ['invocation-2', 'run-2', 'turn-2', 'claim-2'];
+  const planner = new RuntimeContinuationPlanner({
+    readSourceRun: async () => runHeader('run-1'),
+    readImmutableRuntimePrefix: async () => sourcePrefix,
+    readWorkspaceBoundContinuationClaimStateByBoundary: async () => {
+      readWorkspaceClaim = true;
+      return undefined;
+    },
+    newId: () => ids.shift() ?? 'unexpected-id',
+  });
+
+  const plan = await planner.plan({
+    sessionId: 'session-1',
+    sourceRunId: 'run-1',
+    currentCwd: '/workspace/repo',
+    sourceWorkspaceIdentity: 'workspace-1',
+    currentWorkspaceIdentity: 'workspace-1',
+    backgroundOperationsSettled: true,
+    availableToolNames: ['Write', 'Edit'],
+    workspaceBoundary,
+  });
+
+  assert.equal(plan.disposition, 'continue');
+  assert.equal(readWorkspaceClaim, true);
+  assert.deepEqual(plan.continuation?.workspaceBoundary, workspaceBoundary);
+  assert.deepEqual(plan.continuation?.safetySnapshot.workspaceBoundary, workspaceBoundary);
+});
+
+test('RuntimeContinuationPlanner never downgrades a managed boundary to the v1 claim authority', async () => {
+  let readV1Claim = false;
+  const planner = new RuntimeContinuationPlanner({
+    readSourceRun: async () => runHeader('run-1'),
+    readImmutableRuntimePrefix: async () =>
+      immutablePrefix([
+        event({
+          id: 'source-terminal',
+          role: 'system',
+          author: 'system',
+          status: 'failed',
+          actions: { endInvocation: true },
+        }),
+      ]),
+    readContinuationClaimStateByBoundary: async () => {
+      readV1Claim = true;
+      return undefined;
+    },
+    newId: () => 'unused',
+  });
+
+  const plan = await planner.plan({
+    sessionId: 'session-1',
+    sourceRunId: 'run-1',
+    currentCwd: '/workspace/repo',
+    sourceWorkspaceIdentity: 'workspace-1',
+    currentWorkspaceIdentity: 'workspace-1',
+    backgroundOperationsSettled: true,
+    availableToolNames: [],
+    workspaceBoundary: managedWorkspaceBoundary(),
+  });
+
+  assert.equal(plan.disposition, 'park');
+  assert.deepEqual(plan.rejectionReasons, ['continuation_authority_unavailable']);
+  assert.equal(readV1Claim, false);
 });
 
 test('RuntimeRunner rejects a continuation envelope whose high-water is behind its replay context', async () => {
@@ -1146,6 +1230,26 @@ function runHeader(runId: string, overrides: Partial<AgentRunHeader> = {}): Agen
     createdAt: 1,
     updatedAt: 1,
     ...overrides,
+  };
+}
+
+function managedWorkspaceBoundary(): ManagedWorkspaceContinuationBoundaryV1 {
+  return {
+    protocol: 'managed_workspace_continuation_boundary_v1',
+    storageRootId: 'a'.repeat(64),
+    repositoryId: `repository_${'1'.repeat(32)}`,
+    workspaceId: `workspace_${'2'.repeat(32)}`,
+    workspaceEpochId: `epoch_${'3'.repeat(32)}`,
+    workspaceInstanceId: `instance_${'4'.repeat(32)}`,
+    workspaceVersionId: `version_${'5'.repeat(32)}`,
+    acceptedEventId: 'accepted-event-1',
+    revision: 2,
+    objectFormat: 'sha1',
+    commitOid: 'b'.repeat(40),
+    treeOid: 'c'.repeat(40),
+    materializationProfileDigest: `sha256:${'d'.repeat(64)}`,
+    policyHash: `sha256:${'e'.repeat(64)}`,
+    executionProfileDigest: `sha256:${'f'.repeat(64)}`,
   };
 }
 

@@ -166,6 +166,26 @@ export interface RuntimeWorkspaceBoundContinuationAuthorityStore extends Runtime
   readWorkspaceBoundContinuationClaimByBoundary(
     boundaryDigest: RuntimeBoundaryDigest,
   ): Promise<ContinuationClaimV2 | undefined>;
+  readWorkspaceBoundContinuationClaimStateByBoundary(
+    boundaryDigest: RuntimeBoundaryDigest,
+  ): Promise<ContinuationClaimStateV2 | undefined>;
+  listWorkspaceBoundContinuationClaimsForRecovery(
+    sessionId: string,
+  ): Promise<ContinuationClaimStateV2[]>;
+  commitWorkspaceBoundContinuationStart(input: {
+    claim: ContinuationClaimV2;
+    event: RuntimeEvent;
+  }): Promise<{ created: boolean; runtimeEventSeq: number }>;
+  commitWorkspaceBoundContinuationRepairStart(input: {
+    claim: ContinuationClaimV2;
+    event: RuntimeEvent;
+  }): Promise<{ created: boolean; runtimeEventSeq: number }>;
+}
+
+export interface ContinuationClaimStateV2 {
+  claim: ContinuationClaimV2;
+  startEventId?: string;
+  startKind?: 'runtime_admission' | 'claim_repair';
 }
 
 export interface RuntimeWorkspaceVersionAuthorityStore extends RuntimeEventStore {

@@ -244,6 +244,24 @@ if (childMode) {
         assert.equal((await store.claimWorkspaceBoundContinuation({ claim })).kind, 'existing');
       });
     });
+
+    it('rolls back a workspace-bound continuation start when killed inside its transaction', {
+      timeout: 30_000,
+    }, async () => {
+      await withKilledChild('inside_workspace_continuation_start', async (store) => {
+        const claim = workspaceBoundContinuationClaim();
+        const state = await store.readWorkspaceBoundContinuationClaimStateByBoundary(
+          claim.boundaryDigest,
+        );
+        assert.ok(state);
+        assert.equal(state.startEventId, undefined);
+        const committed = await store.commitWorkspaceBoundContinuationStart({
+          claim,
+          event: workspaceBoundContinuationStartEvent(claim),
+        });
+        assert.equal(committed.created, true);
+      });
+    });
   });
 }
 
@@ -337,6 +355,12 @@ async function runCrashChild(mode: string): Promise<void> {
     ) {
       blockUntilKilled();
     }
+    if (
+      point === 'after_continuation_start_insert' &&
+      mode === 'inside_workspace_continuation_start'
+    ) {
+      blockUntilKilled();
+    }
   };
   const store = createSqliteRuntimeStore(dbPath, { failpoint });
   if (
@@ -346,7 +370,8 @@ async function runCrashChild(mode: string): Promise<void> {
     mode === 'inside_workspace_successor' ||
     mode === 'after_workspace_successor_commit' ||
     mode === 'inside_workspace_continuation_claim' ||
-    mode === 'after_workspace_continuation_claim_commit'
+    mode === 'after_workspace_continuation_claim_commit' ||
+    mode === 'inside_workspace_continuation_start'
   ) {
     bindWorkspaceBaselineAuthorityStoreRootInternal(store, 'a'.repeat(64));
     await commitWorkspaceBaselineInternal(store, workspaceBaselineInput());
@@ -362,11 +387,19 @@ async function runCrashChild(mode: string): Promise<void> {
     }
     if (
       mode === 'inside_workspace_continuation_claim' ||
-      mode === 'after_workspace_continuation_claim_commit'
+      mode === 'after_workspace_continuation_claim_commit' ||
+      mode === 'inside_workspace_continuation_start'
     ) {
       await persistWorkspaceContinuationSource(store);
-      await store.claimWorkspaceBoundContinuation({ claim: workspaceBoundContinuationClaim() });
+      const claim = workspaceBoundContinuationClaim();
+      await store.claimWorkspaceBoundContinuation({ claim });
       if (mode === 'after_workspace_continuation_claim_commit') blockUntilKilled();
+      if (mode === 'inside_workspace_continuation_start') {
+        await store.commitWorkspaceBoundContinuationStart({
+          claim,
+          event: workspaceBoundContinuationStartEvent(claim),
+        });
+      }
     }
     throw new Error(`Workspace baseline crash mode ${mode} missed its failpoint`);
   }
@@ -514,6 +547,37 @@ function workspaceBoundContinuationClaim(): ContinuationClaimV2 {
       },
     },
     claimedAt: 1_700_000_000_010,
+  };
+}
+
+function workspaceBoundContinuationStartEvent(claim: ContinuationClaimV2): RuntimeEvent {
+  const source = claim.boundary.segments.at(-1)!;
+  return {
+    id: 'workspace-continuation-start',
+    ...claim.target,
+    ts: claim.claimedAt + 1,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      continuationStart: {
+        protocol: 'continuation_start_v2',
+        provenance: 'runtime_admission',
+        claimId: claim.claimId,
+        boundaryDigest: claim.boundaryDigest,
+        immediateSource: {
+          sessionId: source.identity.sessionId,
+          invocationId: source.identity.invocationId,
+          runId: source.identity.runId,
+          turnId: source.identity.turnId,
+          highWater: source.position.lastEventSeq,
+          prefixDigest: source.prefixDigest,
+        },
+        replayManifestDigest: claim.boundary.manifestDigest,
+        providerProjectionVersion: claim.providerProjectionVersion,
+        providerReplayDigest: claim.providerReplayDigest,
+      },
+    },
   };
 }
 

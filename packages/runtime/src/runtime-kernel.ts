@@ -18,11 +18,18 @@
  */
 
 import type { AgentRunHeader, AgentRunStore } from '@maka/core/agent-run';
-import type { ContinuationClaimV1, ImmutableRuntimePrefixV1 } from '@maka/core/runtime-boundary';
+import {
+  digestWorkspaceBoundContinuationBoundary,
+  type ContinuationClaim,
+  type ContinuationClaimV1,
+  type ContinuationClaimV2,
+  type ImmutableRuntimePrefixV1,
+} from '@maka/core/runtime-boundary';
 import type { RuntimeEvent, ToolBoundaryProtocol } from '@maka/core/runtime-event';
 import type {
   RuntimeContinuationAuthorityStore,
   RuntimeEventStore,
+  RuntimeWorkspaceBoundContinuationAuthorityStore,
 } from '@maka/core/runtime-event-store';
 import { isSessionInlineRun } from '@maka/core/agent-run';
 import type {
@@ -824,7 +831,14 @@ export class RuntimeKernel implements RuntimeKernelLike {
       claimedAt,
     });
     const claim = continuationClaimForExecution(continuation, claimedAt, targetRunHeader);
-    const claimResult = await continuationAuthority.claimContinuation({ claim });
+    const workspaceContinuationAuthority =
+      claim.protocol === 'continuation_claim_v2'
+        ? requireRuntimeWorkspaceBoundContinuationAuthority(this.deps.runtimeEventStore)
+        : undefined;
+    const claimResult =
+      claim.protocol === 'continuation_claim_v2'
+        ? await workspaceContinuationAuthority!.claimWorkspaceBoundContinuation({ claim })
+        : await continuationAuthority.claimContinuation({ claim });
     if (claimResult.kind !== 'acquired') {
       throw new RuntimeContinuationRevalidationError(
         'continuation_claim_conflict',
@@ -878,7 +892,9 @@ export class RuntimeKernel implements RuntimeKernelLike {
       commitContinuationStart: async (startedAt) => {
         const source = claim.boundary.segments.at(-1)!;
         const eventId = this.deps.newId();
-        const result = await continuationAuthority.commitContinuationStart({
+        const result = await commitContinuationStartForClaim({
+          continuationAuthority,
+          workspaceContinuationAuthority,
           claim,
           event: {
             id: eventId,
@@ -1332,9 +1348,14 @@ export class RuntimeKernel implements RuntimeKernelLike {
       claimedAt,
     });
     const claim = continuationClaimForExecution(continuation, claimedAt, targetRunHeader);
-    const claimResult = await continuationAuthority.claimContinuation({
-      claim,
-    });
+    const workspaceContinuationAuthority =
+      claim.protocol === 'continuation_claim_v2'
+        ? requireRuntimeWorkspaceBoundContinuationAuthority(this.deps.runtimeEventStore)
+        : undefined;
+    const claimResult =
+      claim.protocol === 'continuation_claim_v2'
+        ? await workspaceContinuationAuthority!.claimWorkspaceBoundContinuation({ claim })
+        : await continuationAuthority.claimContinuation({ claim });
     if (claimResult.kind !== 'acquired') {
       throw new RuntimeContinuationRevalidationError(
         'continuation_claim_conflict',
@@ -1353,7 +1374,9 @@ export class RuntimeKernel implements RuntimeKernelLike {
       commitContinuationStart: async (startedAt) => {
         const source = claim.boundary.segments.at(-1)!;
         const eventId = this.deps.newId();
-        const result = await continuationAuthority.commitContinuationStart({
+        const result = await commitContinuationStartForClaim({
+          continuationAuthority,
+          workspaceContinuationAuthority,
           claim,
           event: {
             id: eventId,
@@ -3362,6 +3385,45 @@ function requireRuntimeContinuationAuthority(
   return candidate as RuntimeContinuationAuthorityStore;
 }
 
+function requireRuntimeWorkspaceBoundContinuationAuthority(
+  store: RuntimeEventStore,
+): RuntimeWorkspaceBoundContinuationAuthorityStore {
+  const candidate = store as Partial<RuntimeWorkspaceBoundContinuationAuthorityStore>;
+  if (
+    candidate.workspaceBoundContinuationAuthorityCapability !==
+      'runtime_workspace_bound_continuation_authority_v1' ||
+    typeof candidate.claimWorkspaceBoundContinuation !== 'function' ||
+    typeof candidate.readWorkspaceBoundContinuationClaimStateByBoundary !== 'function' ||
+    typeof candidate.listWorkspaceBoundContinuationClaimsForRecovery !== 'function' ||
+    typeof candidate.commitWorkspaceBoundContinuationStart !== 'function' ||
+    typeof candidate.commitWorkspaceBoundContinuationRepairStart !== 'function'
+  ) {
+    throw new Error('Managed Runtime continuation requires workspace-bound SQLite authority');
+  }
+  return candidate as RuntimeWorkspaceBoundContinuationAuthorityStore;
+}
+
+async function commitContinuationStartForClaim(input: {
+  continuationAuthority: RuntimeContinuationAuthorityStore;
+  workspaceContinuationAuthority?: RuntimeWorkspaceBoundContinuationAuthorityStore;
+  claim: ContinuationClaim;
+  event: RuntimeEvent;
+}): Promise<{ created: boolean; runtimeEventSeq: number }> {
+  if (input.claim.protocol === 'continuation_claim_v2') {
+    if (!input.workspaceContinuationAuthority) {
+      throw new Error('Workspace-bound continuation start authority is unavailable');
+    }
+    return input.workspaceContinuationAuthority.commitWorkspaceBoundContinuationStart({
+      claim: input.claim,
+      event: input.event,
+    });
+  }
+  return input.continuationAuthority.commitContinuationStart({
+    claim: input.claim,
+    event: input.event,
+  });
+}
+
 async function revalidateContinuationBoundary(
   store: RuntimeContinuationAuthorityStore,
   continuation: RuntimeContinuation,
@@ -3421,7 +3483,7 @@ function continuationClaimForExecution(
   continuation: RuntimeContinuation,
   claimedAt: number,
   targetRunHeader: AgentRunHeader,
-): ContinuationClaimV1 {
+): ContinuationClaim {
   if (
     !continuation.claimId ||
     !continuation.boundary ||
@@ -3433,10 +3495,14 @@ function continuationClaimForExecution(
       'Runtime continuation is missing its durable claim identity',
     );
   }
-  return {
-    protocol: 'continuation_claim_v1',
+  const common = {
     claimId: continuation.claimId,
-    boundaryDigest: continuation.boundary.manifestDigest,
+    boundaryDigest: continuation.workspaceBoundary
+      ? digestWorkspaceBoundContinuationBoundary(
+          continuation.boundary,
+          continuation.workspaceBoundary,
+        )
+      : continuation.boundary.manifestDigest,
     boundary: continuation.boundary,
     providerProjectionVersion: continuation.providerProjectionVersion,
     providerReplayDigest: continuation.providerReplayDigest,
@@ -3449,6 +3515,17 @@ function continuationClaimForExecution(
     targetRunHeader,
     claimedAt,
   };
+  if (continuation.workspaceBoundary) {
+    return {
+      protocol: 'continuation_claim_v2',
+      ...common,
+      workspaceBoundary: continuation.workspaceBoundary,
+    } satisfies ContinuationClaimV2;
+  }
+  return {
+    protocol: 'continuation_claim_v1',
+    ...common,
+  } satisfies ContinuationClaimV1;
 }
 
 function continuationTargetRunHeaderForExecution(input: {
@@ -3475,6 +3552,12 @@ function continuationTargetRunHeaderForExecution(input: {
     );
   }
   const source = continuation.boundary.segments.at(-1)!;
+  const boundaryDigest = continuation.workspaceBoundary
+    ? digestWorkspaceBoundContinuationBoundary(
+        continuation.boundary,
+        continuation.workspaceBoundary,
+      )
+    : continuation.boundary.manifestDigest;
   return {
     runId: continuation.runId,
     invocationId: continuation.invocationId,
@@ -3507,9 +3590,11 @@ function continuationTargetRunHeaderForExecution(input: {
     ...(userInput.agentId ? { agentId: userInput.agentId } : {}),
     ...(userInput.agentName ? { agentName: userInput.agentName } : {}),
     continuationSource: {
-      protocol: 'continuation_source_v2',
+      protocol: continuation.workspaceBoundary
+        ? 'continuation_source_v3'
+        : 'continuation_source_v2',
       claimId: continuation.claimId,
-      boundaryDigest: continuation.boundary.manifestDigest,
+      boundaryDigest,
       sourceInvocationId: source.identity.invocationId,
       sourceRunId: source.identity.runId,
       sourceTurnId: source.identity.turnId,
@@ -3592,6 +3677,14 @@ function assertContinuationSafetyUnchanged(
     throw new RuntimeContinuationRevalidationError(
       'workspace_identity_changed',
       'Runtime continuation workspace identity changed after planning',
+    );
+  }
+  if (
+    !isDeepStrictEqual(observation.workspaceBoundary ?? null, snapshot.workspaceBoundary ?? null)
+  ) {
+    throw new RuntimeContinuationRevalidationError(
+      'workspace_version_changed',
+      'Runtime continuation accepted workspace boundary changed after planning',
     );
   }
   if (!observation.backgroundOperationsSettled) {

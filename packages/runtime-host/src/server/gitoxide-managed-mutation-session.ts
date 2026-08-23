@@ -24,6 +24,7 @@ import { dirname, join } from 'node:path';
 import { workspaceMutationPolicyHashV1 } from '@maka/core/workspace-version-authority';
 import { GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST } from '@maka/runtime/managed-mutation-transform';
 import type { ToolRuntimeInput } from '@maka/runtime/tool-runtime';
+import type { ManagedWorkspaceContinuationBoundaryV1 } from '@maka/core/runtime-boundary';
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import type { ExecutionStoresWorkspaceMutationAuthorityInternal } from '@maka/storage/execution-stores-workspace-authority-internal';
 import { runWithStorageRootLease, type StorageRootLease } from '@maka/storage/root-authority';
@@ -131,6 +132,72 @@ export async function recoverGitoxideManagedMutationBeforeRunClosureInternal(inp
       reason: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+/**
+ * Re-observes an already accepted managed workspace without creating a
+ * baseline. This is the only Host seam allowed to issue the workspace half of
+ * a continuation boundary.
+ */
+export async function inspectGitoxideManagedContinuationBoundary(input: {
+  readonly storageRoot: string;
+  readonly sourceRoot: string;
+  readonly sessionId: string;
+  readonly invocationOwnerToken: object;
+  readonly helperCapability: GitoxideHelperInvocationCapability;
+  readonly settlementAuthority: ExecutionStoresWorkspaceMutationAuthorityInternal;
+  readonly abortSignal?: AbortSignal;
+}): Promise<ManagedWorkspaceContinuationBoundaryV1 | undefined> {
+  input.abortSignal?.throwIfAborted();
+  const [storageRoot, sourceRoot, helper] = await Promise.all([
+    realpath(input.storageRoot),
+    realpath(input.sourceRoot),
+    verifyGitoxideHelperArtifactForInvocationInternal(
+      input.invocationOwnerToken,
+      input.helperCapability,
+    ),
+  ]);
+  const materializationProfileDigest = sha256(
+    `maka-gitoxide-materialization-v1\0${helper.artifactSha256}\0`,
+  );
+  const workspacePolicyHash = workspaceMutationPolicyHashV1(
+    materializationProfileDigest,
+    GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST,
+  );
+  const identity = managedMutationIdentity(sourceRoot, input.sessionId);
+  const boundary = await input.settlementAuthority.readContinuationBoundary(
+    identity.workspaceId,
+    identity.workspaceEpochId,
+    GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST,
+  );
+  if (!boundary) return undefined;
+  if (
+    boundary.repositoryId !== identity.repositoryId ||
+    boundary.workspaceId !== identity.workspaceId ||
+    boundary.workspaceEpochId !== identity.workspaceEpochId ||
+    boundary.workspaceInstanceId !== identity.workspaceInstanceId
+  ) {
+    throw new Error('Gitoxide managed continuation boundary conflicts with session identity');
+  }
+  const repositoryPath = gitoxideManagedRepositoryPathInternal(storageRoot, identity);
+  const receipt = await readBaselineReceipt(join(dirname(repositoryPath), 'baseline-receipt.json'));
+  if (
+    !receipt ||
+    receipt.repositoryId !== boundary.repositoryId ||
+    receipt.workspaceId !== boundary.workspaceId ||
+    receipt.workspaceEpochId !== boundary.workspaceEpochId ||
+    receipt.workspaceInstanceId !== boundary.workspaceInstanceId ||
+    receipt.helperArtifactSha256 !== helper.artifactSha256 ||
+    boundary.materializationProfileDigest !== materializationProfileDigest ||
+    boundary.executionProfileDigest !==
+      GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST ||
+    boundary.policyHash !== workspacePolicyHash
+  ) {
+    throw new Error('Gitoxide managed continuation baseline receipt is unavailable');
+  }
+  await verifyAcceptedRef(input, repositoryPath, boundary.commitOid, boundary.treeOid);
+  input.abortSignal?.throwIfAborted();
+  return boundary;
 }
 
 /**

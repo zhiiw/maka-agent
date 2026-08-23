@@ -24,6 +24,7 @@ import type {
   WorkspaceSuccessorAuthorityInput,
 } from '@maka/core/workspace-version-authority';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
+import type { ManagedWorkspaceContinuationBoundaryV1 } from '@maka/core/runtime-boundary';
 import { lstatSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { basename, dirname, join, normalize, resolve } from 'node:path';
@@ -88,6 +89,12 @@ export interface ManagedMutationReservationRecordV1 {
 type ManagedMutationReservationReader = (
   workspaceInstanceId: string,
 ) => Promise<ManagedMutationReservationRecordV1 | undefined>;
+type WorkspaceContinuationBoundaryReader = (
+  workspaceId: string,
+  workspaceEpochId: string,
+  rootId: string,
+  executionProfileDigest: `sha256:${string}`,
+) => Promise<ManagedWorkspaceContinuationBoundaryV1 | undefined>;
 
 interface WorkspaceBaselineAuthorityRegistration {
   readonly writer: WorkspaceBaselineAuthorityWriter;
@@ -95,6 +102,7 @@ interface WorkspaceBaselineAuthorityRegistration {
   readonly terminalWriter: ManagedMutationTerminalWriter;
   readonly readHead: WorkspaceHeadReader;
   readonly readActiveManagedMutation: ManagedMutationReservationReader;
+  readonly readContinuationBoundary: WorkspaceContinuationBoundaryReader;
   readonly bindStorageRoot: WorkspaceStorageRootBinder;
   readonly adoptStorageRoot: WorkspaceStorageRootAdopter;
   readonly databasePath: string;
@@ -117,6 +125,7 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   adoptStorageRoot: WorkspaceStorageRootAdopter,
   readHead: WorkspaceHeadReader,
   readActiveManagedMutation: ManagedMutationReservationReader,
+  readContinuationBoundary: WorkspaceContinuationBoundaryReader,
 ): void {
   if (workspaceBaselineAuthorityWriters.has(store)) {
     throw new Error('Workspace baseline authority writer is already registered');
@@ -128,6 +137,7 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
     terminalWriter,
     readHead,
     readActiveManagedMutation,
+    readContinuationBoundary,
     bindStorageRoot,
     adoptStorageRoot,
     databasePath: resolvedDatabasePath,
@@ -152,6 +162,25 @@ export function readWorkspaceHeadInternal(
   const registration = workspaceBaselineAuthorityWriters.get(store);
   if (!registration) throw new Error('Workspace baseline authority reader is unavailable');
   return registration.readHead(workspaceId, workspaceEpochId);
+}
+
+export function readWorkspaceContinuationBoundaryInternal(
+  store: object,
+  workspaceId: string,
+  workspaceEpochId: string,
+  executionProfileDigest: `sha256:${string}`,
+): Promise<ManagedWorkspaceContinuationBoundaryV1 | undefined> {
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Workspace continuation boundary reader is unavailable');
+  if (!registration.boundRootId) {
+    throw new Error('Workspace continuation boundary store has no durable storage-root binding');
+  }
+  return registration.readContinuationBoundary(
+    workspaceId,
+    workspaceEpochId,
+    registration.boundRootId,
+    executionProfileDigest,
+  );
 }
 
 /**

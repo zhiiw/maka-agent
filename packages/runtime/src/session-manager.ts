@@ -125,9 +125,11 @@ import type {
   RootExecutionDescriptor,
 } from '@maka/core/agent-run';
 import type { ArtifactRecord } from '@maka/core/artifacts';
-import type { ContinuationClaimV1 } from '@maka/core/runtime-boundary';
+import type { ContinuationClaim } from '@maka/core/runtime-boundary';
 import type {
   ContinuationClaimStateV1,
+  ContinuationClaimStateV2,
+  RuntimeWorkspaceBoundContinuationAuthorityStore,
   RuntimeEventStore,
   RuntimeContinuationAuthorityStore,
 } from '@maka/core/runtime-event-store';
@@ -257,6 +259,21 @@ function runtimeContinuationAuthority(
     typeof candidate.commitContinuationStart === 'function' &&
     typeof candidate.commitContinuationRepairStart === 'function'
     ? (candidate as RuntimeContinuationAuthorityStore)
+    : undefined;
+}
+
+function runtimeWorkspaceBoundContinuationAuthority(
+  store: RuntimeEventStore | undefined,
+): RuntimeWorkspaceBoundContinuationAuthorityStore | undefined {
+  const candidate = store as Partial<RuntimeWorkspaceBoundContinuationAuthorityStore> | undefined;
+  return candidate?.workspaceBoundContinuationAuthorityCapability ===
+    'runtime_workspace_bound_continuation_authority_v1' &&
+    typeof candidate.claimWorkspaceBoundContinuation === 'function' &&
+    typeof candidate.readWorkspaceBoundContinuationClaimStateByBoundary === 'function' &&
+    typeof candidate.listWorkspaceBoundContinuationClaimsForRecovery === 'function' &&
+    typeof candidate.commitWorkspaceBoundContinuationStart === 'function' &&
+    typeof candidate.commitWorkspaceBoundContinuationRepairStart === 'function'
+    ? (candidate as RuntimeWorkspaceBoundContinuationAuthorityStore)
     : undefined;
 }
 
@@ -1535,6 +1552,7 @@ export class SessionManager {
           continuationClaimRecovered = await this.recoverContinuationClaimsBeforeProvider(
             session.id,
             continuationAuthority,
+            runtimeWorkspaceBoundContinuationAuthority(this.deps.runtimeEventStore),
             policy,
           );
         } catch (error) {
@@ -2150,6 +2168,13 @@ export class SessionManager {
         if (!authority) throw new Error('Continuation authority is not configured');
         return authority.readContinuationClaimStateByBoundary(boundaryDigest);
       },
+      readWorkspaceBoundContinuationClaimStateByBoundary: async (boundaryDigest) => {
+        const authority = runtimeWorkspaceBoundContinuationAuthority(this.deps.runtimeEventStore);
+        if (!authority) {
+          throw new Error('Workspace-bound continuation authority is not configured');
+        }
+        return authority.readWorkspaceBoundContinuationClaimStateByBoundary(boundaryDigest);
+      },
       findExistingContinuation: async (
         targetSessionId,
         sourceRunId,
@@ -2250,6 +2275,9 @@ export class SessionManager {
         : {}),
       ...(observation.workspaceCheckpoint
         ? { workspaceCheckpoint: observation.workspaceCheckpoint }
+        : {}),
+      ...(observation.workspaceBoundary
+        ? { workspaceBoundary: observation.workspaceBoundary }
         : {}),
     });
   }
@@ -4082,7 +4110,11 @@ export class SessionManager {
     const authority = runtimeContinuationAuthority(this.deps.runtimeEventStore);
     const abandonedBeforeProvider =
       sourceRun.failureClass === 'continuation_abandoned_before_provider_dispatch'
-        ? await isProvenRecoveredContinuationAbandonment(authority, sourceRun)
+        ? await isProvenRecoveredContinuationAbandonment(
+            authority,
+            runtimeWorkspaceBoundContinuationAuthority(this.deps.runtimeEventStore),
+            sourceRun,
+          )
         : false;
     if (
       sourceRun.status !== 'failed' ||
@@ -4286,6 +4318,13 @@ export class SessionManager {
         input.authority.readImmutableRuntimePrefix(prefixInput),
       readContinuationClaimStateByBoundary: (boundaryDigest) =>
         input.authority.readContinuationClaimStateByBoundary(boundaryDigest),
+      readWorkspaceBoundContinuationClaimStateByBoundary: async (boundaryDigest) => {
+        const authority = runtimeWorkspaceBoundContinuationAuthority(this.deps.runtimeEventStore);
+        if (!authority) {
+          throw new Error('Workspace-bound continuation authority is not configured');
+        }
+        return authority.readWorkspaceBoundContinuationClaimStateByBoundary(boundaryDigest);
+      },
       findExistingContinuation: async (_sessionId, sourceRunId, sourceRuntimeEventHighWater) =>
         input.runs.find(
           (run) =>
@@ -4307,6 +4346,7 @@ export class SessionManager {
       backgroundOperationsSettled: safety.backgroundOperationsSettled,
       availableToolNames: input.availableToolNames,
       ...(safety.workspaceCheckpoint ? { workspaceCheckpoint: safety.workspaceCheckpoint } : {}),
+      ...(safety.workspaceBoundary ? { workspaceBoundary: safety.workspaceBoundary } : {}),
     });
     if (retryPlan.disposition !== 'continue' || !retryPlan.continuation) {
       throw new Error(
@@ -4666,9 +4706,17 @@ export class SessionManager {
 
       const continuationAuthority = runtimeContinuationAuthority(this.deps.runtimeEventStore);
       if (continuationAuthority) {
-        const claimState = (
-          await continuationAuthority.listContinuationClaimsForRecovery(input.sessionId)
-        ).find(
+        const workspaceAuthority = runtimeWorkspaceBoundContinuationAuthority(
+          this.deps.runtimeEventStore,
+        );
+        const claimState = [
+          ...(await continuationAuthority.listContinuationClaimsForRecovery(input.sessionId)),
+          ...(workspaceAuthority
+            ? await workspaceAuthority.listWorkspaceBoundContinuationClaimsForRecovery(
+                input.sessionId,
+              )
+            : []),
+        ].find(
           (candidate) =>
             candidate.claim.target.runId === input.runId ||
             candidate.claim.target.turnId === input.turnId,
@@ -5571,13 +5619,30 @@ export class SessionManager {
   private async recoverContinuationClaimsBeforeProvider(
     sessionId: string,
     authority: RuntimeContinuationAuthorityStore,
+    workspaceAuthority: RuntimeWorkspaceBoundContinuationAuthorityStore | undefined,
     _policy: RecoveryPolicy,
   ): Promise<boolean> {
     if (!this.deps.runStore) return false;
-    const states = await authority.listContinuationClaimsForRecovery(sessionId);
+    const states: Array<ContinuationClaimStateV1 | ContinuationClaimStateV2> = [
+      ...(await authority.listContinuationClaimsForRecovery(sessionId)),
+      ...(workspaceAuthority
+        ? await workspaceAuthority.listWorkspaceBoundContinuationClaimsForRecovery(sessionId)
+        : []),
+    ];
     let recovered = false;
     for (const initialState of states) {
       const { claim } = initialState;
+      if (claim.protocol === 'continuation_claim_v2') {
+        if (!workspaceAuthority || !this.deps.inspectContinuationSafety) {
+          throw new Error('Workspace-bound continuation recovery authority is unavailable');
+        }
+        const observation = await this.deps.inspectContinuationSafety(sessionId);
+        if (!isDeepStrictEqual(observation.workspaceBoundary, claim.workspaceBoundary)) {
+          throw new Error(
+            `Workspace-bound continuation claim ${claim.claimId} no longer matches accepted head`,
+          );
+        }
+      }
       let run: AgentRunHeader;
       try {
         run = await this.deps.runStore.readRun(sessionId, claim.target.runId);
@@ -5595,9 +5660,13 @@ export class SessionManager {
         }
         recovered = true;
       }
-      let state =
-        (await authority.readContinuationClaimStateByBoundary(claim.boundaryDigest)) ??
-        initialState;
+      const readState = () =>
+        claim.protocol === 'continuation_claim_v2'
+          ? workspaceAuthority!.readWorkspaceBoundContinuationClaimStateByBoundary(
+              claim.boundaryDigest,
+            )
+          : authority.readContinuationClaimStateByBoundary(claim.boundaryDigest);
+      let state = (await readState()) ?? initialState;
       if (
         state.startEventId
           ? !claimTargetRunHeaderIsCompatible(run, claim.targetRunHeader)
@@ -5620,9 +5689,16 @@ export class SessionManager {
           );
         }
         const repairStart = buildContinuationRepairStartEvent(claim);
-        await authority.commitContinuationRepairStart({ claim, event: repairStart });
+        if (claim.protocol === 'continuation_claim_v2') {
+          await workspaceAuthority!.commitWorkspaceBoundContinuationRepairStart({
+            claim,
+            event: repairStart,
+          });
+        } else {
+          await authority.commitContinuationRepairStart({ claim, event: repairStart });
+        }
         state =
-          (await authority.readContinuationClaimStateByBoundary(claim.boundaryDigest)) ??
+          (await readState()) ??
           (() => {
             throw new Error(`Continuation claim ${claim.claimId} disappeared during repair`);
           })();
@@ -6007,7 +6083,7 @@ function continuationRepairEventId(
     .slice(0, 32)}`;
 }
 
-function buildContinuationRepairStartEvent(claim: ContinuationClaimV1): RuntimeEvent {
+function buildContinuationRepairStartEvent(claim: ContinuationClaim): RuntimeEvent {
   const source = claim.boundary.segments.at(-1)!;
   return {
     id: continuationRepairEventId('start', claim.claimId),
@@ -6045,7 +6121,7 @@ function assertClaimOwnsHostedLinkedChildAdmission(
     runId: string;
     execution: Exclude<RootExecutionDescriptor, { kind: 'external_message' }>;
   },
-  claim: ContinuationClaimV1,
+  claim: ContinuationClaim,
 ): void {
   if (
     input.execution.kind !== 'linked_child_resume' &&
@@ -6063,10 +6139,11 @@ function assertClaimOwnsHostedLinkedChildAdmission(
   const header = claim.targetRunHeader;
   const source = claim.boundary.segments.at(-1)!;
   const continuationSource = header.continuationSource;
-  const continuationSourceV2 =
+  const canonicalContinuationSource =
     continuationSource !== undefined &&
     'protocol' in continuationSource &&
-    continuationSource.protocol === 'continuation_source_v2'
+    (continuationSource.protocol === 'continuation_source_v2' ||
+      continuationSource.protocol === 'continuation_source_v3')
       ? continuationSource
       : undefined;
   if (
@@ -6079,10 +6156,10 @@ function assertClaimOwnsHostedLinkedChildAdmission(
     header.agentName !== input.execution.agentName ||
     source.identity.sessionId !== input.sessionId ||
     source.identity.runId !== input.execution.sourceRunId ||
-    !continuationSourceV2 ||
-    continuationSourceV2.claimId !== claim.claimId ||
-    continuationSourceV2.boundaryDigest !== claim.boundaryDigest ||
-    continuationSourceV2.sourceRunId !== input.execution.sourceRunId
+    !canonicalContinuationSource ||
+    canonicalContinuationSource.claimId !== claim.claimId ||
+    canonicalContinuationSource.boundaryDigest !== claim.boundaryDigest ||
+    canonicalContinuationSource.sourceRunId !== input.execution.sourceRunId
   ) {
     throw new Error('Linked child admission continuation claim identity is inconsistent');
   }
@@ -6099,28 +6176,35 @@ function assertClaimOwnsHostedLinkedChildAdmission(
 
 async function isProvenRecoveredContinuationAbandonment(
   authority: RuntimeContinuationAuthorityStore | undefined,
+  workspaceAuthority: RuntimeWorkspaceBoundContinuationAuthorityStore | undefined,
   run: AgentRunHeader,
 ): Promise<boolean> {
   const continuationSource = run.continuationSource;
-  const continuationSourceV2 =
+  const canonicalContinuationSource =
     continuationSource !== undefined &&
     'protocol' in continuationSource &&
-    continuationSource.protocol === 'continuation_source_v2'
+    (continuationSource.protocol === 'continuation_source_v2' ||
+      continuationSource.protocol === 'continuation_source_v3')
       ? continuationSource
       : undefined;
   if (
     !authority ||
-    !continuationSourceV2 ||
+    !canonicalContinuationSource ||
     run.failureClass !== 'continuation_abandoned_before_provider_dispatch'
   ) {
     return false;
   }
-  let state: ContinuationClaimStateV1 | undefined;
+  let state: ContinuationClaimStateV1 | ContinuationClaimStateV2 | undefined;
   let events: RuntimeEvent[];
   try {
-    state = await authority.readContinuationClaimStateByBoundary(
-      continuationSourceV2.boundaryDigest,
-    );
+    state =
+      canonicalContinuationSource.protocol === 'continuation_source_v3'
+        ? await workspaceAuthority?.readWorkspaceBoundContinuationClaimStateByBoundary(
+            canonicalContinuationSource.boundaryDigest,
+          )
+        : await authority.readContinuationClaimStateByBoundary(
+            canonicalContinuationSource.boundaryDigest,
+          );
     events = await authority.readImmutableRuntimeEvents(run.sessionId, run.runId);
   } catch {
     return false;
@@ -6140,7 +6224,7 @@ async function isProvenRecoveredContinuationAbandonment(
   });
   const terminalFact = classifyRuntimeEventTerminalFact(run, events).fact;
   return (
-    claim.claimId === continuationSourceV2.claimId &&
+    claim.claimId === canonicalContinuationSource.claimId &&
     claim.target.sessionId === run.sessionId &&
     claim.target.invocationId === run.invocationId &&
     claim.target.runId === run.runId &&

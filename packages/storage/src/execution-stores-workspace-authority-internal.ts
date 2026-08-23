@@ -20,6 +20,10 @@
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { RuntimeWorkspaceVersionAuthorityStore } from '@maka/core/runtime-event-store';
 import type {
+  ManagedWorkspaceContinuationBoundaryV1,
+  RuntimeBoundaryDigest,
+} from '@maka/core/runtime-boundary';
+import type {
   WorkspaceBaselineAuthorityInput,
   WorkspaceBaselineCommitResult,
   WorkspaceHeadRecordV1,
@@ -31,6 +35,7 @@ import {
   commitWorkspaceBaselineInternal,
   commitWorkspaceSuccessorInternal,
   readActiveManagedMutationInternal,
+  readWorkspaceContinuationBoundaryInternal,
   type ManagedMutationReservationRecordV1,
   type ManagedMutationTerminalCommitInput,
   type ManagedMutationTerminalCommitResult,
@@ -60,6 +65,11 @@ export interface ExecutionStoresWorkspaceMutationAuthorityInternal {
   commitTerminal(
     input: ManagedMutationTerminalCommitInput,
   ): Promise<ManagedMutationTerminalCommitResult>;
+  readContinuationBoundary(
+    workspaceId: string,
+    workspaceEpochId: string,
+    executionProfileDigest: RuntimeBoundaryDigest,
+  ): Promise<ManagedWorkspaceContinuationBoundaryV1 | undefined>;
 }
 
 interface RegisteredWorkspaceAuthority {
@@ -103,5 +113,16 @@ export function requireExecutionStoresWorkspaceMutationAuthorityInternal(
       commitWorkspaceSuccessorInternal(authority, input),
     commitTerminal: (input: ManagedMutationTerminalCommitInput) =>
       commitManagedMutationTerminalInternal(authority, input),
+    readContinuationBoundary: (
+      workspaceId: string,
+      workspaceEpochId: string,
+      executionProfileDigest: RuntimeBoundaryDigest,
+    ) =>
+      readWorkspaceContinuationBoundaryInternal(
+        authority,
+        workspaceId,
+        workspaceEpochId,
+        executionProfileDigest,
+      ),
   });
 }

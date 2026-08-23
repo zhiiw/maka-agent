@@ -36,6 +36,7 @@ import {
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../server/gitoxide-helper-artifact-authority-internal.js';
 import {
+  inspectGitoxideManagedContinuationBoundary,
   openGitoxideManagedMutationSession,
   recoverGitoxideManagedMutationBeforeRunClosureInternal,
 } from '../server/gitoxide-managed-mutation-session.js';
@@ -100,8 +101,12 @@ test('opens one durable Gitoxide baseline and exactly reuses it for the session'
 
     const first = await openGitoxideManagedMutationSession(input);
     const reopened = await openGitoxideManagedMutationSession(input);
+    const initialContinuationBoundary = await inspectGitoxideManagedContinuationBoundary(input);
 
     assert.deepEqual(reopened.head, first.head);
+    assert.equal(initialContinuationBoundary?.commitOid, first.head.commitOid);
+    assert.equal(initialContinuationBoundary?.treeOid, first.head.treeOid);
+    assert.equal(initialContinuationBoundary?.revision, first.head.revision);
     assert.equal(first.head.revision, 1);
     assert.notEqual(first.head.commitOid, git(sourceRoot, ['rev-parse', 'HEAD']));
     assert.equal(first.head.treeOid, git(sourceRoot, ['rev-parse', 'HEAD^{tree}']));
@@ -161,6 +166,10 @@ test('opens one durable Gitoxide baseline and exactly reuses it for the session'
       'after\n',
     );
     assert.equal(await readFile(join(sourceRoot, 'notes.txt'), 'utf8'), 'baseline\n');
+    const successorContinuationBoundary = await inspectGitoxideManagedContinuationBoundary(input);
+    assert.equal(successorContinuationBoundary?.commitOid, afterChange.head.commitOid);
+    assert.equal(successorContinuationBoundary?.treeOid, afterChange.head.treeOid);
+    assert.equal(successorContinuationBoundary?.revision, 3);
 
     const noChange = await executeManagedWrite({
       stores,

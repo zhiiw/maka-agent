@@ -31,6 +31,7 @@ import {
   createRuntimeBoundaryCursor,
   digestWorkspaceBoundContinuationBoundary,
   runtimePrefixSegment,
+  type ContinuationClaim,
   type ContinuationClaimV2,
   type ContinuationClaimV1,
   type ImmutableRuntimePrefixV1,
@@ -905,6 +906,31 @@ describe('SqliteRuntimeStore', () => {
         await store.readWorkspaceBoundContinuationClaimByBoundary(claim.boundaryDigest),
         claim,
       );
+    });
+  });
+
+  it('commits a workspace-bound continuation start only through its dedicated authority', async () => {
+    await withStore(async (store) => {
+      const workspaceBoundary = await openContinuationWorkspaceBoundary(store);
+      const claim = workspaceBoundContinuationClaim(workspaceBoundary);
+      await persistImmutablePrefix(store, continuationSourcePrefix());
+      assert.equal((await store.claimWorkspaceBoundContinuation({ claim })).kind, 'acquired');
+      const event = continuationStartEvent(claim);
+
+      const committed = await store.commitWorkspaceBoundContinuationStart({ claim, event });
+      const retry = await store.commitWorkspaceBoundContinuationStart({ claim, event });
+      const state = await store.readWorkspaceBoundContinuationClaimStateByBoundary(
+        claim.boundaryDigest,
+      );
+
+      assert.equal(committed.created, true);
+      assert.equal(retry.created, false);
+      assert.deepEqual(state, {
+        claim,
+        startEventId: event.id,
+        startKind: 'runtime_admission',
+      });
+      assert.equal(await store.readContinuationClaimByBoundary(claim.boundaryDigest), undefined);
     });
   });
 
@@ -2298,7 +2324,7 @@ async function persistImmutablePrefix(
 }
 
 function continuationStartEvent(
-  claim: ContinuationClaimV1,
+  claim: ContinuationClaim,
   overrides: {
     id?: string;
     provenance?: 'runtime_admission' | 'claim_repair';

@@ -185,6 +185,7 @@ import {
 import { resolvePackagedGitoxideHelperInternal } from './packaged-gitoxide-helper-internal.js';
 import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
 import {
+  inspectGitoxideManagedContinuationBoundary,
   openGitoxideManagedMutationSession,
   recoverGitoxideManagedMutationBeforeRunClosureInternal,
 } from './gitoxide-managed-mutation-session.js';
@@ -1003,6 +1004,19 @@ export async function createExecutionRuntimeHostComposition(
           return (
             resourcesLive || graphLive || graphWake.hasLiveSessionState(sessionId) || descendantLive
           );
+        },
+        readManagedWorkspaceBoundary: async (sessionId) => {
+          const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
+          if (header.toolProfile !== 'managed-coding-v1') return undefined;
+          const runtime = requireGitoxideManagedMutationRuntime(gitoxideManagedMutationRuntime);
+          return inspectGitoxideManagedContinuationBoundary({
+            storageRoot: context.owner.capability.canonicalPath,
+            sourceRoot: header.cwd,
+            sessionId,
+            invocationOwnerToken: runtime.invocationOwnerToken,
+            helperCapability: runtime.helperCapability,
+            settlementAuthority: requireExecutionStoresWorkspaceMutationAuthorityInternal(stores),
+          });
         },
       }),
       runBackendActivation: (operation) => runtimePolicyActivation.runBackendActivation(operation),

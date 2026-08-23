@@ -21,6 +21,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { BackendStopMode } from '@maka/core/backend-types';
 import type { AgentRunHeader, RootExecutionDescriptor } from '@maka/core/agent-run';
+import { digestWorkspaceBoundContinuationBoundary } from '@maka/core/runtime-boundary';
 import {
   INLINE_REFERENCE_MAX_COUNT,
   messageContentsEqual,
@@ -2665,12 +2666,18 @@ function requirePlannedContinuation(plan: SafeBoundaryContinuationPlan): Runtime
 function continuationExecutionDescriptor(
   continuation: RuntimeContinuation,
 ): Extract<RootExecutionDescriptor, { kind: 'safe_boundary_continuation' }> {
-  const boundaryDigest = continuation.boundary?.manifestDigest;
-  if (!continuation.claimId || !boundaryDigest || !continuation.providerReplayDigest) {
+  const replayManifestDigest = continuation.boundary?.manifestDigest;
+  if (!continuation.claimId || !replayManifestDigest || !continuation.providerReplayDigest) {
     throw new RuntimeMessageAuthorityInvariantError(
       'Authoritative continuation plan omitted its durable replay proof',
     );
   }
+  const boundaryDigest = continuation.workspaceBoundary
+    ? digestWorkspaceBoundContinuationBoundary(
+        continuation.boundary!,
+        continuation.workspaceBoundary,
+      )
+    : replayManifestDigest;
   return {
     kind: 'safe_boundary_continuation',
     sourceInvocationId: continuation.sourceInvocationId,
@@ -2679,6 +2686,7 @@ function continuationExecutionDescriptor(
     sourceRuntimeEventHighWater: continuation.sourceRuntimeEventHighWater,
     claimId: continuation.claimId,
     boundaryDigest,
+    ...(continuation.workspaceBoundary ? { replayManifestDigest } : {}),
     providerReplayDigest: continuation.providerReplayDigest,
     safetyDigest: continuationSafetyDigest(continuation),
     targetInvocationId: continuation.invocationId,
@@ -2695,6 +2703,7 @@ export function continuationSafetyDigest(continuation: RuntimeContinuation): `sh
     snapshot.workspaceCheckpoint
       ? [snapshot.workspaceCheckpoint.ref, snapshot.workspaceCheckpoint.runtimeEventHighWater]
       : null,
+    ...(snapshot.workspaceBoundary ? [snapshot.workspaceBoundary] : []),
   ]);
   return `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}`;
 }
