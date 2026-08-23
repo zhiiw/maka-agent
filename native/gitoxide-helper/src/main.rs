@@ -650,7 +650,7 @@ fn create_successor(
                 "maka managed workspace candidate",
             )
             .map_err(|error| {
-                eprintln!("Gitoxide candidate publication failed: {error}");
+                eprintln!("Gitoxide candidate publication failed: {error:?}");
                 "candidate_publish_failed"
             })?;
     } else if current.is_none() {
