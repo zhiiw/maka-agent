@@ -124,7 +124,7 @@ const dispatchEvent: RuntimeEvent = {
 };
 await stores.runtimeEventStore.commitToolPrepared({
   operationId,
-  journalEventId: `${operationId}-prepared`,
+  journalEventId: `${operationId}_prepared`,
   runtimeEvent: callEvent,
   dispatchRuntimeEvent: dispatchEvent,
   providerToolCallId: toolCallId,
@@ -157,4 +157,3 @@ await admission.execute(async () => ({
     changed: true,
   },
 }));
-

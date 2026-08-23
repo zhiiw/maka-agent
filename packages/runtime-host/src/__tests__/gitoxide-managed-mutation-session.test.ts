@@ -290,7 +290,7 @@ async function executeManagedWrite(input: {
   };
   await input.stores.runtimeEventStore.commitToolPrepared({
     operationId: input.operationId,
-    journalEventId: `${input.operationId}-prepared`,
+    journalEventId: `${input.operationId}_prepared`,
     runtimeEvent: callEvent,
     dispatchRuntimeEvent: dispatchEvent,
     providerToolCallId: toolCallId,
