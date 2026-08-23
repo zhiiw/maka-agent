@@ -48,6 +48,9 @@ test('commits the exact Runtime outcome before promoting the Gitoxide candidate'
         head: { ...head, commitOid: '3'.repeat(40), treeOid: '4'.repeat(40), revision: 2 },
       };
     },
+    commitTerminal: async () => {
+      throw new Error('changed success must not use a no-effect terminal');
+    },
   };
   const admissionOwner = createGitoxideManagedMutationAdmissionInternal({
     workspaceInstanceId: 'instance_44444444444444444444444444444444',
@@ -113,6 +116,87 @@ test('commits the exact Runtime outcome before promoting the Gitoxide candidate'
   assert.equal(admission.gitoxideTransform?.baseContent, 'before\n');
 });
 
+test('commits no-op success and deterministic failure without advancing the workspace', async () => {
+  const head = baselineHead();
+  const version = baselineVersion(head);
+  const dispositions: string[] = [];
+  const authority: GitoxideManagedMutationSettlementAuthorityInternal = {
+    readHead: async () => head,
+    readVersion: async () => version,
+    commitSuccessor: async () => {
+      throw new Error('no-effect operations must not advance the workspace');
+    },
+    commitTerminal: async (input) => {
+      dispositions.push(input.disposition);
+      return { created: true, outcomeRuntimeEventSeq: dispositions.length };
+    },
+  };
+  const owner = createGitoxideManagedMutationAdmissionInternal({
+    workspaceInstanceId: 'instance_44444444444444444444444444444444',
+    workspaceId: head.workspaceId,
+    workspaceEpochId: head.workspaceEpochId,
+    settlementAuthority: authority,
+    candidateAuthorityForHead: async () => ({
+      readBaseFile: async () => ({ content: 'same\n', blobOid: '5'.repeat(40) }),
+      capture: async () => {
+        throw new Error('no-effect operations must not create a candidate');
+      },
+      promote: async () => {
+        throw new Error('no-effect operations must not promote a candidate');
+      },
+      promoteDurable: async () => {
+        throw new Error('not used');
+      },
+    }),
+  });
+
+  const noChange = await owner({
+    operationId: 'op-no-change',
+    toolName: 'Write',
+    persistedArgs: { path: 'notes.txt', content: 'same\n' },
+    abortSignal: new AbortController().signal,
+  });
+  const noChangeOutcome = outcomeEvent('op-no-change', false);
+  const noChangeSettlement = await noChange.execute(async () => ({
+    content: {
+      kind: 'json' as const,
+      value: { kind: 'file_diff', paths: ['notes.txt'], diff: 'diff' },
+    },
+    isError: false,
+    durationMs: 5,
+    durableOutcome: noChangeOutcome,
+    managedMutationResult: {
+      canonicalPath: 'notes.txt',
+      content: 'same\n',
+      changed: false,
+    },
+  }));
+
+  const failed = await owner({
+    operationId: 'op-failed',
+    toolName: 'Edit',
+    persistedArgs: { path: 'notes.txt', old_string: 'missing', new_string: 'new' },
+    abortSignal: new AbortController().signal,
+  });
+  const failedOutcome = outcomeEvent('op-failed', true);
+  const failedSettlement = await failed.execute(async () => ({
+    content: {
+      kind: 'json' as const,
+      value: { kind: 'file_diff', paths: ['notes.txt'], diff: 'diff' },
+    },
+    isError: true,
+    durationMs: 5,
+    durableOutcome: failedOutcome,
+  }));
+
+  assert.equal(noChangeSettlement.kind, 'no_workspace_change_committed');
+  assert.equal(failedSettlement.kind, 'operation_failed_no_effect_committed');
+  assert.deepEqual(dispositions, [
+    'no_workspace_change_committed',
+    'operation_failed_no_effect_committed',
+  ]);
+});
+
 test('replays only candidate promotion after SQLite already accepted the successor', async () => {
   const parent = baselineHead();
   const parentVersion = baselineVersion(parent);
@@ -161,6 +245,9 @@ test('replays only candidate promotion after SQLite already accepted the success
       readVersion: async (id) => (id === successor.workspaceVersionId ? successor : parentVersion),
       commitSuccessor: async () => {
         throw new Error('reconciliation must not rewrite SQLite');
+      },
+      commitTerminal: async () => {
+        throw new Error('reconciliation must not write a terminal');
       },
     },
     candidateAuthorityForHead: async (base) => {
@@ -235,9 +322,9 @@ function baselineVersion(head: WorkspaceHeadRecordV1): WorkspaceVersionRecordV1 
   };
 }
 
-function outcomeEvent(): RuntimeEvent {
+function outcomeEvent(operationId = 'op-1', isError = false): RuntimeEvent {
   return {
-    id: 'op-1_response',
+    id: `${operationId}_response`,
     sessionId: 'session-1',
     invocationId: 'run-1',
     runId: 'run-1',
@@ -254,8 +341,9 @@ function outcomeEvent(): RuntimeEvent {
         kind: 'json',
         value: { kind: 'file_diff', paths: ['notes.txt'], diff: 'diff' },
       },
+      ...(isError ? { isError: true } : {}),
     },
-    refs: { operationId: 'op-1', toolCallId: 'call-1' },
+    refs: { operationId, toolCallId: 'call-1' },
     actions: { stateDelta: { durationMs: 5 } },
   };
 }

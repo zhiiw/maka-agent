@@ -73,6 +73,7 @@ import {
   createReadImageSnapshotter,
 } from '@maka/storage/artifact-stores';
 import { isSessionNotFoundError } from '@maka/storage/execution-stores';
+import { requireExecutionStoresWorkspaceMutationAuthorityInternal } from '@maka/storage/execution-stores-workspace-authority-internal';
 import { createExternalSessionAdapterRegistry } from '@maka/storage/external-sessions';
 import { createGitWorktreeChildExecutor } from '@maka/storage/git-worktree-child-executor';
 import { runWithStorageRootLease } from '@maka/storage/root-authority';
@@ -177,9 +178,13 @@ import {
   type RuntimeHostWorkspaceExecutionComposition,
 } from './workspace-execution-composition.js';
 import {
+  runtimeHostPackagedResourcesRootInternal,
   tryOpenPackagedGitoxideManagedInspectionComposition,
   type GitoxideManagedInspectionComposition,
 } from './gitoxide-managed-inspection.js';
+import { resolvePackagedGitoxideHelperInternal } from './packaged-gitoxide-helper-internal.js';
+import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
+import { openGitoxideManagedMutationSession } from './gitoxide-managed-mutation-session.js';
 
 export interface ExecutionRuntimeHostComposition extends RuntimeHostComposition {
   readonly workspaceExecution: RuntimeHostWorkspaceExecutionComposition;
@@ -234,6 +239,12 @@ export async function createExecutionRuntimeHostComposition(
   let unsubscribeUsageChanges: (() => void) | undefined;
   let workspaceExecution: RuntimeHostWorkspaceExecutionComposition | undefined;
   let gitoxideManagedInspection: GitoxideManagedInspectionComposition | undefined;
+  let gitoxideManagedMutationRuntime:
+    | {
+        readonly invocationOwnerToken: object;
+        readonly helperCapability: GitoxideHelperInvocationCapability;
+      }
+    | undefined;
   let goalExecutions: HostGoalExecutionCoordinator | undefined;
   try {
     const openedProjectCatalog = storage.projectCatalog;
@@ -324,6 +335,26 @@ export async function createExecutionRuntimeHostComposition(
           `[runtime-host] Gitoxide managed inspection unavailable: ${generalizedErrorMessage(error)}`,
         ),
     });
+    const packagedResourcesRoot = runtimeHostPackagedResourcesRootInternal();
+    if (packagedResourcesRoot) {
+      const releaseOwnerToken = {};
+      const invocationOwnerToken = {};
+      try {
+        const helperCapability = await resolvePackagedGitoxideHelperInternal({
+          resourcesRoot: packagedResourcesRoot,
+          releaseOwnerToken,
+          invocationOwnerToken,
+        });
+        gitoxideManagedMutationRuntime = Object.freeze({
+          invocationOwnerToken,
+          helperCapability,
+        });
+      } catch (error) {
+        console.warn(
+          `[runtime-host] Gitoxide managed mutation unavailable: ${generalizedErrorMessage(error)}`,
+        );
+      }
+    }
     workspaceExecution = createRuntimeHostWorkspaceExecutionComposition({
       ...(managedFilesystemWorker ? { filesystemWorker: managedFilesystemWorker } : {}),
     });
@@ -617,8 +648,25 @@ export async function createExecutionRuntimeHostComposition(
     backends.register(
       'ai-sdk',
       dependencies.primaryBackendFactory ??
-        ((backendContext) =>
-          createHostAiSdkBackend({
+        (async (backendContext) => {
+          const managedMutationSession =
+            backendContext.header.toolProfile === 'managed-coding-v1'
+              ? await openGitoxideManagedMutationSession({
+                  storageRoot: context.owner.capability.canonicalPath,
+                  sourceRoot: backendContext.header.cwd,
+                  sessionId: backendContext.sessionId,
+                  invocationOwnerToken: requireGitoxideManagedMutationRuntime(
+                    gitoxideManagedMutationRuntime,
+                  ).invocationOwnerToken,
+                  helperCapability: requireGitoxideManagedMutationRuntime(
+                    gitoxideManagedMutationRuntime,
+                  ).helperCapability,
+                  settlementAuthority:
+                    requireExecutionStoresWorkspaceMutationAuthorityInternal(stores),
+                  abortSignal: backendContext.abortSignal,
+                })
+              : undefined;
+          return createHostAiSdkBackend({
             context: backendContext,
             runtimePolicy: runtimePolicyStores,
             oauthCredentials,
@@ -655,8 +703,12 @@ export async function createExecutionRuntimeHostComposition(
               backendContext.sessionId,
             ),
             runtimeCommitSink: stores.runtimeEventStore,
+            ...(managedMutationSession
+              ? { admitManagedMutation: managedMutationSession.admitManagedMutation }
+              : {}),
             requestDrain: context.requestDrain,
-          })),
+          });
+        }),
     );
     const runtimeAuthority: RuntimeHostedRootAuthority = {
       bindRun: (identity) => messages.bindRun(identity),
@@ -1665,6 +1717,23 @@ function requireWorkspaceExecution(
 ): RuntimeHostWorkspaceExecutionComposition {
   if (!composition) throw new Error('Runtime Host workspace execution is not composed');
   return composition;
+}
+
+function requireGitoxideManagedMutationRuntime(
+  runtime:
+    | {
+        readonly invocationOwnerToken: object;
+        readonly helperCapability: GitoxideHelperInvocationCapability;
+      }
+    | undefined,
+): {
+  readonly invocationOwnerToken: object;
+  readonly helperCapability: GitoxideHelperInvocationCapability;
+} {
+  if (!runtime) {
+    throw new Error('Gitoxide managed mutation profile is unavailable');
+  }
+  return runtime;
 }
 
 function adaptManagedWorkspaceFilesystemWorker(

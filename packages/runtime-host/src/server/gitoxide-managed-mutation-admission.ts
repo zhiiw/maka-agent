@@ -27,6 +27,8 @@ import type {
 import { GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST } from '@maka/runtime/managed-mutation-transform';
 import type { RuntimeManagedMutationAdmission, ToolRuntimeInput } from '@maka/runtime/tool-runtime';
 import type {
+  ManagedMutationTerminalCommitInput,
+  ManagedMutationTerminalCommitResult,
   WorkspaceSuccessorCommitInput,
   WorkspaceSuccessorCommitResult,
 } from '@maka/storage/workspace-version-authority-internal';
@@ -77,6 +79,9 @@ export interface GitoxideManagedMutationSettlementAuthorityInternal {
   ): Promise<WorkspaceHeadRecordV1 | undefined>;
   readVersion(workspaceVersionId: string): Promise<WorkspaceVersionRecordV1 | undefined>;
   commitSuccessor(input: WorkspaceSuccessorCommitInput): Promise<WorkspaceSuccessorCommitResult>;
+  commitTerminal(
+    input: ManagedMutationTerminalCommitInput,
+  ): Promise<ManagedMutationTerminalCommitResult>;
 }
 
 export function createGitoxideManagedMutationAdmissionInternal(input: {
@@ -129,11 +134,31 @@ export function createGitoxideManagedMutationAdmissionInternal(input: {
       }),
       async execute(operation: Parameters<RuntimeManagedMutationAdmission['execute']>[0]) {
         const proof = await operation();
+        if (proof.isError) {
+          await input.settlementAuthority.commitTerminal({
+            disposition: 'operation_failed_no_effect_committed',
+            toolOutcome: toolOutcomeInput(request.operationId, proof.durableOutcome),
+          });
+          return Object.freeze({
+            kind: 'operation_failed_no_effect_committed' as const,
+            durableOutcome: proof.durableOutcome,
+          });
+        }
         const mutation = proof.managedMutationResult;
-        if (proof.isError || !mutation || !mutation.changed || mutation.canonicalPath !== path) {
+        if (!mutation || mutation.canonicalPath !== path) {
           return Object.freeze({
             kind: 'unsettled' as const,
-            error: new Error('Gitoxide managed mutation has no changed success candidate'),
+            error: new Error('Gitoxide managed mutation has no exact success transform'),
+          });
+        }
+        if (!mutation.changed) {
+          await input.settlementAuthority.commitTerminal({
+            disposition: 'no_workspace_change_committed',
+            toolOutcome: toolOutcomeInput(request.operationId, proof.durableOutcome),
+          });
+          return Object.freeze({
+            kind: 'no_workspace_change_committed' as const,
+            durableOutcome: proof.durableOutcome,
           });
         }
         const candidate = await candidateAuthority.capture({
@@ -154,12 +179,7 @@ export function createGitoxideManagedMutationAdmissionInternal(input: {
         });
         await input.settlementAuthority.commitSuccessor({
           successor,
-          toolOutcome: {
-            operationId: request.operationId,
-            journalEventId: `${request.operationId}_outcome`,
-            runtimeEvent: proof.durableOutcome,
-            committedAt: proof.durableOutcome.ts,
-          },
+          toolOutcome: toolOutcomeInput(request.operationId, proof.durableOutcome),
         });
         await candidateAuthority.promote(candidate, request.abortSignal);
         return Object.freeze({
@@ -169,6 +189,18 @@ export function createGitoxideManagedMutationAdmissionInternal(input: {
       },
       async dispose() {},
     });
+  };
+}
+
+function toolOutcomeInput(
+  operationId: string,
+  durableOutcome: import('@maka/core/runtime-event').RuntimeEvent,
+) {
+  return {
+    operationId,
+    journalEventId: `${operationId}_outcome`,
+    runtimeEvent: durableOutcome,
+    committedAt: durableOutcome.ts,
   };
 }
 

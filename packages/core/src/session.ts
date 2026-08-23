@@ -194,7 +194,7 @@ export function isTurnStatus(value: unknown): value is TurnStatus {
 // Header (JSONL line 1)
 // ============================================================================
 
-export const SESSION_TOOL_PROFILES = ['headless-coding-v1'] as const;
+export const SESSION_TOOL_PROFILES = ['headless-coding-v1', 'managed-coding-v1'] as const;
 export type SessionToolProfile = (typeof SESSION_TOOL_PROFILES)[number];
 
 export function isSessionToolProfile(value: unknown): value is SessionToolProfile {

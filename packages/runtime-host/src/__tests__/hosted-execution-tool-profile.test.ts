@@ -91,3 +91,23 @@ test('the headless coding profile freezes prompt, tools, memory, and foreground 
   );
   assert.equal((await schema.safeParseAsync({ command: 'true', pty: true })).success, false);
 });
+
+test('the managed coding profile exposes only owner-backed file operations', () => {
+  const profile = hostedExecutionRunProfile('managed-coding-v1');
+  assert.ok(profile);
+  assert.deepEqual(profile.toolNames, ['Write', 'Edit']);
+  assert.equal(profile.memoryExtraction, false);
+  assert.doesNotMatch(profile.systemPrompt, /Bash/u);
+
+  const tools: MakaTool[] = ['Write', 'Edit'].map((name) => ({
+    name,
+    description: name,
+    parameters: z.object({}),
+    impl: async () => 'ok',
+  }));
+  const projected = projectHostedExecutionTools(tools, 'managed-coding-v1');
+  for (const tool of projected) {
+    assert.equal(tool.recoveryMode, 'reconcile');
+    assert.equal(tool.durableExecutionProfile, 'managed_mutation_v1');
+  }
+});

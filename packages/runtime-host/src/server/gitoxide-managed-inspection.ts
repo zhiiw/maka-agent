@@ -347,7 +347,7 @@ export async function tryOpenPackagedGitoxideManagedInspectionComposition(input:
   readonly filesystemWorker?: ManagedWorkspaceFilesystemWorker;
   readonly onUnavailable?: (error: unknown) => void;
 }): Promise<GitoxideManagedInspectionComposition | undefined> {
-  const resourcesRoot = runtimeHostPackagedResourcesRoot();
+  const resourcesRoot = runtimeHostPackagedResourcesRootInternal();
   if (!resourcesRoot || !input.filesystemWorker) return undefined;
   const releaseOwnerToken = {};
   const invocationOwnerToken = {};
@@ -396,7 +396,7 @@ export async function tryOpenPackagedGitoxideManagedInspectionComposition(input:
   }
 }
 
-function runtimeHostPackagedResourcesRoot(): string | undefined {
+export function runtimeHostPackagedResourcesRootInternal(): string | undefined {
   if (!process.versions.electron) return undefined;
   const resourcesPath = (process as NodeJS.Process & { readonly resourcesPath?: string })
     .resourcesPath;

@@ -2,7 +2,8 @@
 
 ## 状态
 
-API-only stacked Draft。此切片先证明 Git 数据面的两个必要边界，不代表 Desktop/CLI 已开放 managed Write/Edit。
+stacked Draft。Runtime Host 已能消费持久化的 `managed-coding-v1` Session profile；Desktop/CLI
+尚未提供创建该 profile 的产品入口，因此不能视为默认开放 managed Write/Edit。
 
 ## 主要不变量
 
@@ -21,6 +22,16 @@ immutable accepted tree
 - accepted truth owner 是 SQLite RuntimeEvents；candidate ref 不是 accepted truth。
 - projection owner 只有在 SQLite successor 已提交后才能调用 `promote_candidate`。
 
+T1 后只有四种互斥终态：
+
+- `workspace_successor_committed`：成功且产生新 Git successor；
+- `no_workspace_change_committed`：成功但结果内容与 base 相同；
+- `operation_failed_no_effect_committed`：纯转换在接触 Git candidate 前确定失败；
+- `unsettled`：无法证明以上任一终态，保留 reservation 并 fail-stop。
+
+前两种 no-effect terminal 由同一个 SQLite writer 原子提交 exact T2、terminal fact 并释放
+reservation；generic T2 writer 在数据库层拒绝 managed mutation。
+
 ## 原子性与恢复
 
 `promote_candidate` 的线性化点是 accepted ref 的 compare-and-swap：
@@ -34,6 +45,7 @@ immutable accepted tree
 ## 失败状态与回滚
 
 - candidate 创建失败：不产生 accepted successor；保留或清理由 candidate 生命周期 owner 处理。
+- no-op / 确定性转换失败：不创建 candidate；SQLite 原子提交 no-effect terminal 并释放 reservation。
 - SQLite successor 未提交：禁止推进 accepted ref。
 - accepted ref CAS 冲突：park；SQLite accepted truth 保留，等待显式 reconciliation。
 - projection 失败：不得回滚 SQLite 事实，也不得重跑工具。
@@ -48,4 +60,7 @@ immutable accepted tree
 
 ## 后续闭环
 
-本切片之后仍需把 Runtime-owned outcome、SQLite successor writer 和 ref projection 串成一个生产 session owner，并补“SQLite 已提交、projection 前杀 Host、重启后只推进 ref”的真实进程测试。完成前保持 Draft，也不进入 M3 的自动恢复策略。
+Runtime-owned outcome、SQLite successor writer、baseline session owner 与 ref projection 已串入
+`managed-coding-v1` Host backend。转 Ready 前仍需由打包 helper 的三平台 lane 证明 Rust import
+exact retry，并补“SQLite 已提交、projection 前杀 Host、重启后只推进 ref”的真实进程测试；完成前
+保持 Draft，也不进入 M3 的自动恢复策略。
