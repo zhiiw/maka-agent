@@ -356,11 +356,16 @@ fn materializes_and_observes_an_exact_commit_without_git_metadata() {
         String::from_utf8_lossy(&materialized.stdout),
         String::from_utf8_lossy(&materialized.stderr)
     );
-    let materialized: serde_json::Value =
-        serde_json::from_slice(&materialized.stdout).unwrap();
+    let materialized: serde_json::Value = serde_json::from_slice(&materialized.stdout).unwrap();
     assert_eq!(materialized["kind"], "projection_materialized");
-    assert_eq!(fs::read(projection.join("hello.txt")).unwrap(), b"hello from sha1\n");
-    assert_eq!(fs::read(projection.join("docs/guide.txt")).unwrap(), b"nested guide\n");
+    assert_eq!(
+        fs::read(projection.join("hello.txt")).unwrap(),
+        b"hello from sha1\n"
+    );
+    assert_eq!(
+        fs::read(projection.join("docs/guide.txt")).unwrap(),
+        b"nested guide\n"
+    );
     assert!(!projection.join(".git").exists());
 
     let observed = invoke_request(serde_json::json!({
@@ -405,13 +410,17 @@ fn reports_projection_content_and_extra_path_drift() {
     let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
     let accepted_commit = imported["baselineCommitOid"].as_str().unwrap();
     let projection = fixture.root.join("projection");
-    assert!(invoke_request(serde_json::json!({
-        "protocolVersion": 1,
-        "operation": "materialize_projection",
-        "repositoryPath": destination,
-        "acceptedCommitOid": accepted_commit,
-        "destinationPath": projection,
-    })).status.success());
+    assert!(
+        invoke_request(serde_json::json!({
+            "protocolVersion": 1,
+            "operation": "materialize_projection",
+            "repositoryPath": destination,
+            "acceptedCommitOid": accepted_commit,
+            "destinationPath": projection,
+        }))
+        .status
+        .success()
+    );
 
     fs::write(projection.join("hello.txt"), b"evil! from sha1\n").unwrap();
     let drifted = invoke_request(serde_json::json!({

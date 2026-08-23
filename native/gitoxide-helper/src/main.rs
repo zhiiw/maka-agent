@@ -716,7 +716,8 @@ fn materialize_projection(
     destination_path: PathBuf,
 ) -> Result<ExitCode, &'static str> {
     let repository = open_repository(repository_path)?;
-    let (accepted_commit, accepted_tree) = accepted_commit_identity(&repository, &accepted_commit_oid)?;
+    let (accepted_commit, accepted_tree) =
+        accepted_commit_identity(&repository, &accepted_commit_oid)?;
 
     let stats = match fs::create_dir(&destination_path) {
         Ok(()) => {
@@ -788,8 +789,7 @@ fn materialize_tree(
             return Err("unsupported_projection_path");
         }
         let relative_path = join_projection_path(prefix, component);
-        record_projection_path(stats, &relative_path)
-            .map_err(|_| "projection_path_collision")?;
+        record_projection_path(stats, &relative_path).map_err(|_| "projection_path_collision")?;
         let output_path = destination.join(component);
         match entry.mode().kind() {
             gix::objs::tree::EntryKind::Tree => {
@@ -803,7 +803,10 @@ fn materialize_tree(
                 )?;
             }
             gix::objs::tree::EntryKind::Blob | gix::objs::tree::EntryKind::BlobExecutable => {
-                let header = entry.id().header().map_err(|_| "projection_blob_unavailable")?;
+                let header = entry
+                    .id()
+                    .header()
+                    .map_err(|_| "projection_blob_unavailable")?;
                 if header.kind() != gix::objs::Kind::Blob
                     || header.size() > MAX_PROJECTION_FILE_BYTES
                 {
@@ -857,7 +860,8 @@ fn observe_projection(
     projection_path: PathBuf,
 ) -> Result<ExitCode, &'static str> {
     let repository = open_repository(repository_path)?;
-    let (accepted_commit, accepted_tree) = accepted_commit_identity(&repository, &accepted_commit_oid)?;
+    let (accepted_commit, accepted_tree) =
+        accepted_commit_identity(&repository, &accepted_commit_oid)?;
     match inspect_projection(&repository, accepted_tree, &projection_path) {
         Ok(stats) => {
             write_response(&Response::ProjectionObserved {
@@ -872,12 +876,7 @@ fn observe_projection(
             });
             Ok(ExitCode::SUCCESS)
         }
-        Err(drift) => projection_drifted(
-            accepted_commit,
-            accepted_tree,
-            projection_path,
-            drift,
-        ),
+        Err(drift) => projection_drifted(accepted_commit, accepted_tree, projection_path, drift),
     }
 }
 
@@ -909,10 +908,12 @@ fn observe_expected_tree(
     prefix: &str,
     stats: &mut ProjectionStats,
 ) -> Result<(), ProjectionDrift> {
-    let tree = repository.find_tree(tree_oid).map_err(|_| ProjectionDrift {
-        reason: "expected_tree_unavailable",
-        path: prefix.to_owned(),
-    })?;
+    let tree = repository
+        .find_tree(tree_oid)
+        .map_err(|_| ProjectionDrift {
+            reason: "expected_tree_unavailable",
+            path: prefix.to_owned(),
+        })?;
     for entry in tree.iter() {
         let entry = entry.map_err(|_| ProjectionDrift {
             reason: "expected_tree_invalid",
@@ -1075,10 +1076,13 @@ fn reject_extra_projection_paths(
             reason: "projection_directory_unreadable",
             path: prefix.to_owned(),
         })?;
-        let component = entry.file_name().into_string().map_err(|_| ProjectionDrift {
-            reason: "unexpected_non_utf8_path",
-            path: prefix.to_owned(),
-        })?;
+        let component = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| ProjectionDrift {
+                reason: "unexpected_non_utf8_path",
+                path: prefix.to_owned(),
+            })?;
         let relative_path = join_projection_path(prefix, &component);
         if !expected_paths.contains(&relative_path) {
             return Err(ProjectionDrift {
