@@ -129,14 +129,14 @@ M2.3b/M2.4 的平台 owner 在副作用前验证。Core 不读取 `process.platf
 
 ## 8. 后续切片
 
-### M2.3b — Runtime admission composition
+### M2.3b — Runtime settlement seam
 
-在 T1 前取得 owner-bound capability，重验平台路径、execution profile 和 canonical head；启动时读取 active
-reservation，禁止新 admission 越过 prepared operation。它不得 capture/discard Git candidate，也不得自行写
-successor。
+Runtime 接收未来 M2.4 Host owner 提供的 admission，但本切片只证明：managed T1 后不再进入 generic T2，且 live
+result 只能采用与 T1 identity 完整一致的 durable response envelope。平台路径、execution profile、canonical
+head 与 active-reservation admission 由 M2.4 的真实 mutation owner 统一证明。
 
 ### M2.4 — Write/Edit production settlement
 
-真实 Write/Edit 执行、candidate capture/verification、owner-controlled settlement 与 reservation terminal
-transition 在此闭环。Runtime 必须能区分：successor 已接受、candidate 可安全 discard、effect unknown/park；
-不能在 managed callback 后自动写 generic T2。
+真实 Write/Edit admission/profile、worker 执行、candidate capture/verification、owner-controlled settlement 与
+reservation terminal transition 在此闭环。Runtime 必须能区分：successor 已接受、candidate 可安全 discard、
+effect unknown/park；不能在 managed callback 后自动写 generic T2。

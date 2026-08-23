@@ -620,10 +620,11 @@ M2 按 owner 与原子边界拆成五个 stacked slices：
    candidate commit/ref、exact-base CAS 与 artifact receipt；不写 T2，不恢复旧 Git CLI adapter；
 3. **M2.3a durable mutation reservation（当前重建切片）**：schema 14 将 T1 与 workspace-instance-exclusive reservation
    原子绑定，successor fact 固化 exact changed paths，generic T2 无权结算 managed mutation；
-4. **M2.3b mutation execution admission**：T1 前冻结 base head、execution profile、operation identity，
-   消费 durable reservation gate；T1 后禁止 silent fallback；
-5. **M2.4 Write/Edit production composition**：把 owner-bound worker、candidate capture 与 M2.1 bundle
-   串成唯一生产路径，并用真实 Host kill/reopen crash test 完成前三片的生产消费者。
+4. **M2.3b Runtime managed settlement**：Host seam 缺失时不落 T1；managed T1 后所有 normalization、
+   size/envelope validation 与 publication failure 都 fail-stop，禁止 generic T2；
+5. **M2.4 Write/Edit production composition**：由同一 owner 绑定真实 mutation profile、canonical head、
+   active reservation、worker、candidate capture 与 M2.1 bundle，并用真实 Host kill/reopen crash test 完成前三片的
+   生产消费者。
 
 M2.2/M2.3a/M2.3b 在 M2.4 消费者存在前保持 Draft。M2.4 不绑定 continuation boundary；该能力仍属于 M3。
 
@@ -661,12 +662,13 @@ M0.1 Git artifact owner (merged)
   └─> M0.4 baseline open bundle (merged)
        └─> M1.1 execution scope admission (current)
             └─> M1.2 runtime-host composition
-                 └─> M1.3 explicit environment provisioning
-                      └─> M2.1 mutation version persistence authority
-                           └─> M2.2 Git mutation candidate owner
-                                └─> M2.3a durable mutation reservation
-                                     └─> M2.3b mutation execution admission
-                                          └─> M2.4 Write/Edit production composition
+                 ├─> M1.3 explicit environment provisioning
+                 └─> M2.1 mutation version persistence authority
+                      ├─> M2.3a durable mutation reservation
+                      │    └─> M2.3b mutation execution admission
+                      └─> Gitoxide source import + candidate/ref data plane
+                           └─> M2.2 Gitoxide mutation candidate owner
+                                └─> M2.4 Write/Edit production composition
                                           └─> M3 workspace-bound continuation
                                                └─> M4 restore / rebaseline / publish / replication
 

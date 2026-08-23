@@ -203,23 +203,24 @@ SQLite transaction 提供三平台一致的数据库原子性；本切片不声�
 - 详细合同见
   [Managed Workspace Mutation Reservation v1](./runtime-managed-workspace-mutation-reservation-v1.zh-CN.md)。
 
-### M2.3b — Mutation execution admission
+### M2.3b — Runtime managed settlement
 
-主要不变量：T1 前冻结 base workspace head、execution profile、operation identity 和 candidate lease；T1 后禁止切换
-attached/managed mode 或退回旧直接写路径。
+主要不变量：Host admission seam 缺失时不落 T1；managed T1 durable 后，settlement、canonicalization、大小检查、
+durable outcome adoption 与 publication 的任何失败都禁止进入 generic T2。
 
-- owner：Runtime Host managed mutation admission；
-- 原子边界：消费 M2.3a，在 T1 durable dispatch 前签发 owner-bound capability；
-- 失败状态：能力缺失、scope 失效、base/head/profile 不一致均在工具副作用前拒绝；
-- 回滚：T1 前失败走标准 tool error；T1 后不确定状态保持 unsettled，交给 M2.4 收敛。
+- owner：Tool Runtime managed settlement seam；
+- 事实边界：只采用 owner 已提交且与 T1 identity 完整相等的 durable response envelope；
+- 失败状态：invalid/unsettled/throw/lost response 均保留 M2.3a reservation并 fail-stop；
+- 明确不证明：真实 mutation worker、execution profile、canonical head admission 和 candidate lease。
 
-该 PR 不新增第二套 workspace writer，不 capture/discard candidate，只消费 M2.1/M2.3a 的 internal capability。
+后面四项必须由 M2.4 的同一个 Host/workspace owner 同时签发并执行，不能由只读 worker、静态 digest 或 caller
+callback 自证。
 
 ### M2.4 — Write/Edit production composition
 
 主要不变量：真实 Write/Edit 的成功只能来自“owned candidate 已验证 + M2.1 bundle 已提交”。
 
-- 把 owner-bound worker、candidate capture 与 successor bundle 串成唯一生产路径；
+- 把 owner-bound profile/admission、mutation worker、candidate capture 与 successor bundle 串成唯一生产路径；
 - 增加真实 Host kill/reopen crash matrix；
 - 保持现有 tool result、permission、sandbox 与 cancellation 语义；
 - 作为 M2.2/M2.3 的首个生产消费者，完成后才允许前三个切片转 Ready/依序合并。
