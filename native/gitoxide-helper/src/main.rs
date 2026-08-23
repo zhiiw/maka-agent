@@ -574,6 +574,10 @@ fn create_successor(
         return Err("successor_content_limit_exceeded");
     }
 
+    if create_target_if_missing {
+        fs::create_dir_all(repository_path.join("refs").join("maka").join("candidates"))
+            .map_err(|_| "candidate_namespace_create_failed")?;
+    }
     let repository = open_repository(repository_path)?;
     if repository.object_hash() != gix::hash::Kind::Sha1 {
         return Err("unsupported_object_format");
