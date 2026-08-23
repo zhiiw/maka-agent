@@ -81,6 +81,11 @@ enum Request {
         path: String,
         content: String,
     },
+    InspectRef {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        target_ref: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -130,6 +135,14 @@ enum Response<'a> {
         object_format: &'static str,
         expected_base_commit_oid: String,
         actual_base_commit_oid: String,
+        target_ref: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    RefInspected {
+        protocol_version: u8,
+        object_format: &'static str,
+        commit_oid: String,
+        tree_oid: String,
         target_ref: String,
     },
     #[serde(rename_all = "camelCase")]
@@ -212,6 +225,14 @@ fn run() -> Result<ExitCode, &'static str> {
                 path,
                 content,
             )
+        }
+        Request::InspectRef {
+            protocol_version,
+            repository_path,
+            target_ref,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            inspect_ref(repository_path, target_ref)
         }
     }
 }
@@ -493,13 +514,12 @@ fn prepare_candidate(
         .map_err(|_| "candidate_ref_unavailable")?
         .is_some();
     if !candidate_exists {
-        let publication = repository
-            .reference(
-                candidate_ref.as_str(),
-                expected_base,
-                gix::refs::transaction::PreviousValue::MustNotExist,
-                "maka managed workspace candidate base",
-            );
+        let publication = repository.reference(
+            candidate_ref.as_str(),
+            expected_base,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "maka managed workspace candidate base",
+        );
         if publication.is_err() {
             repository
                 .find_reference(candidate_ref.as_str())
@@ -513,6 +533,36 @@ fn prepare_candidate(
         path,
         content,
     )
+}
+
+fn inspect_ref(repository_path: PathBuf, target_ref: String) -> Result<ExitCode, &'static str> {
+    if !target_ref.starts_with("refs/maka/") {
+        return Err("target_ref_outside_maka_namespace");
+    }
+    let repository = open_repository(repository_path)?;
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let commit_id = repository
+        .find_reference(target_ref.as_str())
+        .map_err(|_| "target_ref_unavailable")?
+        .into_fully_peeled_id()
+        .map_err(|_| "target_ref_unavailable")?
+        .detach();
+    let tree_id = repository
+        .find_commit(commit_id)
+        .map_err(|_| "base_commit_unavailable")?
+        .tree_id()
+        .map_err(|_| "base_tree_unavailable")?
+        .detach();
+    write_response(&Response::RefInspected {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        commit_oid: commit_id.to_string(),
+        tree_oid: tree_id.to_string(),
+        target_ref,
+    });
+    Ok(ExitCode::SUCCESS)
 }
 
 fn create_successor(

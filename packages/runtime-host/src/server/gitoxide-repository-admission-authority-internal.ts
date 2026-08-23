@@ -22,6 +22,7 @@ import { realpath } from 'node:fs/promises';
 import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
 import {
   importSourceHeadWithGitoxideHelperInternal,
+  inspectManagedRefWithGitoxideHelperInternal,
   inspectRepositoryWithGitoxideHelperInternal,
   createSuccessorWithGitoxideHelperInternal,
   prepareCandidateWithGitoxideHelperInternal,
@@ -211,6 +212,42 @@ export async function importAdmittedGitoxideRepositoryInternal(input: {
     acceptedTreeOid: result.baselineTreeOid,
   });
   return Object.freeze({ ...result, managedRepositoryCapability });
+}
+
+export async function reopenGitoxideManagedRepositoryInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly helperCapability: GitoxideHelperInvocationCapability;
+  readonly managedRepositoryOwnerToken: object;
+  readonly repositoryPath: string;
+  readonly acceptedRef: string;
+  readonly expectedAcceptedCommitOid: string;
+  readonly expectedAcceptedTreeOid: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideManagedRepositoryCapability> {
+  const repositoryPath = await realpath(input.repositoryPath);
+  const observation = await inspectManagedRefWithGitoxideHelperInternal({
+    invocationOwnerToken: input.invocationOwnerToken,
+    capability: input.helperCapability,
+    repositoryPath,
+    targetRef: input.acceptedRef,
+    abortSignal: input.abortSignal,
+  });
+  if (
+    observation.targetRef !== input.acceptedRef ||
+    observation.commitOid !== input.expectedAcceptedCommitOid ||
+    observation.treeOid !== input.expectedAcceptedTreeOid
+  ) {
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_managed_repository_base_mismatch',
+    );
+  }
+  return issueManagedRepositoryCapability({
+    managedRepositoryOwnerToken: input.managedRepositoryOwnerToken,
+    repositoryPath,
+    acceptedRef: observation.targetRef,
+    acceptedCommitOid: observation.commitOid,
+    acceptedTreeOid: observation.treeOid,
+  });
 }
 
 export async function createGitoxideSuccessorInternal(input: {

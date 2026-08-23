@@ -149,6 +149,15 @@ export interface GitoxideSuccessorRejectedV1 {
 
 export type GitoxideSuccessorResultV1 = GitoxideSuccessorPublishedV1 | GitoxideSuccessorRejectedV1;
 
+export interface GitoxideManagedRefObservationV1 {
+  readonly kind: 'ref_inspected';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly commitOid: string;
+  readonly treeOid: string;
+  readonly targetRef: string;
+}
+
 export type GitoxideHelperInvocationErrorCode =
   | 'gitoxide_helper_invocation_invalid'
   | 'gitoxide_helper_invocation_spawn_failed'
@@ -390,6 +399,46 @@ export async function prepareCandidateWithGitoxideHelperInternal(input: {
   return decodeSuccessorOutcome(outcome);
 }
 
+export async function inspectManagedRefWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly targetRef: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideManagedRefObservationV1> {
+  throwIfAborted(input.abortSignal);
+  if (!isAbsolute(input.repositoryPath) || !MAKA_REF_PATTERN.test(input.targetRef)) {
+    throw new GitoxideHelperInvocationError(
+      'gitoxide_helper_invocation_invalid',
+      'Gitoxide managed ref inspection request is invalid',
+    );
+  }
+  const [artifact, repositoryPath] = await Promise.all([
+    verifyGitoxideHelperArtifactForInvocationInternal(input.invocationOwnerToken, input.capability),
+    realpath(input.repositoryPath).catch((error) => {
+      throw new GitoxideHelperInvocationError(
+        'gitoxide_helper_invocation_invalid',
+        `Gitoxide managed repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }),
+  ]);
+  throwIfAborted(input.abortSignal);
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: artifact.protocolVersion,
+      operation: 'inspect_ref',
+      repositoryPath,
+      targetRef: input.targetRef,
+    }),
+  );
+  const outcome = await invokeHelper({
+    executablePath: artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+  });
+  return decodeManagedRefOutcome(outcome);
+}
+
 interface HelperProcessOutcome {
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
@@ -608,6 +657,30 @@ function decodeSuccessorOutcome(outcome: HelperProcessOutcome): GitoxideSuccesso
   );
 }
 
+function decodeManagedRefOutcome(outcome: HelperProcessOutcome): GitoxideManagedRefObservationV1 {
+  if (outcome.signal !== null) {
+    throw protocolInvalid(`Gitoxide helper exited from signal ${outcome.signal}`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(outcome.stdout.toString('utf8'));
+  } catch {
+    throw protocolInvalid('Gitoxide helper stdout is not one JSON response');
+  }
+  if (outcome.exitCode === 0 && isManagedRefObservation(value)) return Object.freeze(value);
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw new GitoxideHelperInvocationError(
+      'gitoxide_helper_operation_failed',
+      `Gitoxide helper could not inspect the managed ref: ${value.reason}`,
+      value.reason,
+    );
+  }
+  const stderr = outcome.stderr.toString('utf8').trim();
+  throw protocolInvalid(
+    `Gitoxide helper exit code and response disagree${stderr ? `: ${stderr}` : ''}`,
+  );
+}
+
 function isSuccessorPublished(value: unknown): value is GitoxideSuccessorPublishedV1 {
   return (
     hasExactKeys(value, [
@@ -658,6 +731,28 @@ function isSuccessorRejected(value: unknown): value is GitoxideSuccessorRejected
     SHA1_OID_PATTERN.test(value.expectedBaseCommitOid) &&
     typeof value.actualBaseCommitOid === 'string' &&
     SHA1_OID_PATTERN.test(value.actualBaseCommitOid) &&
+    typeof value.targetRef === 'string' &&
+    MAKA_REF_PATTERN.test(value.targetRef)
+  );
+}
+
+function isManagedRefObservation(value: unknown): value is GitoxideManagedRefObservationV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'commitOid',
+      'treeOid',
+      'targetRef',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'ref_inspected' &&
+    value.objectFormat === 'sha1' &&
+    typeof value.commitOid === 'string' &&
+    SHA1_OID_PATTERN.test(value.commitOid) &&
+    typeof value.treeOid === 'string' &&
+    SHA1_OID_PATTERN.test(value.treeOid) &&
     typeof value.targetRef === 'string' &&
     MAKA_REF_PATTERN.test(value.targetRef)
   );

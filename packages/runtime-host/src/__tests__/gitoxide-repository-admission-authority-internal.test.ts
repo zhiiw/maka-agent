@@ -35,6 +35,7 @@ import {
   GitoxideRepositoryAdmissionAuthorityError,
   importAdmittedGitoxideRepositoryInternal,
   prepareGitoxideMutationCandidateInternal,
+  reopenGitoxideManagedRepositoryInternal,
   requireGitoxideRepositoryAdmissionInternal,
   requireGitoxideMutationCandidateInternal,
 } from '../server/gitoxide-repository-admission-authority-internal.js';
@@ -343,6 +344,38 @@ test('prepares an owner-bound candidate without advancing the accepted ref', asy
   });
   assert.equal(exactRetry.successorCommitOid, candidate.successorCommitOid);
   assert.equal(exactRetry.candidateRef, candidate.candidateRef);
+  const reopenedOwnerToken = {};
+  const reopenedCapability = await reopenGitoxideManagedRepositoryInternal({
+    ...helper,
+    managedRepositoryOwnerToken: reopenedOwnerToken,
+    repositoryPath: destinationRepositoryPath,
+    acceptedRef: 'refs/maka/accepted',
+    expectedAcceptedCommitOid: imported.baselineCommitOid,
+    expectedAcceptedTreeOid: imported.baselineTreeOid,
+  });
+  const retryAfterReopen = await prepareGitoxideMutationCandidateInternal({
+    ...helper,
+    managedRepositoryOwnerToken: reopenedOwnerToken,
+    managedRepositoryCapability: reopenedCapability,
+    candidateOwnerToken,
+    operationId: 'operation-1',
+    path: 'docs/result.txt',
+    content: 'candidate result\n',
+  });
+  assert.equal(retryAfterReopen.successorCommitOid, candidate.successorCommitOid);
+  await assert.rejects(
+    reopenGitoxideManagedRepositoryInternal({
+      ...helper,
+      managedRepositoryOwnerToken: {},
+      repositoryPath: destinationRepositoryPath,
+      acceptedRef: 'refs/maka/accepted',
+      expectedAcceptedCommitOid: imported.baselineCommitOid,
+      expectedAcceptedTreeOid: 'f'.repeat(40),
+    }),
+    (error) =>
+      error instanceof GitoxideRepositoryAdmissionAuthorityError &&
+      error.code === 'gitoxide_managed_repository_base_mismatch',
+  );
   await assert.rejects(
     async () => requireGitoxideMutationCandidateInternal({}, candidate.candidateCapability),
     (error) =>

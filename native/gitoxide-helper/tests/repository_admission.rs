@@ -278,6 +278,36 @@ fn prepares_and_exactly_retries_a_candidate_without_advancing_the_accepted_ref()
 }
 
 #[test]
+fn observes_the_exact_commit_and_tree_behind_a_managed_ref() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("managed.git");
+    let imported = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "import_source_head",
+        "sourceRepositoryPath": fixture.root,
+        "expectedSourceHeadCommitOid": source_head,
+        "destinationRepositoryPath": destination,
+        "baselineRef": "refs/maka/accepted",
+    }));
+    assert!(imported.status.success());
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+
+    let observed = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "inspect_ref",
+        "repositoryPath": destination,
+        "targetRef": "refs/maka/accepted",
+    }));
+    assert!(observed.status.success());
+    let observed: serde_json::Value = serde_json::from_slice(&observed.stdout).unwrap();
+    assert_eq!(observed["kind"], "ref_inspected");
+    assert_eq!(observed["commitOid"], imported["baselineCommitOid"]);
+    assert_eq!(observed["treeOid"], imported["baselineTreeOid"]);
+    assert_eq!(observed["targetRef"], "refs/maka/accepted");
+}
+
+#[test]
 fn rejects_a_successor_when_the_target_ref_no_longer_matches_the_base() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let source_head = fixture.git_output(["rev-parse", "HEAD"]);

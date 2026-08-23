@@ -80,4 +80,5 @@ jobs:
           node --test
           packages/runtime-host/dist/__tests__/gitoxide-helper-artifact-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-helper-invocation-internal.test.js
+          packages/runtime-host/dist/__tests__/gitoxide-helper-mutation-candidate-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
