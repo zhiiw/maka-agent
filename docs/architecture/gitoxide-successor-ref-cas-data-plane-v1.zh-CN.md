@@ -54,6 +54,6 @@
 
 ## 后续依赖
 
-1. Gitoxide fresh projection materialization/observation；
+1. Gitoxide fresh projection materialization/observation（见 `gitoxide-fresh-projection-data-plane-v1.zh-CN.md`）；
 2. M1.3 product composition 消费 admission/import/candidate/projection capabilities；
 3. 数据面完成后，从最新 `main` 重建 M2.2 candidate durable owner 与 M2.4 Write/Edit 生产闭环。

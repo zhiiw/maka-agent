@@ -23,6 +23,10 @@ import {
   importSourceHeadWithGitoxideHelperInternal,
   inspectRepositoryWithGitoxideHelperInternal,
   createSuccessorWithGitoxideHelperInternal,
+  materializeProjectionWithGitoxideHelperInternal,
+  observeProjectionWithGitoxideHelperInternal,
+  type GitoxideProjectionMaterializedV1,
+  type GitoxideProjectionObservationV1,
   type GitoxideSuccessorPublishedV1,
   type GitoxideSourceImportObservationV1,
   type GitoxideRepositoryRejectionV1,
@@ -36,12 +40,21 @@ export interface GitoxideManagedRepositoryCapability {
   readonly kind: 'gitoxide_managed_repository_capability_v1';
 }
 
+export interface GitoxideProjectionCapability {
+  readonly kind: 'gitoxide_projection_capability_v1';
+}
+
 export interface GitoxideManagedRepositoryImportResultV1 extends GitoxideSourceImportObservationV1 {
   readonly managedRepositoryCapability: GitoxideManagedRepositoryCapability;
 }
 
 export interface GitoxideManagedRepositorySuccessorResultV1 extends GitoxideSuccessorPublishedV1 {
   readonly managedRepositoryCapability: GitoxideManagedRepositoryCapability;
+}
+
+export interface GitoxideProjectionMaterializationResultV1
+  extends GitoxideProjectionMaterializedV1 {
+  readonly projectionCapability: GitoxideProjectionCapability;
 }
 
 export interface GitoxideRepositoryAdmissionStateInternal {
@@ -90,6 +103,16 @@ interface ManagedRepositoryCapabilityRecord {
 }
 
 const managedRepositories = new WeakMap<object, ManagedRepositoryCapabilityRecord>();
+
+interface ProjectionCapabilityRecord {
+  readonly projectionOwnerToken: object;
+  readonly repositoryPath: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly projectionPath: string;
+}
+
+const projections = new WeakMap<object, ProjectionCapabilityRecord>();
 
 export async function admitGitoxideRepositoryInternal(input: {
   readonly invocationOwnerToken: object;
@@ -224,6 +247,84 @@ export async function createGitoxideSuccessorInternal(input: {
     acceptedTreeOid: result.successorTreeOid,
   });
   return Object.freeze({ ...result, managedRepositoryCapability });
+}
+
+export async function materializeGitoxideProjectionInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly helperCapability: GitoxideHelperInvocationCapability;
+  readonly managedRepositoryOwnerToken: object;
+  readonly managedRepositoryCapability: GitoxideManagedRepositoryCapability;
+  readonly projectionOwnerToken: object;
+  readonly destinationPath: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideProjectionMaterializationResultV1> {
+  const managed = requireManagedRepositoryCapability(
+    input.managedRepositoryOwnerToken,
+    input.managedRepositoryCapability,
+  );
+  const result = await materializeProjectionWithGitoxideHelperInternal({
+    invocationOwnerToken: input.invocationOwnerToken,
+    capability: input.helperCapability,
+    repositoryPath: managed.repositoryPath,
+    acceptedCommitOid: managed.acceptedCommitOid,
+    destinationPath: input.destinationPath,
+    abortSignal: input.abortSignal,
+  });
+  if (
+    result.acceptedCommitOid !== managed.acceptedCommitOid ||
+    result.acceptedTreeOid !== managed.acceptedTreeOid
+  ) {
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_repository_admission_capability_invalid',
+    );
+  }
+  const projectionCapability = Object.freeze({
+    kind: 'gitoxide_projection_capability_v1' as const,
+  });
+  projections.set(
+    projectionCapability,
+    Object.freeze({
+      projectionOwnerToken: input.projectionOwnerToken,
+      repositoryPath: managed.repositoryPath,
+      acceptedCommitOid: managed.acceptedCommitOid,
+      acceptedTreeOid: managed.acceptedTreeOid,
+      projectionPath: result.destinationPath,
+    }),
+  );
+  return Object.freeze({ ...result, projectionCapability });
+}
+
+export async function observeGitoxideProjectionInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly helperCapability: GitoxideHelperInvocationCapability;
+  readonly projectionOwnerToken: object;
+  readonly projectionCapability: GitoxideProjectionCapability;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideProjectionObservationV1> {
+  const projection = projections.get(input.projectionCapability);
+  if (!projection || projection.projectionOwnerToken !== input.projectionOwnerToken) {
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_repository_admission_capability_invalid',
+    );
+  }
+  const result = await observeProjectionWithGitoxideHelperInternal({
+    invocationOwnerToken: input.invocationOwnerToken,
+    capability: input.helperCapability,
+    repositoryPath: projection.repositoryPath,
+    acceptedCommitOid: projection.acceptedCommitOid,
+    projectionPath: projection.projectionPath,
+    abortSignal: input.abortSignal,
+  });
+  if (
+    result.acceptedCommitOid !== projection.acceptedCommitOid ||
+    result.acceptedTreeOid !== projection.acceptedTreeOid ||
+    result.projectionPath !== projection.projectionPath
+  ) {
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_repository_admission_capability_invalid',
+    );
+  }
+  return result;
 }
 
 function issueManagedRepositoryCapability(
