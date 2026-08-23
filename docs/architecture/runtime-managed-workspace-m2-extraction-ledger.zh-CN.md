@@ -45,17 +45,33 @@
 |---|---|
 | `managed-dependency-environment`、bundled npm、worker bridge | M1/M1.3 独立前置；不从旧 M2 分支重复携带 |
 | Git candidate ref/commit、delta/path policy、orphan GC | M2.2 |
-| T1 mutation profile/base freeze、owner-bound mutating admission | M2.3 |
+| T1 mutation profile/base freeze、durable workspace reservation、accepted path truth | M2.3a |
+| owner-bound mutating admission、reopen active-reservation gate | M2.3b |
 | 真实 Write/Edit composition、Host crash/reopen | M2.4 |
 | continuation boundary 绑定 workspace version | M3 |
 | restore、rebaseline、publish、undo、replication | M4 |
 
+## M2.3a 增量归属
+
+| 文件 | 主要不变量 |
+|---|---|
+| `packages/core/src/runtime-event.ts` | T1-frozen managed mutation identity 与平台无关 path grammar |
+| `packages/core/src/workspace-version-authority.ts` | successor exact changed paths 进入 immutable accepted truth |
+| `packages/storage/src/sqlite-runtime-schema.ts` | schema 14 active reservation 与 changed-path projection |
+| `packages/storage/src/sqlite-runtime-store.ts` | T1 reservation、generic T2 fence、successor consume、canonical rebuild |
+| `packages/storage/src/workspace-version-authority-internal.ts` | 非 public active reservation reader capability |
+| storage/core focused tests | schema、rollback、rebuild、真实 crash、双进程 exclusivity |
+| `runtime-managed-workspace-mutation-reservation-v1.zh-CN.md` | owner、原子边界、失败状态与平台矩阵 |
+
+M2.3a 不迁入 Runtime hook、ManagedWorkspaceOwner lease、candidate capture/discard 或真实 Write/Edit；前两项属于
+M2.3b，后两项属于 M2.4。
 ## Commit 映射
 
 | 当前重建内容 | 来源 | 说明 |
 |---|---|---|
 | core RED tests + causal successor facts | `14327f5f0` 的 core 最终状态 | 只保留 subpath contract |
 | storage RED tests + atomic successor writer | `14327f5f0` 的 storage 最终状态 | 在 current-main schema 12 上新增 migration 13 |
+| reservation RED tests + T1 owner projection | `36e1e3ec4` | 从 M2.2 stack 中只提取 M2.3a 自有差异，跳过旧 Git CLI candidate owner |
 | 文档与 extraction ledger | 现行工程实践 | 记录最新 main、Gitoxide 换轨和 M2.2–M2.4 等待关系 |
 
 ## Diff 审核门槛

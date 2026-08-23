@@ -65,7 +65,7 @@ M2.2 的 Git candidate owner；M2.1 只建立其唯一持久化出口。
 | stale writer | base head 任一字段不一致即拒绝，且对应 tool operation 保持 `prepared` |
 | corruption | malformed fact、断链、重复 version identity、tool evidence 不匹配全部 fail closed |
 | 运行时回滚 | transaction 未提交时 T2/fact/projection/head 全部回滚 |
-| 数据升级 | schema 12 baseline rows 原样升级到 schema 13；schema 13 不支持向旧 binary 降级 |
+| 数据升级 | schema 12 baseline rows 原样升级；M2.1 使用 schema 13，M2.3a reservation/path projection 顺延为 schema 14；不支持向旧 binary 降级 |
 
 “唯一 writer”不是注释：普通 RuntimeEvent writer 仍拒绝 workspace fact；successor writer 仅能通过
 `workspace-version-authority-internal.ts` 中与具体 store 实例绑定的 capability 调用。
@@ -191,17 +191,29 @@ SQLite transaction 提供三平台一致的数据库原子性；本切片不声�
 
 该 PR 在 M2.4 消费者存在前保持 Draft。
 
-### M2.3 — Mutation execution admission
+### M2.3a — Durable mutation reservation
+
+主要不变量：managed T1 与 workspace-instance-exclusive reservation 原子持久化；直到可信 successor 接受前，
+另一个进程或重启后的 owner 都不能为同一 workspace 创建第二个 mutation T1。
+
+- owner：SQLite workspace mutation authority；
+- 原子边界：call + dispatch + operation projection + active reservation；
+- accepted truth：successor fact 携带 exact changed paths，online/rebuild 均与 T1 比较；
+- generic T2 被存储权威拒绝；
+- 详细合同见
+  [Managed Workspace Mutation Reservation v1](./runtime-managed-workspace-mutation-reservation-v1.zh-CN.md)。
+
+### M2.3b — Mutation execution admission
 
 主要不变量：T1 前冻结 base workspace head、execution profile、operation identity 和 candidate lease；T1 后禁止切换
 attached/managed mode 或退回旧直接写路径。
 
 - owner：Runtime Host managed mutation admission；
-- 原子边界：T1 durable dispatch 选择 `managed_mutation_v1`；
+- 原子边界：消费 M2.3a，在 T1 durable dispatch 前签发 owner-bound capability；
 - 失败状态：能力缺失、scope 失效、base/head/profile 不一致均在工具副作用前拒绝；
 - 回滚：T1 前失败走标准 tool error；T1 后不确定状态保持 unsettled，交给 M2.4 收敛。
 
-该 PR 不新增第二套 workspace writer，只能消费 M2.1/M2.2 的 opaque capabilities。
+该 PR 不新增第二套 workspace writer，不 capture/discard candidate，只消费 M2.1/M2.3a 的 internal capability。
 
 ### M2.4 — Write/Edit production composition
 
@@ -223,7 +235,8 @@ M2.4 不接 workspace-bound continuation；那属于 M3。
 - stale successor 不结算对应 prepared operation；
 - 真实 child process 在 successor transaction 内被杀后，reopen 证明 T2/fact/projection/head 全回滚；
 - 真实 child process 在 COMMIT 后被杀，reopen exact retry 收敛到同一 successor；
-- populated schema 12 → 13 数据升级；
+- populated schema 12 → 14 数据升级；
+- managed T1 reservation 的真实 kill/reopen 与双进程唯一性；
 - canonical origin 被篡改后 reader fail closed；
 - schema、SQLite multi-process 与既有 recovery 定向 suites 保持通过。
 
