@@ -182,6 +182,13 @@ test('replays promotion from the strict durable receipt without recreating the m
     gitBare(fixture.repositoryPath, ['rev-parse', 'refs/maka/accepted']),
     proof.receipt.candidateCommitOid,
   );
+
+  const exactRetry = await createGitoxideMutationCandidateAuthorityInternal({
+    ...fixture.helper,
+    storageRoot: fixture.storageRoot,
+    baseHead: fixture.baseHead,
+  });
+  assert.deepEqual(await exactRetry.promoteDurable(operationId), receipt);
 });
 
 test('converges when execution stops after candidate ref publication and rejects receipt tampering', async (t) => {

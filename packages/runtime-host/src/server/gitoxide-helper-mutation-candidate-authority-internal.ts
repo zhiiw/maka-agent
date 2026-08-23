@@ -168,15 +168,21 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
     GitoxideMutationCandidateProofV1,
     GitoxideMutationCandidateReceiptV1
   >();
-  const managedRepositoryCapability = await reopenGitoxideManagedRepositoryInternal({
-    invocationOwnerToken: input.invocationOwnerToken,
-    helperCapability: input.helperCapability,
-    managedRepositoryOwnerToken,
-    repositoryPath: rootContext.repositoryPath,
-    acceptedRef: ACCEPTED_REF,
-    expectedAcceptedCommitOid: input.baseHead.commitOid,
-    expectedAcceptedTreeOid: input.baseHead.treeOid,
-  });
+  let managedRepositoryCapabilityPromise:
+    | ReturnType<typeof reopenGitoxideManagedRepositoryInternal>
+    | undefined;
+  const requireBaseRepositoryCapability = () => {
+    managedRepositoryCapabilityPromise ??= reopenGitoxideManagedRepositoryInternal({
+      invocationOwnerToken: input.invocationOwnerToken,
+      helperCapability: input.helperCapability,
+      managedRepositoryOwnerToken,
+      repositoryPath: rootContext.repositoryPath,
+      acceptedRef: ACCEPTED_REF,
+      expectedAcceptedCommitOid: input.baseHead.commitOid,
+      expectedAcceptedTreeOid: input.baseHead.treeOid,
+    });
+    return managedRepositoryCapabilityPromise;
+  };
 
   const capture = async (
     request: GitoxideMutationCandidateCaptureInput,
@@ -201,6 +207,7 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
         return withProcessLifetimeFileUpdateLock(receiptPath, async () => {
           request.abortSignal?.throwIfAborted();
           const durable = await readReceipt(receiptPath);
+          const managedRepositoryCapability = await requireBaseRepositoryCapability();
           const candidate = await prepareGitoxideMutationCandidateInternal({
             invocationOwnerToken: input.invocationOwnerToken,
             helperCapability: input.helperCapability,
@@ -263,7 +270,7 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
     const result = await promoteCandidateWithGitoxideHelperInternal({
       invocationOwnerToken: input.invocationOwnerToken,
       capability: input.helperCapability,
-      repositoryPath,
+      repositoryPath: rootContext.repositoryPath,
       expectedBaseCommitOid: receipt.baseCommitOid,
       acceptedRef: receipt.acceptedRef,
       candidateRef: receipt.candidateRef,
@@ -288,6 +295,7 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
   return Object.freeze({
     async readBaseFile(path: string, abortSignal?: AbortSignal) {
       try {
+        const managedRepositoryCapability = await requireBaseRepositoryCapability();
         const result = await readGitoxideTreeFileInternal({
           invocationOwnerToken: input.invocationOwnerToken,
           helperCapability: input.helperCapability,
@@ -347,7 +355,10 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
         );
       }
       const operationIdentitySha256 = sha256(operationId);
-      const receiptPath = join(canonicalReceiptRoot, `${operationIdentitySha256.slice(7)}.json`);
+      const receiptPath = join(
+        rootContext.canonicalReceiptRoot,
+        `${operationIdentitySha256.slice(7)}.json`,
+      );
       return withProcessLifetimeFileUpdateLock(receiptPath, async () => {
         abortSignal?.throwIfAborted();
         const receipt = await readReceipt(receiptPath);
