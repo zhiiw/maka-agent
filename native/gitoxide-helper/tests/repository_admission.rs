@@ -267,6 +267,72 @@ fn publishes_and_exactly_retries_a_successor_from_the_current_ref() {
 }
 
 #[test]
+fn reads_one_exact_utf8_file_from_the_accepted_tree() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    fs::create_dir_all(fixture.root.join("config")).unwrap();
+    fs::write(
+        fixture.root.join("config/package-lock.json"),
+        b"{\"lockfileVersion\":3}\n",
+    )
+    .unwrap();
+    fixture.git(["add", "config/package-lock.json"]);
+    fixture.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "tree file fixture",
+    ]);
+    let accepted_commit = fixture.git_output(["rev-parse", "HEAD"]);
+    let accepted_tree = fixture.git_output(["rev-parse", "HEAD^{tree}"]);
+    let expected_blob = fixture.git_output(["rev-parse", "HEAD:config/package-lock.json"]);
+
+    let output = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "read_tree_file",
+        "repositoryPath": fixture.root,
+        "acceptedCommitOid": accepted_commit,
+        "path": "config/package-lock.json",
+    }));
+
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        serde_json::json!({
+            "protocolVersion": 1,
+            "kind": "tree_file_read",
+            "objectFormat": "sha1",
+            "acceptedCommitOid": accepted_commit,
+            "acceptedTreeOid": accepted_tree,
+            "blobOid": expected_blob,
+            "path": "config/package-lock.json",
+            "content": "{\"lockfileVersion\":3}\n",
+            "bytesRead": 22,
+        })
+    );
+}
+
+#[test]
+fn refuses_to_read_a_tree_file_from_the_wrong_commit_identity() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let output = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "read_tree_file",
+        "repositoryPath": fixture.root,
+        "acceptedCommitOid": "0000000000000000000000000000000000000000",
+        "path": "hello.txt",
+    }));
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["reason"],
+        "accepted_commit_unavailable"
+    );
+}
+
+#[test]
 fn rejects_a_successor_when_the_target_ref_no_longer_matches_the_base() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let source_head = fixture.git_output(["rev-parse", "HEAD"]);
