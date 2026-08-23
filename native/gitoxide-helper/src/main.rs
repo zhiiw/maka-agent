@@ -649,7 +649,10 @@ fn create_successor(
                 gix::refs::transaction::PreviousValue::MustNotExist,
                 "maka managed workspace candidate",
             )
-            .map_err(|_| "candidate_publish_failed")?;
+            .map_err(|error| {
+                eprintln!("Gitoxide candidate publication failed: {error}");
+                "candidate_publish_failed"
+            })?;
     } else if current.is_none() {
         return Err("target_ref_unavailable");
     } else if current != Some(expected_base) && current != Some(successor_commit) {
