@@ -84,6 +84,8 @@ export interface GitoxideManagedMutationSettlementAuthorityInternal {
   ): Promise<ManagedMutationTerminalCommitResult>;
 }
 
+export type GitoxideManagedMutationAdmissionFailpoint = 'after_successor_commit';
+
 export function createGitoxideManagedMutationAdmissionInternal(input: {
   readonly workspaceInstanceId: string;
   readonly workspaceId: string;
@@ -92,6 +94,7 @@ export function createGitoxideManagedMutationAdmissionInternal(input: {
   readonly candidateAuthorityForHead: (
     head: WorkspaceHeadRecordV1,
   ) => Promise<GitoxideManagedMutationCandidateAuthorityInternal>;
+  readonly failpoint?: (point: GitoxideManagedMutationAdmissionFailpoint) => void | Promise<void>;
 }): NonNullable<ToolRuntimeInput['admitManagedMutation']> {
   return async (request: AdmissionInput): Promise<RuntimeManagedMutationAdmission> => {
     if (request.toolName !== 'Write' && request.toolName !== 'Edit') {
@@ -181,6 +184,7 @@ export function createGitoxideManagedMutationAdmissionInternal(input: {
           successor,
           toolOutcome: toolOutcomeInput(request.operationId, proof.durableOutcome),
         });
+        await input.failpoint?.('after_successor_commit');
         await candidateAuthority.promote(candidate, request.abortSignal);
         return Object.freeze({
           kind: 'workspace_successor_committed' as const,

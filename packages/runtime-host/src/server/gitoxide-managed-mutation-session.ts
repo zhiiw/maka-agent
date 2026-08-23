@@ -40,6 +40,7 @@ import {
 } from './gitoxide-helper-mutation-candidate-authority-internal.js';
 import {
   createGitoxideManagedMutationAdmissionInternal,
+  type GitoxideManagedMutationAdmissionFailpoint,
   reconcileGitoxideManagedMutationProjectionInternal,
 } from './gitoxide-managed-mutation-admission.js';
 
@@ -87,6 +88,7 @@ export async function openGitoxideManagedMutationSession(input: {
   readonly helperCapability: GitoxideHelperInvocationCapability;
   readonly settlementAuthority: ExecutionStoresWorkspaceMutationAuthorityInternal;
   readonly abortSignal?: AbortSignal;
+  readonly failpoint?: (point: GitoxideManagedMutationAdmissionFailpoint) => void | Promise<void>;
 }): Promise<GitoxideManagedMutationSession> {
   input.abortSignal?.throwIfAborted();
   const [storageRoot, sourceRoot, helper] = await Promise.all([
@@ -255,6 +257,7 @@ export async function openGitoxideManagedMutationSession(input: {
     workspaceEpochId: identity.workspaceEpochId,
     settlementAuthority: input.settlementAuthority,
     candidateAuthorityForHead,
+    failpoint: input.failpoint,
   });
   return Object.freeze({
     head,
