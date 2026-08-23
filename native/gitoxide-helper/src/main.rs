@@ -758,7 +758,9 @@ fn read_tree_file(
     if bytes_read != header.size() {
         return Err("tree_file_identity_mismatch");
     }
-    let content = String::from_utf8(blob.data).map_err(|_| "tree_file_not_utf8")?;
+    let content = std::str::from_utf8(&blob.data)
+        .map_err(|_| "tree_file_not_utf8")?
+        .to_owned();
     write_response(&Response::TreeFileRead {
         protocol_version: PROTOCOL_VERSION,
         object_format: "sha1",
