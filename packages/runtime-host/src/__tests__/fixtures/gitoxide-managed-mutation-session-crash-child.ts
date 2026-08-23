@@ -103,7 +103,7 @@ const callEvent: RuntimeEvent = {
   refs: { operationId, toolCallId },
 };
 const dispatchEvent: RuntimeEvent = {
-  id: `${operationId}-dispatch-event`,
+  id: `${operationId}_dispatch`,
   ...identity,
   ts: 20,
   partial: false,

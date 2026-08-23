@@ -269,7 +269,7 @@ async function executeManagedWrite(input: {
     refs: { operationId: input.operationId, toolCallId },
   };
   const dispatchEvent: RuntimeEvent = {
-    id: `${input.operationId}-dispatch-event`,
+    id: `${input.operationId}_dispatch`,
     ...identity,
     ts: 10,
     partial: false,
