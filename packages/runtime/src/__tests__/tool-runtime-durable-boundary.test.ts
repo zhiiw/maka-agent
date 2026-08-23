@@ -317,6 +317,8 @@ describe('ToolRuntime durable boundary', () => {
       content: 'after\n',
       changed: true,
     });
+    assert.equal(observedProof?.durableOutcome.content?.kind, 'function_response');
+    assert.equal(observedProof?.durableOutcome.refs?.operationId, operationId);
   });
 
   it('does not replace a committed managed result when admission cleanup fails', async () => {

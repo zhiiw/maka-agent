@@ -499,6 +499,8 @@ export interface RuntimeManagedMutationOperationProof {
   readonly content: ToolResultContent;
   readonly isError: boolean;
   readonly durationMs: number;
+  /** Runtime-owned exact response envelope consumed by the SQLite settlement owner. */
+  readonly durableOutcome: RuntimeEvent;
   readonly managedMutationResult?: {
     readonly canonicalPath: string;
     readonly content: string;
@@ -535,6 +537,7 @@ export interface RuntimeManagedMutationAdmission {
 interface DurableToolAttempt {
   operationId: string;
   responseEventId: string;
+  buildOutcome(result: ToolResultContent, isError: boolean, durationMs: number): RuntimeEvent;
   commitOutcome(
     result: unknown,
     isError: boolean,
@@ -1635,6 +1638,11 @@ export class ToolRuntime {
                   content: value.outcome.content,
                   isError: value.outcome.isError,
                   durationMs: value.outcome.durationMs,
+                  durableOutcome: durableAttempt!.buildOutcome(
+                    value.outcome.content,
+                    value.outcome.isError,
+                    value.outcome.durationMs,
+                  ),
                   ...(value.managedMutationResult
                     ? { managedMutationResult: value.managedMutationResult }
                     : {}),
@@ -2154,6 +2162,11 @@ export class ToolRuntime {
     return {
       operationId,
       responseEventId: `${operationId}_response`,
+      buildOutcome: (result, isError, durationMs) =>
+        snapshotManagedToolResult(
+          buildResponseEvent(result, isError, durationMs, this.input.now()),
+          undefined,
+        ) as RuntimeEvent,
       commitOutcome: async (result, isError, durationMs) => {
         if (committedOutcome) return committedOutcome;
         const responseEvent = buildResponseEvent(result, isError, durationMs, this.input.now());
