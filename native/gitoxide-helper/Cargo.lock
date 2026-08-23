@@ -1031,6 +1031,7 @@ name = "maka-gitoxide-helper"
 version = "0.0.0"
 dependencies = [
  "gix",
+ "libc",
  "serde",
  "serde_json",
  "unicode-normalization",

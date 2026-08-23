@@ -314,6 +314,133 @@ fn rejects_a_successor_when_the_target_ref_no_longer_matches_the_base() {
 }
 
 #[test]
+fn materializes_and_observes_an_exact_commit_without_git_metadata() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    fs::create_dir_all(fixture.root.join("docs")).unwrap();
+    fs::write(fixture.root.join("docs/guide.txt"), b"nested guide\n").unwrap();
+    fixture.git(["add", "docs/guide.txt"]);
+    fixture.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "projection fixture",
+    ]);
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("managed.git");
+    let imported = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "import_source_head",
+        "sourceRepositoryPath": fixture.root,
+        "expectedSourceHeadCommitOid": source_head,
+        "destinationRepositoryPath": destination,
+        "baselineRef": "refs/maka/accepted",
+    }));
+    assert!(imported.status.success());
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let accepted_commit = imported["baselineCommitOid"].as_str().unwrap();
+    let projection = fixture.root.join("projection");
+
+    let materialized = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "materialize_projection",
+        "repositoryPath": destination,
+        "acceptedCommitOid": accepted_commit,
+        "destinationPath": projection,
+    }));
+    assert!(
+        materialized.status.success(),
+        "materialize failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&materialized.stdout),
+        String::from_utf8_lossy(&materialized.stderr)
+    );
+    let materialized: serde_json::Value =
+        serde_json::from_slice(&materialized.stdout).unwrap();
+    assert_eq!(materialized["kind"], "projection_materialized");
+    assert_eq!(fs::read(projection.join("hello.txt")).unwrap(), b"hello from sha1\n");
+    assert_eq!(fs::read(projection.join("docs/guide.txt")).unwrap(), b"nested guide\n");
+    assert!(!projection.join(".git").exists());
+
+    let observed = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "observe_projection",
+        "repositoryPath": destination,
+        "acceptedCommitOid": accepted_commit,
+        "projectionPath": projection,
+    }));
+    assert!(observed.status.success());
+    let observed: serde_json::Value = serde_json::from_slice(&observed.stdout).unwrap();
+    assert_eq!(observed["kind"], "projection_observed");
+    assert_eq!(observed["state"], "clean");
+
+    let retry = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "materialize_projection",
+        "repositoryPath": destination,
+        "acceptedCommitOid": accepted_commit,
+        "destinationPath": projection,
+    }));
+    assert!(retry.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&retry.stdout).unwrap(),
+        materialized
+    );
+}
+
+#[test]
+fn reports_projection_content_and_extra_path_drift() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("managed.git");
+    let imported = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "import_source_head",
+        "sourceRepositoryPath": fixture.root,
+        "expectedSourceHeadCommitOid": source_head,
+        "destinationRepositoryPath": destination,
+        "baselineRef": "refs/maka/accepted",
+    }));
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let accepted_commit = imported["baselineCommitOid"].as_str().unwrap();
+    let projection = fixture.root.join("projection");
+    assert!(invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "materialize_projection",
+        "repositoryPath": destination,
+        "acceptedCommitOid": accepted_commit,
+        "destinationPath": projection,
+    })).status.success());
+
+    fs::write(projection.join("hello.txt"), b"evil! from sha1\n").unwrap();
+    let drifted = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "observe_projection",
+        "repositoryPath": destination,
+        "acceptedCommitOid": accepted_commit,
+        "projectionPath": projection,
+    }));
+    assert_eq!(drifted.status.code(), Some(3));
+    let drifted: serde_json::Value = serde_json::from_slice(&drifted.stdout).unwrap();
+    assert_eq!(drifted["reason"], "expected_file_content_mismatch");
+
+    fs::write(projection.join("hello.txt"), b"hello from sha1\n").unwrap();
+    fs::write(projection.join("external.txt"), b"external\n").unwrap();
+    let extra = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "observe_projection",
+        "repositoryPath": destination,
+        "acceptedCommitOid": accepted_commit,
+        "projectionPath": projection,
+    }));
+    assert_eq!(extra.status.code(), Some(3));
+    let extra: serde_json::Value = serde_json::from_slice(&extra.stdout).unwrap();
+    assert_eq!(extra["reason"], "unexpected_projection_path");
+    assert_eq!(extra["path"], "external.txt");
+}
+
+#[test]
 fn rejects_a_successor_tree_outside_the_managed_tree_policy_before_ref_cas() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let source_head = fixture.git_output(["rev-parse", "HEAD"]);
