@@ -645,9 +645,10 @@ function decodeSuccessorOutcome(outcome: HelperProcessOutcome): GitoxideSuccesso
   if (outcome.exitCode === 0 && isSuccessorPublished(value)) return Object.freeze(value);
   if (outcome.exitCode === 3 && isSuccessorRejected(value)) return Object.freeze(value);
   if (outcome.exitCode === 1 && isHelperError(value)) {
+    const stderr = outcome.stderr.toString('utf8').trim();
     throw new GitoxideHelperInvocationError(
       'gitoxide_helper_operation_failed',
-      `Gitoxide helper could not publish the successor: ${value.reason}`,
+      `Gitoxide helper could not publish the successor: ${value.reason}${stderr ? `: ${stderr}` : ''}`,
       value.reason,
     );
   }
