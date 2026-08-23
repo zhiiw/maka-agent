@@ -316,7 +316,10 @@ export async function prepareGitoxideMutationCandidateInternal(input: {
     input.managedRepositoryOwnerToken,
     input.managedRepositoryCapability,
   );
-  const candidateRef = `refs/maka/candidates/${createHash('sha256').update(input.operationId).digest('hex')}`;
+  const candidateRef = `refs/maka/candidates/${createHash('sha256')
+    .update(input.operationId)
+    .digest('hex')
+    .slice(0, 32)}`;
   const result = await prepareCandidateWithGitoxideHelperInternal({
     invocationOwnerToken: input.invocationOwnerToken,
     capability: input.helperCapability,

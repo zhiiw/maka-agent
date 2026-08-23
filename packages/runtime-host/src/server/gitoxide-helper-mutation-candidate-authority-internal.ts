@@ -257,7 +257,8 @@ function identityDigest(
 ): string {
   return createHash('sha256')
     .update(`${head.workspaceId}\0${head.workspaceEpochId}`, 'utf8')
-    .digest('hex');
+    .digest('hex')
+    .slice(0, 32);
 }
 
 function assertCaptureInput(input: GitoxideMutationCandidateCaptureInput): void {
