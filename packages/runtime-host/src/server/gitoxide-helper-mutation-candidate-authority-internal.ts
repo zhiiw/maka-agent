@@ -114,6 +114,10 @@ export interface GitoxideMutationCandidateAuthorityInternal {
     proof: GitoxideMutationCandidateProofV1,
     abortSignal?: AbortSignal,
   ): Promise<GitoxideMutationCandidateReceiptV1>;
+  promoteDurable(
+    operationId: string,
+    abortSignal?: AbortSignal,
+  ): Promise<GitoxideMutationCandidateReceiptV1>;
 }
 
 export type GitoxideMutationCandidateFailpoint = 'after_candidate_ref' | 'after_candidate_receipt';
@@ -252,6 +256,35 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
     );
   };
 
+  const promoteReceipt = async (
+    receipt: GitoxideMutationCandidateReceiptV1,
+    abortSignal?: AbortSignal,
+  ): Promise<GitoxideMutationCandidateReceiptV1> => {
+    const result = await promoteCandidateWithGitoxideHelperInternal({
+      invocationOwnerToken: input.invocationOwnerToken,
+      capability: input.helperCapability,
+      repositoryPath,
+      expectedBaseCommitOid: receipt.baseCommitOid,
+      acceptedRef: receipt.acceptedRef,
+      candidateRef: receipt.candidateRef,
+      expectedCandidateCommitOid: receipt.candidateCommitOid,
+      ...(abortSignal ? { abortSignal } : {}),
+    });
+    if (
+      result.kind !== 'candidate_promoted' ||
+      result.baseCommitOid !== receipt.baseCommitOid ||
+      result.candidateCommitOid !== receipt.candidateCommitOid ||
+      result.acceptedRef !== receipt.acceptedRef ||
+      result.candidateRef !== receipt.candidateRef
+    ) {
+      throw new GitoxideMutationCandidateAuthorityError(
+        'gitoxide_mutation_candidate_identity_conflict',
+        'Gitoxide accepted ref no longer matches the candidate promotion proof',
+      );
+    }
+    return receipt;
+  };
+
   return Object.freeze({
     async readBaseFile(path: string, abortSignal?: AbortSignal) {
       try {
@@ -304,31 +337,49 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
     },
     async promote(proof: GitoxideMutationCandidateProofV1, abortSignal?: AbortSignal) {
       const receipt = this.validate(proof);
-      const result = await promoteCandidateWithGitoxideHelperInternal({
-        invocationOwnerToken: input.invocationOwnerToken,
-        capability: input.helperCapability,
-        repositoryPath,
-        expectedBaseCommitOid: receipt.baseCommitOid,
-        acceptedRef: receipt.acceptedRef,
-        candidateRef: receipt.candidateRef,
-        expectedCandidateCommitOid: receipt.candidateCommitOid,
-        ...(abortSignal ? { abortSignal } : {}),
-      });
-      if (
-        result.kind !== 'candidate_promoted' ||
-        result.baseCommitOid !== receipt.baseCommitOid ||
-        result.candidateCommitOid !== receipt.candidateCommitOid ||
-        result.acceptedRef !== receipt.acceptedRef ||
-        result.candidateRef !== receipt.candidateRef
-      ) {
+      return promoteReceipt(receipt, abortSignal);
+    },
+    async promoteDurable(operationId: string, abortSignal?: AbortSignal) {
+      if (operationId.length === 0 || operationId.length > 1024) {
         throw new GitoxideMutationCandidateAuthorityError(
-          'gitoxide_mutation_candidate_identity_conflict',
-          'Gitoxide accepted ref no longer matches the candidate promotion proof',
+          'gitoxide_mutation_candidate_request_invalid',
+          'Gitoxide durable candidate operation identity is invalid',
         );
       }
-      return receipt;
+      const operationIdentitySha256 = sha256(operationId);
+      const receiptPath = join(canonicalReceiptRoot, `${operationIdentitySha256.slice(7)}.json`);
+      return withProcessLifetimeFileUpdateLock(receiptPath, async () => {
+        abortSignal?.throwIfAborted();
+        const receipt = await readReceipt(receiptPath);
+        if (!receipt || !receiptMatchesBase(receipt, operationIdentitySha256, input.baseHead)) {
+          throw new GitoxideMutationCandidateAuthorityError(
+            'gitoxide_mutation_candidate_identity_conflict',
+            'Durable Gitoxide candidate receipt does not match its accepted base',
+          );
+        }
+        return promoteReceipt(receipt, abortSignal);
+      });
     },
   });
+}
+
+function receiptMatchesBase(
+  receipt: GitoxideMutationCandidateReceiptV1,
+  operationIdentitySha256: `sha256:${string}`,
+  head: WorkspaceHeadRecordV1,
+): boolean {
+  return (
+    receipt.repositoryId === head.repositoryId &&
+    receipt.workspaceId === head.workspaceId &&
+    receipt.workspaceEpochId === head.workspaceEpochId &&
+    receipt.workspaceVersionId === head.workspaceVersionId &&
+    receipt.baseAcceptedEventId === head.acceptedEventId &&
+    receipt.baseHeadRevision === head.revision &&
+    receipt.baseCommitOid === head.commitOid &&
+    receipt.baseTreeOid === head.treeOid &&
+    receipt.operationIdentitySha256 === operationIdentitySha256 &&
+    receipt.acceptedRef === ACCEPTED_REF
+  );
 }
 
 export function gitoxideManagedRepositoryPathInternal(

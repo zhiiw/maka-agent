@@ -154,6 +154,36 @@ test('promotes an exact candidate only after the caller presents its owner-bound
   await authority.promote(proof);
 });
 
+test('replays promotion from the strict durable receipt without recreating the mutation', async (t) => {
+  const fixture = await candidateFixture(t);
+  if (!fixture) return;
+  const operationId = 'operation-durable-promote-1';
+  const authority = await createGitoxideMutationCandidateAuthorityInternal({
+    ...fixture.helper,
+    storageRoot: fixture.storageRoot,
+    baseHead: fixture.baseHead,
+  });
+  const proof = await authority.capture({
+    operationId,
+    path: 'docs/recovered.txt',
+    content: 'recovered result\n',
+    executionProfileDigest: `sha256:${'c'.repeat(64)}`,
+  });
+  const reopened = await createGitoxideMutationCandidateAuthorityInternal({
+    ...fixture.helper,
+    storageRoot: fixture.storageRoot,
+    baseHead: fixture.baseHead,
+  });
+
+  const receipt = await reopened.promoteDurable(operationId);
+
+  assert.deepEqual(receipt, proof.receipt);
+  assert.equal(
+    gitBare(fixture.repositoryPath, ['rev-parse', 'refs/maka/accepted']),
+    proof.receipt.candidateCommitOid,
+  );
+});
+
 test('converges when execution stops after candidate ref publication and rejects receipt tampering', async (t) => {
   const fixture = await candidateFixture(t);
   if (!fixture) return;
