@@ -61,6 +61,9 @@ reservation；generic T2 writer 在数据库层拒绝 managed mutation。
 ## 后续闭环
 
 Runtime-owned outcome、SQLite successor writer、baseline session owner 与 ref projection 已串入
-`managed-coding-v1` Host backend。转 Ready 前仍需由打包 helper 的三平台 lane 证明 Rust import
-exact retry，并补“SQLite 已提交、projection 前杀 Host、重启后只推进 ref”的真实进程测试；完成前
-保持 Draft，也不进入 M3 的自动恢复策略。
+`managed-coding-v1` Host backend。三平台打包 helper lane 负责证明 Rust import exact retry；
+production-shaped 子进程测试会在 SQLite 已提交、projection 尚未推进时杀死执行进程，再由新 owner
+重开同一 Session、只推进 exact candidate ref，并验证第二次重开仍停留在同一 revision。
+
+当前仍保持 Draft：Windows 完整证据必须由 CI 实际通过，Desktop/CLI 产品入口尚未开放，M3 也只能在
+该 crash seam 稳定后开始绑定 continuation boundary。
