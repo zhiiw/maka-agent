@@ -131,6 +131,29 @@ test('rejects a candidate proof whose receipt was recomposed around a valid capa
   );
 });
 
+test('promotes an exact candidate only after the caller presents its owner-bound proof', async (t) => {
+  const fixture = await candidateFixture(t);
+  if (!fixture) return;
+  const authority = await createGitoxideMutationCandidateAuthorityInternal({
+    ...fixture.helper,
+    storageRootLease: fixture.rootOwner.lease,
+    baseHead: fixture.baseHead,
+  });
+  const proof = await authority.capture({
+    operationId: 'operation-promote-1',
+    path: 'docs/promoted.txt',
+    content: 'promoted result\n',
+    executionProfileDigest: `sha256:${'b'.repeat(64)}`,
+  });
+
+  await authority.promote(proof);
+  assert.equal(
+    gitBare(fixture.repositoryPath, ['rev-parse', 'refs/maka/accepted']),
+    proof.receipt.candidateCommitOid,
+  );
+  await authority.promote(proof);
+});
+
 test('converges when execution stops after candidate ref publication and rejects receipt tampering', async (t) => {
   const fixture = await candidateFixture(t);
   if (!fixture) return;

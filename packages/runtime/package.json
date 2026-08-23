@@ -80,6 +80,7 @@
     "./request-customization-fetch": "./dist/request-customization-fetch.js",
     "./request-shape": "./dist/request-shape.js",
     "./runtime-commit-sink": "./dist/runtime-commit-sink.js",
+    "./managed-mutation-transform": "./dist/managed-mutation-transform.js",
     "./runtime-read-model": "./dist/runtime-read-model.js",
     "./sandbox-boundary-tool": "./dist/sandbox-boundary-tool.js",
     "./scheduled-task-tools": "./dist/scheduled-task-tools.js",

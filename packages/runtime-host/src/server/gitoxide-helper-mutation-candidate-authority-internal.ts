@@ -33,9 +33,14 @@ import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artif
 import {
   type GitoxideMutationCandidateCapability,
   prepareGitoxideMutationCandidateInternal,
+  readGitoxideTreeFileInternal,
   reopenGitoxideManagedRepositoryInternal,
   requireGitoxideMutationCandidateInternal,
 } from './gitoxide-repository-admission-authority-internal.js';
+import {
+  GitoxideHelperInvocationError,
+  promoteCandidateWithGitoxideHelperInternal,
+} from './gitoxide-helper-invocation-internal.js';
 
 const ACCEPTED_REF = 'refs/maka/accepted';
 const MAX_RECEIPT_BYTES = 32 * 1024;
@@ -99,8 +104,16 @@ export interface GitoxideMutationCandidateProofV1 {
 }
 
 export interface GitoxideMutationCandidateAuthorityInternal {
+  readBaseFile(
+    path: string,
+    abortSignal?: AbortSignal,
+  ): Promise<{ readonly content: string; readonly blobOid: string } | null>;
   capture(input: GitoxideMutationCandidateCaptureInput): Promise<GitoxideMutationCandidateProofV1>;
   validate(proof: GitoxideMutationCandidateProofV1): GitoxideMutationCandidateReceiptV1;
+  promote(
+    proof: GitoxideMutationCandidateProofV1,
+    abortSignal?: AbortSignal,
+  ): Promise<GitoxideMutationCandidateReceiptV1>;
 }
 
 export type GitoxideMutationCandidateFailpoint = 'after_candidate_ref' | 'after_candidate_receipt';
@@ -240,6 +253,28 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
   };
 
   return Object.freeze({
+    async readBaseFile(path: string, abortSignal?: AbortSignal) {
+      try {
+        const result = await readGitoxideTreeFileInternal({
+          invocationOwnerToken: input.invocationOwnerToken,
+          helperCapability: input.helperCapability,
+          managedRepositoryOwnerToken,
+          managedRepositoryCapability,
+          path,
+          ...(abortSignal ? { abortSignal } : {}),
+        });
+        return Object.freeze({ content: result.content, blobOid: result.blobOid });
+      } catch (error) {
+        if (
+          error instanceof GitoxideHelperInvocationError &&
+          error.code === 'gitoxide_helper_operation_failed' &&
+          error.helperReason === 'tree_file_unavailable'
+        ) {
+          return null;
+        }
+        throw error;
+      }
+    },
     capture,
     validate(proof: GitoxideMutationCandidateProofV1) {
       const issuedReceipt = issuedProofs.get(proof);
@@ -266,6 +301,32 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
         );
       }
       return issuedReceipt;
+    },
+    async promote(proof: GitoxideMutationCandidateProofV1, abortSignal?: AbortSignal) {
+      const receipt = this.validate(proof);
+      const result = await promoteCandidateWithGitoxideHelperInternal({
+        invocationOwnerToken: input.invocationOwnerToken,
+        capability: input.helperCapability,
+        repositoryPath,
+        expectedBaseCommitOid: receipt.baseCommitOid,
+        acceptedRef: receipt.acceptedRef,
+        candidateRef: receipt.candidateRef,
+        expectedCandidateCommitOid: receipt.candidateCommitOid,
+        ...(abortSignal ? { abortSignal } : {}),
+      });
+      if (
+        result.kind !== 'candidate_promoted' ||
+        result.baseCommitOid !== receipt.baseCommitOid ||
+        result.candidateCommitOid !== receipt.candidateCommitOid ||
+        result.acceptedRef !== receipt.acceptedRef ||
+        result.candidateRef !== receipt.candidateRef
+      ) {
+        throw new GitoxideMutationCandidateAuthorityError(
+          'gitoxide_mutation_candidate_identity_conflict',
+          'Gitoxide accepted ref no longer matches the candidate promotion proof',
+        );
+      }
+      return receipt;
     },
   });
 }
