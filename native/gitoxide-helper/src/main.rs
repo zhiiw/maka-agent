@@ -525,6 +525,9 @@ fn prepare_candidate(
                 .find_reference(candidate_ref.as_str())
                 .map_err(|_| "candidate_publish_failed")?;
         }
+        // On Windows the returned reference can retain a handle to the loose
+        // ref path. Release it before create_successor performs the CAS update.
+        drop(publication);
     }
     create_successor(
         repository_path,
