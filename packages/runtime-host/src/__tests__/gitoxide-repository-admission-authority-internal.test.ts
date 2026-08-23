@@ -36,6 +36,7 @@ import {
   importAdmittedGitoxideRepositoryInternal,
   materializeGitoxideProjectionInternal,
   observeGitoxideProjectionInternal,
+  readGitoxideTreeFileInternal,
   requireGitoxideRepositoryAdmissionInternal,
 } from '../server/gitoxide-repository-admission-authority-internal.js';
 
@@ -264,6 +265,64 @@ test('binds successor publication to the imported repository capability and exac
     (error) =>
       error instanceof GitoxideRepositoryAdmissionAuthorityError &&
       error.code === 'gitoxide_repository_admission_capability_invalid',
+  );
+});
+
+test('reads dependency inputs from the immutable imported tree, not the projection filesystem', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the real helper contract test');
+    return;
+  }
+  const repositoryPath = await createRepository(t, 'sha1');
+  await writeFile(join(repositoryPath, 'package.json'), '{"name":"fixture","private":true}\n');
+  git(repositoryPath, ['add', 'package.json']);
+  git(repositoryPath, [
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=maka@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'fixture',
+  ]);
+  const admissionOwnerToken = {};
+  const managedRepositoryOwnerToken = {};
+  const admitted = await admitGitoxideRepositoryInternal({
+    ...helper,
+    admissionOwnerToken,
+    repositoryPath,
+  });
+  assert.equal(admitted.kind, 'accepted');
+  if (admitted.kind !== 'accepted') return;
+  const imported = await importAdmittedGitoxideRepositoryInternal({
+    ...helper,
+    admissionOwnerToken,
+    repositoryCapability: admitted.capability,
+    managedRepositoryOwnerToken,
+    destinationRepositoryPath: join(repositoryPath, 'managed.git'),
+    baselineRef: 'refs/maka/accepted',
+  });
+
+  const result = await readGitoxideTreeFileInternal({
+    ...helper,
+    managedRepositoryOwnerToken,
+    managedRepositoryCapability: imported.managedRepositoryCapability,
+    path: 'package.json',
+  });
+
+  assert.equal(result.content, '{"name":"fixture","private":true}\n');
+  assert.equal(result.acceptedCommitOid, imported.baselineCommitOid);
+  assert.equal(result.acceptedTreeOid, imported.baselineTreeOid);
+  await assert.rejects(
+    readGitoxideTreeFileInternal({
+      ...helper,
+      managedRepositoryOwnerToken: {},
+      managedRepositoryCapability: imported.managedRepositoryCapability,
+      path: 'package.json',
+    }),
+    GitoxideRepositoryAdmissionAuthorityError,
   );
 });
 
