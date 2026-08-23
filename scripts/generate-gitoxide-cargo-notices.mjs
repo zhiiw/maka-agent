@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const manifestPath = join(repoRoot, 'native', 'gitoxide-helper', 'Cargo.toml');
 const lockPath = join(repoRoot, 'native', 'gitoxide-helper', 'Cargo.lock');
+const apacheLicensePath = join(repoRoot, 'LICENSE');
 const outputPath = join(
   repoRoot,
   'apps',
@@ -59,7 +60,8 @@ const sections = packages.map((pkg) => {
     )
     .map((entry) => entry.name)
     .sort();
-  if (licenseFiles.length === 0) {
+  const selectedLicense = selectPackagedLicense(pkg.license, directory, licenseFiles);
+  if (!selectedLicense) {
     throw new Error(`${pkg.name}@${pkg.version}: packaged crate has no license or notice text`);
   }
   const source = pkg.repository ?? pkg.homepage ?? pkg.source ?? 'unknown';
@@ -68,14 +70,30 @@ const sections = packages.map((pkg) => {
     heading,
     '-'.repeat(heading.length),
     `SPDX license: ${pkg.license}`,
+    ...(selectedLicense.note ? [selectedLicense.note] : []),
     `Source: ${source}`,
-    ...licenseFiles.flatMap((name) => [
+    ...selectedLicense.files.flatMap(({ name, path }) => [
       '',
       `--- ${name} ---`,
-      readFileSync(join(directory, name), 'utf8').replace(/\r\n?/gu, '\n').trimEnd(),
+      readFileSync(path, 'utf8').replace(/\r\n?/gu, '\n').trimEnd(),
     ]),
   ].join('\n');
 });
+
+function selectPackagedLicense(spdxLicense, directory, licenseFiles) {
+  if (licenseFiles.length > 0) {
+    return {
+      files: licenseFiles.map((name) => ({ name, path: join(directory, name) })),
+    };
+  }
+  if (/(^|\s|\()Apache-2\.0($|\s|\))/u.test(spdxLicense)) {
+    return {
+      note: 'Selected license: Apache-2.0 (the crate archive contains no license text)',
+      files: [{ name: 'LICENSE-APACHE-2.0', path: apacheLicensePath }],
+    };
+  }
+  return undefined;
+}
 const lockDigest = createHash('sha256').update(readFileSync(lockPath)).digest('hex');
 const output = `Maka Gitoxide helper Cargo dependency notices
 ================================================
