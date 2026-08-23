@@ -34,6 +34,7 @@ type WorkspaceBaselineAuthorityWriter = (
   rootId: string,
 ) => Promise<WorkspaceBaselineCommitResult>;
 type WorkspaceStorageRootBinder = (rootId: string) => void;
+type WorkspaceStorageRootAdopter = (rootId: string) => void;
 export interface WorkspaceSuccessorCommitInput {
   successor: WorkspaceSuccessorAuthorityInput;
   toolOutcome: {
@@ -48,10 +49,22 @@ export interface WorkspaceSuccessorCommitResult {
   head: WorkspaceHeadRecordV1;
   outcomeRuntimeEventSeq: number;
 }
+export interface ManagedMutationTerminalCommitInput {
+  readonly disposition: 'operation_failed_no_effect_committed' | 'no_workspace_change_committed';
+  readonly toolOutcome: WorkspaceSuccessorCommitInput['toolOutcome'];
+}
+export interface ManagedMutationTerminalCommitResult {
+  readonly created: boolean;
+  readonly outcomeRuntimeEventSeq: number;
+}
 type WorkspaceSuccessorAuthorityWriter = (
   input: WorkspaceSuccessorCommitInput,
   rootId: string,
 ) => Promise<WorkspaceSuccessorCommitResult>;
+type ManagedMutationTerminalWriter = (
+  input: ManagedMutationTerminalCommitInput,
+  rootId: string,
+) => Promise<ManagedMutationTerminalCommitResult>;
 type WorkspaceHeadReader = (
   workspaceId: string,
   workspaceEpochId: string,
@@ -79,9 +92,11 @@ type ManagedMutationReservationReader = (
 interface WorkspaceBaselineAuthorityRegistration {
   readonly writer: WorkspaceBaselineAuthorityWriter;
   readonly successorWriter: WorkspaceSuccessorAuthorityWriter;
+  readonly terminalWriter: ManagedMutationTerminalWriter;
   readonly readHead: WorkspaceHeadReader;
   readonly readActiveManagedMutation: ManagedMutationReservationReader;
   readonly bindStorageRoot: WorkspaceStorageRootBinder;
+  readonly adoptStorageRoot: WorkspaceStorageRootAdopter;
   readonly databasePath: string;
   readonly databaseFileIdentity?: string;
   boundRootId?: string;
@@ -97,7 +112,9 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   databasePath: string,
   writer: WorkspaceBaselineAuthorityWriter,
   successorWriter: WorkspaceSuccessorAuthorityWriter,
+  terminalWriter: ManagedMutationTerminalWriter,
   bindStorageRoot: WorkspaceStorageRootBinder,
+  adoptStorageRoot: WorkspaceStorageRootAdopter,
   readHead: WorkspaceHeadReader,
   readActiveManagedMutation: ManagedMutationReservationReader,
 ): void {
@@ -108,9 +125,11 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   workspaceBaselineAuthorityWriters.set(store, {
     writer,
     successorWriter,
+    terminalWriter,
     readHead,
     readActiveManagedMutation,
     bindStorageRoot,
+    adoptStorageRoot,
     databasePath: resolvedDatabasePath,
     databaseFileIdentity: captureRegularFileIdentity(resolvedDatabasePath),
   });
@@ -165,6 +184,18 @@ export function commitWorkspaceSuccessorInternal(
   return registration.successorWriter(input, registration.boundRootId);
 }
 
+export function commitManagedMutationTerminalInternal(
+  store: object,
+  input: ManagedMutationTerminalCommitInput,
+): Promise<ManagedMutationTerminalCommitResult> {
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Managed mutation terminal authority writer is unavailable');
+  if (!registration.boundRootId) {
+    throw new Error('Workspace settlement authority store has no durable storage-root binding');
+  }
+  return registration.terminalWriter(input, registration.boundRootId);
+}
+
 export function bindWorkspaceBaselineAuthorityStoreRootInternal(
   store: object,
   rootId: string,
@@ -175,6 +206,19 @@ export function bindWorkspaceBaselineAuthorityStoreRootInternal(
     throw new Error('Invalid durable storage-root identity');
   }
   registration.bindStorageRoot(rootId);
+  registration.boundRootId = rootId;
+}
+
+export function adoptWorkspaceBaselineAuthorityStoreRootInternal(
+  store: object,
+  rootId: string,
+): void {
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Workspace baseline authority writer is unavailable');
+  if (!/^[a-f0-9]{64}$/u.test(rootId)) {
+    throw new Error('Invalid durable storage-root identity');
+  }
+  registration.adoptStorageRoot(rootId);
   registration.boundRootId = rootId;
 }
 

@@ -19,46 +19,71 @@
 
 import type { RuntimeWorkspaceVersionAuthorityStore } from '@maka/core/runtime-event-store';
 import type {
+  WorkspaceBaselineAuthorityInput,
+  WorkspaceBaselineCommitResult,
   WorkspaceHeadRecordV1,
   WorkspaceVersionRecordV1,
 } from '@maka/core/workspace-version-authority';
 import {
+  adoptWorkspaceBaselineAuthorityStoreRootInternal,
+  commitManagedMutationTerminalInternal,
+  commitWorkspaceBaselineInternal,
   commitWorkspaceSuccessorInternal,
+  type ManagedMutationTerminalCommitInput,
+  type ManagedMutationTerminalCommitResult,
   type WorkspaceSuccessorCommitInput,
   type WorkspaceSuccessorCommitResult,
 } from './workspace-version-authority-internal.js';
 
 export interface ExecutionStoresWorkspaceMutationAuthorityInternal {
+  adoptRootForManagedExecution(): void;
   readHead(
     workspaceId: string,
     workspaceEpochId: string,
   ): Promise<WorkspaceHeadRecordV1 | undefined>;
   readVersion(workspaceVersionId: string): Promise<WorkspaceVersionRecordV1 | undefined>;
+  commitBaseline(input: WorkspaceBaselineAuthorityInput): Promise<WorkspaceBaselineCommitResult>;
   commitSuccessor(input: WorkspaceSuccessorCommitInput): Promise<WorkspaceSuccessorCommitResult>;
+  commitTerminal(
+    input: ManagedMutationTerminalCommitInput,
+  ): Promise<ManagedMutationTerminalCommitResult>;
 }
 
-const workspaceAuthorities = new WeakMap<object, RuntimeWorkspaceVersionAuthorityStore>();
+interface RegisteredWorkspaceAuthority {
+  readonly authority: RuntimeWorkspaceVersionAuthorityStore;
+  readonly rootId: string;
+}
+
+const workspaceAuthorities = new WeakMap<object, RegisteredWorkspaceAuthority>();
 
 export function registerExecutionStoresWorkspaceMutationAuthorityInternal(
   stores: object,
   authority: RuntimeWorkspaceVersionAuthorityStore,
+  rootId: string,
 ): void {
   if (workspaceAuthorities.has(stores)) {
     throw new Error('Execution stores workspace mutation authority is already registered');
   }
-  workspaceAuthorities.set(stores, authority);
+  workspaceAuthorities.set(stores, Object.freeze({ authority, rootId }));
 }
 
 export function requireExecutionStoresWorkspaceMutationAuthorityInternal(
   stores: object,
 ): ExecutionStoresWorkspaceMutationAuthorityInternal {
-  const authority = workspaceAuthorities.get(stores);
-  if (!authority) throw new Error('Execution stores workspace mutation authority is unavailable');
+  const registered = workspaceAuthorities.get(stores);
+  if (!registered) throw new Error('Execution stores workspace mutation authority is unavailable');
+  const { authority, rootId } = registered;
   return Object.freeze({
+    adoptRootForManagedExecution: () =>
+      adoptWorkspaceBaselineAuthorityStoreRootInternal(authority, rootId),
     readHead: (workspaceId: string, workspaceEpochId: string) =>
       authority.readWorkspaceHead(workspaceId, workspaceEpochId),
     readVersion: (workspaceVersionId: string) => authority.readWorkspaceVersion(workspaceVersionId),
+    commitBaseline: (input: WorkspaceBaselineAuthorityInput) =>
+      commitWorkspaceBaselineInternal(authority, input),
     commitSuccessor: (input: WorkspaceSuccessorCommitInput) =>
       commitWorkspaceSuccessorInternal(authority, input),
+    commitTerminal: (input: ManagedMutationTerminalCommitInput) =>
+      commitManagedMutationTerminalInternal(authority, input),
   });
 }

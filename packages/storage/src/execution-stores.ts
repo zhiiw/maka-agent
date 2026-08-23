@@ -562,6 +562,7 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
   registerExecutionStoresWorkspaceMutationAuthorityInternal(
     stores,
     runtimePersistence.runtimeCommitStore,
+    lease.rootId,
   );
   executionStoresWriterKinds.set(stores, kind);
   executionStoresWritersByLease.set(lease, stores);

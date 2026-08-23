@@ -274,6 +274,20 @@ export interface RuntimeEventManagedWorkspaceMutationV1 {
   executionProfileDigest: `sha256:${string}`;
 }
 
+/**
+ * Immutable proof that one managed mutation reached a committed terminal
+ * state without advancing the workspace head. The SQLite workspace
+ * settlement writer is the only authority allowed to persist this fact.
+ */
+export interface RuntimeEventManagedWorkspaceMutationTerminalV1 {
+  protocol: 'managed_mutation_terminal_v1';
+  disposition: 'operation_failed_no_effect_committed' | 'no_workspace_change_committed';
+  operationId: string;
+  dispatchEventId: string;
+  outcomeEventId: string;
+  mutation: RuntimeEventManagedWorkspaceMutationV1;
+}
+
 export interface RuntimeEventProtocolMarker {
   toolBoundary: ToolBoundaryProtocol;
 }
@@ -349,6 +363,8 @@ export interface RuntimeEventActions {
   continuationStart?: RuntimeEventContinuationStartV2;
   /** Reserved workspace authority fact; only its atomic SQLite writer may persist it. */
   workspaceFact?: RuntimeEventWorkspaceFactEnvelope;
+  /** Reserved no-effect terminal fact; only the workspace settlement writer may persist it. */
+  managedMutationTerminal?: RuntimeEventManagedWorkspaceMutationTerminalV1;
 }
 
 // ============================================================================
@@ -536,6 +552,7 @@ const RUNTIME_ACTIONS_SHAPE = defineObjectShape<RuntimeEventActions>()(
     'runtimeProtocol',
     'continuationStart',
     'workspaceFact',
+    'managedMutationTerminal',
   ],
 );
 const ANSWER_ACCEPTED_IDENTITY_SHAPE = defineObjectShape<RuntimeEventAnswerAcceptedIdentity>()(
@@ -577,6 +594,11 @@ const RUNTIME_MANAGED_WORKSPACE_MUTATION_SHAPE =
       'expectedPaths',
       'executionProfileDigest',
     ],
+    [],
+  );
+const RUNTIME_MANAGED_WORKSPACE_MUTATION_TERMINAL_SHAPE =
+  defineObjectShape<RuntimeEventManagedWorkspaceMutationTerminalV1>()(
+    ['protocol', 'disposition', 'operationId', 'dispatchEventId', 'outcomeEventId', 'mutation'],
     [],
   );
 const RUNTIME_PROTOCOL_MARKER_SHAPE = defineObjectShape<RuntimeEventProtocolMarker>()(
@@ -786,7 +808,10 @@ function isRuntimeEventActions(value: unknown): value is RuntimeEventActions {
     (value.runtimeProtocol === undefined || isRuntimeProtocolMarker(value.runtimeProtocol)) &&
     (value.continuationStart === undefined ||
       isRuntimeContinuationStart(value.continuationStart)) &&
-    (value.workspaceFact === undefined || isRuntimeEventWorkspaceFactEnvelope(value.workspaceFact))
+    (value.workspaceFact === undefined ||
+      isRuntimeEventWorkspaceFactEnvelope(value.workspaceFact)) &&
+    (value.managedMutationTerminal === undefined ||
+      isRuntimeManagedWorkspaceMutationTerminal(value.managedMutationTerminal))
   );
 }
 
@@ -887,6 +912,25 @@ function isRuntimeManagedWorkspaceMutation(
     new Set(expectedPaths).size === expectedPaths.length &&
     expectedPaths.every(isCanonicalManagedMutationPathV1) &&
     expectedPaths.every((path, index) => index === 0 || expectedPaths[index - 1]! < path)
+  );
+}
+
+export function isRuntimeManagedWorkspaceMutationTerminal(
+  value: unknown,
+): value is RuntimeEventManagedWorkspaceMutationTerminalV1 {
+  return (
+    isRecord(value) &&
+    hasExactShape(value, RUNTIME_MANAGED_WORKSPACE_MUTATION_TERMINAL_SHAPE) &&
+    value.protocol === 'managed_mutation_terminal_v1' &&
+    (value.disposition === 'operation_failed_no_effect_committed' ||
+      value.disposition === 'no_workspace_change_committed') &&
+    typeof value.operationId === 'string' &&
+    value.operationId.length > 0 &&
+    typeof value.dispatchEventId === 'string' &&
+    value.dispatchEventId.length > 0 &&
+    typeof value.outcomeEventId === 'string' &&
+    value.outcomeEventId.length > 0 &&
+    isRuntimeManagedWorkspaceMutation(value.mutation)
   );
 }
 

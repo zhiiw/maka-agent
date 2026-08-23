@@ -38,6 +38,7 @@ import {
 } from '../sqlite-runtime-store.js';
 import {
   bindWorkspaceBaselineAuthorityStoreRootInternal,
+  commitManagedMutationTerminalInternal,
   commitWorkspaceBaselineInternal,
   commitWorkspaceSuccessorInternal,
   readActiveManagedMutationInternal,
@@ -214,9 +215,79 @@ describe('workspace version persistence authority', () => {
             },
           },
         }),
-        /managed mutation outcome requires the workspace successor writer/i,
+        /managed mutation outcome requires a workspace settlement writer/i,
       );
       assert.equal((await store.readToolOperation(prepared.operationId))?.currentState, 'prepared');
+    });
+  });
+
+  it('atomically commits a no-effect outcome and releases its durable reservation', async () => {
+    await withDatabase(async ({ dbPath, store }) => {
+      const baseline = baselineInput();
+      const opened = await commitWorkspaceBaselineInternal(store, baseline);
+      const prepared = managedPreparedCommit(baseline, opened.head, 'operation-no-change');
+      await store.commitToolPrepared(prepared);
+      const runtimeEvent: RuntimeEvent = {
+        id: `${prepared.operationId}-outcome-event`,
+        sessionId: prepared.runtimeEvent.sessionId,
+        invocationId: prepared.runtimeEvent.invocationId,
+        runId: prepared.runtimeEvent.runId,
+        turnId: prepared.runtimeEvent.turnId,
+        ts: baseline.committedAt + 2,
+        partial: false,
+        role: 'tool',
+        author: 'tool',
+        content: {
+          kind: 'function_response',
+          id: prepared.providerToolCallId,
+          name: prepared.toolName,
+          result: { kind: 'text', text: 'No workspace change' },
+        },
+        refs: {
+          operationId: prepared.operationId,
+          toolCallId: prepared.providerToolCallId,
+        },
+      };
+      const input = {
+        disposition: 'no_workspace_change_committed' as const,
+        toolOutcome: {
+          operationId: prepared.operationId,
+          journalEventId: `${prepared.operationId}_outcome`,
+          committedAt: baseline.committedAt + 2,
+          runtimeEvent,
+        },
+      };
+
+      const committed = await commitManagedMutationTerminalInternal(store, input);
+      assert.equal(committed.created, true);
+      assert.equal(
+        (await store.readToolOperation(prepared.operationId))?.currentState,
+        'outcome_committed',
+      );
+      assert.equal(
+        await readActiveManagedMutationInternal(store, baseline.epoch.workspaceInstanceId),
+        undefined,
+      );
+      assert.deepEqual(
+        await store.readWorkspaceHead(baseline.epoch.workspaceId, baseline.epoch.workspaceEpochId),
+        opened.head,
+      );
+      assert.equal((await commitManagedMutationTerminalInternal(store, input)).created, false);
+
+      const raw = new DatabaseSync(dbPath);
+      try {
+        assert.equal(
+          countWhere(
+            raw,
+            'runtime_events',
+            "json_extract(payload_json, '$.actions.managedMutationTerminal.protocol') = ?",
+            'managed_mutation_terminal_v1',
+          ),
+          1,
+        );
+      } finally {
+        raw.close();
+      }
     });
   });
 

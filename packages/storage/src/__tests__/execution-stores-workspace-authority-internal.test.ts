@@ -49,6 +49,39 @@ test('binds the private workspace mutation authority to authentic execution stor
     const authority = requireExecutionStoresWorkspaceMutationAuthorityInternal(stores);
     assert.equal(await authority.readHead('workspace-missing', 'epoch-missing'), undefined);
     assert.equal(await authority.readVersion('version-missing'), undefined);
+    authority.adoptRootForManagedExecution();
+    const accepted = await authority.commitBaseline({
+      epochOpenedEventId: 'gitoxide-epoch-opened-1',
+      baselineAcceptedEventId: 'gitoxide-baseline-accepted-1',
+      committedAt: 0,
+      epoch: {
+        repositoryId: 'repository_11111111111111111111111111111111',
+        workspaceId: 'workspace_22222222222222222222222222222222',
+        workspaceEpochId: 'epoch_33333333333333333333333333333333',
+        workspaceInstanceId: 'instance_44444444444444444444444444444444',
+        mode: 'managed_worktree',
+        objectFormat: 'sha1',
+        sourceCommitOid: '1'.repeat(40),
+        sourceTreeOid: '2'.repeat(40),
+        materializationProfileDigest: `sha256:${'3'.repeat(64)}`,
+        materializationSemantics: 'git_tree_materialized_with_fixed_config_v1',
+        policyHash: `sha256:${'4'.repeat(64)}`,
+      },
+      baseline: {
+        workspaceVersionId: 'version_55555555555555555555555555555555',
+        commitOid: '5'.repeat(40),
+        treeOid: '2'.repeat(40),
+        treeDeltaDigest: `sha256:${'6'.repeat(64)}`,
+        changedFileCount: 1,
+        deletedFileCount: 0,
+      },
+    });
+    assert.equal(accepted.created, true);
+    assert.equal(
+      (await authority.readHead(accepted.head.workspaceId, accepted.head.workspaceEpochId))
+        ?.workspaceVersionId,
+      accepted.head.workspaceVersionId,
+    );
   } finally {
     await stores.sessionStore.close?.();
     await owner.close();
