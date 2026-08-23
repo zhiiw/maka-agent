@@ -205,6 +205,7 @@ fn run() -> Result<ExitCode, &'static str> {
                 target_ref,
                 path,
                 content,
+                false,
             )
         }
         Request::PrepareCandidate {
@@ -509,29 +510,9 @@ fn prepare_candidate(
         });
         return Ok(ExitCode::from(3));
     }
-    let candidate_exists = repository
-        .try_find_reference(candidate_ref.as_str())
-        .map_err(|_| "candidate_ref_unavailable")?
-        .is_some();
-    if !candidate_exists {
-        let publication = repository.reference(
-            candidate_ref.as_str(),
-            expected_base,
-            gix::refs::transaction::PreviousValue::MustNotExist,
-            "maka managed workspace candidate base",
-        );
-        if publication.is_err() {
-            repository
-                .find_reference(candidate_ref.as_str())
-                .map_err(|_| "candidate_publish_failed")?;
-        }
-        // On Windows the returned reference can retain a handle to the loose
-        // ref path. Release it before create_successor performs the CAS update.
-        drop(publication);
-    }
-    // create_successor deliberately reopens the repository and repeats the
-    // expected-base CAS. Release this observation handle first so Windows does
-    // not retain a loose-ref handle across the second writer.
+    // Publish the deterministic successor directly. A temporary base-valued
+    // candidate followed by an update creates a second ref lock boundary and
+    // is not reliable on Windows.
     drop(repository);
     create_successor(
         repository_path,
@@ -539,6 +520,7 @@ fn prepare_candidate(
         candidate_ref,
         path,
         content,
+        true,
     )
 }
 
@@ -578,6 +560,7 @@ fn create_successor(
     target_ref: String,
     path: String,
     content: String,
+    create_target_if_missing: bool,
 ) -> Result<ExitCode, &'static str> {
     use gix::bstr::ByteSlice;
 
@@ -649,23 +632,37 @@ fn create_successor(
         .detach();
 
     let current = repository
-        .find_reference(target_ref.as_str())
+        .try_find_reference(target_ref.as_str())
         .map_err(|_| "target_ref_unavailable")?
-        .into_fully_peeled_id()
-        .map_err(|_| "target_ref_unavailable")?
-        .detach();
-    if current != expected_base && current != successor_commit {
+        .map(|reference| {
+            reference
+                .into_fully_peeled_id()
+                .map(|id| id.detach())
+                .map_err(|_| "target_ref_unavailable")
+        })
+        .transpose()?;
+    if current.is_none() && create_target_if_missing {
+        repository
+            .reference(
+                target_ref.as_str(),
+                successor_commit,
+                gix::refs::transaction::PreviousValue::MustNotExist,
+                "maka managed workspace candidate",
+            )
+            .map_err(|_| "candidate_publish_failed")?;
+    } else if current.is_none() {
+        return Err("target_ref_unavailable");
+    } else if current != Some(expected_base) && current != Some(successor_commit) {
         write_response(&Response::SuccessorRejected {
             protocol_version: PROTOCOL_VERSION,
             reason: "base_commit_mismatch",
             object_format: "sha1",
             expected_base_commit_oid: expected_base.to_string(),
-            actual_base_commit_oid: current.to_string(),
+            actual_base_commit_oid: current.expect("checked above").to_string(),
             target_ref,
         });
         return Ok(ExitCode::from(3));
-    }
-    if current == expected_base {
+    } else if current == Some(expected_base) {
         repository
             .reference(
                 target_ref.as_str(),
