@@ -261,6 +261,64 @@ describe('ToolRuntime durable boundary', () => {
     );
   });
 
+  it('derives a Gitoxide managed Write from the owner-observed immutable base', async () => {
+    let observedProof: RuntimeManagedMutationOperationProof | undefined;
+    let operationId = '';
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a Gitoxide managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return {
+            ...managedAdmission(async (operation) => {
+              observedProof = await operation();
+              return {
+                kind: 'workspace_successor_committed',
+                durableOutcome: managedOutcomeEvent(operationId, observedProof.content, false, {
+                  durationMs: observedProof.durationMs,
+                }),
+              };
+            }),
+            gitoxideTransform: {
+              canonicalPath: 'notes.txt',
+              baseContent: 'before\n',
+            },
+            durableDispatch: {
+              ...managedMutationDispatch(),
+              executionProfileDigest:
+                'sha256:992cc9a7a2f7cd32b1062241146727aac11ae111ab81d480c57c5d68ad8f35cc',
+            },
+          };
+        },
+      },
+    );
+    const managedTool = tool(() => {
+      throw new Error('mutable filesystem implementation must not run');
+    });
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'gitoxide_managed_mutation_v1';
+
+    const result = await harness.execute(managedTool, new AbortController().signal, {
+      path: 'notes.txt',
+      content: 'after\n',
+    });
+
+    assert.equal((result as { kind: string }).kind, 'file_diff');
+    assert.deepEqual(observedProof?.managedMutationResult, {
+      canonicalPath: 'notes.txt',
+      content: 'after\n',
+      changed: true,
+    });
+  });
+
   it('does not replace a committed managed result when admission cleanup fails', async () => {
     let operationId = '';
     const harness = makeHarness(

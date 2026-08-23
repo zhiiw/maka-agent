@@ -95,6 +95,10 @@ import { sandboxErrorMetadata, serializeSandboxError } from './sandbox/errors.js
 import { normalizeSandboxBoundaryExpansion } from './sandbox-boundary-path.js';
 import { SANDBOX_BOUNDARY_UNAVAILABLE } from './sandbox-boundary-tool.js';
 import {
+  GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST,
+  transformManagedMutation,
+} from './managed-mutation-transform.js';
+import {
   RuntimeInteractionAdmissionRejectedError,
   RuntimeInteractionClosedError,
   RuntimeInteractionFailStopError,
@@ -160,7 +164,7 @@ export interface MakaTool<P = any, R = unknown> {
   /** Crash-recovery contract used by the durable tool boundary. */
   recoveryMode?: ToolRecoveryMode;
   /** Durable execution profile selected by the Host before T1. */
-  durableExecutionProfile?: 'managed_mutation_v1';
+  durableExecutionProfile?: 'managed_mutation_v1' | 'gitoxide_managed_mutation_v1';
   /** Step-level admission contract. Exclusive tools cannot share an assistant step. */
   executionSemantics?: 'parallel' | 'exclusive_step';
   /** Nested CodeMode admission. Ordinary tools are nestable by default. */
@@ -479,6 +483,11 @@ interface RuntimeManagedMutationOperationValue<T> {
     readonly isError: boolean;
     readonly durationMs: number;
   };
+  readonly managedMutationResult?: {
+    readonly canonicalPath: string;
+    readonly content: string;
+    readonly changed: boolean;
+  };
 }
 
 /**
@@ -490,6 +499,11 @@ export interface RuntimeManagedMutationOperationProof {
   readonly content: ToolResultContent;
   readonly isError: boolean;
   readonly durationMs: number;
+  readonly managedMutationResult?: {
+    readonly canonicalPath: string;
+    readonly content: string;
+    readonly changed: boolean;
+  };
 }
 
 export type RuntimeManagedMutationSettlement =
@@ -507,6 +521,10 @@ export type RuntimeManagedMutationSettlement =
 
 export interface RuntimeManagedMutationAdmission {
   readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceMutationV1>;
+  readonly gitoxideTransform?: {
+    readonly canonicalPath: string;
+    readonly baseContent: string | null;
+  };
   execute(
     operation: () => Promise<RuntimeManagedMutationOperationProof>,
   ): Promise<RuntimeManagedMutationSettlement>;
@@ -1342,7 +1360,10 @@ export class ToolRuntime {
     }
 
     let managedMutationAdmission: RuntimeManagedMutationAdmission | undefined;
-    if (tool.durableExecutionProfile === 'managed_mutation_v1') {
+    if (
+      tool.durableExecutionProfile === 'managed_mutation_v1' ||
+      tool.durableExecutionProfile === 'gitoxide_managed_mutation_v1'
+    ) {
       if (
         (tool.name !== 'Write' && tool.name !== 'Edit') ||
         tool.recoveryMode !== 'reconcile' ||
@@ -1362,6 +1383,18 @@ export class ToolRuntime {
           persistedArgs: structuredClone(persistedArgs),
           abortSignal: ctx.abortSignal,
         });
+        if (tool.durableExecutionProfile === 'gitoxide_managed_mutation_v1') {
+          const transform = managedMutationAdmission.gitoxideTransform;
+          if (
+            !transform ||
+            managedMutationAdmission.durableDispatch.expectedPaths.length !== 1 ||
+            transform.canonicalPath !== managedMutationAdmission.durableDispatch.expectedPaths[0] ||
+            managedMutationAdmission.durableDispatch.executionProfileDigest !==
+              GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST
+          ) {
+            throw new Error('Gitoxide managed mutation transform admission is invalid');
+          }
+        }
       } catch (error) {
         const reason = `Managed workspace mutation admission failed: ${formatSyntheticToolErrorText(error)}`;
         await refuseBeforeDispatch(reason);
@@ -1513,7 +1546,37 @@ export class ToolRuntime {
         const prepareOperationValue = async (
           immutableSnapshot = false,
         ): Promise<RuntimeManagedMutationOperationValue<unknown>> => {
-          const rawResult = await invokeTool();
+          let managedMutationResult:
+            | {
+                readonly canonicalPath: string;
+                readonly content: string;
+                readonly changed: boolean;
+              }
+            | undefined;
+          let rawResult: unknown;
+          if (
+            immutableSnapshot &&
+            tool.durableExecutionProfile === 'gitoxide_managed_mutation_v1'
+          ) {
+            const transformAdmission = managedMutationAdmission?.gitoxideTransform;
+            if (!transformAdmission || (tool.name !== 'Write' && tool.name !== 'Edit')) {
+              throw new Error('Gitoxide managed mutation transform is unavailable');
+            }
+            const transformed = transformManagedMutation({
+              toolName: tool.name,
+              canonicalPath: transformAdmission.canonicalPath,
+              baseContent: transformAdmission.baseContent,
+              args: executionArgs,
+            });
+            rawResult = transformed.providerResult;
+            managedMutationResult = Object.freeze({
+              canonicalPath: transformAdmission.canonicalPath,
+              content: transformed.content,
+              changed: transformed.changed,
+            });
+          } else {
+            rawResult = await invokeTool();
+          }
           const result = immutableSnapshot
             ? snapshotManagedToolResult(rawResult, ctx.maxResultBytes)
             : rawResult;
@@ -1535,6 +1598,7 @@ export class ToolRuntime {
           const value = {
             result,
             outcome: immutableSnapshot ? Object.freeze(outcome) : outcome,
+            ...(managedMutationResult ? { managedMutationResult } : {}),
           };
           return immutableSnapshot ? Object.freeze(value) : value;
         };
@@ -1571,6 +1635,9 @@ export class ToolRuntime {
                   content: value.outcome.content,
                   isError: value.outcome.isError,
                   durationMs: value.outcome.durationMs,
+                  ...(value.managedMutationResult
+                    ? { managedMutationResult: value.managedMutationResult }
+                    : {}),
                 };
               } finally {
                 if (operationLifecycle.state === 'running') {

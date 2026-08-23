@@ -26,6 +26,10 @@ export interface ManagedMutationTransformResult {
   readonly changed: boolean;
 }
 
+/** Frozen semantic identity of the Runtime-owned immutable Git transform. */
+export const GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST =
+  'sha256:992cc9a7a2f7cd32b1062241146727aac11ae111ab81d480c57c5d68ad8f35cc' as const;
+
 /**
  * Pure Write/Edit transform for Git-backed managed workspaces. It never reads
  * or writes a checkout: the accepted Git tree supplies the sole base content.
