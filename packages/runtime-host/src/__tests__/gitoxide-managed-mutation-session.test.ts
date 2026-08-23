@@ -24,6 +24,8 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import type { RuntimeEvent } from '@maka/core/runtime-event';
+import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
 import { requireExecutionStoresWorkspaceMutationAuthorityInternal } from '@maka/storage/execution-stores-workspace-authority-internal';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
@@ -98,11 +100,127 @@ test('opens one durable Gitoxide baseline and exactly reuses it for the session'
     assert.equal(first.head.revision, 1);
     assert.notEqual(first.head.commitOid, git(sourceRoot, ['rev-parse', 'HEAD']));
     assert.equal(first.head.treeOid, git(sourceRoot, ['rev-parse', 'HEAD^{tree}']));
+
+    const changed = await executeManagedWrite({
+      stores,
+      session: reopened,
+      operationId: 'operation-gitoxide-write-1',
+      content: 'after\n',
+      changed: true,
+    });
+    assert.equal(changed.kind, 'workspace_successor_committed');
+    const afterChange = await openGitoxideManagedMutationSession(input);
+    assert.equal(afterChange.head.revision, 2);
+    assert.notEqual(afterChange.head.commitOid, first.head.commitOid);
+
+    const noChange = await executeManagedWrite({
+      stores,
+      session: afterChange,
+      operationId: 'operation-gitoxide-write-noop',
+      content: 'after\n',
+      changed: false,
+    });
+    assert.equal(noChange.kind, 'no_workspace_change_committed');
+    const afterNoChange = await openGitoxideManagedMutationSession(input);
+    assert.deepEqual(afterNoChange.head, afterChange.head);
   } finally {
     await stores.sessionStore.close?.();
     await storageOwner.close();
   }
 });
+
+async function executeManagedWrite(input: {
+  readonly stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>>;
+  readonly session: Awaited<ReturnType<typeof openGitoxideManagedMutationSession>>;
+  readonly operationId: string;
+  readonly content: string;
+  readonly changed: boolean;
+}) {
+  const toolCallId = `${input.operationId}-call`;
+  const args = { path: 'notes.txt', content: input.content };
+  const admission = await input.session.admitManagedMutation({
+    operationId: input.operationId,
+    toolName: 'Write',
+    persistedArgs: args,
+    abortSignal: new AbortController().signal,
+  });
+  const identity = {
+    sessionId: 'session-gitoxide-managed-1',
+    invocationId: `invocation-${input.operationId}`,
+    runId: `run-${input.operationId}`,
+    turnId: `turn-${input.operationId}`,
+  };
+  const callEvent: RuntimeEvent = {
+    id: `${input.operationId}-call-event`,
+    ...identity,
+    ts: 10,
+    partial: false,
+    role: 'model',
+    author: 'agent',
+    content: { kind: 'function_call', id: toolCallId, name: 'Write', args },
+    refs: { operationId: input.operationId, toolCallId },
+  };
+  const dispatchEvent: RuntimeEvent = {
+    id: `${input.operationId}-dispatch-event`,
+    ...identity,
+    ts: 10,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      toolDispatch: {
+        protocol: 't1_after_preflight_v1',
+        operationId: input.operationId,
+        providerToolCallId: toolCallId,
+        toolName: 'Write',
+        canonicalArgsHash: canonicalToolArgsHash('Write', args),
+        recoveryMode: 'reconcile',
+        managedMutation: admission.durableDispatch,
+      },
+    },
+    refs: { operationId: input.operationId, toolCallId },
+  };
+  await input.stores.runtimeEventStore.commitToolPrepared({
+    operationId: input.operationId,
+    journalEventId: `${input.operationId}-prepared`,
+    runtimeEvent: callEvent,
+    dispatchRuntimeEvent: dispatchEvent,
+    providerToolCallId: toolCallId,
+    toolName: 'Write',
+    canonicalArgsHash: canonicalToolArgsHash('Write', args),
+    recoveryMode: 'reconcile',
+    committedAt: 10,
+  });
+  const providerResult = { kind: 'file_write', path: 'notes.txt', bytes: input.content.length };
+  const resultContent = { kind: 'json' as const, value: providerResult };
+  const outcome: RuntimeEvent = {
+    id: `${input.operationId}-outcome-event`,
+    ...identity,
+    ts: 11,
+    partial: false,
+    role: 'tool',
+    author: 'tool',
+    content: {
+      kind: 'function_response',
+      id: toolCallId,
+      name: 'Write',
+      result: resultContent,
+    },
+    refs: { operationId: input.operationId, toolCallId },
+    actions: { stateDelta: { durationMs: 1 } },
+  };
+  return admission.execute(async () => ({
+    content: resultContent,
+    isError: false,
+    durationMs: 1,
+    durableOutcome: outcome,
+    managedMutationResult: {
+      canonicalPath: 'notes.txt',
+      content: input.content,
+      changed: input.changed,
+    },
+  }));
+}
 
 function git(cwd: string, args: readonly string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
