@@ -31,6 +31,7 @@ import {
 } from '../server/gitoxide-helper-artifact-authority-internal.js';
 import {
   admitGitoxideRepositoryInternal,
+  createGitoxideSuccessorInternal,
   GitoxideRepositoryAdmissionAuthorityError,
   importAdmittedGitoxideRepositoryInternal,
   requireGitoxideRepositoryAdmissionInternal,
@@ -139,6 +140,7 @@ test('imports only the exact repository identity bound to the admission capabili
   const expectedCommit = git(repositoryPath, ['rev-parse', 'HEAD']);
   const expectedTree = git(repositoryPath, ['rev-parse', 'HEAD^{tree}']);
   const admissionOwnerToken = {};
+  const managedRepositoryOwnerToken = {};
   const admitted = await admitGitoxideRepositoryInternal({
     ...helper,
     admissionOwnerToken,
@@ -152,6 +154,7 @@ test('imports only the exact repository identity bound to the admission capabili
     ...helper,
     admissionOwnerToken,
     repositoryCapability: admitted.capability,
+    managedRepositoryOwnerToken,
     destinationRepositoryPath,
     baselineRef: 'refs/maka/baseline',
   });
@@ -168,8 +171,93 @@ test('imports only the exact repository identity bound to the admission capabili
       ...helper,
       admissionOwnerToken: {},
       repositoryCapability: admitted.capability,
+      managedRepositoryOwnerToken,
       destinationRepositoryPath: join(repositoryPath, 'forged.git'),
       baselineRef: 'refs/maka/forged',
+    }),
+    (error) =>
+      error instanceof GitoxideRepositoryAdmissionAuthorityError &&
+      error.code === 'gitoxide_repository_admission_capability_invalid',
+  );
+});
+
+test('binds successor publication to the imported repository capability and exact base', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the real helper contract test');
+    return;
+  }
+  const repositoryPath = await createRepository(t, 'sha1');
+  await writeFile(join(repositoryPath, 'hello.txt'), 'hello from candidate authority\n');
+  git(repositoryPath, ['add', 'hello.txt']);
+  git(repositoryPath, [
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=maka@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'fixture',
+  ]);
+  const admissionOwnerToken = {};
+  const managedRepositoryOwnerToken = {};
+  const admitted = await admitGitoxideRepositoryInternal({
+    ...helper,
+    admissionOwnerToken,
+    repositoryPath,
+  });
+  assert.equal(admitted.kind, 'accepted');
+  if (admitted.kind !== 'accepted') return;
+  const destinationRepositoryPath = join(repositoryPath, 'managed.git');
+  const imported = await importAdmittedGitoxideRepositoryInternal({
+    ...helper,
+    admissionOwnerToken,
+    repositoryCapability: admitted.capability,
+    managedRepositoryOwnerToken,
+    destinationRepositoryPath,
+    baselineRef: 'refs/maka/accepted',
+  });
+
+  const successor = await createGitoxideSuccessorInternal({
+    ...helper,
+    managedRepositoryOwnerToken,
+    managedRepositoryCapability: imported.managedRepositoryCapability,
+    path: 'docs/result.txt',
+    content: 'candidate result\n',
+  });
+
+  assert.equal(successor.baseCommitOid, imported.baselineCommitOid);
+  assert.equal(successor.targetRef, 'refs/maka/accepted');
+  assert.equal(
+    gitBare(destinationRepositoryPath, ['rev-parse', 'refs/maka/accepted']),
+    successor.successorCommitOid,
+  );
+  const exactRetry = await createGitoxideSuccessorInternal({
+    ...helper,
+    managedRepositoryOwnerToken,
+    managedRepositoryCapability: imported.managedRepositoryCapability,
+    path: 'docs/result.txt',
+    content: 'candidate result\n',
+  });
+  assert.equal(exactRetry.successorCommitOid, successor.successorCommitOid);
+  assert.equal(exactRetry.successorTreeOid, successor.successorTreeOid);
+
+  const next = await createGitoxideSuccessorInternal({
+    ...helper,
+    managedRepositoryOwnerToken,
+    managedRepositoryCapability: successor.managedRepositoryCapability,
+    path: 'docs/next.txt',
+    content: 'next candidate\n',
+  });
+  assert.equal(next.baseCommitOid, successor.successorCommitOid);
+  await assert.rejects(
+    createGitoxideSuccessorInternal({
+      ...helper,
+      managedRepositoryOwnerToken: {},
+      managedRepositoryCapability: imported.managedRepositoryCapability,
+      path: 'forged.txt',
+      content: 'forged\n',
     }),
     (error) =>
       error instanceof GitoxideRepositoryAdmissionAuthorityError &&
