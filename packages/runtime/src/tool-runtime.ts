@@ -514,9 +514,11 @@ export type RuntimeManagedMutationSettlement =
       readonly durableOutcome: RuntimeEvent;
     }
   | {
-      readonly kind: 'safely_discarded';
-      /** Exact value returned to the provider and canonicalized for durable replay. */
-      readonly providerResult: unknown;
+      readonly kind: 'no_workspace_change_committed';
+      readonly durableOutcome: RuntimeEvent;
+    }
+  | {
+      readonly kind: 'operation_failed_no_effect_committed';
       readonly durableOutcome: RuntimeEvent;
     }
   | { readonly kind: 'unsettled'; readonly error: unknown };
@@ -1557,28 +1559,39 @@ export class ToolRuntime {
               }
             | undefined;
           let rawResult: unknown;
-          if (
-            immutableSnapshot &&
-            tool.durableExecutionProfile === 'gitoxide_managed_mutation_v1'
-          ) {
-            const transformAdmission = managedMutationAdmission?.gitoxideTransform;
-            if (!transformAdmission || (tool.name !== 'Write' && tool.name !== 'Edit')) {
-              throw new Error('Gitoxide managed mutation transform is unavailable');
+          try {
+            if (
+              immutableSnapshot &&
+              tool.durableExecutionProfile === 'gitoxide_managed_mutation_v1'
+            ) {
+              const transformAdmission = managedMutationAdmission?.gitoxideTransform;
+              if (!transformAdmission || (tool.name !== 'Write' && tool.name !== 'Edit')) {
+                throw new Error('Gitoxide managed mutation transform is unavailable');
+              }
+              const transformed = transformManagedMutation({
+                toolName: tool.name,
+                canonicalPath: transformAdmission.canonicalPath,
+                baseContent: transformAdmission.baseContent,
+                args: executionArgs,
+              });
+              rawResult = transformed.providerResult;
+              managedMutationResult = Object.freeze({
+                canonicalPath: transformAdmission.canonicalPath,
+                content: transformed.content,
+                changed: transformed.changed,
+              });
+            } else {
+              rawResult = await invokeTool();
             }
-            const transformed = transformManagedMutation({
-              toolName: tool.name,
-              canonicalPath: transformAdmission.canonicalPath,
-              baseContent: transformAdmission.baseContent,
-              args: executionArgs,
-            });
-            rawResult = transformed.providerResult;
-            managedMutationResult = Object.freeze({
-              canonicalPath: transformAdmission.canonicalPath,
-              content: transformed.content,
-              changed: transformed.changed,
-            });
-          } else {
-            rawResult = await invokeTool();
+          } catch (error) {
+            if (
+              !immutableSnapshot ||
+              tool.durableExecutionProfile !== 'gitoxide_managed_mutation_v1'
+            ) {
+              throw error;
+            }
+            const message = formatSyntheticToolErrorText(error);
+            rawResult = this.errorReturn(message);
           }
           const result = immutableSnapshot
             ? snapshotManagedToolResult(rawResult, ctx.maxResultBytes)
@@ -1691,7 +1704,7 @@ export class ToolRuntime {
             // discarded; every other failure remains unsettled for recovery.
             throw new RuntimeManagedMutationUnsettledError(ownerError);
           }
-          const normalized = normalizeManagedMutationSettlement(settlement, ctx.maxResultBytes);
+          const normalized = normalizeManagedMutationSettlement(settlement);
           if (normalized.kind === 'workspace_successor_committed') {
             if (!runtimeOwnedValue) {
               throw new RuntimeManagedMutationUnsettledError(
@@ -1706,9 +1719,14 @@ export class ToolRuntime {
               durableOutcome: normalized.durableOutcome,
             };
           } else {
+            if (!runtimeOwnedValue) {
+              throw new RuntimeManagedMutationUnsettledError(
+                new Error('Managed mutation owner settled without executing the operation'),
+              );
+            }
             settledExecution = {
               kind: 'managed',
-              value: normalized.value,
+              value: runtimeOwnedValue,
               durableOutcome: normalized.durableOutcome,
             };
           }
@@ -3208,17 +3226,17 @@ function uncertainOutcomeSignalFromError(error: unknown): ToolUncertainOutcomeSi
   };
 }
 
-function normalizeManagedMutationSettlement(
-  settlement: unknown,
-  maxResultBytes: number | undefined,
-):
+function normalizeManagedMutationSettlement(settlement: unknown):
   | {
       kind: 'workspace_successor_committed';
       durableOutcome: RuntimeEvent;
     }
   | {
-      kind: 'safely_discarded';
-      value: RuntimeManagedMutationOperationValue<unknown>;
+      kind: 'no_workspace_change_committed';
+      durableOutcome: RuntimeEvent;
+    }
+  | {
+      kind: 'operation_failed_no_effect_committed';
       durableOutcome: RuntimeEvent;
     } {
   if (!settlement || typeof settlement !== 'object' || Array.isArray(settlement)) {
@@ -3229,7 +3247,11 @@ function normalizeManagedMutationSettlement(
   if (kind === 'unsettled') {
     throw new RuntimeManagedMutationUnsettledError(record.error);
   }
-  if (kind !== 'workspace_successor_committed' && kind !== 'safely_discarded') {
+  if (
+    kind !== 'workspace_successor_committed' &&
+    kind !== 'no_workspace_change_committed' &&
+    kind !== 'operation_failed_no_effect_committed'
+  ) {
     throw new Error('Managed mutation owner returned an unknown settlement kind');
   }
   const durableOutcomeValue = Object.hasOwn(record, 'durableOutcome')
@@ -3244,36 +3266,20 @@ function normalizeManagedMutationSettlement(
   }
   const durableOutcome = durableOutcomeValue as RuntimeEvent;
 
-  if (kind === 'workspace_successor_committed') {
-    return {
-      kind,
-      durableOutcome,
-    };
-  }
-
-  if (!Object.hasOwn(record, 'providerResult')) {
-    throw new Error('Managed safely-discarded settlement has no provider result');
-  }
-  const providerResult = snapshotManagedToolResult(record.providerResult, maxResultBytes);
   const response = durableOutcome.content;
-  if (response?.kind !== 'function_response' || response.isError !== true) {
-    throw new Error('Managed safely-discarded settlement has no durable error outcome');
+  if (response?.kind !== 'function_response') {
+    throw new Error('Managed mutation settlement has no durable function response');
   }
-  const content = Object.freeze(coerceResultContent(providerResult));
-  const outcome = Object.freeze({
-    content,
-    isError: true,
-    durationMs:
-      typeof durableOutcome.actions?.stateDelta?.durationMs === 'number'
-        ? durableOutcome.actions.stateDelta.durationMs
-        : 0,
-  });
+  const expectsError = kind === 'operation_failed_no_effect_committed';
+  if ((response.isError === true) !== expectsError) {
+    throw new Error(
+      expectsError
+        ? 'Managed no-effect failure settlement has no durable error outcome'
+        : 'Managed successful settlement has no durable success outcome',
+    );
+  }
   return {
     kind,
-    value: Object.freeze({
-      result: providerResult,
-      outcome,
-    }),
     durableOutcome,
   };
 }

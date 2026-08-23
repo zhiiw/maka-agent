@@ -24,7 +24,7 @@ import { relayModelProfile } from '@maka/core/model-thinking';
 import type { ModelCallAttempt } from '@maka/core/model-call-attempt';
 import type { ModelCallCommit } from '@maka/core/agent-run';
 import type { PermissionMode } from '@maka/core/permission';
-import { AiSdkBackend } from '@maka/runtime/ai-sdk-backend';
+import { AiSdkBackend, type AiSdkBackendInput } from '@maka/runtime/ai-sdk-backend';
 import {
   buildDefaultContextBudgetPolicy,
   resolveSelectedModelContextWindow,
@@ -72,6 +72,7 @@ export interface HostAiSdkBackendInput {
   readonly usage: HostExecutionUsageAuthority;
   readonly requestDrain: () => void;
   readonly runtimeCommitSink?: RuntimeCommitSink;
+  readonly admitManagedMutation?: AiSdkBackendInput['admitManagedMutation'];
   readonly childAgents?: HostChildAgentBackendCapabilities;
   readonly createFetchTransport?: (proxy: ProxiedFetchProxy | null) => ProxiedFetchTransport;
 }
@@ -424,6 +425,7 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
         assertModelCallAccountingReady,
         recordToolInvocation: (event) => recordToolInvocation({ repo: telemetry }, event),
         ...(input.runtimeCommitSink ? { runtimeCommitSink: input.runtimeCommitSink } : {}),
+        ...(input.admitManagedMutation ? { admitManagedMutation: input.admitManagedMutation } : {}),
         ...(providerRequestCapture
           ? {
               recordProviderRequestCapture: providerRequestCapture,

@@ -1055,8 +1055,10 @@ function rewriteRuntimeEventActions(
 ): RuntimeEvent['actions'] {
   const dispatch = actions?.toolDispatch;
   const recovery = actions?.toolRecovery;
-  if (!dispatch && !recovery) return actions;
-  const operationId = dispatch?.operationId ?? recovery?.payload.operationId;
+  const managedTerminal = actions?.managedMutationTerminal;
+  if (!dispatch && !recovery && !managedTerminal) return actions;
+  const operationId =
+    dispatch?.operationId ?? recovery?.payload.operationId ?? managedTerminal?.operationId;
   const targetOperationId = operationId
     ? rewriteOwnedId(operationId, references.operationIds, 'tool operation')
     : undefined;
@@ -1068,6 +1070,24 @@ function rewriteRuntimeEventActions(
     ...(recovery && targetOperationId
       ? {
           toolRecovery: rewriteToolRecoveryFact(recovery, targetOperationId, references),
+        }
+      : {}),
+    ...(managedTerminal && targetOperationId
+      ? {
+          managedMutationTerminal: {
+            ...managedTerminal,
+            operationId: targetOperationId,
+            dispatchEventId: requiredMappedId(
+              references.runtimeEventIds,
+              managedTerminal.dispatchEventId,
+              'RuntimeEvent',
+            ),
+            outcomeEventId: requiredMappedId(
+              references.runtimeEventIds,
+              managedTerminal.outcomeEventId,
+              'RuntimeEvent',
+            ),
+          },
         }
       : {}),
   };
