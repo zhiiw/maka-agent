@@ -19,7 +19,7 @@
 
 # Managed Workspace M2 Extraction Ledger
 
-- 新基线：`upstream/main@cd0163a1e`
+- 新基线：`upstream/main@19cd9e782`
 - 历史实现来源：`codex/managed-workspace-mutation-version-authority-m2-1@14327f5f0`
 - 当前重建分支：`codex/m2-1-successor-authority-rebuild`
 - 原则：历史分支只作为测试与实现来源；最终 diff 直接建立在最新主线上，不带入旧集成栈提交；
