@@ -529,6 +529,10 @@ fn prepare_candidate(
         // ref path. Release it before create_successor performs the CAS update.
         drop(publication);
     }
+    // create_successor deliberately reopens the repository and repeats the
+    // expected-base CAS. Release this observation handle first so Windows does
+    // not retain a loose-ref handle across the second writer.
+    drop(repository);
     create_successor(
         repository_path,
         expected_base_commit_oid,
