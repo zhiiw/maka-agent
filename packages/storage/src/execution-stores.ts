@@ -76,6 +76,7 @@ import type {
   ToolCommitResult,
   ToolOperationRecord,
 } from './sqlite-runtime-store.js';
+import { registerExecutionStoresWorkspaceMutationAuthorityInternal } from './execution-stores-workspace-authority-internal.js';
 
 const executionStoresWriterBrand: unique symbol = Symbol('ExecutionStoresWriter');
 const executionStoresReaderBrand: unique symbol = Symbol('ExecutionStoresReader');
@@ -558,6 +559,10 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
     },
   };
   freezeExecutionStoresFacade(stores);
+  registerExecutionStoresWorkspaceMutationAuthorityInternal(
+    stores,
+    runtimePersistence.runtimeCommitStore,
+  );
   executionStoresWriterKinds.set(stores, kind);
   executionStoresWritersByLease.set(lease, stores);
   return stores;

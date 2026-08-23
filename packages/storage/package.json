@@ -42,6 +42,8 @@
     "./model-call-ledger": "./dist/model-call-ledger.js",
     "./usage-stores": "./dist/usage-stores.js",
     "./workspace-identity": "./dist/workspace-identity.js",
+    "./execution-stores-workspace-authority-internal": "./dist/execution-stores-workspace-authority-internal.js",
+    "./workspace-version-authority-internal": "./dist/workspace-version-authority-internal.js",
     "./write-queue": "./dist/write-queue.js"
   },
   "scripts": {
