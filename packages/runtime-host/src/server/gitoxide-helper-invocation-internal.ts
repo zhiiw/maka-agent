@@ -26,7 +26,8 @@ import {
   verifyGitoxideHelperArtifactForInvocationInternal,
 } from './gitoxide-helper-artifact-authority-internal.js';
 
-const MAX_REQUEST_BYTES = 64 * 1024;
+const MAX_SUCCESSOR_CONTENT_BYTES = 64 * 1024 * 1024;
+const MAX_REQUEST_BYTES = MAX_SUCCESSOR_CONTENT_BYTES + 64 * 1024;
 const MAX_STDOUT_BYTES = 64 * 1024;
 const MAX_STDERR_BYTES = 16 * 1024;
 const INVOCATION_TIMEOUT_MS = 5_000;
@@ -45,12 +46,19 @@ const HELPER_ERROR_REASONS = new Set([
   'baseline_commit_write_failed',
   'baseline_publish_failed',
   'baseline_ref_outside_maka_namespace',
+  'base_commit_unavailable',
+  'base_path_lookup_failed',
+  'base_tree_unavailable',
+  'blob_write_failed',
+  'commit_write_failed',
   'import_destination_create_failed',
   'import_destination_not_fresh',
   'import_destination_object_format_mismatch',
   'import_destination_unreadable',
   'import_hooks_cleanup_failed',
   'invalid_source_head_commit_oid',
+  'invalid_base_commit_oid',
+  'invalid_successor_path',
   'source_blob_copy_failed',
   'source_blob_identity_mismatch',
   'source_blob_invalid',
@@ -70,6 +78,13 @@ const HELPER_ERROR_REASONS = new Set([
   'source_tree_invalid',
   'source_tree_unavailable',
   'source_tree_visit_limit_exceeded',
+  'successor_content_limit_exceeded',
+  'successor_publish_failed',
+  'target_ref_outside_maka_namespace',
+  'target_ref_unavailable',
+  'tree_edit_failed',
+  'tree_write_failed',
+  'unsupported_base_path_kind',
   'unsupported_source_entry_kind',
   'unsupported_source_path',
 ]);
@@ -106,6 +121,30 @@ export interface GitoxideSourceImportObservationV1 {
   readonly filesImported: number;
   readonly bytesImported: number;
 }
+
+export interface GitoxideSuccessorPublishedV1 {
+  readonly kind: 'successor_published';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly baseCommitOid: string;
+  readonly successorCommitOid: string;
+  readonly successorTreeOid: string;
+  readonly resultBlobOid: string;
+  readonly targetRef: string;
+  readonly path: string;
+}
+
+export interface GitoxideSuccessorRejectedV1 {
+  readonly kind: 'successor_rejected';
+  readonly protocolVersion: 1;
+  readonly reason: 'base_commit_mismatch';
+  readonly objectFormat: 'sha1';
+  readonly expectedBaseCommitOid: string;
+  readonly actualBaseCommitOid: string;
+  readonly targetRef: string;
+}
+
+export type GitoxideSuccessorResultV1 = GitoxideSuccessorPublishedV1 | GitoxideSuccessorRejectedV1;
 
 export type GitoxideHelperInvocationErrorCode =
   | 'gitoxide_helper_invocation_invalid'
@@ -226,6 +265,64 @@ export async function importSourceHeadWithGitoxideHelperInternal(input: {
     abortSignal: input.abortSignal,
   });
   return decodeSourceImportOutcome(outcome);
+}
+
+export async function createSuccessorWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly expectedBaseCommitOid: string;
+  readonly targetRef: string;
+  readonly path: string;
+  readonly content: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideSuccessorResultV1> {
+  throwIfAborted(input.abortSignal);
+  if (
+    !isAbsolute(input.repositoryPath) ||
+    !SHA1_OID_PATTERN.test(input.expectedBaseCommitOid) ||
+    !MAKA_REF_PATTERN.test(input.targetRef) ||
+    !isCanonicalSuccessorPath(input.path) ||
+    Buffer.byteLength(input.content) > MAX_SUCCESSOR_CONTENT_BYTES
+  ) {
+    throw new GitoxideHelperInvocationError(
+      'gitoxide_helper_invocation_invalid',
+      'Gitoxide successor request is invalid',
+    );
+  }
+  const [artifact, repositoryPath] = await Promise.all([
+    verifyGitoxideHelperArtifactForInvocationInternal(input.invocationOwnerToken, input.capability),
+    realpath(input.repositoryPath).catch((error) => {
+      throw new GitoxideHelperInvocationError(
+        'gitoxide_helper_invocation_invalid',
+        `Gitoxide managed repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }),
+  ]);
+  throwIfAborted(input.abortSignal);
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: artifact.protocolVersion,
+      operation: 'create_successor',
+      repositoryPath,
+      expectedBaseCommitOid: input.expectedBaseCommitOid,
+      targetRef: input.targetRef,
+      path: input.path,
+      content: input.content,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) {
+    throw new GitoxideHelperInvocationError(
+      'gitoxide_helper_invocation_invalid',
+      'Gitoxide helper request exceeds its byte limit',
+    );
+  }
+  const outcome = await invokeHelper({
+    executablePath: artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+  });
+  return decodeSuccessorOutcome(outcome);
 }
 
 interface HelperProcessOutcome {
@@ -421,6 +518,86 @@ function decodeSourceImportOutcome(
   );
 }
 
+function decodeSuccessorOutcome(outcome: HelperProcessOutcome): GitoxideSuccessorResultV1 {
+  if (outcome.signal !== null) {
+    throw protocolInvalid(`Gitoxide helper exited from signal ${outcome.signal}`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(outcome.stdout.toString('utf8'));
+  } catch {
+    throw protocolInvalid('Gitoxide helper stdout is not one JSON response');
+  }
+  if (outcome.exitCode === 0 && isSuccessorPublished(value)) return Object.freeze(value);
+  if (outcome.exitCode === 3 && isSuccessorRejected(value)) return Object.freeze(value);
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw new GitoxideHelperInvocationError(
+      'gitoxide_helper_operation_failed',
+      `Gitoxide helper could not publish the successor: ${value.reason}`,
+      value.reason,
+    );
+  }
+  const stderr = outcome.stderr.toString('utf8').trim();
+  throw protocolInvalid(
+    `Gitoxide helper exit code and response disagree${stderr ? `: ${stderr}` : ''}`,
+  );
+}
+
+function isSuccessorPublished(value: unknown): value is GitoxideSuccessorPublishedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'baseCommitOid',
+      'successorCommitOid',
+      'successorTreeOid',
+      'resultBlobOid',
+      'targetRef',
+      'path',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'successor_published' &&
+    value.objectFormat === 'sha1' &&
+    typeof value.baseCommitOid === 'string' &&
+    SHA1_OID_PATTERN.test(value.baseCommitOid) &&
+    typeof value.successorCommitOid === 'string' &&
+    SHA1_OID_PATTERN.test(value.successorCommitOid) &&
+    typeof value.successorTreeOid === 'string' &&
+    SHA1_OID_PATTERN.test(value.successorTreeOid) &&
+    typeof value.resultBlobOid === 'string' &&
+    SHA1_OID_PATTERN.test(value.resultBlobOid) &&
+    typeof value.targetRef === 'string' &&
+    MAKA_REF_PATTERN.test(value.targetRef) &&
+    typeof value.path === 'string' &&
+    isCanonicalSuccessorPath(value.path)
+  );
+}
+
+function isSuccessorRejected(value: unknown): value is GitoxideSuccessorRejectedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'reason',
+      'objectFormat',
+      'expectedBaseCommitOid',
+      'actualBaseCommitOid',
+      'targetRef',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'successor_rejected' &&
+    value.reason === 'base_commit_mismatch' &&
+    value.objectFormat === 'sha1' &&
+    typeof value.expectedBaseCommitOid === 'string' &&
+    SHA1_OID_PATTERN.test(value.expectedBaseCommitOid) &&
+    typeof value.actualBaseCommitOid === 'string' &&
+    SHA1_OID_PATTERN.test(value.actualBaseCommitOid) &&
+    typeof value.targetRef === 'string' &&
+    MAKA_REF_PATTERN.test(value.targetRef)
+  );
+}
+
 function isSourceImportObservation(value: unknown): value is GitoxideSourceImportObservationV1 {
   return (
     hasExactKeys(value, [
@@ -517,6 +694,25 @@ function hasExactKeys(
   const keys = Object.keys(value).sort();
   const expected = [...expectedKeys].sort();
   return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
+}
+
+function isCanonicalSuccessorPath(path: string): boolean {
+  return (
+    path.length > 0 &&
+    path.length <= 4096 &&
+    !path.startsWith('/') &&
+    !path.includes('\\') &&
+    !path.includes('\0') &&
+    path
+      .split('/')
+      .every(
+        (component) =>
+          component.length > 0 &&
+          component !== '.' &&
+          component !== '..' &&
+          component.toLowerCase() !== '.git',
+      )
+  );
 }
 
 function helperEnvironment(): NodeJS.ProcessEnv {

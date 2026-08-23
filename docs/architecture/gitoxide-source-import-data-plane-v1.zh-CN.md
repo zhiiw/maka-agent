@@ -29,6 +29,9 @@
 > 只把该 commit 的 reachable tree/blob 导入此前不存在的 Maka-owned bare repository，并以确定性零父
 > baseline commit 发布 `refs/maka/*`。caller 不能重新提交 source path、HEAD 或 tree identity。
 
+后续的 exact-base successor/ref CAS 由
+`gitoxide-successor-ref-cas-data-plane-v1.zh-CN.md` 单独证明；本切片不创建 projection，也不推进 SQLite canonical head。
+
 ## 2. Owner 与原子性边界
 
 - repository admission authority 拥有 source path、commit 与 tree identity；
