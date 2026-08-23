@@ -24,6 +24,8 @@ on:
       - 'native/gitoxide-helper/**'
       - 'packages/runtime-host/src/server/gitoxide-helper-*.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-helper-*.test.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-inspection.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-inspection.test.ts'
       - 'packages/runtime-host/src/server/packaged-gitoxide-helper-internal.ts'
       - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
       - 'scripts/prepare-gitoxide-helper*'
@@ -38,6 +40,8 @@ on:
       - 'native/gitoxide-helper/**'
       - 'packages/runtime-host/src/server/gitoxide-helper-*.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-helper-*.test.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-inspection.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-inspection.test.ts'
       - 'packages/runtime-host/src/server/packaged-gitoxide-helper-internal.ts'
       - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
       - 'scripts/prepare-gitoxide-helper*'
@@ -98,3 +102,4 @@ jobs:
           packages/runtime-host/dist/__tests__/gitoxide-helper-artifact-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-helper-invocation-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
+          packages/runtime-host/dist/__tests__/gitoxide-managed-inspection.test.js
