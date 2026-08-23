@@ -18027,6 +18027,9 @@ class MemoryAgentRunStore
 
   async claimContinuation(input: { claim: ContinuationClaimV1 }) {
     const claim = decodeContinuationClaim(input.claim);
+    if (claim.protocol !== 'continuation_claim_v1') {
+      throw new Error('Memory continuation authority only supports v1 claims');
+    }
     const existing = this.continuationClaims.get(claim.boundaryDigest);
     if (existing) return { kind: 'existing' as const, claim: existing };
     const conflict = [...this.continuationClaims.values()].find(

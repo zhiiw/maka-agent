@@ -54,6 +54,7 @@ import {
 import {
   RunSealedError,
   RUNTIME_CONTINUATION_AUTHORITY_V1,
+  RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_V1,
   TOOL_RECOVERY_BUNDLE_CAPABILITY_V1,
   type ContinuationClaimResult,
   type ContinuationClaimStateV1,
@@ -61,6 +62,8 @@ import {
   type RuntimeRecoveryBundleCommit,
   type RuntimeRecoveryBundleStore,
   type RuntimeWorkspaceVersionAuthorityStore,
+  type RuntimeWorkspaceBoundContinuationAuthorityStore,
+  type WorkspaceBoundContinuationClaimResult,
 } from '@maka/core/runtime-event-store';
 import { type ToolRecoveryDecisionFact } from '@maka/core/tool-recovery-fact';
 import { canonicalToolArgsHash, stableJsonStringify } from '@maka/core/tool-args-identity';
@@ -78,7 +81,9 @@ import {
 import {
   buildImmutableRuntimePrefix,
   decodeContinuationClaim,
+  type ContinuationClaim,
   type ContinuationClaimV1,
+  type ManagedWorkspaceContinuationBoundaryV1,
   type ImmutableRuntimePrefixV1,
   type RuntimeBoundaryDigest,
 } from '@maka/core/runtime-boundary';
@@ -94,6 +99,8 @@ import {
   RUNTIME_RECOVERY_AUTHORITY_CAPABILITY_VERSION,
   RUNTIME_CONTINUATION_AUTHORITY_CAPABILITY,
   RUNTIME_CONTINUATION_AUTHORITY_CAPABILITY_VERSION,
+  RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY,
+  RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY_VERSION,
   RUNTIME_WORKSPACE_VERSION_AUTHORITY_CAPABILITY,
   RUNTIME_WORKSPACE_VERSION_AUTHORITY_CAPABILITY_VERSION,
   SQLITE_RUNTIME_SCHEMA_VERSION,
@@ -268,12 +275,15 @@ export class SqliteRuntimeStore
   implements
     RuntimeRecoveryBundleStore,
     RuntimeContinuationAuthorityStore,
+    RuntimeWorkspaceBoundContinuationAuthorityStore,
     RuntimeWorkspaceVersionAuthorityStore
 {
   readonly durability = 'canonical' as const;
   readonly toolBoundaryProtocol = 't1_after_preflight_v1' as const;
   readonly recoveryBundleCapability = TOOL_RECOVERY_BUNDLE_CAPABILITY_V1;
   readonly continuationAuthorityCapability = RUNTIME_CONTINUATION_AUTHORITY_V1;
+  readonly workspaceBoundContinuationAuthorityCapability =
+    RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_V1;
   readonly workspaceVersionAuthorityCapability = WORKSPACE_VERSION_AUTHORITY_CAPABILITY_V1;
   private readonly db: DatabaseSync;
   private readonly databaseLease?: OperationalStateDatabaseLease;
@@ -293,6 +303,7 @@ export class SqliteRuntimeStore
       this.db = options.databaseLease.database;
       assertRecoveryAuthorityCapability(this.db);
       assertContinuationAuthorityCapability(this.db);
+      assertWorkspaceBoundContinuationAuthorityCapability(this.db);
       assertWorkspaceVersionAuthorityCapability(this.db);
       if (!options.readOnly) {
         this.registerWorkspaceBaselineAuthorityWriter(options.databaseLease.databasePath);
@@ -319,6 +330,7 @@ export class SqliteRuntimeStore
       }
       assertRecoveryAuthorityCapability(this.db);
       assertContinuationAuthorityCapability(this.db);
+      assertWorkspaceBoundContinuationAuthorityCapability(this.db);
       assertWorkspaceVersionAuthorityCapability(this.db);
       if (!options.readOnly) {
         this.registerWorkspaceBaselineAuthorityWriter(path);
@@ -861,8 +873,38 @@ export class SqliteRuntimeStore
     );
   }
 
-  async claimContinuation(input: { claim: ContinuationClaimV1 }): Promise<ContinuationClaimResult> {
-    const claim = decodeContinuationClaim(input.claim);
+  async claimContinuation(input: {
+    claim: Extract<ContinuationClaim, { protocol: 'continuation_claim_v1' }>;
+  }): Promise<ContinuationClaimResult> {
+    const result = await this.claimContinuationAuthority(input.claim);
+    if (result.claim.protocol !== 'continuation_claim_v1') {
+      throw new Error('Legacy continuation authority conflicts with a workspace-bound claim');
+    }
+    if (result.kind === 'acquired') return { kind: 'acquired', claim: result.claim };
+    if (result.kind === 'existing') return { kind: 'existing', claim: result.claim };
+    return { kind: 'conflict', claim: result.claim };
+  }
+
+  async claimWorkspaceBoundContinuation(input: {
+    claim: Extract<ContinuationClaim, { protocol: 'continuation_claim_v2' }>;
+  }): Promise<WorkspaceBoundContinuationClaimResult> {
+    const result = await this.claimContinuationAuthority(input.claim);
+    if (result.claim.protocol !== 'continuation_claim_v2') {
+      throw new Error('Workspace-bound continuation authority conflicts with a legacy claim');
+    }
+    if (result.kind === 'acquired') return { kind: 'acquired', claim: result.claim };
+    if (result.kind === 'existing') return { kind: 'existing', claim: result.claim };
+    return { kind: 'conflict', claim: result.claim };
+  }
+
+  private async claimContinuationAuthority(
+    inputClaim: ContinuationClaim,
+  ): Promise<
+    | { kind: 'acquired'; claim: ContinuationClaim }
+    | { kind: 'existing'; claim: ContinuationClaim }
+    | { kind: 'conflict'; claim: ContinuationClaim }
+  > {
+    const claim = decodeContinuationClaim(inputClaim);
     if (
       claim.target.sessionId === WORKSPACE_AUTHORITY_SESSION_ID ||
       claim.boundary.segments.some(
@@ -872,13 +914,20 @@ export class SqliteRuntimeStore
       throw new Error('Continuation cannot target the reserved workspace authority stream');
     }
     const boundaryJson = stableJsonStringify(claim.boundary);
+    const workspaceBoundaryJson =
+      claim.protocol === 'continuation_claim_v2'
+        ? stableJsonStringify(claim.workspaceBoundary)
+        : null;
     return this.transaction(() => {
       this.assertContinuationAuthorityIntegrity();
       this.assertContinuationBoundaryMatchesLedger(claim);
       const byBoundary = this.readContinuationClaimRow('boundary_digest = ?', claim.boundaryDigest);
       if (byBoundary) {
         const existing = decodeContinuationClaimRow(byBoundary);
-        if (byBoundary.boundary_json !== boundaryJson) {
+        if (
+          byBoundary.boundary_json !== boundaryJson ||
+          byBoundary.workspace_boundary_json !== workspaceBoundaryJson
+        ) {
           throw new Error('Continuation claim boundary digest has conflicting canonical JSON');
         }
         return { kind: 'existing', claim: existing };
@@ -910,6 +959,9 @@ export class SqliteRuntimeStore
       if (this.continuationTargetHasRuntimeState(claim)) {
         throw new Error('Continuation claim target RuntimeEvent ledger is not empty');
       }
+      if (claim.protocol === 'continuation_claim_v2') {
+        this.assertContinuationWorkspaceBoundaryMatchesAuthority(claim.workspaceBoundary);
+      }
 
       try {
         this.db
@@ -924,6 +976,7 @@ export class SqliteRuntimeStore
               source_prefix_digest,
               boundary_digest,
               boundary_json,
+              workspace_boundary_json,
               provider_projection_version,
               provider_replay_digest,
               target_session_id,
@@ -933,7 +986,7 @@ export class SqliteRuntimeStore
               target_run_header_json,
               claimed_at,
               protocol_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `)
           .run(
             claim.claimId,
@@ -945,6 +998,7 @@ export class SqliteRuntimeStore
             source.prefixDigest,
             claim.boundaryDigest,
             boundaryJson,
+            workspaceBoundaryJson,
             claim.providerProjectionVersion,
             claim.providerReplayDigest,
             claim.target.sessionId,
@@ -953,6 +1007,7 @@ export class SqliteRuntimeStore
             claim.target.turnId,
             stableJsonStringify(claim.targetRunHeader),
             claim.claimedAt,
+            claim.protocol === 'continuation_claim_v2' ? 2 : 1,
           );
       } catch (error) {
         const raced =
@@ -989,8 +1044,26 @@ export class SqliteRuntimeStore
 
   async readContinuationClaimByBoundary(
     boundaryDigest: RuntimeBoundaryDigest,
-  ): Promise<ContinuationClaimV1 | undefined> {
+  ): Promise<Extract<ContinuationClaim, { protocol: 'continuation_claim_v1' }> | undefined> {
     return (await this.readContinuationClaimStateByBoundary(boundaryDigest))?.claim;
+  }
+
+  async readWorkspaceBoundContinuationClaimByBoundary(
+    boundaryDigest: RuntimeBoundaryDigest,
+  ): Promise<Extract<ContinuationClaim, { protocol: 'continuation_claim_v2' }> | undefined> {
+    if (!/^sha256:[0-9a-f]{64}$/.test(boundaryDigest)) {
+      throw new Error('Invalid continuation boundary digest');
+    }
+    const row = this.readContinuationClaimRow(
+      'boundary_digest = ? AND protocol_version = 2',
+      boundaryDigest,
+    );
+    if (!row) return undefined;
+    const claim = decodeContinuationClaimRow(row);
+    if (claim.protocol !== 'continuation_claim_v2') {
+      throw new Error('Workspace-bound continuation claim protocol mismatch');
+    }
+    return claim;
   }
 
   async readContinuationClaimStateByBoundary(
@@ -999,7 +1072,10 @@ export class SqliteRuntimeStore
     if (!/^sha256:[0-9a-f]{64}$/.test(boundaryDigest)) {
       throw new Error('Invalid continuation boundary digest');
     }
-    const row = this.readContinuationClaimRow('boundary_digest = ?', boundaryDigest);
+    const row = this.readContinuationClaimRow(
+      'boundary_digest = ? AND protocol_version = 1',
+      boundaryDigest,
+    );
     return row ? this.decodeContinuationClaimStateRow(row) : undefined;
   }
 
@@ -1016,6 +1092,7 @@ export class SqliteRuntimeStore
           source_prefix_digest,
           boundary_digest,
           boundary_json,
+          workspace_boundary_json,
           provider_projection_version,
           provider_replay_digest,
           target_session_id,
@@ -1028,7 +1105,7 @@ export class SqliteRuntimeStore
           start_kind,
           protocol_version
         FROM runtime_continuation_claims
-        WHERE target_session_id = ?
+        WHERE target_session_id = ? AND protocol_version = 1
         ORDER BY claimed_at ASC, claim_id ASC
       `)
       .all(sessionId) as unknown as ContinuationClaimStorageRow[];
@@ -1057,6 +1134,9 @@ export class SqliteRuntimeStore
     startKind: 'runtime_admission' | 'claim_repair',
   ): ToolCommitResult {
     const claim = decodeContinuationClaim(input.claim);
+    if (claim.protocol !== 'continuation_claim_v1') {
+      throw new Error('Legacy continuation start requires a v1 claim');
+    }
     const event = canonicalizeRuntimeEventForStorage(input.event);
     assertNoReservedWorkspaceAuthorityAppend(event);
     assertContinuationStartEvent(claim, event, startKind);
@@ -3071,6 +3151,7 @@ export class SqliteRuntimeStore
           source_prefix_digest,
           boundary_digest,
           boundary_json,
+          workspace_boundary_json,
           provider_projection_version,
           provider_replay_digest,
           target_session_id,
@@ -3102,6 +3183,7 @@ export class SqliteRuntimeStore
           source_prefix_digest,
           boundary_digest,
           boundary_json,
+          workspace_boundary_json,
           provider_projection_version,
           provider_replay_digest,
           target_session_id,
@@ -3121,11 +3203,20 @@ export class SqliteRuntimeStore
 
   private assertContinuationAuthorityIntegrity(): void {
     for (const row of this.readContinuationClaimRows()) {
+      const claim = decodeContinuationClaimRow(row);
+      if (claim.protocol === 'continuation_claim_v2') {
+        if (row.start_event_id !== null || row.start_kind !== null) {
+          throw new Error(
+            `Workspace-bound continuation claim has an unsupported start event for ${claim.claimId}`,
+          );
+        }
+        continue;
+      }
       this.decodeContinuationClaimStateRow(row);
     }
   }
 
-  private continuationTargetHasRuntimeState(claim: ContinuationClaimV1): boolean {
+  private continuationTargetHasRuntimeState(claim: ContinuationClaim): boolean {
     const { target } = claim;
     const values = [
       target.invocationId,
@@ -3163,6 +3254,9 @@ export class SqliteRuntimeStore
     row: ContinuationClaimStorageRow,
   ): ContinuationClaimStateV1 {
     const claim = decodeContinuationClaimRow(row);
+    if (claim.protocol !== 'continuation_claim_v1') {
+      throw new Error(`Legacy continuation reader encountered ${claim.protocol}`);
+    }
     if (!row.start_event_id) {
       if (row.start_kind !== null) {
         throw new Error(`Continuation claim start kind exists without event for ${claim.claimId}`);
@@ -3180,7 +3274,7 @@ export class SqliteRuntimeStore
     return { claim, startEventId: row.start_event_id, startKind: row.start_kind };
   }
 
-  private assertContinuationBoundaryMatchesLedger(claim: ContinuationClaimV1): void {
+  private assertContinuationBoundaryMatchesLedger(claim: ContinuationClaim): void {
     const lastIndex = claim.boundary.segments.length - 1;
     for (const [index, segment] of claim.boundary.segments.entries()) {
       let prefix: ImmutableRuntimePrefixV1;
@@ -3225,6 +3319,70 @@ export class SqliteRuntimeStore
           );
         }
       }
+    }
+  }
+
+  private assertContinuationWorkspaceBoundaryMatchesAuthority(
+    boundary: ManagedWorkspaceContinuationBoundaryV1,
+  ): void {
+    const storageRoot = this.#readWorkspaceStorageRootBinding();
+    if (
+      !storageRoot ||
+      storageRoot.protocol_version !== 1 ||
+      storageRoot.root_id !== boundary.storageRootId
+    ) {
+      throw new Error('Continuation workspace boundary storage-root identity conflict');
+    }
+
+    const authority = this.readCanonicalWorkspaceAuthoritySync();
+    this.assertWorkspaceProjectionsMatchSync(authority);
+    const epoch = authority.baselines.find(
+      (candidate) =>
+        candidate.epoch.workspaceId === boundary.workspaceId &&
+        candidate.epoch.workspaceEpochId === boundary.workspaceEpochId,
+    );
+    const head = authority.heads.find(
+      (candidate) =>
+        candidate.workspaceId === boundary.workspaceId &&
+        candidate.workspaceEpochId === boundary.workspaceEpochId,
+    );
+    if (!epoch || !head) {
+      throw new Error('Continuation workspace boundary is unavailable');
+    }
+
+    const baseline = authority.baselines.find(
+      (candidate) =>
+        candidate.baseline.workspaceVersionId === head.workspaceVersionId &&
+        candidate.baselineAcceptedEventId === head.acceptedEventId,
+    );
+    const successor = authority.successors.find(
+      (candidate) =>
+        candidate.successor.workspaceVersionId === head.workspaceVersionId &&
+        candidate.acceptedEventId === head.acceptedEventId,
+    );
+    if ((baseline === undefined) === (successor === undefined)) {
+      throw new Error('Continuation workspace head has ambiguous accepted evidence');
+    }
+    const version = baseline?.baseline ?? successor!.successor;
+    const expected: ManagedWorkspaceContinuationBoundaryV1 = {
+      protocol: 'managed_workspace_continuation_boundary_v1',
+      storageRootId: storageRoot.root_id,
+      repositoryId: epoch.epoch.repositoryId,
+      workspaceId: epoch.epoch.workspaceId,
+      workspaceEpochId: epoch.epoch.workspaceEpochId,
+      workspaceInstanceId: epoch.epoch.workspaceInstanceId,
+      workspaceVersionId: head.workspaceVersionId,
+      acceptedEventId: head.acceptedEventId,
+      revision: head.revision,
+      objectFormat: epoch.epoch.objectFormat,
+      commitOid: head.commitOid,
+      treeOid: head.treeOid,
+      materializationProfileDigest: epoch.epoch.materializationProfileDigest,
+      policyHash: version.policyHash,
+      executionProfileDigest: successor?.successor.executionProfileDigest ?? null,
+    };
+    if (!isDeepStrictEqual(boundary, expected)) {
+      throw new Error('Continuation workspace boundary no longer matches accepted authority');
     }
   }
 
@@ -4119,6 +4277,19 @@ function assertContinuationAuthorityCapability(db: DatabaseSync): void {
   }
 }
 
+function assertWorkspaceBoundContinuationAuthorityCapability(db: DatabaseSync): void {
+  const row = db
+    .prepare('SELECT version FROM runtime_capabilities WHERE capability = ?')
+    .get(RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY) as
+    | { version?: unknown }
+    | undefined;
+  if (row?.version !== RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY_VERSION) {
+    throw new Error(
+      `SQLite runtime workspace-bound continuation capability ${RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY}@${RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY_VERSION} is unavailable`,
+    );
+  }
+}
+
 function assertRuntimeStorageSafeId(value: string, message: string): void {
   if (!isRuntimeStorageSafeId(value)) throw new Error(message);
 }
@@ -4553,6 +4724,7 @@ interface ContinuationClaimStorageRow {
   source_prefix_digest: string;
   boundary_digest: string;
   boundary_json: string;
+  workspace_boundary_json: string | null;
   provider_projection_version: number;
   provider_replay_digest: string;
   target_session_id: string;
@@ -4741,8 +4913,8 @@ function hasOnlyKeys(value: object, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowedSet.has(key));
 }
 
-function decodeContinuationClaimRow(row: ContinuationClaimStorageRow): ContinuationClaimV1 {
-  if (row.protocol_version !== 1) {
+function decodeContinuationClaimRow(row: ContinuationClaimStorageRow): ContinuationClaim {
+  if (row.protocol_version !== 1 && row.protocol_version !== 2) {
     throw new Error(`Unsupported continuation claim protocol ${row.protocol_version}`);
   }
   const boundary = JSON.parse(row.boundary_json) as unknown;
@@ -4750,10 +4922,17 @@ function decodeContinuationClaimRow(row: ContinuationClaimStorageRow): Continuat
     markPersisted<AgentRunHeader>(JSON.parse(row.target_run_header_json)),
   );
   const claim = decodeContinuationClaim({
-    protocol: 'continuation_claim_v1',
+    protocol: row.protocol_version === 1 ? 'continuation_claim_v1' : 'continuation_claim_v2',
     claimId: row.claim_id,
     boundaryDigest: row.boundary_digest,
     boundary,
+    ...(row.protocol_version === 2
+      ? {
+          workspaceBoundary: row.workspace_boundary_json
+            ? (JSON.parse(row.workspace_boundary_json) as unknown)
+            : undefined,
+        }
+      : {}),
     providerProjectionVersion: row.provider_projection_version,
     providerReplayDigest: row.provider_replay_digest,
     target: {
@@ -4765,6 +4944,14 @@ function decodeContinuationClaimRow(row: ContinuationClaimStorageRow): Continuat
     targetRunHeader,
     claimedAt: row.claimed_at,
   });
+  if (
+    (row.protocol_version === 1 && row.workspace_boundary_json !== null) ||
+    (row.protocol_version === 2 &&
+      (claim.protocol !== 'continuation_claim_v2' ||
+        row.workspace_boundary_json !== stableJsonStringify(claim.workspaceBoundary)))
+  ) {
+    throw new Error(`Continuation claim workspace row/payload mismatch for ${row.claim_id}`);
+  }
   const source = claim.boundary.segments.at(-1)!;
   if (
     row.source_session_id !== source.identity.sessionId ||

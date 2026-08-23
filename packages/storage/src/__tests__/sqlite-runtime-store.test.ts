@@ -29,10 +29,14 @@ import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import {
   buildImmutableRuntimePrefix,
   createRuntimeBoundaryCursor,
+  digestWorkspaceBoundContinuationBoundary,
   runtimePrefixSegment,
+  type ContinuationClaimV2,
   type ContinuationClaimV1,
   type ImmutableRuntimePrefixV1,
+  type ManagedWorkspaceContinuationBoundaryV1,
 } from '@maka/core/runtime-boundary';
+import type { WorkspaceBaselineAuthorityInput } from '@maka/core/workspace-version-authority';
 import {
   ToolLedgerCorruptionError,
   ToolLedgerRejectionError,
@@ -42,6 +46,12 @@ import {
   createSqliteRuntimeStore,
   type SqliteRuntimeStoreFailpoint,
 } from '../sqlite-runtime-store.js';
+import {
+  bindWorkspaceBaselineAuthorityStoreRootInternal,
+  commitWorkspaceBaselineInternal,
+} from '../workspace-version-authority-internal.js';
+
+const TEST_STORAGE_ROOT_ID = 'a'.repeat(64);
 
 describe('SqliteRuntimeStore', () => {
   it('applies versioned migrations and reopens the same database without rewriting schema', async () => {
@@ -59,6 +69,64 @@ describe('SqliteRuntimeStore', () => {
         reopened.close();
       }
     });
+  });
+
+  it('migrates a populated schema 14 continuation authority without changing its v1 claim', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-continuation-schema-14-'));
+    const dbPath = join(root, 'runtime.sqlite');
+    const claim = continuationClaim();
+    try {
+      const current = createSqliteRuntimeStore(dbPath);
+      await persistImmutablePrefix(current, continuationSourcePrefix());
+      assert.equal((await current.claimContinuation({ claim })).kind, 'acquired');
+      current.close();
+
+      const rewind = new DatabaseSync(dbPath);
+      try {
+        rewindContinuationClaimsToSchema14(rewind);
+      } finally {
+        rewind.close();
+      }
+
+      const upgraded = createSqliteRuntimeStore(dbPath);
+      try {
+        assert.equal(upgraded.schemaVersion(), SQLITE_RUNTIME_SCHEMA_VERSION);
+        assert.deepEqual(
+          await upgraded.readContinuationClaimByBoundary(claim.boundaryDigest),
+          claim,
+        );
+      } finally {
+        upgraded.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when the workspace-bound continuation capability is missing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-workspace-continuation-capability-'));
+    const dbPath = join(root, 'runtime.sqlite');
+    const store = createSqliteRuntimeStore(dbPath);
+    store.close();
+    try {
+      const raw = new DatabaseSync(dbPath);
+      try {
+        raw
+          .prepare(
+            `DELETE FROM runtime_capabilities
+             WHERE capability = 'runtime_workspace_bound_continuation_authority'`,
+          )
+          .run();
+      } finally {
+        raw.close();
+      }
+      assert.throws(
+        () => createSqliteRuntimeStore(dbPath),
+        /runtime_workspace_bound_continuation_authority@1 is unavailable/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('refuses every post-terminal append as the typed sealed-run boundary', async () => {
@@ -813,6 +881,73 @@ describe('SqliteRuntimeStore', () => {
 
       const persisted = await store.readContinuationClaimByBoundary(claim.boundaryDigest);
       assert.equal(persisted?.targetRunHeader.permissionMode, 'ask');
+    });
+  });
+
+  it('atomically binds a continuation claim to the exact accepted workspace head', async () => {
+    await withStore(async (store) => {
+      const workspaceBoundary = await openContinuationWorkspaceBoundary(store);
+      const claim = workspaceBoundContinuationClaim(workspaceBoundary);
+      await persistImmutablePrefix(store, continuationSourcePrefix());
+
+      const acquired = await store.claimWorkspaceBoundContinuation({ claim });
+      const existing = await store.claimWorkspaceBoundContinuation({
+        claim: structuredClone(claim),
+      });
+
+      assert.equal(acquired.kind, 'acquired');
+      assert.equal(existing.kind, 'existing');
+      assert.deepEqual(existing.claim, claim);
+      assert.deepEqual(
+        await store.readWorkspaceBoundContinuationClaimByBoundary(claim.boundaryDigest),
+        claim,
+      );
+    });
+  });
+
+  it('rejects a workspace-bound claim when caller evidence differs from accepted authority', async () => {
+    await withStore(async (store) => {
+      const workspaceBoundary = await openContinuationWorkspaceBoundary(store);
+      const staleBoundary = { ...workspaceBoundary, revision: workspaceBoundary.revision + 1 };
+      const claim = workspaceBoundContinuationClaim(staleBoundary);
+      await persistImmutablePrefix(store, continuationSourcePrefix());
+
+      await assert.rejects(
+        store.claimWorkspaceBoundContinuation({ claim }),
+        /workspace boundary no longer matches accepted authority/i,
+      );
+      assert.equal(
+        await store.readWorkspaceBoundContinuationClaimByBoundary(claim.boundaryDigest),
+        undefined,
+      );
+    });
+  });
+
+  it('fails closed when stored workspace-bound claim JSON is changed independently', async () => {
+    await withStore(async (store, dbPath) => {
+      const workspaceBoundary = await openContinuationWorkspaceBoundary(store);
+      const claim = workspaceBoundContinuationClaim(workspaceBoundary);
+      await persistImmutablePrefix(store, continuationSourcePrefix());
+      assert.equal((await store.claimWorkspaceBoundContinuation({ claim })).kind, 'acquired');
+
+      const tamper = new DatabaseSync(dbPath);
+      try {
+        tamper
+          .prepare(
+            'UPDATE runtime_continuation_claims SET workspace_boundary_json = ? WHERE claim_id = ?',
+          )
+          .run(
+            JSON.stringify({ ...workspaceBoundary, revision: workspaceBoundary.revision + 1 }),
+            claim.claimId,
+          );
+      } finally {
+        tamper.close();
+      }
+
+      await assert.rejects(
+        store.readWorkspaceBoundContinuationClaimByBoundary(claim.boundaryDigest),
+        /workspace boundary digest mismatch|workspace row\/payload mismatch/i,
+      );
     });
   });
 
@@ -1897,6 +2032,184 @@ function continuationClaimForBoundary(
     },
     claimedAt,
   };
+}
+
+function workspaceBoundContinuationClaim(
+  workspaceBoundary: ManagedWorkspaceContinuationBoundaryV1,
+): ContinuationClaimV2 {
+  const legacy = continuationClaim();
+  const boundaryDigest = digestWorkspaceBoundContinuationBoundary(
+    legacy.boundary,
+    workspaceBoundary,
+  );
+  const source = legacy.boundary.segments.at(-1)!;
+  return {
+    ...legacy,
+    protocol: 'continuation_claim_v2',
+    boundaryDigest,
+    workspaceBoundary,
+    targetRunHeader: {
+      ...legacy.targetRunHeader,
+      continuationSource: {
+        protocol: 'continuation_source_v3',
+        claimId: legacy.claimId,
+        boundaryDigest,
+        sourceInvocationId: source.identity.invocationId,
+        sourceRunId: source.identity.runId,
+        sourceTurnId: source.identity.turnId,
+        sourceRuntimeEventHighWater: source.position.lastEventSeq,
+        sourcePrefixDigest: source.prefixDigest,
+        replayManifestDigest: legacy.boundary.manifestDigest,
+      },
+    },
+  };
+}
+
+async function openContinuationWorkspaceBoundary(
+  store: Store,
+): Promise<ManagedWorkspaceContinuationBoundaryV1> {
+  const input = continuationWorkspaceBaselineInput();
+  bindWorkspaceBaselineAuthorityStoreRootInternal(store, TEST_STORAGE_ROOT_ID);
+  const opened = await commitWorkspaceBaselineInternal(store, input);
+  return {
+    protocol: 'managed_workspace_continuation_boundary_v1',
+    storageRootId: TEST_STORAGE_ROOT_ID,
+    repositoryId: input.epoch.repositoryId,
+    workspaceId: input.epoch.workspaceId,
+    workspaceEpochId: input.epoch.workspaceEpochId,
+    workspaceInstanceId: input.epoch.workspaceInstanceId,
+    workspaceVersionId: opened.head.workspaceVersionId,
+    acceptedEventId: opened.head.acceptedEventId,
+    revision: opened.head.revision,
+    objectFormat: input.epoch.objectFormat,
+    commitOid: opened.head.commitOid,
+    treeOid: opened.head.treeOid,
+    materializationProfileDigest: input.epoch.materializationProfileDigest,
+    policyHash: input.epoch.policyHash,
+    executionProfileDigest: null,
+  };
+}
+
+function continuationWorkspaceBaselineInput(): WorkspaceBaselineAuthorityInput {
+  return {
+    epochOpenedEventId: 'continuation-workspace-epoch-event',
+    baselineAcceptedEventId: 'continuation-workspace-version-event',
+    committedAt: 5,
+    epoch: {
+      repositoryId: 'repository_11111111111111111111111111111111',
+      workspaceId: 'workspace_22222222222222222222222222222222',
+      workspaceEpochId: 'epoch_33333333333333333333333333333333',
+      workspaceInstanceId: 'instance_44444444444444444444444444444444',
+      mode: 'managed_worktree',
+      objectFormat: 'sha1',
+      sourceCommitOid: '1'.repeat(40),
+      sourceTreeOid: '2'.repeat(40),
+      materializationProfileDigest: `sha256:${'3'.repeat(64)}`,
+      materializationSemantics: 'git_tree_materialized_with_fixed_config_v1',
+      policyHash: `sha256:${'4'.repeat(64)}`,
+    },
+    baseline: {
+      workspaceVersionId: 'version_55555555555555555555555555555555',
+      commitOid: '5'.repeat(40),
+      treeOid: '2'.repeat(40),
+      treeDeltaDigest: `sha256:${'6'.repeat(64)}`,
+      changedFileCount: 1,
+      deletedFileCount: 0,
+    },
+  };
+}
+
+function rewindContinuationClaimsToSchema14(db: DatabaseSync): void {
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    ALTER TABLE runtime_continuation_claims
+      RENAME TO runtime_continuation_claims_schema_15;
+
+    CREATE TABLE runtime_continuation_claims (
+      claim_id TEXT PRIMARY KEY,
+      source_session_id TEXT NOT NULL,
+      source_invocation_id TEXT NOT NULL,
+      source_run_id TEXT NOT NULL,
+      source_turn_id TEXT NOT NULL,
+      source_event_high_water INTEGER NOT NULL CHECK (source_event_high_water > 0),
+      source_prefix_digest TEXT NOT NULL,
+      boundary_digest TEXT NOT NULL UNIQUE,
+      boundary_json TEXT NOT NULL,
+      provider_projection_version INTEGER NOT NULL CHECK (provider_projection_version = 1),
+      provider_replay_digest TEXT NOT NULL,
+      target_session_id TEXT NOT NULL,
+      target_invocation_id TEXT NOT NULL UNIQUE,
+      target_run_id TEXT NOT NULL UNIQUE,
+      target_turn_id TEXT NOT NULL,
+      target_run_header_json TEXT NOT NULL,
+      claimed_at INTEGER NOT NULL,
+      start_event_id TEXT UNIQUE REFERENCES runtime_events(event_id),
+      start_kind TEXT CHECK (
+        start_kind IS NULL OR start_kind IN ('runtime_admission', 'claim_repair')
+      ),
+      protocol_version INTEGER NOT NULL CHECK (protocol_version = 1),
+      UNIQUE (
+        source_session_id,
+        source_run_id,
+        source_event_high_water,
+        source_prefix_digest
+      ),
+      UNIQUE (target_session_id, target_turn_id)
+    );
+
+    INSERT INTO runtime_continuation_claims (
+      claim_id,
+      source_session_id,
+      source_invocation_id,
+      source_run_id,
+      source_turn_id,
+      source_event_high_water,
+      source_prefix_digest,
+      boundary_digest,
+      boundary_json,
+      provider_projection_version,
+      provider_replay_digest,
+      target_session_id,
+      target_invocation_id,
+      target_run_id,
+      target_turn_id,
+      target_run_header_json,
+      claimed_at,
+      start_event_id,
+      start_kind,
+      protocol_version
+    )
+    SELECT
+      claim_id,
+      source_session_id,
+      source_invocation_id,
+      source_run_id,
+      source_turn_id,
+      source_event_high_water,
+      source_prefix_digest,
+      boundary_digest,
+      boundary_json,
+      provider_projection_version,
+      provider_replay_digest,
+      target_session_id,
+      target_invocation_id,
+      target_run_id,
+      target_turn_id,
+      target_run_header_json,
+      claimed_at,
+      start_event_id,
+      start_kind,
+      protocol_version
+    FROM runtime_continuation_claims_schema_15;
+
+    DROP TABLE runtime_continuation_claims_schema_15;
+    DELETE FROM runtime_capabilities
+      WHERE capability = 'runtime_workspace_bound_continuation_authority';
+    PRAGMA user_version = 14;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
 }
 
 function continuationSourcePrefix(): ImmutableRuntimePrefixV1 {

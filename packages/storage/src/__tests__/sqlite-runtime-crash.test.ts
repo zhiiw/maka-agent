@@ -29,6 +29,13 @@ import { type RuntimeEvent } from '@maka/core/runtime-event';
 import { type WorkspaceBaselineAuthorityInput } from '@maka/core/workspace-version-authority';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import {
+  buildImmutableRuntimePrefix,
+  createRuntimeBoundaryCursor,
+  digestWorkspaceBoundContinuationBoundary,
+  runtimePrefixSegment,
+  type ContinuationClaimV2,
+} from '@maka/core/runtime-boundary';
+import {
   createSqliteRuntimeStore,
   type SqliteRuntimeStoreFailpoint,
 } from '../sqlite-runtime-store.js';
@@ -208,6 +215,32 @@ if (childMode) {
         );
       });
     });
+
+    it('rolls back a workspace-bound continuation claim when killed inside its transaction', {
+      timeout: 30_000,
+    }, async () => {
+      await withKilledChild('inside_workspace_continuation_claim', async (store) => {
+        const claim = workspaceBoundContinuationClaim();
+        assert.equal(
+          await store.readWorkspaceBoundContinuationClaimByBoundary(claim.boundaryDigest),
+          undefined,
+        );
+        assert.equal((await store.claimWorkspaceBoundContinuation({ claim })).kind, 'acquired');
+      });
+    });
+
+    it('returns the exact workspace-bound claim after a process is killed post-commit', {
+      timeout: 30_000,
+    }, async () => {
+      await withKilledChild('after_workspace_continuation_claim_commit', async (store) => {
+        const claim = workspaceBoundContinuationClaim();
+        assert.deepEqual(
+          await store.readWorkspaceBoundContinuationClaimByBoundary(claim.boundaryDigest),
+          claim,
+        );
+        assert.equal((await store.claimWorkspaceBoundContinuation({ claim })).kind, 'existing');
+      });
+    });
   });
 }
 
@@ -295,6 +328,12 @@ async function runCrashChild(mode: string): Promise<void> {
     ) {
       blockUntilKilled();
     }
+    if (
+      point === 'after_continuation_claim_insert' &&
+      mode === 'inside_workspace_continuation_claim'
+    ) {
+      blockUntilKilled();
+    }
   };
   const store = createSqliteRuntimeStore(dbPath, { failpoint });
   if (
@@ -302,7 +341,9 @@ async function runCrashChild(mode: string): Promise<void> {
     mode === 'after_workspace_baseline_commit' ||
     mode === 'after_workspace_mutation_t1' ||
     mode === 'inside_workspace_successor' ||
-    mode === 'after_workspace_successor_commit'
+    mode === 'after_workspace_successor_commit' ||
+    mode === 'inside_workspace_continuation_claim' ||
+    mode === 'after_workspace_continuation_claim_commit'
   ) {
     bindWorkspaceBaselineAuthorityStoreRootInternal(store, 'a'.repeat(64));
     await commitWorkspaceBaselineInternal(store, workspaceBaselineInput());
@@ -315,6 +356,14 @@ async function runCrashChild(mode: string): Promise<void> {
       await store.commitToolPrepared(workspaceSuccessorPreparedCommit());
       await commitWorkspaceSuccessorInternal(store, workspaceSuccessorCommit());
       if (mode === 'after_workspace_successor_commit') blockUntilKilled();
+    }
+    if (
+      mode === 'inside_workspace_continuation_claim' ||
+      mode === 'after_workspace_continuation_claim_commit'
+    ) {
+      await persistWorkspaceContinuationSource(store);
+      await store.claimWorkspaceBoundContinuation({ claim: workspaceBoundContinuationClaim() });
+      if (mode === 'after_workspace_continuation_claim_commit') blockUntilKilled();
     }
     throw new Error(`Workspace baseline crash mode ${mode} missed its failpoint`);
   }
@@ -386,6 +435,118 @@ function workspaceBaselineInput(): WorkspaceBaselineAuthorityInput {
       deletedFileCount: 0,
     },
   };
+}
+
+function workspaceBoundContinuationClaim(): ContinuationClaimV2 {
+  const prefix = workspaceContinuationSourcePrefix();
+  const boundary = createRuntimeBoundaryCursor([runtimePrefixSegment(prefix)]);
+  const workspaceBoundary = {
+    protocol: 'managed_workspace_continuation_boundary_v1' as const,
+    storageRootId: 'a'.repeat(64),
+    repositoryId: `repository_${'1'.repeat(32)}`,
+    workspaceId: `workspace_${'2'.repeat(32)}`,
+    workspaceEpochId: `epoch_${'3'.repeat(32)}`,
+    workspaceInstanceId: `instance_${'4'.repeat(32)}`,
+    workspaceVersionId: `version_${'5'.repeat(32)}`,
+    acceptedEventId: 'workspace-version-event-1',
+    revision: 1,
+    objectFormat: 'sha1' as const,
+    commitOid: '5'.repeat(40),
+    treeOid: '2'.repeat(40),
+    materializationProfileDigest: `sha256:${'3'.repeat(64)}` as const,
+    policyHash: `sha256:${'4'.repeat(64)}` as const,
+    executionProfileDigest: null,
+  };
+  const boundaryDigest = digestWorkspaceBoundContinuationBoundary(boundary, workspaceBoundary);
+  const source = boundary.segments[0];
+  const target = {
+    sessionId: 'continuation-session',
+    invocationId: 'continuation-target-invocation',
+    runId: 'continuation-target-run',
+    turnId: 'continuation-target-turn',
+  };
+  return {
+    protocol: 'continuation_claim_v2',
+    claimId: 'workspace-continuation-claim',
+    boundaryDigest,
+    boundary,
+    workspaceBoundary,
+    providerProjectionVersion: 1,
+    providerReplayDigest: `sha256:${'e'.repeat(64)}`,
+    target,
+    targetRunHeader: {
+      ...target,
+      status: 'created',
+      backendKind: 'fake',
+      llmConnectionSlug: 'connection-1',
+      modelId: 'model-1',
+      cwd: '/workspace/repo',
+      permissionMode: 'ask',
+      collaborationMode: 'agent',
+      orchestrationMode: 'default',
+      orchestrationSource: 'session',
+      agentSwarmAuthorization: 'none',
+      createdAt: 1_700_000_000_010,
+      updatedAt: 1_700_000_000_010,
+      parentRunId: source.identity.runId,
+      parentTurnId: source.identity.turnId,
+      continuationSource: {
+        protocol: 'continuation_source_v3',
+        claimId: 'workspace-continuation-claim',
+        boundaryDigest,
+        sourceInvocationId: source.identity.invocationId,
+        sourceRunId: source.identity.runId,
+        sourceTurnId: source.identity.turnId,
+        sourceRuntimeEventHighWater: source.position.lastEventSeq,
+        sourcePrefixDigest: source.prefixDigest,
+        replayManifestDigest: boundary.manifestDigest,
+      },
+    },
+    claimedAt: 1_700_000_000_010,
+  };
+}
+
+function workspaceContinuationSourcePrefix() {
+  const identity = {
+    sessionId: 'continuation-session',
+    invocationId: 'continuation-source-invocation',
+    runId: 'continuation-source-run',
+    turnId: 'continuation-source-turn',
+  };
+  const events: RuntimeEvent[] = [
+    {
+      id: 'continuation-source-user',
+      ...identity,
+      ts: 1_700_000_000_003,
+      partial: false,
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text: 'continue after the accepted workspace head' },
+    },
+    {
+      id: 'continuation-source-terminal',
+      ...identity,
+      ts: 1_700_000_000_004,
+      partial: false,
+      role: 'system',
+      author: 'system',
+      status: 'failed',
+      actions: { endInvocation: true },
+    },
+  ];
+  return buildImmutableRuntimePrefix(
+    identity,
+    events.map((event, index) => ({ eventSeq: index + 1, event })),
+  );
+}
+
+async function persistWorkspaceContinuationSource(
+  store: ReturnType<typeof createSqliteRuntimeStore>,
+): Promise<void> {
+  const prefix = workspaceContinuationSourcePrefix();
+  for (const event of prefix.events) {
+    await store.appendRuntimeEvent(event.sessionId, event.runId, event);
+  }
 }
 
 function workspaceSuccessorPreparedCommit(operationId = 'workspace-successor-operation') {

@@ -19,11 +19,14 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_RUNTIME_SCHEMA_VERSION = 14;
+export const SQLITE_RUNTIME_SCHEMA_VERSION = 15;
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY = 'runtime_recovery_authority';
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY_VERSION = 1;
 export const RUNTIME_CONTINUATION_AUTHORITY_CAPABILITY = 'runtime_continuation_authority';
 export const RUNTIME_CONTINUATION_AUTHORITY_CAPABILITY_VERSION = 1;
+export const RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY =
+  'runtime_workspace_bound_continuation_authority';
+export const RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY_VERSION = 1;
 export const RUNTIME_WORKSPACE_VERSION_AUTHORITY_CAPABILITY = 'runtime_workspace_version_authority';
 export const RUNTIME_WORKSPACE_VERSION_AUTHORITY_CAPABILITY_VERSION = 1;
 const SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS = 5_000;
@@ -441,6 +444,102 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
       FOREIGN KEY (workspace_id, workspace_epoch_id)
         REFERENCES runtime_workspace_epochs(workspace_id, workspace_epoch_id)
     );
+    `,
+  ],
+  [
+    15,
+    `
+    ALTER TABLE runtime_continuation_claims
+      RENAME TO runtime_continuation_claims_v14;
+
+    CREATE TABLE runtime_continuation_claims (
+      claim_id TEXT PRIMARY KEY,
+      source_session_id TEXT NOT NULL,
+      source_invocation_id TEXT NOT NULL,
+      source_run_id TEXT NOT NULL,
+      source_turn_id TEXT NOT NULL,
+      source_event_high_water INTEGER NOT NULL CHECK (source_event_high_water > 0),
+      source_prefix_digest TEXT NOT NULL,
+      boundary_digest TEXT NOT NULL UNIQUE,
+      boundary_json TEXT NOT NULL,
+      workspace_boundary_json TEXT,
+      provider_projection_version INTEGER NOT NULL CHECK (provider_projection_version = 1),
+      provider_replay_digest TEXT NOT NULL,
+      target_session_id TEXT NOT NULL,
+      target_invocation_id TEXT NOT NULL UNIQUE,
+      target_run_id TEXT NOT NULL UNIQUE,
+      target_turn_id TEXT NOT NULL,
+      target_run_header_json TEXT NOT NULL,
+      claimed_at INTEGER NOT NULL,
+      start_event_id TEXT UNIQUE REFERENCES runtime_events(event_id),
+      start_kind TEXT CHECK (
+        start_kind IS NULL OR start_kind IN ('runtime_admission', 'claim_repair')
+      ),
+      protocol_version INTEGER NOT NULL CHECK (protocol_version IN (1, 2)),
+      UNIQUE (
+        source_session_id,
+        source_run_id,
+        source_event_high_water,
+        source_prefix_digest
+      ),
+      UNIQUE (target_session_id, target_turn_id),
+      CHECK (
+        (protocol_version = 1 AND workspace_boundary_json IS NULL)
+        OR (protocol_version = 2 AND workspace_boundary_json IS NOT NULL)
+      )
+    );
+
+    INSERT INTO runtime_continuation_claims (
+      claim_id,
+      source_session_id,
+      source_invocation_id,
+      source_run_id,
+      source_turn_id,
+      source_event_high_water,
+      source_prefix_digest,
+      boundary_digest,
+      boundary_json,
+      workspace_boundary_json,
+      provider_projection_version,
+      provider_replay_digest,
+      target_session_id,
+      target_invocation_id,
+      target_run_id,
+      target_turn_id,
+      target_run_header_json,
+      claimed_at,
+      start_event_id,
+      start_kind,
+      protocol_version
+    )
+    SELECT
+      claim_id,
+      source_session_id,
+      source_invocation_id,
+      source_run_id,
+      source_turn_id,
+      source_event_high_water,
+      source_prefix_digest,
+      boundary_digest,
+      boundary_json,
+      NULL,
+      provider_projection_version,
+      provider_replay_digest,
+      target_session_id,
+      target_invocation_id,
+      target_run_id,
+      target_turn_id,
+      target_run_header_json,
+      claimed_at,
+      start_event_id,
+      start_kind,
+      protocol_version
+    FROM runtime_continuation_claims_v14;
+
+    DROP TABLE runtime_continuation_claims_v14;
+
+    INSERT INTO runtime_capabilities(capability, version)
+      VALUES ('runtime_workspace_bound_continuation_authority', 1);
     `,
   ],
 ]);
