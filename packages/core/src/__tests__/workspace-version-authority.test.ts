@@ -22,10 +22,12 @@ import { describe, it } from 'node:test';
 import { decodeRuntimeEvent, type RuntimeEvent } from '../runtime-event.js';
 import {
   buildWorkspaceBaselineAuthorityEvents,
+  buildWorkspaceSuccessorAuthorityEvent,
   scanWorkspaceBaselineAuthority,
   validateWorkspaceFactEventLane,
   workspaceAuthorityIdentity,
   type WorkspaceBaselineAuthorityInput,
+  type WorkspaceSuccessorAuthorityInput,
 } from '../workspace-version-authority.js';
 
 describe('workspace version authority contract', () => {
@@ -191,7 +193,64 @@ describe('workspace version authority contract', () => {
     assert.equal(orphan.hasCorruption, true);
     assert.equal(orphan.issues[0]?.code, 'orphan_baseline_version');
   });
+
+  it('advances one canonical head through a causal successor fact', () => {
+    const baseline = buildWorkspaceBaselineAuthorityEvents(baselineInput());
+    const successor = buildWorkspaceSuccessorAuthorityEvent(successorInput());
+    assert.deepEqual(decodeRuntimeEvent(successor), successor);
+
+    const scan = scanWorkspaceBaselineAuthority([
+      { event: baseline.epochOpenedEvent, eventSeq: 1 },
+      { event: baseline.baselineAcceptedEvent, eventSeq: 2 },
+      { event: successor, eventSeq: 3 },
+    ]);
+
+    assert.equal(scan.hasCorruption, false);
+    assert.equal(scan.successors.length, 1);
+    assert.deepEqual(scan.heads, [
+      {
+        repositoryId: baselineInput().epoch.repositoryId,
+        workspaceId: baselineInput().epoch.workspaceId,
+        workspaceEpochId: baselineInput().epoch.workspaceEpochId,
+        workspaceVersionId: successorInput().successor.workspaceVersionId,
+        acceptedEventId: successorInput().acceptedEventId,
+        commitOid: successorInput().successor.commitOid,
+        treeOid: successorInput().successor.treeOid,
+        revision: 2,
+      },
+    ]);
+  });
 });
+
+function successorInput(): WorkspaceSuccessorAuthorityInput {
+  const baseline = baselineInput();
+  return {
+    acceptedEventId: 'workspace-successor-event-1',
+    committedAt: baseline.committedAt + 1,
+    successor: {
+      repositoryId: baseline.epoch.repositoryId,
+      workspaceId: baseline.epoch.workspaceId,
+      workspaceEpochId: baseline.epoch.workspaceEpochId,
+      workspaceVersionId: 'version_77777777777777777777777777777777',
+      objectFormat: baseline.epoch.objectFormat,
+      parentWorkspaceVersionId: baseline.baseline.workspaceVersionId,
+      baseAcceptedEventId: baseline.baselineAcceptedEventId,
+      baseHeadRevision: 1,
+      commitOid: '7'.repeat(40),
+      treeOid: '8'.repeat(40),
+      policyHash: baseline.epoch.policyHash,
+      treeDeltaDigest: `sha256:${'9'.repeat(64)}`,
+      changedFileCount: 1,
+      deletedFileCount: 0,
+      executionProfileDigest: `sha256:${'a'.repeat(64)}`,
+    },
+    origin: {
+      operationId: 'operation-successor-1',
+      dispatchEventId: 'dispatch-successor-1',
+      outcomeEventId: 'outcome-successor-1',
+    },
+  };
+}
 
 function baselineInput(
   overrides: Partial<WorkspaceBaselineAuthorityInput> = {},

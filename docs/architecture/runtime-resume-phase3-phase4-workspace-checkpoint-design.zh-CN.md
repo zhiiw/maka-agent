@@ -611,6 +611,20 @@ M1.1 合同见
 这一步取代旧的“先做通用 checkpoint contract，再接 observe-only Git carrier”。不得同时维护两套
 managed workspace version writer。
 
+M2 按 owner 与原子边界拆成四个 stacked slices：
+
+1. **M2.1 mutation version persistence authority（当前切片）**：定义 successor fact/scanner，并在一个
+   SQLite transaction 中原子提交 T2、`version_accepted`、version projection 和 head CAS；schema 13
+   从 populated schema 12 保留 baseline/head；不接真实 Write/Edit；
+2. **M2.2 Git mutation candidate owner**：唯一拥有 operation-bound candidate ref/commit、delta/path
+   policy、artifact receipt 与 orphan GC；不写 T2；
+3. **M2.3 mutation execution admission**：T1 前冻结 base head、execution profile、operation identity 与
+   candidate lease；T1 后禁止 silent fallback；
+4. **M2.4 Write/Edit production composition**：把 owner-bound worker、candidate capture 与 M2.1 bundle
+   串成唯一生产路径，并用真实 Host kill/reopen crash test 完成前三片的生产消费者。
+
+M2.2/M2.3 在 M2.4 消费者存在前保持 Draft。M2.4 不绑定 continuation boundary；该能力仍属于 M3。
+
 ### M3 — Workspace-bound continuation / resume
 
 Continuation boundary 同时绑定 immutable RuntimeEvent cursor 与 accepted workspace version/epoch：
@@ -646,9 +660,12 @@ M0.1 Git artifact owner (merged)
        └─> M1.1 execution scope admission (current)
             └─> M1.2 runtime-host composition
                  └─> M1.3 explicit environment provisioning
-                      └─> M2 mutation version acceptance
-                           └─> M3 workspace-bound continuation
-                                └─> M4 restore / rebaseline / publish / replication
+                      └─> M2.1 mutation version persistence authority
+                           └─> M2.2 Git mutation candidate owner
+                                └─> M2.3 mutation execution admission
+                                     └─> M2.4 Write/Edit production composition
+                                          └─> M3 workspace-bound continuation
+                                               └─> M4 restore / rebaseline / publish / replication
 
 Independent maintenance gates before broad production enablement:
   - legacy non-empty DB root-binding adoption
