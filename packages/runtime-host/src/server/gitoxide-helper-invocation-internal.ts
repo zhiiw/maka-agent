@@ -46,6 +46,9 @@ const HELPER_ERROR_REASONS = new Set([
   'baseline_commit_write_failed',
   'baseline_publish_failed',
   'baseline_ref_outside_maka_namespace',
+  'candidate_publish_failed',
+  'candidate_ref_outside_candidate_namespace',
+  'candidate_ref_unavailable',
   'base_commit_unavailable',
   'base_path_lookup_failed',
   'base_tree_unavailable',
@@ -307,6 +310,68 @@ export async function createSuccessorWithGitoxideHelperInternal(input: {
       repositoryPath,
       expectedBaseCommitOid: input.expectedBaseCommitOid,
       targetRef: input.targetRef,
+      path: input.path,
+      content: input.content,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) {
+    throw new GitoxideHelperInvocationError(
+      'gitoxide_helper_invocation_invalid',
+      'Gitoxide helper request exceeds its byte limit',
+    );
+  }
+  const outcome = await invokeHelper({
+    executablePath: artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+  });
+  return decodeSuccessorOutcome(outcome);
+}
+
+export async function prepareCandidateWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly expectedBaseCommitOid: string;
+  readonly acceptedRef: string;
+  readonly candidateRef: string;
+  readonly path: string;
+  readonly content: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideSuccessorResultV1> {
+  throwIfAborted(input.abortSignal);
+  if (
+    !isAbsolute(input.repositoryPath) ||
+    !SHA1_OID_PATTERN.test(input.expectedBaseCommitOid) ||
+    !MAKA_REF_PATTERN.test(input.acceptedRef) ||
+    !isCandidateRef(input.candidateRef) ||
+    input.candidateRef === input.acceptedRef ||
+    !isCanonicalSuccessorPath(input.path) ||
+    Buffer.byteLength(input.content) > MAX_SUCCESSOR_CONTENT_BYTES
+  ) {
+    throw new GitoxideHelperInvocationError(
+      'gitoxide_helper_invocation_invalid',
+      'Gitoxide candidate request is invalid',
+    );
+  }
+  const [artifact, repositoryPath] = await Promise.all([
+    verifyGitoxideHelperArtifactForInvocationInternal(input.invocationOwnerToken, input.capability),
+    realpath(input.repositoryPath).catch((error) => {
+      throw new GitoxideHelperInvocationError(
+        'gitoxide_helper_invocation_invalid',
+        `Gitoxide managed repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }),
+  ]);
+  throwIfAborted(input.abortSignal);
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: artifact.protocolVersion,
+      operation: 'prepare_candidate',
+      repositoryPath,
+      expectedBaseCommitOid: input.expectedBaseCommitOid,
+      acceptedRef: input.acceptedRef,
+      candidateRef: input.candidateRef,
       path: input.path,
       content: input.content,
     }),
@@ -713,6 +778,10 @@ function isCanonicalSuccessorPath(path: string): boolean {
           component.toLowerCase() !== '.git',
       )
   );
+}
+
+function isCandidateRef(ref: string): boolean {
+  return MAKA_REF_PATTERN.test(ref) && ref.startsWith('refs/maka/candidates/');
 }
 
 function helperEnvironment(): NodeJS.ProcessEnv {

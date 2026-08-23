@@ -224,6 +224,60 @@ fn publishes_and_exactly_retries_a_successor_from_the_current_ref() {
 }
 
 #[test]
+fn prepares_and_exactly_retries_a_candidate_without_advancing_the_accepted_ref() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("managed.git");
+    let imported = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "import_source_head",
+        "sourceRepositoryPath": fixture.root,
+        "expectedSourceHeadCommitOid": source_head,
+        "destinationRepositoryPath": destination,
+        "baselineRef": "refs/maka/accepted",
+    }));
+    assert!(imported.status.success());
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let baseline = imported["baselineCommitOid"].as_str().unwrap();
+    let request = serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "prepare_candidate",
+        "repositoryPath": destination,
+        "expectedBaseCommitOid": baseline,
+        "acceptedRef": "refs/maka/accepted",
+        "candidateRef": "refs/maka/candidates/operation-1",
+        "path": "docs/hello.txt",
+        "content": "candidate content\n",
+    });
+
+    let first = invoke_request(request.clone());
+    assert!(first.status.success());
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["kind"], "successor_published");
+    assert_eq!(first["baseCommitOid"], baseline);
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/accepted"]),
+        baseline
+    );
+    assert_eq!(
+        git_bare_output(
+            &destination,
+            ["rev-parse", "refs/maka/candidates/operation-1"]
+        ),
+        first["successorCommitOid"].as_str().unwrap()
+    );
+
+    let retry = invoke_request(request);
+    assert!(retry.status.success());
+    let retry: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
+    assert_eq!(retry, first);
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/accepted"]),
+        baseline
+    );
+}
+
+#[test]
 fn rejects_a_successor_when_the_target_ref_no_longer_matches_the_base() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let source_head = fixture.git_output(["rev-parse", "HEAD"]);

@@ -72,6 +72,15 @@ enum Request {
         path: String,
         content: String,
     },
+    PrepareCandidate {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        expected_base_commit_oid: String,
+        accepted_ref: String,
+        candidate_ref: String,
+        path: String,
+        content: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -181,6 +190,25 @@ fn run() -> Result<ExitCode, &'static str> {
                 repository_path,
                 expected_base_commit_oid,
                 target_ref,
+                path,
+                content,
+            )
+        }
+        Request::PrepareCandidate {
+            protocol_version,
+            repository_path,
+            expected_base_commit_oid,
+            accepted_ref,
+            candidate_ref,
+            path,
+            content,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            prepare_candidate(
+                repository_path,
+                expected_base_commit_oid,
+                accepted_ref,
+                candidate_ref,
                 path,
                 content,
             )
@@ -418,6 +446,73 @@ fn copy_source_tree(
         return Err("source_tree_identity_mismatch");
     }
     Ok(())
+}
+
+fn prepare_candidate(
+    repository_path: PathBuf,
+    expected_base_commit_oid: String,
+    accepted_ref: String,
+    candidate_ref: String,
+    path: String,
+    content: String,
+) -> Result<ExitCode, &'static str> {
+    if !accepted_ref.starts_with("refs/maka/") {
+        return Err("target_ref_outside_maka_namespace");
+    }
+    if !candidate_ref.starts_with("refs/maka/candidates/") || candidate_ref == accepted_ref {
+        return Err("candidate_ref_outside_candidate_namespace");
+    }
+    let repository = open_repository(repository_path.clone())?;
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let expected_base = gix::hash::ObjectId::from_hex(expected_base_commit_oid.as_bytes())
+        .map_err(|_| "invalid_base_commit_oid")?;
+    if expected_base.kind() != gix::hash::Kind::Sha1 {
+        return Err("invalid_base_commit_oid");
+    }
+    let accepted = repository
+        .find_reference(accepted_ref.as_str())
+        .map_err(|_| "target_ref_unavailable")?
+        .into_fully_peeled_id()
+        .map_err(|_| "target_ref_unavailable")?
+        .detach();
+    if accepted != expected_base {
+        write_response(&Response::SuccessorRejected {
+            protocol_version: PROTOCOL_VERSION,
+            reason: "base_commit_mismatch",
+            object_format: "sha1",
+            expected_base_commit_oid,
+            actual_base_commit_oid: accepted.to_string(),
+            target_ref: accepted_ref,
+        });
+        return Ok(ExitCode::from(3));
+    }
+    let candidate_exists = repository
+        .try_find_reference(candidate_ref.as_str())
+        .map_err(|_| "candidate_ref_unavailable")?
+        .is_some();
+    if !candidate_exists {
+        let publication = repository
+            .reference(
+                candidate_ref.as_str(),
+                expected_base,
+                gix::refs::transaction::PreviousValue::MustNotExist,
+                "maka managed workspace candidate base",
+            );
+        if publication.is_err() {
+            repository
+                .find_reference(candidate_ref.as_str())
+                .map_err(|_| "candidate_publish_failed")?;
+        }
+    }
+    create_successor(
+        repository_path,
+        expected_base_commit_oid,
+        candidate_ref,
+        path,
+        content,
+    )
 }
 
 fn create_successor(

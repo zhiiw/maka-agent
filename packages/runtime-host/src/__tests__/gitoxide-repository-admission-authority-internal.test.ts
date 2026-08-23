@@ -34,7 +34,9 @@ import {
   createGitoxideSuccessorInternal,
   GitoxideRepositoryAdmissionAuthorityError,
   importAdmittedGitoxideRepositoryInternal,
+  prepareGitoxideMutationCandidateInternal,
   requireGitoxideRepositoryAdmissionInternal,
+  requireGitoxideMutationCandidateInternal,
 } from '../server/gitoxide-repository-admission-authority-internal.js';
 
 interface AdmittedHelper {
@@ -262,6 +264,90 @@ test('binds successor publication to the imported repository capability and exac
     (error) =>
       error instanceof GitoxideRepositoryAdmissionAuthorityError &&
       error.code === 'gitoxide_repository_admission_capability_invalid',
+  );
+});
+
+test('prepares an owner-bound candidate without advancing the accepted ref', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the real helper contract test');
+    return;
+  }
+  const repositoryPath = await createRepository(t, 'sha1');
+  await writeFile(join(repositoryPath, 'hello.txt'), 'candidate base\n');
+  git(repositoryPath, ['add', 'hello.txt']);
+  git(repositoryPath, [
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=maka@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'fixture',
+  ]);
+  const admissionOwnerToken = {};
+  const managedRepositoryOwnerToken = {};
+  const candidateOwnerToken = {};
+  const admitted = await admitGitoxideRepositoryInternal({
+    ...helper,
+    admissionOwnerToken,
+    repositoryPath,
+  });
+  assert.equal(admitted.kind, 'accepted');
+  if (admitted.kind !== 'accepted') return;
+  const destinationRepositoryPath = join(repositoryPath, 'candidate.git');
+  const imported = await importAdmittedGitoxideRepositoryInternal({
+    ...helper,
+    admissionOwnerToken,
+    repositoryCapability: admitted.capability,
+    managedRepositoryOwnerToken,
+    destinationRepositoryPath,
+    baselineRef: 'refs/maka/accepted',
+  });
+
+  const candidate = await prepareGitoxideMutationCandidateInternal({
+    ...helper,
+    managedRepositoryOwnerToken,
+    managedRepositoryCapability: imported.managedRepositoryCapability,
+    candidateOwnerToken,
+    operationId: 'operation-1',
+    path: 'docs/result.txt',
+    content: 'candidate result\n',
+  });
+
+  assert.equal(
+    gitBare(destinationRepositoryPath, ['rev-parse', 'refs/maka/accepted']),
+    imported.baselineCommitOid,
+  );
+  assert.equal(
+    gitBare(destinationRepositoryPath, ['rev-parse', candidate.candidateRef]),
+    candidate.successorCommitOid,
+  );
+  const proof = requireGitoxideMutationCandidateInternal(
+    candidateOwnerToken,
+    candidate.candidateCapability,
+  );
+  assert.equal(proof.baseCommitOid, imported.baselineCommitOid);
+  assert.equal(proof.candidateCommitOid, candidate.successorCommitOid);
+  assert.equal(proof.path, 'docs/result.txt');
+
+  const exactRetry = await prepareGitoxideMutationCandidateInternal({
+    ...helper,
+    managedRepositoryOwnerToken,
+    managedRepositoryCapability: imported.managedRepositoryCapability,
+    candidateOwnerToken,
+    operationId: 'operation-1',
+    path: 'docs/result.txt',
+    content: 'candidate result\n',
+  });
+  assert.equal(exactRetry.successorCommitOid, candidate.successorCommitOid);
+  assert.equal(exactRetry.candidateRef, candidate.candidateRef);
+  await assert.rejects(
+    async () => requireGitoxideMutationCandidateInternal({}, candidate.candidateCapability),
+    (error) =>
+      error instanceof GitoxideRepositoryAdmissionAuthorityError &&
+      error.code === 'gitoxide_mutation_candidate_capability_invalid',
   );
 });
 
