@@ -808,6 +808,7 @@ async function prepareSuccessorCommit(
           treeOid: treeDigit.repeat(40),
           policyHash: baseline.epoch.policyHash,
           treeDeltaDigest: `sha256:${'9'.repeat(64)}`,
+          changedPaths: ['notes.txt'],
           changedFileCount: 1,
           deletedFileCount: 0,
           executionProfileDigest: `sha256:${'a'.repeat(64)}`,

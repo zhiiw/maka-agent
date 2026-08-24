@@ -198,6 +198,11 @@ describe('workspace version authority contract', () => {
     const baseline = buildWorkspaceBaselineAuthorityEvents(baselineInput());
     const successor = buildWorkspaceSuccessorAuthorityEvent(successorInput());
     assert.deepEqual(decodeRuntimeEvent(successor), successor);
+    const missingChangedPaths = structuredClone(successor) as unknown as {
+      actions: { workspaceFact: { payload: Record<string, unknown> } };
+    };
+    delete missingChangedPaths.actions.workspaceFact.payload.changedPaths;
+    assert.throws(() => decodeRuntimeEvent(missingChangedPaths), /Invalid RuntimeEvent schema/);
 
     const scan = scanWorkspaceBaselineAuthority([
       { event: baseline.epochOpenedEvent, eventSeq: 1 },
@@ -207,6 +212,7 @@ describe('workspace version authority contract', () => {
 
     assert.equal(scan.hasCorruption, false);
     assert.equal(scan.successors.length, 1);
+    assert.deepEqual(scan.successors[0]?.successor.changedPaths, ['notes.txt']);
     assert.deepEqual(scan.heads, [
       {
         repositoryId: baselineInput().epoch.repositoryId,
@@ -240,6 +246,7 @@ function successorInput(): WorkspaceSuccessorAuthorityInput {
       treeOid: '8'.repeat(40),
       policyHash: baseline.epoch.policyHash,
       treeDeltaDigest: `sha256:${'9'.repeat(64)}`,
+      changedPaths: ['notes.txt'],
       changedFileCount: 1,
       deletedFileCount: 0,
       executionProfileDigest: `sha256:${'a'.repeat(64)}`,

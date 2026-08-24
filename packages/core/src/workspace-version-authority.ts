@@ -86,6 +86,7 @@ export interface WorkspaceSuccessorDescriptorV1 {
   treeOid: string;
   policyHash: `sha256:${string}`;
   treeDeltaDigest: `sha256:${string}`;
+  changedPaths: readonly string[];
   changedFileCount: number;
   deletedFileCount: number;
   executionProfileDigest: `sha256:${string}`;
@@ -112,6 +113,7 @@ export interface WorkspaceVersionAcceptedV1 {
   treeOid: string;
   policyHash: `sha256:${string}`;
   treeDeltaDigest: `sha256:${string}`;
+  changedPaths: readonly string[];
   changedFileCount: number;
   deletedFileCount: number;
   executionProfileDigest: `sha256:${string}`;
@@ -359,6 +361,7 @@ export function buildWorkspaceSuccessorAuthorityEvent(
     treeOid: input.successor.treeOid,
     policyHash: input.successor.policyHash,
     treeDeltaDigest: input.successor.treeDeltaDigest,
+    changedPaths: input.successor.changedPaths,
     changedFileCount: input.successor.changedFileCount,
     deletedFileCount: input.successor.deletedFileCount,
     executionProfileDigest: input.successor.executionProfileDigest,
@@ -842,6 +845,7 @@ function isWorkspaceVersionAcceptedV1(value: unknown): value is WorkspaceVersion
       'treeOid',
       'policyHash',
       'treeDeltaDigest',
+      'changedPaths',
       'changedFileCount',
       'deletedFileCount',
       'executionProfileDigest',
@@ -879,10 +883,39 @@ function isWorkspaceSuccessorDescriptor(value: unknown): value is WorkspaceSucce
     isGitOid(value.treeOid, value.objectFormat) &&
     isSha256Digest(value.policyHash) &&
     isSha256Digest(value.treeDeltaDigest) &&
+    isCanonicalManagedMutationPathSet(value.changedPaths) &&
     isNonNegativeSafeInteger(value.changedFileCount) &&
+    value.changedFileCount === value.changedPaths.length &&
     isNonNegativeSafeInteger(value.deletedFileCount) &&
     isSha256Digest(value.executionProfileDigest)
   );
+}
+
+function isCanonicalManagedMutationPathSet(value: unknown): value is readonly string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 32) return false;
+  if (!value.every(isCanonicalManagedMutationPathV1)) return false;
+  return value.every((path, index) => index === 0 || value[index - 1]! < path);
+}
+
+function isCanonicalManagedMutationPathV1(path: unknown): path is string {
+  if (
+    typeof path !== 'string' ||
+    path.length === 0 ||
+    path.length > 4096 ||
+    path.includes('\\') ||
+    path.includes('\0') ||
+    path.includes(':') ||
+    path.startsWith('/') ||
+    path.endsWith('/')
+  ) {
+    return false;
+  }
+  const segments = path.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    return false;
+  }
+  const firstSegment = segments[0]!.toLowerCase();
+  return firstSegment !== '.git' && firstSegment !== 'node_modules';
 }
 
 function isWorkspaceMutationOrigin(value: unknown): value is WorkspaceMutationOriginV1 {
