@@ -44,9 +44,6 @@ const MANAGED_TREE_POLICY_V1: ManagedTreePolicy = ManagedTreePolicy {
     max_file_bytes: MAX_IMPORT_FILE_BYTES,
     max_bytes: MAX_IMPORT_BYTES,
 };
-const MAX_PROJECTION_FILE_BYTES: u64 = MAX_IMPORT_FILE_BYTES;
-const MAX_PROJECTION_BYTES: u64 = MAX_IMPORT_BYTES;
-const MAX_PROJECTION_FILES: u64 = MAX_IMPORT_FILES;
 
 #[derive(Deserialize)]
 #[serde(
@@ -718,6 +715,7 @@ fn materialize_projection(
     let repository = open_repository(repository_path)?;
     let (accepted_commit, accepted_tree) =
         accepted_commit_identity(&repository, &accepted_commit_oid)?;
+    validate_managed_tree(&repository, accepted_tree, MANAGED_TREE_POLICY_V1)?;
 
     let stats = match fs::create_dir(&destination_path) {
         Ok(()) => {
@@ -808,19 +806,19 @@ fn materialize_tree(
                     .header()
                     .map_err(|_| "projection_blob_unavailable")?;
                 if header.kind() != gix::objs::Kind::Blob
-                    || header.size() > MAX_PROJECTION_FILE_BYTES
+                    || header.size() > MANAGED_TREE_POLICY_V1.max_file_bytes
                 {
                     return Err("projection_file_limit_exceeded");
                 }
                 stats.files = stats
                     .files
                     .checked_add(1)
-                    .filter(|count| *count <= MAX_PROJECTION_FILES)
+                    .filter(|count| *count <= MANAGED_TREE_POLICY_V1.max_files)
                     .ok_or("projection_file_limit_exceeded")?;
                 stats.bytes = stats
                     .bytes
                     .checked_add(header.size())
-                    .filter(|bytes| *bytes <= MAX_PROJECTION_BYTES)
+                    .filter(|bytes| *bytes <= MANAGED_TREE_POLICY_V1.max_bytes)
                     .ok_or("projection_byte_limit_exceeded")?;
                 let blob = entry
                     .object()
@@ -862,6 +860,7 @@ fn observe_projection(
     let repository = open_repository(repository_path)?;
     let (accepted_commit, accepted_tree) =
         accepted_commit_identity(&repository, &accepted_commit_oid)?;
+    validate_managed_tree(&repository, accepted_tree, MANAGED_TREE_POLICY_V1)?;
     match inspect_projection(&repository, accepted_tree, &projection_path) {
         Ok(stats) => {
             write_response(&Response::ProjectionObserved {
@@ -987,7 +986,7 @@ fn observe_expected_blob(
         path: relative_path.to_owned(),
     })?;
     if header.kind() != gix::objs::Kind::Blob
-        || header.size() > MAX_PROJECTION_FILE_BYTES
+        || header.size() > MANAGED_TREE_POLICY_V1.max_file_bytes
         || metadata.len() != header.size()
     {
         return Err(ProjectionDrift {
@@ -998,7 +997,7 @@ fn observe_expected_blob(
     stats.files = stats
         .files
         .checked_add(1)
-        .filter(|count| *count <= MAX_PROJECTION_FILES)
+        .filter(|count| *count <= MANAGED_TREE_POLICY_V1.max_files)
         .ok_or_else(|| ProjectionDrift {
             reason: "projection_file_limit_exceeded",
             path: relative_path.to_owned(),
@@ -1006,7 +1005,7 @@ fn observe_expected_blob(
     stats.bytes = stats
         .bytes
         .checked_add(header.size())
-        .filter(|bytes| *bytes <= MAX_PROJECTION_BYTES)
+        .filter(|bytes| *bytes <= MANAGED_TREE_POLICY_V1.max_bytes)
         .ok_or_else(|| ProjectionDrift {
             reason: "projection_byte_limit_exceeded",
             path: relative_path.to_owned(),
