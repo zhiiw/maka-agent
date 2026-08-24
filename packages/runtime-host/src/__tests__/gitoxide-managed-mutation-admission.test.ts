@@ -21,15 +21,158 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
+import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import type {
   WorkspaceHeadRecordV1,
   WorkspaceVersionRecordV1,
 } from '@maka/core/workspace-version-authority';
 import {
   createGitoxideManagedMutationAdmissionInternal,
+  reconcilePreparedGitoxideManagedMutationInternal,
   reconcileGitoxideManagedMutationProjectionInternal,
   type GitoxideManagedMutationSettlementAuthorityInternal,
 } from '../server/gitoxide-managed-mutation-admission.js';
+
+test('reconciles an active T1 from immutable Git and ledger facts without rerunning a tool', async () => {
+  const head = baselineHead();
+  const version = baselineVersion(head);
+  const operationId = 'op-active-t1';
+  const args = { path: 'notes.txt', content: 'recovered\n' };
+  const hash = canonicalToolArgsHash('Write', args);
+  const managedMutation = {
+    protocol: 'managed_mutation_v1' as const,
+    repositoryId: head.repositoryId,
+    workspaceId: head.workspaceId,
+    workspaceEpochId: head.workspaceEpochId,
+    workspaceInstanceId: 'instance_44444444444444444444444444444444',
+    objectFormat: 'sha1' as const,
+    baseWorkspaceVersionId: head.workspaceVersionId,
+    baseAcceptedEventId: head.acceptedEventId,
+    baseHeadRevision: head.revision,
+    baseCommitOid: head.commitOid,
+    baseTreeOid: head.treeOid,
+    expectedPaths: ['notes.txt'],
+    executionProfileDigest:
+      'sha256:992cc9a7a2f7cd32b1062241146727aac11ae111ab81d480c57c5d68ad8f35cc' as const,
+  };
+  const callEvent: RuntimeEvent = {
+    id: `${operationId}_call`,
+    sessionId: 'session-1',
+    invocationId: 'run-1',
+    runId: 'run-1',
+    turnId: 'turn-1',
+    ts: 10,
+    partial: false,
+    role: 'model',
+    author: 'agent',
+    content: { kind: 'function_call', id: 'call-1', name: 'Write', args },
+    refs: { operationId, toolCallId: 'call-1' },
+  };
+  const dispatchEvent: RuntimeEvent = {
+    id: `${operationId}_dispatch`,
+    sessionId: 'session-1',
+    invocationId: 'run-1',
+    runId: 'run-1',
+    turnId: 'turn-1',
+    ts: 10,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      toolDispatch: {
+        protocol: 't1_after_preflight_v1',
+        operationId,
+        providerToolCallId: 'call-1',
+        toolName: 'Write',
+        canonicalArgsHash: hash,
+        recoveryMode: 'reconcile',
+        managedMutation,
+      },
+    },
+    refs: { operationId, toolCallId: 'call-1' },
+  };
+  let successorCommits = 0;
+  let captures = 0;
+  const result = await reconcilePreparedGitoxideManagedMutationInternal({
+    sessionId: 'session-1',
+    reservation: {
+      workspaceInstanceId: managedMutation.workspaceInstanceId,
+      repositoryId: head.repositoryId,
+      workspaceId: head.workspaceId,
+      workspaceEpochId: head.workspaceEpochId,
+      operationId,
+      dispatchEventId: dispatchEvent.id,
+      baseWorkspaceVersionId: head.workspaceVersionId,
+      baseAcceptedEventId: head.acceptedEventId,
+      baseHeadRevision: head.revision,
+      baseCommitOid: head.commitOid,
+      baseTreeOid: head.treeOid,
+      expectedPaths: ['notes.txt'],
+      executionProfileDigest: managedMutation.executionProfileDigest,
+      reservedAt: 10,
+    },
+    operation: {
+      operationId,
+      invocationId: 'run-1',
+      runId: 'run-1',
+      turnId: 'turn-1',
+      providerToolCallId: 'call-1',
+      toolName: 'Write',
+      canonicalArgsHash: hash,
+      recoveryMode: 'reconcile',
+      currentState: 'prepared',
+      callEventId: callEvent.id,
+      dispatchEventId: dispatchEvent.id,
+    },
+    runtimeEvents: [callEvent, dispatchEvent],
+    settlementAuthority: {
+      readHead: async () => head,
+      readVersion: async () => version,
+      commitSuccessor: async (input) => {
+        successorCommits += 1;
+        assert.equal(input.toolOutcome.runtimeEvent.id, `${operationId}_response`);
+        assert.equal(input.toolOutcome.runtimeEvent.content?.kind, 'function_response');
+        return { created: true, outcomeRuntimeEventSeq: 3, head: { ...head, revision: 2 } };
+      },
+      commitTerminal: async () => {
+        throw new Error('changed recovery must commit a successor');
+      },
+    },
+    candidateAuthorityForHead: async () => ({
+      readBaseFile: async () => ({ content: 'baseline\n', blobOid: '5'.repeat(40) }),
+      capture: async (input) => {
+        captures += 1;
+        assert.equal(input.content, 'recovered\n');
+        return {
+          receipt: {
+            repositoryId: head.repositoryId,
+            workspaceId: head.workspaceId,
+            workspaceEpochId: head.workspaceEpochId,
+            workspaceVersionId: head.workspaceVersionId,
+            baseAcceptedEventId: head.acceptedEventId,
+            baseHeadRevision: head.revision,
+            baseCommitOid: head.commitOid,
+            baseTreeOid: head.treeOid,
+            candidateCommitOid: '3'.repeat(40),
+            candidateTreeOid: '4'.repeat(40),
+            resultBlobOid: '6'.repeat(40),
+            path: 'notes.txt',
+            contentSha256: sha256('recovered\n'),
+            executionProfileDigest: managedMutation.executionProfileDigest,
+          },
+        };
+      },
+      promote: async (proof) => proof.receipt,
+      promoteDurable: async () => {
+        throw new Error('not used');
+      },
+    }),
+  });
+
+  assert.equal(result, 'successor_committed');
+  assert.equal(captures, 1);
+  assert.equal(successorCommits, 1);
+});
 
 test('commits the exact Runtime outcome before promoting the Gitoxide candidate', async () => {
   const order: string[] = [];

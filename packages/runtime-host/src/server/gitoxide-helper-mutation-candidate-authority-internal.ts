@@ -32,6 +32,8 @@ import { syncDirectory } from '@maka/storage/stable-storage';
 import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
 import {
   type GitoxideMutationCandidateCapability,
+  materializeGitoxideProjectionInternal,
+  observeGitoxideProjectionInternal,
   prepareGitoxideMutationCandidateInternal,
   readGitoxideTreeFileInternal,
   reopenGitoxideManagedRepositoryInternal,
@@ -108,6 +110,13 @@ export interface GitoxideMutationCandidateAuthorityInternal {
     path: string,
     abortSignal?: AbortSignal,
   ): Promise<{ readonly content: string; readonly blobOid: string } | null>;
+  materializeBaseProjection(
+    destinationPath: string,
+    abortSignal?: AbortSignal,
+  ): Promise<{
+    readonly destinationPath: string;
+    verify(abortSignal?: AbortSignal): Promise<void>;
+  }>;
   capture(input: GitoxideMutationCandidateCaptureInput): Promise<GitoxideMutationCandidateProofV1>;
   validate(proof: GitoxideMutationCandidateProofV1): GitoxideMutationCandidateReceiptV1;
   promote(
@@ -315,6 +324,36 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
         }
         throw error;
       }
+    },
+    async materializeBaseProjection(destinationPath: string, abortSignal?: AbortSignal) {
+      const managedRepositoryCapability = await requireBaseRepositoryCapability();
+      const projectionOwnerToken = {};
+      const projection = await materializeGitoxideProjectionInternal({
+        invocationOwnerToken: input.invocationOwnerToken,
+        helperCapability: input.helperCapability,
+        managedRepositoryOwnerToken,
+        managedRepositoryCapability,
+        projectionOwnerToken,
+        destinationPath,
+        ...(abortSignal ? { abortSignal } : {}),
+      });
+      return Object.freeze({
+        destinationPath: projection.destinationPath,
+        async verify(signal?: AbortSignal) {
+          const observation = await observeGitoxideProjectionInternal({
+            invocationOwnerToken: input.invocationOwnerToken,
+            helperCapability: input.helperCapability,
+            projectionOwnerToken,
+            projectionCapability: projection.projectionCapability,
+            ...(signal ? { abortSignal: signal } : {}),
+          });
+          if (observation.kind !== 'projection_observed') {
+            throw new Error(
+              `Gitoxide projection drifted at ${observation.path}: ${observation.reason}`,
+            );
+          }
+        },
+      });
     },
     capture,
     validate(proof: GitoxideMutationCandidateProofV1) {

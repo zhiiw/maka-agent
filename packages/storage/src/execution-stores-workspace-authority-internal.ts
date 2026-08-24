@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { RuntimeWorkspaceVersionAuthorityStore } from '@maka/core/runtime-event-store';
 import type {
   WorkspaceBaselineAuthorityInput,
@@ -29,11 +30,18 @@ import {
   commitManagedMutationTerminalInternal,
   commitWorkspaceBaselineInternal,
   commitWorkspaceSuccessorInternal,
+  readActiveManagedMutationInternal,
+  type ManagedMutationReservationRecordV1,
   type ManagedMutationTerminalCommitInput,
   type ManagedMutationTerminalCommitResult,
   type WorkspaceSuccessorCommitInput,
   type WorkspaceSuccessorCommitResult,
 } from './workspace-version-authority-internal.js';
+import type { ToolOperationRecord } from './sqlite-runtime-store.js';
+
+interface WorkspaceMutationRecoveryStore extends RuntimeWorkspaceVersionAuthorityStore {
+  readToolOperation(operationId: string): Promise<ToolOperationRecord | undefined>;
+}
 
 export interface ExecutionStoresWorkspaceMutationAuthorityInternal {
   adoptRootForManagedExecution(): void;
@@ -42,6 +50,11 @@ export interface ExecutionStoresWorkspaceMutationAuthorityInternal {
     workspaceEpochId: string,
   ): Promise<WorkspaceHeadRecordV1 | undefined>;
   readVersion(workspaceVersionId: string): Promise<WorkspaceVersionRecordV1 | undefined>;
+  readActiveManagedMutation(
+    workspaceInstanceId: string,
+  ): Promise<ManagedMutationReservationRecordV1 | undefined>;
+  readToolOperation(operationId: string): Promise<ToolOperationRecord | undefined>;
+  readRuntimeEvents(sessionId: string, runId: string): Promise<RuntimeEvent[]>;
   commitBaseline(input: WorkspaceBaselineAuthorityInput): Promise<WorkspaceBaselineCommitResult>;
   commitSuccessor(input: WorkspaceSuccessorCommitInput): Promise<WorkspaceSuccessorCommitResult>;
   commitTerminal(
@@ -50,7 +63,7 @@ export interface ExecutionStoresWorkspaceMutationAuthorityInternal {
 }
 
 interface RegisteredWorkspaceAuthority {
-  readonly authority: RuntimeWorkspaceVersionAuthorityStore;
+  readonly authority: WorkspaceMutationRecoveryStore;
   readonly rootId: string;
 }
 
@@ -58,7 +71,7 @@ const workspaceAuthorities = new WeakMap<object, RegisteredWorkspaceAuthority>()
 
 export function registerExecutionStoresWorkspaceMutationAuthorityInternal(
   stores: object,
-  authority: RuntimeWorkspaceVersionAuthorityStore,
+  authority: WorkspaceMutationRecoveryStore,
   rootId: string,
 ): void {
   if (workspaceAuthorities.has(stores)) {
@@ -79,6 +92,11 @@ export function requireExecutionStoresWorkspaceMutationAuthorityInternal(
     readHead: (workspaceId: string, workspaceEpochId: string) =>
       authority.readWorkspaceHead(workspaceId, workspaceEpochId),
     readVersion: (workspaceVersionId: string) => authority.readWorkspaceVersion(workspaceVersionId),
+    readActiveManagedMutation: (workspaceInstanceId: string) =>
+      readActiveManagedMutationInternal(authority, workspaceInstanceId),
+    readToolOperation: (operationId: string) => authority.readToolOperation(operationId),
+    readRuntimeEvents: (sessionId: string, runId: string) =>
+      authority.readRuntimeEvents(sessionId, runId),
     commitBaseline: (input: WorkspaceBaselineAuthorityInput) =>
       commitWorkspaceBaselineInternal(authority, input),
     commitSuccessor: (input: WorkspaceSuccessorCommitInput) =>

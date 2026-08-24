@@ -88,6 +88,42 @@ test('keeps provisioning-backed managed inspection out of read-only Plan Mode', 
   );
 });
 
+test('binds an inspection tool to the current accepted repository provider', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-gitoxide-inspection-accepted-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const composition = await createGitoxideManagedInspectionComposition({
+    storageRoot: root,
+    invocationOwnerToken: {},
+    helperCapability: Object.freeze({
+      kind: 'gitoxide_helper_invocation_capability_v1' as const,
+    }),
+    npmRuntime: fakeNpmRuntime,
+    dependencyAuthority: inertDependencyAuthority(),
+    filesystemWorker: rejectingFilesystemWorker(),
+  });
+  t.after(() => composition.close());
+  let providerCalls = 0;
+  const tool = composition.toolForRepositoryProvider(async () => {
+    providerCalls += 1;
+    return Object.freeze({
+      acceptedCommitOid: '1'.repeat(40),
+      acceptedTreeOid: '2'.repeat(40),
+      async readFile(path: string) {
+        return Object.freeze({ path, content: 'accepted revision two\n' });
+      },
+      async materializeProjection() {
+        throw new Error('not used');
+      },
+    });
+  });
+
+  const result = await tool.impl({ kind: 'read', path: 'notes.txt' }, toolContext(root));
+  assert.equal(providerCalls, 1);
+  assert.equal(result.acceptedCommitOid, '1'.repeat(40));
+  assert.equal(result.acceptedTreeOid, '2'.repeat(40));
+  assert.deepEqual(result.result, { kind: 'read', content: 'accepted revision two\n' });
+});
+
 test('reads source and dependency files through the real Gitoxide product data plane', async (t) => {
   const admittedHelper = await admitRealHelper();
   if (!admittedHelper) {

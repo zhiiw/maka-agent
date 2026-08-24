@@ -95,11 +95,11 @@ test('the headless coding profile freezes prompt, tools, memory, and foreground 
 test('the managed coding profile exposes only owner-backed file operations', () => {
   const profile = hostedExecutionRunProfile('managed-coding-v1');
   assert.ok(profile);
-  assert.deepEqual(profile.toolNames, ['Write', 'Edit']);
+  assert.deepEqual(profile.toolNames, ['ManagedWorkspaceInspect', 'Write', 'Edit']);
   assert.equal(profile.memoryExtraction, false);
   assert.doesNotMatch(profile.systemPrompt, /Bash/u);
 
-  const tools: MakaTool[] = ['Write', 'Edit'].map((name) => ({
+  const tools: MakaTool[] = ['ManagedWorkspaceInspect', 'Write', 'Edit'].map((name) => ({
     name,
     description: name,
     parameters: z.object({}),
@@ -107,7 +107,12 @@ test('the managed coding profile exposes only owner-backed file operations', () 
   }));
   const projected = projectHostedExecutionTools(tools, 'managed-coding-v1');
   for (const tool of projected) {
-    assert.equal(tool.recoveryMode, 'reconcile');
-    assert.equal(tool.durableExecutionProfile, 'gitoxide_managed_mutation_v1');
+    if (tool.name === 'ManagedWorkspaceInspect') {
+      assert.equal(tool.recoveryMode, undefined);
+      assert.equal(tool.durableExecutionProfile, undefined);
+    } else {
+      assert.equal(tool.recoveryMode, 'reconcile');
+      assert.equal(tool.durableExecutionProfile, 'gitoxide_managed_mutation_v1');
+    }
   }
 });

@@ -102,18 +102,55 @@ test('opens one durable Gitoxide baseline and exactly reuses it for the session'
     assert.equal(first.head.revision, 1);
     assert.notEqual(first.head.commitOid, git(sourceRoot, ['rev-parse', 'HEAD']));
     assert.equal(first.head.treeOid, git(sourceRoot, ['rev-parse', 'HEAD^{tree}']));
+    const baselineRepository = await reopened.inspectionRepositoryProvider({
+      sourceCwd: sourceRoot,
+      repositoryPath: join(root, 'unused.git'),
+      abortSignal: new AbortController().signal,
+    });
+    assert.equal(
+      (await baselineRepository.readFile('notes.txt', new AbortController().signal)).content,
+      'baseline\n',
+    );
+
+    await prepareManagedWrite({
+      stores,
+      session: reopened,
+      operationId: 'operation-gitoxide-recover-t1',
+      content: 'recovered\n',
+    });
+    const recovered = await openGitoxideManagedMutationSession(input);
+    assert.equal(recovered.head.revision, 2);
+    const recoveredRepository = await recovered.inspectionRepositoryProvider({
+      sourceCwd: sourceRoot,
+      repositoryPath: join(root, 'unused.git'),
+      abortSignal: new AbortController().signal,
+    });
+    assert.equal(
+      (await recoveredRepository.readFile('notes.txt', new AbortController().signal)).content,
+      'recovered\n',
+    );
 
     const changed = await executeManagedWrite({
       stores,
-      session: reopened,
+      session: recovered,
       operationId: 'operation-gitoxide-write-1',
       content: 'after\n',
       changed: true,
     });
     assert.equal(changed.kind, 'workspace_successor_committed');
     const afterChange = await openGitoxideManagedMutationSession(input);
-    assert.equal(afterChange.head.revision, 2);
+    assert.equal(afterChange.head.revision, 3);
     assert.notEqual(afterChange.head.commitOid, first.head.commitOid);
+    const acceptedRepository = await afterChange.inspectionRepositoryProvider({
+      sourceCwd: sourceRoot,
+      repositoryPath: join(root, 'unused.git'),
+      abortSignal: new AbortController().signal,
+    });
+    assert.equal(
+      (await acceptedRepository.readFile('notes.txt', new AbortController().signal)).content,
+      'after\n',
+    );
+    assert.equal(await readFile(join(sourceRoot, 'notes.txt'), 'utf8'), 'baseline\n');
 
     const noChange = await executeManagedWrite({
       stores,
@@ -244,6 +281,45 @@ async function executeManagedWrite(input: {
   readonly content: string;
   readonly changed: boolean;
 }) {
+  const prepared = await prepareManagedWrite(input);
+  const { admission, toolCallId, args, identity } = prepared;
+  const providerResult = { kind: 'file_write', path: 'notes.txt', bytes: input.content.length };
+  const resultContent = { kind: 'json' as const, value: providerResult };
+  const outcome: RuntimeEvent = {
+    id: `${input.operationId}-outcome-event`,
+    ...identity,
+    ts: 11,
+    partial: false,
+    role: 'tool',
+    author: 'tool',
+    content: {
+      kind: 'function_response',
+      id: toolCallId,
+      name: 'Write',
+      result: resultContent,
+    },
+    refs: { operationId: input.operationId, toolCallId },
+    actions: { stateDelta: { durationMs: 1 } },
+  };
+  return admission.execute(async () => ({
+    content: resultContent,
+    isError: false,
+    durationMs: 1,
+    durableOutcome: outcome,
+    managedMutationResult: {
+      canonicalPath: String(args.path),
+      content: input.content,
+      changed: input.changed,
+    },
+  }));
+}
+
+async function prepareManagedWrite(input: {
+  readonly stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>>;
+  readonly session: Awaited<ReturnType<typeof openGitoxideManagedMutationSession>>;
+  readonly operationId: string;
+  readonly content: string;
+}) {
   const toolCallId = `${input.operationId}-call`;
   const args = { path: 'notes.txt', content: input.content };
   const admission = await input.session.admitManagedMutation({
@@ -299,35 +375,7 @@ async function executeManagedWrite(input: {
     recoveryMode: 'reconcile',
     committedAt: 10,
   });
-  const providerResult = { kind: 'file_write', path: 'notes.txt', bytes: input.content.length };
-  const resultContent = { kind: 'json' as const, value: providerResult };
-  const outcome: RuntimeEvent = {
-    id: `${input.operationId}-outcome-event`,
-    ...identity,
-    ts: 11,
-    partial: false,
-    role: 'tool',
-    author: 'tool',
-    content: {
-      kind: 'function_response',
-      id: toolCallId,
-      name: 'Write',
-      result: resultContent,
-    },
-    refs: { operationId: input.operationId, toolCallId },
-    actions: { stateDelta: { durationMs: 1 } },
-  };
-  return admission.execute(async () => ({
-    content: resultContent,
-    isError: false,
-    durationMs: 1,
-    durableOutcome: outcome,
-    managedMutationResult: {
-      canonicalPath: 'notes.txt',
-      content: input.content,
-      changed: input.changed,
-    },
-  }));
+  return { admission, toolCallId, args, identity };
 }
 
 function git(cwd: string, args: readonly string[]): string {

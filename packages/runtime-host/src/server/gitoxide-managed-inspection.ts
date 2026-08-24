@@ -87,9 +87,34 @@ export interface GitoxideManagedInspectionResult {
   readonly result: ManagedWorkspaceReadOnlyResult;
 }
 
+export interface GitoxideInspectionRepositoryInternal {
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readFile(
+    path: string,
+    abortSignal: AbortSignal,
+  ): Promise<{ readonly path: string; readonly content: string }>;
+  materializeProjection(
+    destinationPath: string,
+    abortSignal: AbortSignal,
+  ): Promise<{
+    readonly destinationPath: string;
+    verify(abortSignal: AbortSignal): Promise<void>;
+  }>;
+}
+
+export type GitoxideInspectionRepositoryProviderInternal = (input: {
+  readonly sourceCwd: string;
+  readonly repositoryPath: string;
+  readonly abortSignal: AbortSignal;
+}) => Promise<GitoxideInspectionRepositoryInternal>;
+
 export interface GitoxideManagedInspectionComposition {
   readonly state: 'ready' | 'draining' | 'closed';
   readonly tool: MakaTool<GitoxideManagedInspectionInput, GitoxideManagedInspectionResult>;
+  toolForRepositoryProvider(
+    provider: GitoxideInspectionRepositoryProviderInternal,
+  ): MakaTool<GitoxideManagedInspectionInput, GitoxideManagedInspectionResult>;
   beginDrain(): void;
   close(): Promise<void>;
 }
@@ -121,10 +146,81 @@ export async function createGitoxideManagedInspectionComposition(
   const drainWaiters = new Set<() => void>();
   let closeTask: Promise<void> | undefined;
 
+  const openFreshSourceRepository = async (request: {
+    readonly sourceRoot: string;
+    readonly repositoryPath: string;
+    readonly abortSignal: AbortSignal;
+  }): Promise<GitoxideInspectionRepositoryInternal> => {
+    const admitted = await admitGitoxideRepositoryInternal({
+      invocationOwnerToken,
+      helperCapability: input.helperCapability,
+      admissionOwnerToken,
+      repositoryPath: request.sourceRoot,
+      abortSignal: request.abortSignal,
+    });
+    if (admitted.kind !== 'accepted') {
+      throw new Error(`Gitoxide rejected the source repository: ${admitted.reason}`);
+    }
+    const imported = await importAdmittedGitoxideRepositoryInternal({
+      invocationOwnerToken,
+      helperCapability: input.helperCapability,
+      admissionOwnerToken,
+      repositoryCapability: admitted.capability,
+      managedRepositoryOwnerToken,
+      destinationRepositoryPath: request.repositoryPath,
+      baselineRef: BASELINE_REF,
+      abortSignal: request.abortSignal,
+    });
+    return Object.freeze({
+      acceptedCommitOid: imported.baselineCommitOid,
+      acceptedTreeOid: imported.baselineTreeOid,
+      async readFile(path: string, abortSignal: AbortSignal) {
+        const file = await readGitoxideTreeFileInternal({
+          invocationOwnerToken,
+          helperCapability: input.helperCapability,
+          managedRepositoryOwnerToken,
+          managedRepositoryCapability: imported.managedRepositoryCapability,
+          path,
+          abortSignal,
+        });
+        return Object.freeze({ path: file.path, content: file.content });
+      },
+      async materializeProjection(destinationPath: string, abortSignal: AbortSignal) {
+        const projection = await materializeGitoxideProjectionInternal({
+          invocationOwnerToken,
+          helperCapability: input.helperCapability,
+          managedRepositoryOwnerToken,
+          managedRepositoryCapability: imported.managedRepositoryCapability,
+          projectionOwnerToken,
+          destinationPath,
+          abortSignal,
+        });
+        return Object.freeze({
+          destinationPath: projection.destinationPath,
+          async verify(signal: AbortSignal) {
+            const observation = await observeGitoxideProjectionInternal({
+              invocationOwnerToken,
+              helperCapability: input.helperCapability,
+              projectionOwnerToken,
+              projectionCapability: projection.projectionCapability,
+              abortSignal: signal,
+            });
+            if (observation.kind !== 'projection_observed') {
+              throw new Error(
+                `Gitoxide projection drifted at ${observation.path}: ${observation.reason}`,
+              );
+            }
+          },
+        });
+      },
+    });
+  };
+
   const execute = async (
     operation: GitoxideManagedInspectionInput,
     sourceCwd: string,
     abortSignal: AbortSignal,
+    repositoryProvider?: GitoxideInspectionRepositoryProviderInternal,
   ): Promise<GitoxideManagedInspectionResult> => {
     if (state !== 'ready') throw new Error(`Gitoxide managed inspection is ${state}`);
     const route = routeInspectionOperation(operation);
@@ -139,89 +235,32 @@ export async function createGitoxideManagedInspectionComposition(
       operationRoot = await mkdtemp(join(canonicalStagingRoot, 'inspection-'));
       const repositoryPath = join(operationRoot, 'repository.git');
       const projectionPath = join(operationRoot, 'projection');
-      const admitted = await admitGitoxideRepositoryInternal({
-        invocationOwnerToken,
-        helperCapability: input.helperCapability,
-        admissionOwnerToken,
-        repositoryPath: sourceRoot,
-        abortSignal,
-      });
-      if (admitted.kind !== 'accepted') {
-        throw new Error(`Gitoxide rejected the source repository: ${admitted.reason}`);
-      }
-      const imported = await importAdmittedGitoxideRepositoryInternal({
-        invocationOwnerToken,
-        helperCapability: input.helperCapability,
-        admissionOwnerToken,
-        repositoryCapability: admitted.capability,
-        managedRepositoryOwnerToken,
-        destinationRepositoryPath: repositoryPath,
-        baselineRef: BASELINE_REF,
-        abortSignal,
-      });
+      const repository = repositoryProvider
+        ? await repositoryProvider({ sourceCwd: sourceRoot, repositoryPath, abortSignal })
+        : await openFreshSourceRepository({ sourceRoot, repositoryPath, abortSignal });
       let rawResult: ManagedWorkspaceReadOnlyResult;
       let dependencyEnvironmentId: `sha256:${string}` | undefined;
       if (route.root === 'source_tree') {
         if (operation.kind !== 'read') throw new Error('Invalid source-tree inspection route');
-        const file = await readGitoxideTreeFileInternal({
-          invocationOwnerToken,
-          helperCapability: input.helperCapability,
-          managedRepositoryOwnerToken,
-          managedRepositoryCapability: imported.managedRepositoryCapability,
-          path: route.workerOperation.path,
-          abortSignal,
-        });
+        const file = await repository.readFile(route.workerOperation.path, abortSignal);
         rawResult = Object.freeze({
           kind: 'read' as const,
           content: sliceReadContent(file.content, operation.offset, operation.limit),
         });
       } else if (route.root === 'projection') {
-        const projection = await materializeGitoxideProjectionInternal({
-          invocationOwnerToken,
-          helperCapability: input.helperCapability,
-          managedRepositoryOwnerToken,
-          managedRepositoryCapability: imported.managedRepositoryCapability,
-          projectionOwnerToken,
-          destinationPath: projectionPath,
-          abortSignal,
-        });
+        const projection = await repository.materializeProjection(projectionPath, abortSignal);
         rawResult = await input.filesystemWorker.execute({
           operation: route.workerOperation,
           cwd: projection.destinationPath,
           executionBoundary: route.executionBoundary,
           abortSignal,
         });
-        const observation = await observeGitoxideProjectionInternal({
-          invocationOwnerToken,
-          helperCapability: input.helperCapability,
-          projectionOwnerToken,
-          projectionCapability: projection.projectionCapability,
-          abortSignal,
-        });
-        if (observation.kind !== 'projection_observed') {
-          throw new Error(
-            `Gitoxide projection drifted at ${observation.path}: ${observation.reason}`,
-          );
-        }
+        await projection.verify(abortSignal);
       } else {
         // These reads are intentionally sequential. A rejected child cannot outlive
         // the operation and race cleanup of the shared managed repository.
-        const manifest = await readGitoxideTreeFileInternal({
-          invocationOwnerToken,
-          helperCapability: input.helperCapability,
-          managedRepositoryOwnerToken,
-          managedRepositoryCapability: imported.managedRepositoryCapability,
-          path: 'package.json',
-          abortSignal,
-        });
-        const lockfile = await readGitoxideTreeFileInternal({
-          invocationOwnerToken,
-          helperCapability: input.helperCapability,
-          managedRepositoryOwnerToken,
-          managedRepositoryCapability: imported.managedRepositoryCapability,
-          path: 'package-lock.json',
-          abortSignal,
-        });
+        const manifest = await repository.readFile('package.json', abortSignal);
+        const lockfile = await repository.readFile('package-lock.json', abortSignal);
         const manifestBytes = Buffer.from(manifest.content, 'utf8');
         const lockfileBytes = Buffer.from(lockfile.content, 'utf8');
         const producerCapability = createManagedDependencyEnvironmentProducerCapability(
@@ -259,8 +298,8 @@ export async function createGitoxideManagedInspectionComposition(
       const result = remapInspectionResult(route, rawResult);
       const response = Object.freeze({
         kind: 'gitoxide_managed_inspection_v1' as const,
-        acceptedCommitOid: imported.baselineCommitOid,
-        acceptedTreeOid: imported.baselineTreeOid,
+        acceptedCommitOid: repository.acceptedCommitOid,
+        acceptedTreeOid: repository.acceptedTreeOid,
         ...(dependencyEnvironmentId ? { dependencyEnvironmentId } : {}),
         result,
       });
@@ -307,24 +346,31 @@ export async function createGitoxideManagedInspectionComposition(
     }
   };
 
-  const tool: MakaTool<GitoxideManagedInspectionInput, GitoxideManagedInspectionResult> = {
+  const createTool = (
+    repositoryProvider?: GitoxideInspectionRepositoryProviderInternal,
+  ): MakaTool<GitoxideManagedInspectionInput, GitoxideManagedInspectionResult> => ({
     name: 'ManagedWorkspaceInspect',
     displayName: 'Inspect isolated workspace',
     description:
-      'Read or glob a project through a fresh Maka-owned Gitoxide projection and its attested npm dependency environment. ' +
+      'Read or glob a project through a Maka-owned Gitoxide accepted tree and its attested npm dependency environment. ' +
       'This operation may provision dependencies and is intentionally unavailable in read-only Plan Mode.',
     parameters: managedInspectionInputSchema,
     categoryHint: 'custom_tool',
     recoveryMode: 'never_auto_retry',
     executionSemantics: 'exclusive_step',
-    impl: async (operation, context) => execute(operation, context.cwd, context.abortSignal),
-  };
+    impl: async (operation, context) =>
+      execute(operation, context.cwd, context.abortSignal, repositoryProvider),
+  });
+  const tool = createTool();
 
   return Object.freeze({
     get state() {
       return state;
     },
     tool,
+    toolForRepositoryProvider(provider: GitoxideInspectionRepositoryProviderInternal) {
+      return createTool(provider);
+    },
     beginDrain() {
       if (state === 'ready') state = 'draining';
     },

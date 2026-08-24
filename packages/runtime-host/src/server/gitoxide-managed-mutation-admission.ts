@@ -19,14 +19,21 @@
 
 import { createHash } from 'node:crypto';
 import { isCanonicalManagedMutationPathV1 } from '@maka/core/runtime-event';
+import type { RuntimeEvent } from '@maka/core/runtime-event';
+import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import type {
   WorkspaceHeadRecordV1,
   WorkspaceSuccessorAuthorityInput,
   WorkspaceVersionRecordV1,
 } from '@maka/core/workspace-version-authority';
-import { GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST } from '@maka/runtime/managed-mutation-transform';
+import {
+  GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST,
+  transformManagedMutation,
+} from '@maka/runtime/managed-mutation-transform';
+import { formatSyntheticToolErrorText } from '@maka/runtime/tool-runtime';
 import type { RuntimeManagedMutationAdmission, ToolRuntimeInput } from '@maka/runtime/tool-runtime';
 import type {
+  ManagedMutationReservationRecordV1,
   ManagedMutationTerminalCommitInput,
   ManagedMutationTerminalCommitResult,
   WorkspaceSuccessorCommitInput,
@@ -85,6 +92,148 @@ export interface GitoxideManagedMutationSettlementAuthorityInternal {
 }
 
 export type GitoxideManagedMutationAdmissionFailpoint = 'after_successor_commit';
+
+interface PreparedToolOperation {
+  readonly operationId: string;
+  readonly invocationId: string;
+  readonly runId: string;
+  readonly turnId: string;
+  readonly providerToolCallId: string;
+  readonly toolName: string;
+  readonly canonicalArgsHash: string;
+  readonly recoveryMode: string;
+  readonly currentState: string;
+  readonly callEventId: string;
+  readonly dispatchEventId?: string;
+}
+
+/**
+ * Reconciles one T1-owned mutation without invoking a filesystem tool again.
+ * The immutable accepted Git tree and persisted call arguments are the only
+ * transform inputs; SQLite remains the sole terminal-fact owner.
+ */
+export async function reconcilePreparedGitoxideManagedMutationInternal(input: {
+  readonly sessionId: string;
+  readonly reservation: ManagedMutationReservationRecordV1;
+  readonly operation: PreparedToolOperation;
+  readonly runtimeEvents: readonly RuntimeEvent[];
+  readonly settlementAuthority: GitoxideManagedMutationSettlementAuthorityInternal;
+  readonly candidateAuthorityForHead: (
+    head: WorkspaceHeadRecordV1,
+  ) => Promise<GitoxideManagedMutationCandidateAuthorityInternal>;
+  readonly abortSignal?: AbortSignal;
+}): Promise<'successor_committed' | 'terminal_committed'> {
+  input.abortSignal?.throwIfAborted();
+  const { reservation, operation } = input;
+  if (
+    operation.operationId !== reservation.operationId ||
+    operation.currentState !== 'prepared' ||
+    operation.recoveryMode !== 'reconcile' ||
+    operation.dispatchEventId !== reservation.dispatchEventId ||
+    (operation.toolName !== 'Write' && operation.toolName !== 'Edit')
+  ) {
+    throw new Error('Active managed mutation reservation conflicts with its tool operation');
+  }
+  const callEvent = input.runtimeEvents.find((event) => event.id === operation.callEventId);
+  const dispatchEvent = input.runtimeEvents.find((event) => event.id === operation.dispatchEventId);
+  const call = callEvent?.content;
+  const dispatch = dispatchEvent?.actions?.toolDispatch;
+  const managed = dispatch?.managedMutation;
+  if (
+    !callEvent ||
+    call?.kind !== 'function_call' ||
+    call.id !== operation.providerToolCallId ||
+    call.name !== operation.toolName ||
+    callEvent.sessionId !== input.sessionId ||
+    callEvent.runId !== operation.runId ||
+    callEvent.invocationId !== operation.invocationId ||
+    callEvent.turnId !== operation.turnId ||
+    canonicalToolArgsHash(call.name, call.args) !== operation.canonicalArgsHash ||
+    !dispatchEvent ||
+    dispatchEvent.sessionId !== input.sessionId ||
+    dispatchEvent.runId !== operation.runId ||
+    dispatchEvent.invocationId !== operation.invocationId ||
+    dispatchEvent.turnId !== operation.turnId ||
+    dispatch?.operationId !== operation.operationId ||
+    dispatch.providerToolCallId !== operation.providerToolCallId ||
+    dispatch.toolName !== operation.toolName ||
+    dispatch.canonicalArgsHash !== operation.canonicalArgsHash ||
+    dispatch.recoveryMode !== 'reconcile' ||
+    !managed ||
+    !managedMutationMatchesReservation(managed, reservation)
+  ) {
+    throw new Error('Prepared managed mutation ledger identity is corrupt');
+  }
+
+  const head = await input.settlementAuthority.readHead(
+    reservation.workspaceId,
+    reservation.workspaceEpochId,
+  );
+  if (!head || !reservationMatchesHead(reservation, head)) {
+    throw new Error('Prepared managed mutation base is no longer the accepted head');
+  }
+  const version = await input.settlementAuthority.readVersion(head.workspaceVersionId);
+  if (!version || !versionMatchesHead(version, head)) {
+    throw new Error('Prepared managed mutation base version is unavailable');
+  }
+  const candidateAuthority = await input.candidateAuthorityForHead(head);
+  const path = reservation.expectedPaths[0];
+  if (!path || reservation.expectedPaths.length !== 1) {
+    throw new Error('Prepared managed mutation path identity is invalid');
+  }
+  const baseFile = await candidateAuthority.readBaseFile(path, input.abortSignal);
+  let transformed: ReturnType<typeof transformManagedMutation> | undefined;
+  let errorMessage: string | undefined;
+  try {
+    transformed = transformManagedMutation({
+      toolName: operation.toolName,
+      canonicalPath: path,
+      baseContent: baseFile?.content ?? null,
+      args: call.args,
+    });
+  } catch (error) {
+    errorMessage = formatSyntheticToolErrorText(error);
+  }
+  const result = errorMessage
+    ? Object.freeze({ kind: 'json' as const, value: Object.freeze({ error: errorMessage }) })
+    : coerceRecoveredResult(transformed!.providerResult);
+  const outcome = buildRecoveredOutcome(callEvent, operation, result, errorMessage !== undefined);
+  if (errorMessage) {
+    await input.settlementAuthority.commitTerminal({
+      disposition: 'operation_failed_no_effect_committed',
+      toolOutcome: toolOutcomeInput(operation.operationId, outcome),
+    });
+    return 'terminal_committed';
+  }
+  if (!transformed!.changed) {
+    await input.settlementAuthority.commitTerminal({
+      disposition: 'no_workspace_change_committed',
+      toolOutcome: toolOutcomeInput(operation.operationId, outcome),
+    });
+    return 'terminal_committed';
+  }
+  const candidate = await candidateAuthority.capture({
+    operationId: operation.operationId,
+    path,
+    content: transformed!.content,
+    executionProfileDigest: GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST,
+    abortSignal: input.abortSignal,
+  });
+  assertCandidateReceipt(candidate.receipt, head, path, transformed!.content);
+  await input.settlementAuthority.commitSuccessor({
+    successor: successorInput({
+      operationId: operation.operationId,
+      outcomeEventId: outcome.id,
+      outcomeTimestamp: outcome.ts,
+      version,
+      head,
+      receipt: candidate.receipt,
+    }),
+    toolOutcome: toolOutcomeInput(operation.operationId, outcome),
+  });
+  await candidateAuthority.promote(candidate, input.abortSignal);
+  return 'successor_committed';
+}
 
 export function createGitoxideManagedMutationAdmissionInternal(input: {
   readonly workspaceInstanceId: string;
@@ -206,6 +355,96 @@ function toolOutcomeInput(
     runtimeEvent: durableOutcome,
     committedAt: durableOutcome.ts,
   };
+}
+
+function buildRecoveredOutcome(
+  callEvent: RuntimeEvent,
+  operation: PreparedToolOperation,
+  result: unknown,
+  isError: boolean,
+): RuntimeEvent {
+  return Object.freeze({
+    id: `${operation.operationId}_response`,
+    invocationId: operation.invocationId,
+    runId: operation.runId,
+    sessionId: callEvent.sessionId,
+    turnId: operation.turnId,
+    ts: Math.max(callEvent.ts, 0),
+    partial: false,
+    role: 'tool' as const,
+    author: 'tool' as const,
+    origin: callEvent.origin ?? ('provider' as const),
+    modelVisibility: callEvent.modelVisibility ?? ('visible' as const),
+    content: Object.freeze({
+      kind: 'function_response' as const,
+      id: operation.providerToolCallId,
+      name: operation.toolName,
+      result,
+      ...(isError ? { isError: true } : {}),
+    }),
+    refs: Object.freeze({
+      operationId: operation.operationId,
+      toolCallId: operation.providerToolCallId,
+      ...(callEvent.refs?.parentToolCallId
+        ? { parentToolCallId: callEvent.refs.parentToolCallId }
+        : {}),
+      ...(callEvent.refs?.parentOperationId
+        ? { parentOperationId: callEvent.refs.parentOperationId }
+        : {}),
+    }),
+    actions: Object.freeze({ stateDelta: Object.freeze({ durationMs: 0 }) }),
+  });
+}
+
+function coerceRecoveredResult(raw: unknown): unknown {
+  if (typeof raw === 'string') return Object.freeze({ kind: 'text' as const, text: raw });
+  if (raw && typeof raw === 'object') {
+    const record = raw as Record<string, unknown>;
+    if (typeof record.kind === 'string') return Object.freeze({ ...record });
+    if (typeof record.text === 'string') {
+      return Object.freeze({ kind: 'text' as const, text: record.text });
+    }
+    return Object.freeze({ kind: 'json' as const, value: Object.freeze({ ...record }) });
+  }
+  return Object.freeze({ kind: 'text' as const, text: String(raw ?? '') });
+}
+
+function managedMutationMatchesReservation(
+  managed: NonNullable<NonNullable<RuntimeEvent['actions']>['toolDispatch']>['managedMutation'],
+  reservation: ManagedMutationReservationRecordV1,
+): boolean {
+  return (
+    managed?.protocol === 'managed_mutation_v1' &&
+    managed.repositoryId === reservation.repositoryId &&
+    managed.workspaceId === reservation.workspaceId &&
+    managed.workspaceEpochId === reservation.workspaceEpochId &&
+    managed.workspaceInstanceId === reservation.workspaceInstanceId &&
+    managed.baseWorkspaceVersionId === reservation.baseWorkspaceVersionId &&
+    managed.baseAcceptedEventId === reservation.baseAcceptedEventId &&
+    managed.baseHeadRevision === reservation.baseHeadRevision &&
+    managed.baseCommitOid === reservation.baseCommitOid &&
+    managed.baseTreeOid === reservation.baseTreeOid &&
+    managed.executionProfileDigest === reservation.executionProfileDigest &&
+    managed.expectedPaths.length === reservation.expectedPaths.length &&
+    managed.expectedPaths.every((path, index) => path === reservation.expectedPaths[index])
+  );
+}
+
+function reservationMatchesHead(
+  reservation: ManagedMutationReservationRecordV1,
+  head: WorkspaceHeadRecordV1,
+): boolean {
+  return (
+    reservation.repositoryId === head.repositoryId &&
+    reservation.workspaceId === head.workspaceId &&
+    reservation.workspaceEpochId === head.workspaceEpochId &&
+    reservation.baseWorkspaceVersionId === head.workspaceVersionId &&
+    reservation.baseAcceptedEventId === head.acceptedEventId &&
+    reservation.baseHeadRevision === head.revision &&
+    reservation.baseCommitOid === head.commitOid &&
+    reservation.baseTreeOid === head.treeOid &&
+    reservation.executionProfileDigest === GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST
+  );
 }
 
 export async function reconcileGitoxideManagedMutationProjectionInternal(input: {

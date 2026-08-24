@@ -663,6 +663,15 @@ export async function createExecutionRuntimeHostComposition(
                   abortSignal: backendContext.abortSignal,
                 })
               : undefined;
+          const backendHostTools = managedMutationSession
+            ? hostTools.map((tool) =>
+                tool.name === 'ManagedWorkspaceInspect'
+                  ? requireGitoxideManagedInspection(
+                      gitoxideManagedInspection,
+                    ).toolForRepositoryProvider(managedMutationSession.inspectionRepositoryProvider)
+                  : tool,
+              )
+            : hostTools;
           return createHostAiSdkBackend({
             context: backendContext,
             runtimePolicy: runtimePolicyStores,
@@ -681,7 +690,7 @@ export async function createExecutionRuntimeHostComposition(
               ),
               goalTools: requireGoal(goal).tools,
               builtinTools,
-              hostTools,
+              hostTools: backendHostTools,
               resolveRootTools: (sessionId) =>
                 requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId),
               parentAgentTools: childAgentTools.parentTools,
@@ -1713,6 +1722,13 @@ function requireWorkspaceExecution(
   composition: RuntimeHostWorkspaceExecutionComposition | undefined,
 ): RuntimeHostWorkspaceExecutionComposition {
   if (!composition) throw new Error('Runtime Host workspace execution is not composed');
+  return composition;
+}
+
+function requireGitoxideManagedInspection(
+  composition: GitoxideManagedInspectionComposition | undefined,
+): GitoxideManagedInspectionComposition {
+  if (!composition) throw new Error('Gitoxide managed inspection profile is unavailable');
   return composition;
 }
 

@@ -31,7 +31,7 @@ const HEADLESS_CODING_V1_TOOL_NAMES = [
   'apply_patch',
 ] as const;
 
-const MANAGED_CODING_V1_TOOL_NAMES = ['Write', 'Edit'] as const;
+const MANAGED_CODING_V1_TOOL_NAMES = ['ManagedWorkspaceInspect', 'Write', 'Edit'] as const;
 
 const HEADLESS_CODING_V1_SYSTEM_PROMPT = [
   'Complete the task by acting with the available tools, not by narrating.',

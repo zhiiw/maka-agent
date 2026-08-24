@@ -21,6 +21,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { workspaceMutationPolicyHashV1 } from '@maka/core/workspace-version-authority';
+import { GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST } from '@maka/runtime/managed-mutation-transform';
 import type { ToolRuntimeInput } from '@maka/runtime/tool-runtime';
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import type { ExecutionStoresWorkspaceMutationAuthorityInternal } from '@maka/storage/execution-stores-workspace-authority-internal';
@@ -41,9 +43,11 @@ import {
 } from './gitoxide-helper-mutation-candidate-authority-internal.js';
 import {
   createGitoxideManagedMutationAdmissionInternal,
+  reconcilePreparedGitoxideManagedMutationInternal,
   type GitoxideManagedMutationAdmissionFailpoint,
   reconcileGitoxideManagedMutationProjectionInternal,
 } from './gitoxide-managed-mutation-admission.js';
+import type { GitoxideInspectionRepositoryProviderInternal } from './gitoxide-managed-inspection.js';
 
 const ACCEPTED_REF = 'refs/maka/accepted';
 const RECEIPT_PROTOCOL = 'maka_gitoxide_managed_mutation_baseline_v1';
@@ -73,6 +77,7 @@ interface BaselineReceiptV1 extends Omit<BaselineIntentV1, 'protocol'> {
 export interface GitoxideManagedMutationSession {
   readonly head: WorkspaceHeadRecordV1;
   readonly admitManagedMutation: NonNullable<ToolRuntimeInput['admitManagedMutation']>;
+  readonly inspectionRepositoryProvider: GitoxideInspectionRepositoryProviderInternal;
   readonly reconcileProjection: (abortSignal?: AbortSignal) => Promise<void>;
 }
 
@@ -101,6 +106,13 @@ export async function openGitoxideManagedMutationSession(input: {
     ),
   ]);
   const identity = managedMutationIdentity(sourceRoot, input.sessionId);
+  const materializationProfileDigest = sha256(
+    `maka-gitoxide-materialization-v1\0${helper.artifactSha256}\0`,
+  );
+  const workspacePolicyHash = workspaceMutationPolicyHashV1(
+    materializationProfileDigest,
+    GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST,
+  );
   const repositoryPath = gitoxideManagedRepositoryPathInternal(storageRoot, identity);
   const controlRoot = dirname(repositoryPath);
   const intentPath = join(controlRoot, 'baseline-intent.json');
@@ -204,11 +216,9 @@ export async function openGitoxideManagedMutationSession(input: {
         objectFormat: 'sha1',
         sourceCommitOid: receipt.sourceCommitOid,
         sourceTreeOid: receipt.sourceTreeOid,
-        materializationProfileDigest: sha256(
-          `maka-gitoxide-materialization-v1\0${receipt.helperArtifactSha256}\0`,
-        ),
+        materializationProfileDigest,
         materializationSemantics: 'git_tree_materialized_with_fixed_config_v1',
-        policyHash: sha256('maka-gitoxide-managed-mutation-policy-v1\0'),
+        policyHash: workspacePolicyHash,
       },
       baseline: {
         workspaceVersionId: receipt.workspaceVersionId,
@@ -222,6 +232,9 @@ export async function openGitoxideManagedMutationSession(input: {
     head = committed.head;
   }
   if (!receipt) throw new Error('Gitoxide managed coding baseline receipt is unavailable');
+  if (receipt.helperArtifactSha256 !== helper.artifactSha256) {
+    throw new Error('Gitoxide managed coding helper identity changed for this workspace epoch');
+  }
   const baselineVersion = await input.settlementAuthority.readVersion(receipt.workspaceVersionId);
   if (
     !baselineVersion ||
@@ -230,7 +243,8 @@ export async function openGitoxideManagedMutationSession(input: {
     baselineVersion.workspaceId !== receipt.workspaceId ||
     baselineVersion.workspaceEpochId !== receipt.workspaceEpochId ||
     baselineVersion.commitOid !== receipt.baselineCommitOid ||
-    baselineVersion.treeOid !== receipt.baselineTreeOid
+    baselineVersion.treeOid !== receipt.baselineTreeOid ||
+    baselineVersion.policyHash !== workspacePolicyHash
   ) {
     throw new Error('Gitoxide baseline receipt conflicts with accepted baseline authority');
   }
@@ -242,6 +256,30 @@ export async function openGitoxideManagedMutationSession(input: {
       invocationOwnerToken: input.invocationOwnerToken,
       helperCapability: input.helperCapability,
     });
+  const activeReservation = await input.settlementAuthority.readActiveManagedMutation(
+    identity.workspaceInstanceId,
+  );
+  if (activeReservation) {
+    const operation = await input.settlementAuthority.readToolOperation(
+      activeReservation.operationId,
+    );
+    if (!operation) {
+      throw new Error('Active managed mutation reservation has no durable tool operation');
+    }
+    const runtimeEvents = await input.settlementAuthority.readRuntimeEvents(
+      input.sessionId,
+      operation.runId,
+    );
+    await reconcilePreparedGitoxideManagedMutationInternal({
+      sessionId: input.sessionId,
+      reservation: activeReservation,
+      operation,
+      runtimeEvents,
+      settlementAuthority: input.settlementAuthority,
+      candidateAuthorityForHead,
+      abortSignal: input.abortSignal,
+    });
+  }
   await reconcileGitoxideManagedMutationProjectionInternal({
     workspaceId: identity.workspaceId,
     workspaceEpochId: identity.workspaceEpochId,
@@ -263,6 +301,49 @@ export async function openGitoxideManagedMutationSession(input: {
   return Object.freeze({
     head,
     admitManagedMutation,
+    inspectionRepositoryProvider: async ({
+      abortSignal,
+    }: {
+      readonly sourceCwd: string;
+      readonly repositoryPath: string;
+      readonly abortSignal: AbortSignal;
+    }) => {
+      abortSignal.throwIfAborted();
+      const currentHead = await input.settlementAuthority.readHead(
+        identity.workspaceId,
+        identity.workspaceEpochId,
+      );
+      if (!currentHead) throw new Error('Gitoxide managed inspection has no accepted head');
+      const currentVersion = await input.settlementAuthority.readVersion(
+        currentHead.workspaceVersionId,
+      );
+      if (
+        !currentVersion ||
+        currentVersion.repositoryId !== currentHead.repositoryId ||
+        currentVersion.workspaceId !== currentHead.workspaceId ||
+        currentVersion.workspaceEpochId !== currentHead.workspaceEpochId ||
+        currentVersion.workspaceVersionId !== currentHead.workspaceVersionId ||
+        currentVersion.acceptedEventId !== currentHead.acceptedEventId ||
+        currentVersion.commitOid !== currentHead.commitOid ||
+        currentVersion.treeOid !== currentHead.treeOid ||
+        currentVersion.policyHash !== workspacePolicyHash
+      ) {
+        throw new Error('Gitoxide managed inspection head conflicts with workspace authority');
+      }
+      const authority = await candidateAuthorityForHead(currentHead);
+      return Object.freeze({
+        acceptedCommitOid: currentHead.commitOid,
+        acceptedTreeOid: currentHead.treeOid,
+        async readFile(path: string, signal: AbortSignal) {
+          const file = await authority.readBaseFile(path, signal);
+          if (!file) throw new Error(`Managed accepted tree file is unavailable: ${path}`);
+          return Object.freeze({ path, content: file.content });
+        },
+        materializeProjection(destinationPath: string, signal: AbortSignal) {
+          return authority.materializeBaseProjection(destinationPath, signal);
+        },
+      });
+    },
     reconcileProjection: async (abortSignal?: AbortSignal) => {
       await reconcileGitoxideManagedMutationProjectionInternal({
         workspaceId: identity.workspaceId,

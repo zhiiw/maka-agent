@@ -26,11 +26,25 @@ import {
   scanWorkspaceBaselineAuthority,
   validateWorkspaceFactEventLane,
   workspaceAuthorityIdentity,
+  workspaceMutationPolicyHashV1,
   type WorkspaceBaselineAuthorityInput,
   type WorkspaceSuccessorAuthorityInput,
 } from '../workspace-version-authority.js';
 
 describe('workspace version authority contract', () => {
+  it('binds the materialization and mutation execution profiles into one policy identity', () => {
+    const materialization = `sha256:${'1'.repeat(64)}` as const;
+    const execution = `sha256:${'2'.repeat(64)}` as const;
+    const policy = workspaceMutationPolicyHashV1(materialization, execution);
+
+    assert.match(policy, /^sha256:[0-9a-f]{64}$/u);
+    assert.notEqual(
+      policy,
+      workspaceMutationPolicyHashV1(materialization, `sha256:${'3'.repeat(64)}`),
+    );
+    assert.notEqual(policy, workspaceMutationPolicyHashV1(`sha256:${'4'.repeat(64)}`, execution));
+  });
+
   it('decodes only exact v1 baseline facts on the store-owned semantic lane', () => {
     const { epochOpenedEvent, baselineAcceptedEvent } = buildWorkspaceBaselineAuthorityEvents(
       baselineInput(),
