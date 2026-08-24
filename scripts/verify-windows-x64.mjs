@@ -132,6 +132,7 @@ export async function verifyPackagedWindowsApp(
     requireCanonicalIcon: requiresCurrentContract,
     requireAppIconCatalog: requiresCurrentContract,
     requireBundledNpm: requiresCurrentContract,
+    requireGitoxideHelper: requiresCurrentContract,
   });
   if (requiresCurrentContract) await assertPackagedDependencyClosure(resources);
   else await requirePath(join(resources, 'git', 'cmd', 'git.exe'));
