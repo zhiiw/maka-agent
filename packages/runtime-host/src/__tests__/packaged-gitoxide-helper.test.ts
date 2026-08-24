@@ -41,6 +41,7 @@ test('turns an exact packaged helper manifest into an owner-bound invocation cap
       capability,
     );
     assert.equal(verified.executablePath, fixture.executablePath);
+    assert.equal(verified.artifactSha256, fixture.artifactSha256);
     assert.equal(verified.protocolVersion, 1);
   } finally {
     await fixture.cleanup();
@@ -101,6 +102,7 @@ async function withPackagedResourcesRoot<T>(root: string, run: () => Promise<T>)
 async function createFixture(): Promise<{
   root: string;
   executablePath: string;
+  artifactSha256: `sha256:${string}`;
   cleanup(): Promise<void>;
 }> {
   const root = await mkdtemp(join(tmpdir(), 'maka-packaged-gitoxide-'));
@@ -110,6 +112,7 @@ async function createFixture(): Promise<{
     process.platform === 'win32' ? 'maka-gitoxide-helper.exe' : 'maka-gitoxide-helper';
   const executablePath = join(runtimeRoot, executableName);
   const bytes = Buffer.from('packaged-helper');
+  const artifactSha256 = `sha256:${createHash('sha256').update(bytes).digest('hex')}` as const;
   await writeFile(executablePath, bytes, { mode: 0o755 });
   await writeFile(
     join(root, 'gitoxide-helper.json'),
@@ -122,13 +125,14 @@ async function createFixture(): Promise<{
       protocolVersion: 1,
       executableRelativePath: `gitoxide/${executableName}`,
       bytes: bytes.byteLength,
-      sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+      sha256: artifactSha256,
       distributionReady: true,
     })}\n`,
   );
   return {
     root,
     executablePath,
+    artifactSha256,
     cleanup: () => rm(root, { recursive: true, force: true }),
   };
 }

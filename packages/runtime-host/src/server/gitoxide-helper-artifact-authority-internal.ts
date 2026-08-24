@@ -44,6 +44,7 @@ export interface GitoxideHelperReleaseArtifactStateInternal {
 
 export interface VerifiedGitoxideHelperArtifactInternal {
   readonly executablePath: string;
+  readonly artifactSha256: `sha256:${string}`;
   readonly protocolVersion: 1;
 }
 
@@ -146,6 +147,7 @@ export async function verifyGitoxideHelperArtifactForInvocationInternal(
   }
   return Object.freeze({
     executablePath: canonicalExecutablePath,
+    artifactSha256: record.claim.expectedSha256,
     protocolVersion: record.claim.protocolVersion,
   });
 }
