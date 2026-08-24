@@ -28,7 +28,10 @@ export interface ManagedMutationTransformResult {
 
 /** Frozen semantic identity of the Runtime-owned immutable Git transform. */
 export const GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST =
-  'sha256:992cc9a7a2f7cd32b1062241146727aac11ae111ab81d480c57c5d68ad8f35cc' as const;
+  'sha256:4d9d03626705fdc7f895256b7a94b6c6fdd04c7bf76c70e67bab6a6f177e4b99' as const;
+
+export const MANAGED_MUTATION_CANDIDATE_REJECTED_MESSAGE =
+  'Managed workspace candidate was rejected before publication' as const;
 
 /**
  * Pure Write/Edit transform for Git-backed managed workspaces. It never reads

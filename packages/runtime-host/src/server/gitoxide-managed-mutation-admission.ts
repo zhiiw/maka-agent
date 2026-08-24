@@ -28,6 +28,7 @@ import type {
 } from '@maka/core/workspace-version-authority';
 import {
   GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST,
+  MANAGED_MUTATION_CANDIDATE_REJECTED_MESSAGE,
   transformManagedMutation,
 } from '@maka/runtime/managed-mutation-transform';
 import { formatSyntheticToolErrorText } from '@maka/runtime/tool-runtime';
@@ -39,6 +40,7 @@ import type {
   WorkspaceSuccessorCommitInput,
   WorkspaceSuccessorCommitResult,
 } from '@maka/storage/workspace-version-authority-internal';
+import { GitoxideHelperInvocationError } from './gitoxide-helper-invocation-internal.js';
 
 type AdmissionInput = Parameters<NonNullable<ToolRuntimeInput['admitManagedMutation']>>[0];
 
@@ -62,6 +64,26 @@ interface CandidateReceipt {
 interface CandidateProof {
   readonly receipt: CandidateReceipt;
 }
+
+type CandidateCaptureResult =
+  | { readonly kind: 'captured'; readonly proof: CandidateProof }
+  | { readonly kind: 'rejected_before_publication' }
+  | { readonly kind: 'publication_indeterminate'; readonly error: unknown };
+
+const CANDIDATE_PREPUBLICATION_POLICY_REASONS = new Set([
+  'successor_content_limit_exceeded',
+  'unsupported_base_path_kind',
+  'unsupported_source_path',
+  'unsupported_source_entry_kind',
+  'source_tree_depth_exceeded',
+  'source_tree_entry_limit_exceeded',
+  'source_tree_visit_limit_exceeded',
+  'source_path_collision',
+  'source_path_byte_limit_exceeded',
+  'source_path_length_exceeded',
+  'source_file_limit_exceeded',
+  'source_byte_limit_exceeded',
+]);
 
 export interface GitoxideManagedMutationCandidateAuthorityInternal {
   readBaseFile(
@@ -212,13 +234,28 @@ export async function reconcilePreparedGitoxideManagedMutationInternal(input: {
     });
     return 'terminal_committed';
   }
-  const candidate = await candidateAuthority.capture({
+  const candidateCapture = await captureCandidate(candidateAuthority, {
     operationId: operation.operationId,
     path,
     content: transformed!.content,
     executionProfileDigest: GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST,
     abortSignal: input.abortSignal,
   });
+  if (candidateCapture.kind === 'rejected_before_publication') {
+    const rejectedResult = coerceRecoveredResult({
+      error: MANAGED_MUTATION_CANDIDATE_REJECTED_MESSAGE,
+    });
+    const rejectedOutcome = buildRecoveredOutcome(callEvent, operation, rejectedResult, true);
+    await input.settlementAuthority.commitTerminal({
+      disposition: 'operation_failed_no_effect_committed',
+      toolOutcome: toolOutcomeInput(operation.operationId, rejectedOutcome),
+    });
+    return 'terminal_committed';
+  }
+  if (candidateCapture.kind === 'publication_indeterminate') {
+    throw candidateCapture.error;
+  }
+  const candidate = candidateCapture.proof;
   assertCandidateReceipt(candidate.receipt, head, path, transformed!.content);
   await input.settlementAuthority.commitSuccessor({
     successor: successorInput({
@@ -313,13 +350,39 @@ export function createGitoxideManagedMutationAdmissionInternal(input: {
             durableOutcome: proof.durableOutcome,
           });
         }
-        const candidate = await candidateAuthority.capture({
+        const candidateCapture = await captureCandidate(candidateAuthority, {
           operationId: request.operationId,
           path,
           content: mutation.content,
           executionProfileDigest: GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST,
           abortSignal: request.abortSignal,
         });
+        if (candidateCapture.kind === 'rejected_before_publication') {
+          if (!operation.rejectNoEffect) {
+            return Object.freeze({
+              kind: 'unsettled' as const,
+              error: new Error('Runtime no-effect rejection capability is unavailable'),
+            });
+          }
+          const rejectedProof = await operation.rejectNoEffect(
+            'candidate_rejected_before_publication',
+          );
+          await input.settlementAuthority.commitTerminal({
+            disposition: 'operation_failed_no_effect_committed',
+            toolOutcome: toolOutcomeInput(request.operationId, rejectedProof.durableOutcome),
+          });
+          return Object.freeze({
+            kind: 'operation_failed_no_effect_committed' as const,
+            durableOutcome: rejectedProof.durableOutcome,
+          });
+        }
+        if (candidateCapture.kind === 'publication_indeterminate') {
+          return Object.freeze({
+            kind: 'unsettled' as const,
+            error: candidateCapture.error,
+          });
+        }
+        const candidate = candidateCapture.proof;
         assertCandidateReceipt(candidate.receipt, head, path, mutation.content);
         const successor = successorInput({
           operationId: request.operationId,
@@ -343,6 +406,25 @@ export function createGitoxideManagedMutationAdmissionInternal(input: {
       async dispose() {},
     });
   };
+}
+
+async function captureCandidate(
+  authority: GitoxideManagedMutationCandidateAuthorityInternal,
+  input: Parameters<GitoxideManagedMutationCandidateAuthorityInternal['capture']>[0],
+): Promise<CandidateCaptureResult> {
+  try {
+    return Object.freeze({ kind: 'captured' as const, proof: await authority.capture(input) });
+  } catch (error) {
+    if (
+      error instanceof GitoxideHelperInvocationError &&
+      error.code === 'gitoxide_helper_operation_failed' &&
+      error.helperReason !== undefined &&
+      CANDIDATE_PREPUBLICATION_POLICY_REASONS.has(error.helperReason)
+    ) {
+      return Object.freeze({ kind: 'rejected_before_publication' as const });
+    }
+    return Object.freeze({ kind: 'publication_indeterminate' as const, error });
+  }
 }
 
 function toolOutcomeInput(

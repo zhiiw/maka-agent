@@ -35,7 +35,10 @@ import {
   admitGitoxideHelperArtifactInternal,
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../server/gitoxide-helper-artifact-authority-internal.js';
-import { openGitoxideManagedMutationSession } from '../server/gitoxide-managed-mutation-session.js';
+import {
+  openGitoxideManagedMutationSession,
+  recoverGitoxideManagedMutationBeforeRunClosureInternal,
+} from '../server/gitoxide-managed-mutation-session.js';
 
 test('opens one durable Gitoxide baseline and exactly reuses it for the session', async (t) => {
   const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
@@ -118,6 +121,13 @@ test('opens one durable Gitoxide baseline and exactly reuses it for the session'
       operationId: 'operation-gitoxide-recover-t1',
       content: 'recovered\n',
     });
+    const unavailableGate = await recoverGitoxideManagedMutationBeforeRunClosureInternal({
+      storageRootLease: storageOwner.lease,
+      sourceRoot,
+      sessionId: input.sessionId,
+      settlementAuthority: requireExecutionStoresWorkspaceMutationAuthorityInternal(stores),
+    });
+    assert.equal(unavailableGate.kind, 'parked');
     const recovered = await openGitoxideManagedMutationSession(input);
     assert.equal(recovered.head.revision, 2);
     const recoveredRepository = await recovered.inspectionRepositoryProvider({

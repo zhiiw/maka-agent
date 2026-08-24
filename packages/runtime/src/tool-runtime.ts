@@ -96,6 +96,7 @@ import { normalizeSandboxBoundaryExpansion } from './sandbox-boundary-path.js';
 import { SANDBOX_BOUNDARY_UNAVAILABLE } from './sandbox-boundary-tool.js';
 import {
   GITOXIDE_MANAGED_MUTATION_TRANSFORM_PROFILE_DIGEST,
+  MANAGED_MUTATION_CANDIDATE_REJECTED_MESSAGE,
   transformManagedMutation,
 } from './managed-mutation-transform.js';
 import {
@@ -508,6 +509,13 @@ export interface RuntimeManagedMutationOperationProof {
   };
 }
 
+export interface RuntimeManagedMutationOperationCapability {
+  (): Promise<RuntimeManagedMutationOperationProof>;
+  readonly rejectNoEffect?: (
+    reason: 'candidate_rejected_before_publication',
+  ) => Promise<RuntimeManagedMutationOperationProof>;
+}
+
 export type RuntimeManagedMutationSettlement =
   | {
       readonly kind: 'workspace_successor_committed';
@@ -530,7 +538,7 @@ export interface RuntimeManagedMutationAdmission {
     readonly baseContent: string | null;
   };
   execute(
-    operation: () => Promise<RuntimeManagedMutationOperationProof>,
+    operation: RuntimeManagedMutationOperationCapability,
   ): Promise<RuntimeManagedMutationSettlement>;
   /** Idempotent for an unused, failed-T1, or already executed admission. */
   dispose(): Promise<void>;
@@ -1631,7 +1639,24 @@ export class ToolRuntime {
           } = { state: 'open' };
           let operationPromise: Promise<RuntimeManagedMutationOperationProof> | undefined;
           let runtimeOwnedValue: RuntimeManagedMutationOperationValue<unknown> | undefined;
-          const executeManagedOperation = (): Promise<RuntimeManagedMutationOperationProof> => {
+          const proofForValue = (
+            value: RuntimeManagedMutationOperationValue<unknown>,
+          ): RuntimeManagedMutationOperationProof => ({
+            // The canonical content is already recursively immutable, so the
+            // owner can read it without receiving a mutable alias.
+            content: value.outcome.content,
+            isError: value.outcome.isError,
+            durationMs: value.outcome.durationMs,
+            durableOutcome: durableAttempt!.buildOutcome(
+              value.outcome.content,
+              value.outcome.isError,
+              value.outcome.durationMs,
+            ),
+            ...(value.managedMutationResult
+              ? { managedMutationResult: value.managedMutationResult }
+              : {}),
+          });
+          const executeManagedOperationBase = (): Promise<RuntimeManagedMutationOperationProof> => {
             if (operationLifecycle.state !== 'open') {
               if (operationLifecycle.state === 'closed') {
                 return Promise.reject(new Error('Managed mutation operation capability is closed'));
@@ -1645,21 +1670,7 @@ export class ToolRuntime {
               try {
                 const value = await prepareOperationValue(true);
                 runtimeOwnedValue = value;
-                return {
-                  // The canonical content is already recursively immutable, so
-                  // the owner can read it without receiving a mutable alias.
-                  content: value.outcome.content,
-                  isError: value.outcome.isError,
-                  durationMs: value.outcome.durationMs,
-                  durableOutcome: durableAttempt!.buildOutcome(
-                    value.outcome.content,
-                    value.outcome.isError,
-                    value.outcome.durationMs,
-                  ),
-                  ...(value.managedMutationResult
-                    ? { managedMutationResult: value.managedMutationResult }
-                    : {}),
-                };
+                return proofForValue(value);
               } finally {
                 if (operationLifecycle.state === 'running') {
                   operationLifecycle.state = 'settled';
@@ -1671,6 +1682,37 @@ export class ToolRuntime {
             void operationPromise.catch(() => undefined);
             return operationPromise;
           };
+          let noEffectRejectionIssued = false;
+          const executeManagedOperation = Object.assign(executeManagedOperationBase, {
+            rejectNoEffect: async (
+              reason: 'candidate_rejected_before_publication',
+            ): Promise<RuntimeManagedMutationOperationProof> => {
+              if (
+                reason !== 'candidate_rejected_before_publication' ||
+                operationLifecycle.state !== 'settled' ||
+                !runtimeOwnedValue ||
+                noEffectRejectionIssued
+              ) {
+                throw new Error('Managed mutation no-effect rejection capability is unavailable');
+              }
+              noEffectRejectionIssued = true;
+              const result = snapshotManagedToolResult(
+                this.errorReturn(MANAGED_MUTATION_CANDIDATE_REJECTED_MESSAGE),
+                ctx.maxResultBytes,
+              );
+              const content = Object.freeze(coerceResultContent(result));
+              const value = Object.freeze({
+                result,
+                outcome: Object.freeze({
+                  content,
+                  isError: true,
+                  durationMs: this.input.now() - startedAt,
+                }),
+              });
+              runtimeOwnedValue = value;
+              return proofForValue(value);
+            },
+          });
           let settlement: unknown;
           let ownerFailed = false;
           let ownerError: unknown;

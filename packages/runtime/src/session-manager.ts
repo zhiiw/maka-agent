@@ -864,7 +864,20 @@ interface SessionManagerBaseDeps {
     sourceText: string;
   }) => Promise<string | undefined>;
   onSessionTitleChanged?: (sessionId: string) => void;
+  /**
+   * Host-owned durable mutation gate. Generic app-restart recovery may only
+   * seal a Run after this owner has either settled its active T1 or proved
+   * that the Session has no active managed mutation.
+   */
+  recoverManagedMutationBeforeRunClosure?: (
+    session: Readonly<Pick<SessionHeader, 'id'>>,
+  ) => Promise<ManagedMutationRecoveryGate>;
 }
+
+export type ManagedMutationRecoveryGate =
+  | { readonly kind: 'settled' }
+  | { readonly kind: 'no_active_mutation' }
+  | { readonly kind: 'parked'; readonly reason: string };
 
 export interface ResolvedChildToolActivation {
   readonly tools: readonly MakaTool[];
@@ -1500,6 +1513,19 @@ export class SessionManager {
           recovered.add(session.id);
           continue;
         }
+      }
+
+      if (this.deps.recoverManagedMutationBeforeRunClosure) {
+        let managedMutationGate: ManagedMutationRecoveryGate;
+        try {
+          managedMutationGate = await this.deps.recoverManagedMutationBeforeRunClosure(session);
+        } catch (error) {
+          if (policy.kind === 'strict') throw error;
+          // An unreadable configured mutation authority is not evidence that
+          // no T1 exists. Keep the Run open for a later authoritative pass.
+          continue;
+        }
+        if (managedMutationGate.kind === 'parked') continue;
       }
 
       let continuationClaimRecovered = false;

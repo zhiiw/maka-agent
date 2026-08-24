@@ -294,7 +294,7 @@ describe('ToolRuntime durable boundary', () => {
             durableDispatch: {
               ...managedMutationDispatch(),
               executionProfileDigest:
-                'sha256:992cc9a7a2f7cd32b1062241146727aac11ae111ab81d480c57c5d68ad8f35cc',
+                'sha256:4d9d03626705fdc7f895256b7a94b6c6fdd04c7bf76c70e67bab6a6f177e4b99',
             },
           };
         },
@@ -320,6 +320,67 @@ describe('ToolRuntime durable boundary', () => {
     });
     assert.equal(observedProof?.durableOutcome.content?.kind, 'function_response');
     assert.equal(observedProof?.durableOutcome.refs?.operationId, operationId);
+  });
+
+  it('keeps candidate rejection result ownership inside Runtime', async () => {
+    let genericOutcomeCalls = 0;
+    let rejectedProof: RuntimeManagedMutationOperationProof | undefined;
+    let operationId = '';
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          genericOutcomeCalls += 1;
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return {
+            ...managedAdmission(async (operation) => {
+              await operation();
+              rejectedProof = await operation.rejectNoEffect!(
+                'candidate_rejected_before_publication',
+              );
+              return {
+                kind: 'operation_failed_no_effect_committed',
+                durableOutcome: rejectedProof.durableOutcome,
+              };
+            }),
+            gitoxideTransform: {
+              canonicalPath: 'notes.txt',
+              baseContent: 'before\n',
+            },
+            durableDispatch: {
+              ...managedMutationDispatch(),
+              executionProfileDigest:
+                'sha256:4d9d03626705fdc7f895256b7a94b6c6fdd04c7bf76c70e67bab6a6f177e4b99',
+            },
+          };
+        },
+      },
+    );
+    const managedTool = tool(() => {
+      throw new Error('mutable filesystem implementation must not run');
+    });
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'gitoxide_managed_mutation_v1';
+
+    const result = await harness.execute(managedTool, new AbortController().signal, {
+      path: 'notes.txt',
+      content: 'after\n',
+    });
+
+    assert.deepEqual(result, {
+      error: 'Managed workspace candidate was rejected before publication',
+    });
+    assert.equal(rejectedProof?.isError, true);
+    assert.equal(rejectedProof?.durableOutcome.refs?.operationId, operationId);
+    assert.equal(genericOutcomeCalls, 0);
   });
 
   it('does not replace a committed managed result when admission cleanup fails', async () => {

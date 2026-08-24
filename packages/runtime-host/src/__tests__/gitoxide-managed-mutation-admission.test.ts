@@ -32,6 +32,7 @@ import {
   reconcileGitoxideManagedMutationProjectionInternal,
   type GitoxideManagedMutationSettlementAuthorityInternal,
 } from '../server/gitoxide-managed-mutation-admission.js';
+import { GitoxideHelperInvocationError } from '../server/gitoxide-helper-invocation-internal.js';
 
 test('reconciles an active T1 from immutable Git and ledger facts without rerunning a tool', async () => {
   const head = baselineHead();
@@ -53,7 +54,7 @@ test('reconciles an active T1 from immutable Git and ledger facts without rerunn
     baseTreeOid: head.treeOid,
     expectedPaths: ['notes.txt'],
     executionProfileDigest:
-      'sha256:992cc9a7a2f7cd32b1062241146727aac11ae111ab81d480c57c5d68ad8f35cc' as const,
+      'sha256:4d9d03626705fdc7f895256b7a94b6c6fdd04c7bf76c70e67bab6a6f177e4b99' as const,
   };
   const callEvent: RuntimeEvent = {
     id: `${operationId}_call`,
@@ -174,6 +175,138 @@ test('reconciles an active T1 from immutable Git and ledger facts without rerunn
   assert.equal(successorCommits, 1);
 });
 
+test('recovery releases T1 when candidate policy proves no publication', async () => {
+  const head = baselineHead();
+  const version = baselineVersion(head);
+  const operationId = 'op-recovery-policy-rejected';
+  const args = { path: 'notes.txt', content: 'recovered\n' };
+  const canonicalArgsHash = canonicalToolArgsHash('Write', args);
+  const executionProfileDigest =
+    'sha256:4d9d03626705fdc7f895256b7a94b6c6fdd04c7bf76c70e67bab6a6f177e4b99' as const;
+  const identity = {
+    sessionId: 'session-1',
+    invocationId: 'run-1',
+    runId: 'run-1',
+    turnId: 'turn-1',
+  };
+  const callEvent: RuntimeEvent = {
+    id: `${operationId}_call`,
+    ...identity,
+    ts: 10,
+    partial: false,
+    role: 'model',
+    author: 'agent',
+    content: { kind: 'function_call', id: 'call-1', name: 'Write', args },
+    refs: { operationId, toolCallId: 'call-1' },
+  };
+  const managedMutation = {
+    protocol: 'managed_mutation_v1' as const,
+    repositoryId: head.repositoryId,
+    workspaceId: head.workspaceId,
+    workspaceEpochId: head.workspaceEpochId,
+    workspaceInstanceId: 'instance_44444444444444444444444444444444',
+    objectFormat: 'sha1' as const,
+    baseWorkspaceVersionId: head.workspaceVersionId,
+    baseAcceptedEventId: head.acceptedEventId,
+    baseHeadRevision: head.revision,
+    baseCommitOid: head.commitOid,
+    baseTreeOid: head.treeOid,
+    expectedPaths: ['notes.txt'],
+    executionProfileDigest,
+  };
+  const dispatchEvent: RuntimeEvent = {
+    id: `${operationId}_dispatch`,
+    ...identity,
+    ts: 10,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      toolDispatch: {
+        protocol: 't1_after_preflight_v1',
+        operationId,
+        providerToolCallId: 'call-1',
+        toolName: 'Write',
+        canonicalArgsHash,
+        recoveryMode: 'reconcile',
+        managedMutation,
+      },
+    },
+    refs: { operationId, toolCallId: 'call-1' },
+  };
+  let terminalOutcome: RuntimeEvent | undefined;
+
+  const result = await reconcilePreparedGitoxideManagedMutationInternal({
+    sessionId: identity.sessionId,
+    reservation: {
+      workspaceInstanceId: managedMutation.workspaceInstanceId,
+      repositoryId: head.repositoryId,
+      workspaceId: head.workspaceId,
+      workspaceEpochId: head.workspaceEpochId,
+      operationId,
+      dispatchEventId: dispatchEvent.id,
+      baseWorkspaceVersionId: head.workspaceVersionId,
+      baseAcceptedEventId: head.acceptedEventId,
+      baseHeadRevision: head.revision,
+      baseCommitOid: head.commitOid,
+      baseTreeOid: head.treeOid,
+      expectedPaths: ['notes.txt'],
+      executionProfileDigest,
+      reservedAt: 10,
+    },
+    operation: {
+      operationId,
+      invocationId: identity.invocationId,
+      runId: identity.runId,
+      turnId: identity.turnId,
+      providerToolCallId: 'call-1',
+      toolName: 'Write',
+      canonicalArgsHash,
+      recoveryMode: 'reconcile',
+      currentState: 'prepared',
+      callEventId: callEvent.id,
+      dispatchEventId: dispatchEvent.id,
+    },
+    runtimeEvents: [callEvent, dispatchEvent],
+    settlementAuthority: {
+      readHead: async () => head,
+      readVersion: async () => version,
+      commitSuccessor: async () => {
+        throw new Error('rejected candidate must not commit a successor');
+      },
+      commitTerminal: async (input) => {
+        terminalOutcome = input.toolOutcome.runtimeEvent;
+        return { created: true, outcomeRuntimeEventSeq: 3 };
+      },
+    },
+    candidateAuthorityForHead: async () => ({
+      readBaseFile: async () => ({ content: 'baseline\n', blobOid: '5'.repeat(40) }),
+      capture: async () => {
+        throw new GitoxideHelperInvocationError(
+          'gitoxide_helper_operation_failed',
+          'candidate exceeds the managed content limit',
+          'successor_content_limit_exceeded',
+        );
+      },
+      promote: async () => {
+        throw new Error('rejected candidate must not promote');
+      },
+      promoteDurable: async () => {
+        throw new Error('not used');
+      },
+    }),
+  });
+
+  assert.equal(result, 'terminal_committed');
+  assert.equal(terminalOutcome?.content?.kind, 'function_response');
+  assert.equal(
+    terminalOutcome?.content?.kind === 'function_response'
+      ? terminalOutcome.content.isError
+      : undefined,
+    true,
+  );
+});
+
 test('commits the exact Runtime outcome before promoting the Gitoxide candidate', async () => {
   const order: string[] = [];
   const head = baselineHead();
@@ -218,7 +351,7 @@ test('commits the exact Runtime outcome before promoting the Gitoxide candidate'
           path: 'notes.txt',
           contentSha256: sha256('after\n'),
           executionProfileDigest:
-            'sha256:992cc9a7a2f7cd32b1062241146727aac11ae111ab81d480c57c5d68ad8f35cc',
+            'sha256:4d9d03626705fdc7f895256b7a94b6c6fdd04c7bf76c70e67bab6a6f177e4b99',
         },
       }),
       promote: async (proof) => {
@@ -340,6 +473,102 @@ test('commits no-op success and deterministic failure without advancing the work
   ]);
 });
 
+test('commits a Runtime-owned no-effect failure when candidate policy rejects before publication', async () => {
+  const head = baselineHead();
+  const version = baselineVersion(head);
+  const terminalOutcomes: RuntimeEvent[] = [];
+  const owner = createGitoxideManagedMutationAdmissionInternal({
+    workspaceInstanceId: 'instance_44444444444444444444444444444444',
+    workspaceId: head.workspaceId,
+    workspaceEpochId: head.workspaceEpochId,
+    settlementAuthority: {
+      readHead: async () => head,
+      readVersion: async () => version,
+      commitSuccessor: async () => {
+        throw new Error('rejected candidate must not advance the workspace');
+      },
+      commitTerminal: async (input) => {
+        terminalOutcomes.push(input.toolOutcome.runtimeEvent);
+        return { created: true, outcomeRuntimeEventSeq: 4 };
+      },
+    },
+    candidateAuthorityForHead: async () => ({
+      readBaseFile: async () => ({ content: 'before\n', blobOid: '5'.repeat(40) }),
+      capture: async () => {
+        throw new GitoxideHelperInvocationError(
+          'gitoxide_helper_operation_failed',
+          'candidate exceeds the managed content limit',
+          'successor_content_limit_exceeded',
+        );
+      },
+      promote: async () => {
+        throw new Error('rejected candidate must not be promoted');
+      },
+      promoteDurable: async () => {
+        throw new Error('not used');
+      },
+    }),
+  });
+  const admission = await owner({
+    operationId: 'op-candidate-policy-rejected',
+    toolName: 'Write',
+    persistedArgs: { path: 'notes.txt', content: 'after\n' },
+    abortSignal: new AbortController().signal,
+  });
+  const successContent = {
+    kind: 'json' as const,
+    value: { kind: 'file_write', path: 'notes.txt', bytes: 6 },
+  };
+  const failureContent = {
+    kind: 'json' as const,
+    value: { error: 'Managed workspace candidate was rejected before publication' },
+  };
+  const successOutcome = outcomeEvent('op-candidate-policy-rejected', false);
+  const failureOutcome: RuntimeEvent = {
+    ...outcomeEvent('op-candidate-policy-rejected', true),
+    content: {
+      kind: 'function_response',
+      id: 'call-1',
+      name: 'Write',
+      result: failureContent,
+      isError: true,
+    },
+  };
+  const operation = Object.assign(
+    async () => ({
+      content: successContent,
+      isError: false,
+      durationMs: 5,
+      durableOutcome: successOutcome,
+      managedMutationResult: {
+        canonicalPath: 'notes.txt',
+        content: 'after\n',
+        changed: true,
+      },
+    }),
+    {
+      rejectNoEffect: async () => ({
+        content: failureContent,
+        isError: true,
+        durationMs: 5,
+        durableOutcome: failureOutcome,
+      }),
+    },
+  );
+
+  const settlement = await admission.execute(operation);
+
+  assert.equal(settlement.kind, 'operation_failed_no_effect_committed');
+  assert.equal(terminalOutcomes.length, 1);
+  assert.equal(terminalOutcomes[0]?.content?.kind, 'function_response');
+  assert.equal(
+    terminalOutcomes[0]?.content?.kind === 'function_response'
+      ? terminalOutcomes[0].content.isError
+      : undefined,
+    true,
+  );
+});
+
 test('replays only candidate promotion after SQLite already accepted the successor', async () => {
   const parent = baselineHead();
   const parentVersion = baselineVersion(parent);
@@ -367,7 +596,7 @@ test('replays only candidate promotion after SQLite already accepted the success
     changedFileCount: 1,
     deletedFileCount: 0,
     executionProfileDigest:
-      'sha256:992cc9a7a2f7cd32b1062241146727aac11ae111ab81d480c57c5d68ad8f35cc',
+      'sha256:4d9d03626705fdc7f895256b7a94b6c6fdd04c7bf76c70e67bab6a6f177e4b99',
     acceptedEventId: 'successor-event-1',
     committedAt: 10,
   };

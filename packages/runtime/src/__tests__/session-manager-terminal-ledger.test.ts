@@ -1723,6 +1723,50 @@ describe('SessionManager terminal ledger invariants', () => {
     expect(view.terminalFacts[0]?.failureClass).toBe('app_restarted');
   });
 
+  test('startup recovery does not seal a run while managed mutation recovery is parked', async () => {
+    const store = new TinySessionStore();
+    const runStore = new TinyAgentRunStore();
+    const gatedSessions: string[] = [];
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends: new BackendRegistry(),
+      newId: nextId(),
+      now: nextNow(55_000),
+      runtimeSource: 'test',
+      recoverManagedMutationBeforeRunClosure: async (session) => {
+        gatedSessions.push(session.id);
+        return { kind: 'parked', reason: 'candidate publication state is indeterminate' };
+      },
+    });
+    const session = await store.create(makeInput({ status: 'active' }));
+    const run = await runStore.createRun(
+      makeRunHeader({
+        sessionId: session.id,
+        runId: 'run-managed-mutation-parked',
+        turnId: 'turn-managed-mutation-parked',
+        status: 'running',
+      }),
+    );
+    await runStore.appendEvent(session.id, run.runId, {
+      type: 'run_started',
+      id: 'run-started-managed-mutation',
+      sessionId: session.id,
+      runId: run.runId,
+      turnId: run.turnId,
+      ts: 2,
+    });
+
+    await manager.recoverInterruptedSessions();
+
+    expect(gatedSessions).toEqual([session.id]);
+    expect((await runStore.readRun(session.id, run.runId)).status).toBe('running');
+    expect(
+      (await runStore.readRuntimeEvents(session.id, run.runId)).filter(isTerminalRuntimeEvent),
+    ).toHaveLength(0);
+  });
+
   test('startup recovery completes an existing aborted terminal RuntimeEvent without appending another', async () => {
     const store = new TinySessionStore();
     const runStore = new TinyAgentRunStore();

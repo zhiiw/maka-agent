@@ -57,3 +57,16 @@ test('uses the production Edit matcher and rejects an absent target', () => {
     /does not exist/u,
   );
 });
+
+test('keeps the durable provider result bounded independently of file size', () => {
+  const content = `${'x'.repeat(2 * 1024 * 1024)}\n`;
+  const result = transformManagedMutation({
+    toolName: 'Write',
+    canonicalPath: 'artifacts/large.txt',
+    baseContent: 'before\n',
+    args: { path: 'artifacts/large.txt', content },
+  });
+
+  assert.equal(result.content, content);
+  assert.ok(Buffer.byteLength(JSON.stringify(result.providerResult), 'utf8') <= 512);
+});

@@ -81,6 +81,58 @@ export interface GitoxideManagedMutationSession {
   readonly reconcileProjection: (abortSignal?: AbortSignal) => Promise<void>;
 }
 
+export type GitoxideManagedMutationRecoveryGate =
+  | { readonly kind: 'settled' }
+  | { readonly kind: 'no_active_mutation' }
+  | { readonly kind: 'parked'; readonly reason: string };
+
+/**
+ * Runs before generic AgentRun recovery is allowed to append a terminal fact.
+ * It deliberately proves the absence of a reservation without opening a new
+ * baseline, and fails closed when an active T1 cannot be reconciled.
+ */
+export async function recoverGitoxideManagedMutationBeforeRunClosureInternal(input: {
+  readonly storageRootLease: StorageRootLease<'interactive', 'write'>;
+  readonly sourceRoot: string;
+  readonly sessionId: string;
+  readonly settlementAuthority: ExecutionStoresWorkspaceMutationAuthorityInternal;
+  readonly invocationOwnerToken?: object;
+  readonly helperCapability?: GitoxideHelperInvocationCapability;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideManagedMutationRecoveryGate> {
+  try {
+    input.abortSignal?.throwIfAborted();
+    const sourceRoot = await realpath(input.sourceRoot);
+    const identity = managedMutationIdentity(sourceRoot, input.sessionId);
+    input.settlementAuthority.adoptRootForManagedExecution();
+    const active = await input.settlementAuthority.readActiveManagedMutation(
+      identity.workspaceInstanceId,
+    );
+    if (!active) return Object.freeze({ kind: 'no_active_mutation' as const });
+    if (!input.invocationOwnerToken || !input.helperCapability) {
+      return Object.freeze({
+        kind: 'parked' as const,
+        reason: 'Gitoxide managed mutation recovery capability is unavailable',
+      });
+    }
+    await openGitoxideManagedMutationSession({
+      storageRootLease: input.storageRootLease,
+      sourceRoot,
+      sessionId: input.sessionId,
+      invocationOwnerToken: input.invocationOwnerToken,
+      helperCapability: input.helperCapability,
+      settlementAuthority: input.settlementAuthority,
+      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+    });
+    return Object.freeze({ kind: 'settled' as const });
+  } catch (error) {
+    return Object.freeze({
+      kind: 'parked' as const,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 /**
  * Opens one explicit managed-coding session. The source observation is frozen
  * before import, Gitoxide owns the immutable repository, SQLite owns accepted

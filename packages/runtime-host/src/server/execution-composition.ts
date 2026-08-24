@@ -184,7 +184,10 @@ import {
 } from './gitoxide-managed-inspection.js';
 import { resolvePackagedGitoxideHelperInternal } from './packaged-gitoxide-helper-internal.js';
 import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
-import { openGitoxideManagedMutationSession } from './gitoxide-managed-mutation-session.js';
+import {
+  openGitoxideManagedMutationSession,
+  recoverGitoxideManagedMutationBeforeRunClosureInternal,
+} from './gitoxide-managed-mutation-session.js';
 
 export interface ExecutionRuntimeHostComposition extends RuntimeHostComposition {
   readonly workspaceExecution: RuntimeHostWorkspaceExecutionComposition;
@@ -957,6 +960,25 @@ export async function createExecutionRuntimeHostComposition(
       generateSessionTitle: (input) => sessionEffectCoordinator.generateTitle(input),
       onSessionTitleChanged: (sessionId) =>
         continuityCoordinator.enqueueCanonicalRefresh(sessionId),
+      recoverManagedMutationBeforeRunClosure: async ({ id: sessionId }) => {
+        const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
+        if (header.toolProfile !== 'managed-coding-v1') {
+          return { kind: 'no_active_mutation' as const };
+        }
+        const runtime = gitoxideManagedMutationRuntime;
+        return recoverGitoxideManagedMutationBeforeRunClosureInternal({
+          storageRootLease: context.owner.lease,
+          sourceRoot: header.cwd,
+          sessionId,
+          settlementAuthority: requireExecutionStoresWorkspaceMutationAuthorityInternal(stores),
+          ...(runtime
+            ? {
+                invocationOwnerToken: runtime.invocationOwnerToken,
+                helperCapability: runtime.helperCapability,
+              }
+            : {}),
+        });
+      },
       inspectContinuationSafety: createLocalContinuationSafetyInspector({
         readSessionCwd: async (sessionId) =>
           (await stores.sessionStore.readHeaderSnapshot(sessionId)).cwd,
