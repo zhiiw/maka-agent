@@ -155,6 +155,7 @@ it('uses the product SemVer contract throughout Windows release verification', (
   assert.equal(bumpedAutoupdateVersion('1.2.3'), '1.2.4');
 
   const baseline = {
+    repository: 'apache/maka',
     version: '1.2.3-beta.1',
     tag: 'v1.2.3-beta.1',
     assetName: 'Maka-1.2.3-beta.1-win-x64.exe',
