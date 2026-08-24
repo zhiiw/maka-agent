@@ -66,10 +66,12 @@ test('a started workspace-bound continuation survives Host death without provide
     );
     return;
   }
+  const windowsSandboxPath = requireWindowsSandboxPath();
 
   await withManagedContinuationFixture(
     helperPath,
     bundledNpmResourcesRoot,
+    windowsSandboxPath,
     async ({ fixture, resourcesRoot, callLog, boundary }) => {
       const source = await fixture.seedSafeBoundaryContinuationSource();
       const crashHost = await fixture.startHost(undefined, true, {
@@ -181,10 +183,12 @@ test('a revision-two continuation never calls the provider twice after Host deat
     );
     return;
   }
+  const windowsSandboxPath = requireWindowsSandboxPath();
 
   await withManagedContinuationFixture(
     helperPath,
     bundledNpmResourcesRoot,
+    windowsSandboxPath,
     async ({ fixture, resourcesRoot, callLog, boundary }) => {
       assert.equal(boundary.revision, 2);
       const source = await fixture.seedSafeBoundaryContinuationSource();
@@ -251,6 +255,7 @@ test('a revision-two continuation never calls the provider twice after Host deat
 async function withManagedContinuationFixture(
   helperInputPath: string,
   bundledNpmResourcesRoot: string,
+  windowsSandboxInputPath: string | undefined,
   run: (input: {
     fixture: ExecutionFixture;
     resourcesRoot: string;
@@ -282,6 +287,7 @@ async function withManagedContinuationFixture(
     base,
     helperInputPath,
     bundledNpmResourcesRoot,
+    windowsSandboxInputPath,
   );
   const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const owner = await tryAcquireInteractiveRootOwner(capability);
@@ -403,6 +409,7 @@ async function preparePackagedResources(
   base: string,
   helperInputPath: string,
   bundledNpmResourcesInputRoot: string,
+  windowsSandboxInputPath: string | undefined,
 ): Promise<string> {
   const resourcesRoot = join(base, 'resources');
   const helperDirectory = join(resourcesRoot, 'gitoxide');
@@ -438,7 +445,26 @@ async function preparePackagedResources(
     recursive: true,
     verbatimSymlinks: true,
   });
+  if (windowsSandboxInputPath) {
+    const sandboxDirectory = join(resourcesRoot, 'windows-sandbox');
+    await mkdir(sandboxDirectory, { recursive: true });
+    await copyFile(
+      await realpath(windowsSandboxInputPath),
+      join(sandboxDirectory, 'maka-windows-sandbox.exe'),
+    );
+  }
   return resourcesRoot;
+}
+
+function requireWindowsSandboxPath(): string | undefined {
+  if (process.platform !== 'win32') return undefined;
+  const sandboxPath = process.env.MAKA_WINDOWS_SANDBOX_PATH;
+  if (!sandboxPath) {
+    throw new Error(
+      'MAKA_WINDOWS_SANDBOX_PATH is required for the production-shaped Windows continuation test',
+    );
+  }
+  return sandboxPath;
 }
 
 async function admitRealHelper(helperInputPath: string) {
