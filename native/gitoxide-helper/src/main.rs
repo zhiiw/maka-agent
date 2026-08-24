@@ -708,16 +708,14 @@ fn validate_managed_tree_inner(
 }
 
 fn is_canonical_successor_path(path: &str) -> bool {
-    path.len() <= 4096
+    path.len() as u64 <= MANAGED_TREE_POLICY_V1.max_relative_path_bytes
         && !path.is_empty()
         && !path.starts_with('/')
         && !path.contains('\\')
         && !path.contains('\0')
         && path.split('/').all(|component| {
-            !component.is_empty()
-                && component != "."
-                && component != ".."
-                && !component.eq_ignore_ascii_case(".git")
+            component.len() as u64 <= MANAGED_TREE_POLICY_V1.max_component_bytes
+                && is_supported_source_component(component)
         })
 }
 
@@ -745,7 +743,9 @@ fn read_tree_file(
         return Err("tree_file_invalid");
     }
     let header = entry.id().header().map_err(|_| "tree_file_unavailable")?;
-    if header.kind() != gix::objs::Kind::Blob || header.size() > MAX_TREE_FILE_BYTES {
+    if header.kind() != gix::objs::Kind::Blob
+        || header.size() > MAX_TREE_FILE_BYTES.min(MANAGED_TREE_POLICY_V1.max_file_bytes)
+    {
         return Err("tree_file_size_limit_exceeded");
     }
     let blob_oid = entry.object_id();
@@ -1447,6 +1447,16 @@ mod tests {
             stats.observe_blob(1, policy),
             Err("source_file_limit_exceeded")
         );
+    }
+
+    #[test]
+    fn direct_tree_paths_share_the_managed_tree_policy() {
+        assert!(!is_canonical_successor_path(".gitattributes"));
+        assert!(!is_canonical_successor_path(&format!(
+            "{}.txt",
+            "a".repeat(MANAGED_TREE_POLICY_V1.max_component_bytes as usize)
+        )));
+        assert!(is_canonical_successor_path("docs/guide.txt"));
     }
 }
 
