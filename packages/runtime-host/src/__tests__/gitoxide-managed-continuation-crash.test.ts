@@ -119,7 +119,11 @@ test('a started workspace-bound continuation survives Host death without provide
           turnId: targetTurnId,
         });
         assert.equal(target.runId, admission.runId);
-        assert.equal(target.status === 'created' || target.status === 'running', true);
+        assert.equal(
+          target.status === 'created' || target.status === 'running',
+          true,
+          JSON.stringify(target),
+        );
         assert.deepEqual(await successorClient.queryTurnResume({ sessionId: fixture.sessionId }), {
           sessionId: fixture.sessionId,
           disposition: 'parked',
