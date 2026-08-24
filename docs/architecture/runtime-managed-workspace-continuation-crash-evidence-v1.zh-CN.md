@@ -42,6 +42,12 @@
 7. 使用新的 Turn identity 重试同一 source boundary，验证结果仍为 `continuation_started_indeterminate`；
 8. 验证 claim 仍绑定原 commit/tree/revision，provider invocation log 始终为空。
 
+同一 gate 还覆盖更强的未知结果窗口：先通过一次 durable managed Write 将 accepted head 推进到
+revision 2，再启动 continuation；Fake provider 已记录一次真实 `send()` 调用、但尚未产生 durable
+terminal 时杀死 Host。重启与新 Turn 重试都必须保持
+`continuation_started_indeterminate`，provider invocation log 的计数必须始终等于 1。这样既证明
+successor workspace boundary 可恢复，也证明“请求可能已经到达 provider”时绝不重发。
+
 这项测试有意不声称可以恢复 provider 的网络执行。它证明的是“未知时不重发”，不是 bit-exact provider continuation。
 
 ## 平台能力矩阵

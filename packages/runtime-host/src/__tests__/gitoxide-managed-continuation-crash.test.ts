@@ -36,6 +36,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import type { RuntimeEvent } from '@maka/core/runtime-event';
+import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import { createSqliteRuntimeStore } from '@maka/storage';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
 import { requireExecutionStoresWorkspaceMutationAuthorityInternal } from '@maka/storage/execution-stores-workspace-authority-internal';
@@ -170,6 +172,82 @@ test('a started workspace-bound continuation survives Host death without provide
   );
 });
 
+test('a revision-two continuation never calls the provider twice after Host death', async (t) => {
+  const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
+  const bundledNpmResourcesRoot = process.env.MAKA_BUNDLED_NPM_RESOURCES_ROOT;
+  if (!helperPath || !bundledNpmResourcesRoot) {
+    t.skip(
+      'MAKA_GITOXIDE_HELPER_PATH and MAKA_BUNDLED_NPM_RESOURCES_ROOT are required for the real provider crash test',
+    );
+    return;
+  }
+
+  await withManagedContinuationFixture(
+    helperPath,
+    bundledNpmResourcesRoot,
+    async ({ fixture, resourcesRoot, callLog, boundary }) => {
+      assert.equal(boundary.revision, 2);
+      const source = await fixture.seedSafeBoundaryContinuationSource();
+      const crashHost = await fixture.startHost(undefined, true, {
+        packagedResourcesRoot: resourcesRoot,
+        providerCallLogPath: callLog,
+        providerFailpointAfterSend: true,
+      });
+      const crashClient = await connectClient(fixture.root);
+      const targetTurnId = 'turn-workspace-bound-provider-crash';
+      try {
+        const initialPlan = await crashClient.queryTurnResume({ sessionId: fixture.sessionId });
+        assert.equal(initialPlan.disposition, 'ready', JSON.stringify(initialPlan));
+        const failpoint = waitForProviderFailpoint(crashHost.child);
+        const start = crashClient
+          .startTurnResume({
+            sessionId: fixture.sessionId,
+            turnId: targetTurnId,
+            sourceRunId: source.sourceRunId,
+            sourceRuntimeEventHighWater: source.sourceRuntimeEventHighWater,
+          })
+          .then(
+            () => undefined,
+            () => undefined,
+          );
+        await failpoint;
+        assert.equal(await providerCallCount(callLog), 1);
+        await fixture.killHost(crashHost);
+        await withTimeout(start, PROCESS_TIMEOUT_MS, 'provider-crashed continuation did not close');
+      } finally {
+        await crashClient.close().catch(() => undefined);
+      }
+
+      const successorHost = await fixture.startHost(undefined, true, {
+        packagedResourcesRoot: resourcesRoot,
+        providerCallLogPath: callLog,
+      });
+      const successorClient = await connectClient(fixture.root);
+      try {
+        const plan = await successorClient.queryTurnResume({
+          sessionId: fixture.sessionId,
+          sourceRunId: source.sourceRunId,
+          expectedRuntimeEventHighWater: source.sourceRuntimeEventHighWater,
+        });
+        assert.equal(plan.disposition, 'parked');
+        assert.equal(plan.reason, 'continuation_started_indeterminate');
+        const retry = await successorClient.startTurnResume({
+          sessionId: fixture.sessionId,
+          turnId: `${targetTurnId}-retry`,
+          sourceRunId: source.sourceRunId,
+          sourceRuntimeEventHighWater: source.sourceRuntimeEventHighWater,
+        });
+        assert.equal(retry.kind, 'parked');
+        assert.equal(await providerCallCount(callLog), 1);
+      } finally {
+        await successorClient.close();
+        await fixture.stopHost(successorHost);
+      }
+    },
+    { advanceWorkspace: true },
+  );
+});
+
 async function withManagedContinuationFixture(
   helperInputPath: string,
   bundledNpmResourcesRoot: string,
@@ -179,6 +257,7 @@ async function withManagedContinuationFixture(
     callLog: string;
     boundary: NonNullable<Awaited<ReturnType<typeof inspectGitoxideManagedContinuationBoundary>>>;
   }) => Promise<void>,
+  options: { readonly advanceWorkspace?: boolean } = {},
 ): Promise<void> {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-continuation-')));
   const root = join(base, 'root');
@@ -221,13 +300,19 @@ async function withManagedContinuationFixture(
     });
     sessionId = session.id;
     const helper = await admitRealHelper(helperInputPath);
-    await openGitoxideManagedMutationSession({
+    const sessionInput = {
       storageRootLease: owner.lease,
       sourceRoot: root,
       sessionId,
       ...helper,
       settlementAuthority: requireExecutionStoresWorkspaceMutationAuthorityInternal(stores),
-    });
+    };
+    const managedSession = await openGitoxideManagedMutationSession(sessionInput);
+    if (options.advanceWorkspace) {
+      await prepareManagedWriteT1({ stores, session: managedSession, sessionId });
+      const recovered = await openGitoxideManagedMutationSession(sessionInput);
+      assert.equal(recovered.head.revision, 2);
+    }
     const observedBoundary = await inspectGitoxideManagedContinuationBoundary({
       storageRootLease: owner.lease,
       sourceRoot: root,
@@ -248,6 +333,70 @@ async function withManagedContinuationFixture(
   } finally {
     await fixture.close();
   }
+}
+
+async function prepareManagedWriteT1(input: {
+  readonly stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>>;
+  readonly session: Awaited<ReturnType<typeof openGitoxideManagedMutationSession>>;
+  readonly sessionId: string;
+}): Promise<void> {
+  const operationId = 'operation-continuation-successor-setup';
+  const toolCallId = `${operationId}-call`;
+  const args = { path: 'notes.txt', content: 'successor\n' };
+  const admission = await input.session.admitManagedMutation({
+    operationId,
+    toolName: 'Write',
+    persistedArgs: args,
+    abortSignal: new AbortController().signal,
+  });
+  const identity = {
+    sessionId: input.sessionId,
+    invocationId: 'invocation-continuation-successor-setup',
+    runId: 'run-continuation-successor-setup',
+    turnId: 'turn-continuation-successor-setup',
+  };
+  const canonicalArgsHash = canonicalToolArgsHash('Write', args);
+  const callEvent: RuntimeEvent = {
+    id: `${operationId}_call`,
+    ...identity,
+    ts: 10,
+    partial: false,
+    role: 'model',
+    author: 'agent',
+    content: { kind: 'function_call', id: toolCallId, name: 'Write', args },
+    refs: { operationId, toolCallId },
+  };
+  const dispatchEvent: RuntimeEvent = {
+    id: `${operationId}_dispatch`,
+    ...identity,
+    ts: 10,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      toolDispatch: {
+        protocol: 't1_after_preflight_v1',
+        operationId,
+        providerToolCallId: toolCallId,
+        toolName: 'Write',
+        canonicalArgsHash,
+        recoveryMode: 'reconcile',
+        managedMutation: admission.durableDispatch,
+      },
+    },
+    refs: { operationId, toolCallId },
+  };
+  await input.stores.runtimeEventStore.commitToolPrepared({
+    operationId,
+    journalEventId: `${operationId}_prepared`,
+    runtimeEvent: callEvent,
+    dispatchRuntimeEvent: dispatchEvent,
+    providerToolCallId: toolCallId,
+    toolName: 'Write',
+    canonicalArgsHash,
+    recoveryMode: 'reconcile',
+    committedAt: 10,
+  });
 }
 
 async function preparePackagedResources(
@@ -340,6 +489,47 @@ function waitForContinuationFailpoint(child: ChildProcess): Promise<void> {
     PROCESS_TIMEOUT_MS * 3,
     'Runtime Host did not reach the continuation failpoint',
   );
+}
+
+function waitForProviderFailpoint(child: ChildProcess): Promise<void> {
+  return waitForChildMessage(child, 'test.provider_failpoint', 'provider');
+}
+
+function waitForChildMessage(
+  child: ChildProcess,
+  expectedType: string,
+  label: string,
+): Promise<void> {
+  return withTimeout(
+    new Promise<void>((resolve, reject) => {
+      const onMessage = (message: unknown): void => {
+        if (
+          message &&
+          typeof message === 'object' &&
+          (message as { type?: unknown }).type === expectedType
+        ) {
+          cleanup();
+          resolve();
+        }
+      };
+      const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+        cleanup();
+        reject(new Error(`Runtime Host exited before ${label} failpoint: ${code ?? signal}`));
+      };
+      const cleanup = (): void => {
+        child.off('message', onMessage);
+        child.off('exit', onExit);
+      };
+      child.on('message', onMessage);
+      child.on('exit', onExit);
+    }),
+    PROCESS_TIMEOUT_MS * 3,
+    `Runtime Host did not reach the ${label} failpoint`,
+  );
+}
+
+async function providerCallCount(path: string): Promise<number> {
+  return (await readFile(path, 'utf8')).split(/\r?\n/u).filter(Boolean).length;
 }
 
 function git(cwd: string, args: readonly string[]): string {

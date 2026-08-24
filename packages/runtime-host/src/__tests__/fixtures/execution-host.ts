@@ -58,11 +58,16 @@ if (packagedResourcesRoot) {
 
 const providerCallLogPath = process.env.MAKA_TEST_PROVIDER_CALL_LOG;
 const continuationFailpoint = process.env.MAKA_TEST_CONTINUATION_FAILPOINT;
+const providerFailpointAfterSend = process.env.MAKA_TEST_PROVIDER_FAILPOINT_AFTER_SEND === '1';
 
 class ObservedFakeBackend extends FakeBackend {
   override async *send(input: Parameters<FakeBackend['send']>[0]) {
     if (providerCallLogPath) {
       await appendFile(providerCallLogPath, `${input.turnId}\n`, 'utf8');
+    }
+    if (providerFailpointAfterSend) {
+      process.send?.({ type: 'test.provider_failpoint', point: 'after_send_called' });
+      await new Promise<never>(() => undefined);
     }
     yield* super.send(input);
   }
