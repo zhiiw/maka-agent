@@ -15,11 +15,11 @@ Locations intentionally omit line numbers so unrelated edits do not invalidate t
 
 | Classification | Count |
 |---|---:|
-| windows-backend-gap | 20 |
+| windows-backend-gap | 22 |
 | portable-candidate | 8 |
-| platform-contract | 35 |
+| platform-contract | 36 |
 
-Total Windows-excluded declarations: **63**
+Total Windows-excluded declarations: **66**
 
 ## Inventory
 
@@ -41,6 +41,9 @@ Total Windows-excluded declarations: **63**
 | windows-backend-gap | `packages/runtime-host/src/__tests__/host-kernel.test.ts` a non-reading Client overload is isolated to its connection | `process.platform === 'win32'` |
 | windows-backend-gap | `packages/runtime-host/src/__tests__/host-kernel.test.ts` reports one shutdown failure through close and closed while releasing ownership | `process.platform === 'win32'` |
 | platform-contract | `packages/runtime-host/src/__tests__/host-kernel.test.ts` publishes private POSIX endpoint and registration permissions | `process.platform === 'win32'` |
+| platform-contract | `packages/runtime-host/src/__tests__/managed-dependency-producer-process.test.ts` reaps a surviving descendant after the direct producer accepts SIGTERM | `process.platform === 'win32' ? 'POSIX detached process-group semantics required' : false` |
+| windows-backend-gap | `packages/runtime-host/src/__tests__/managed-dependency-producer-process.test.ts` accepts and accounts for a contained npm bin symlink on POSIX | `process.platform === 'win32'` |
+| windows-backend-gap | `packages/runtime-host/src/__tests__/managed-dependency-producer-process.test.ts` rejects an escaping producer symlink as invalid output instead of a quota failure | `process.platform === 'win32'` |
 | windows-backend-gap | `packages/runtime-host/src/__tests__/memory-two-client-uds.test.ts` two UDS clients share one recoverable Memory authority across Host death | `process.platform === 'win32' ? 'POSIX process death gate' : false` |
 | windows-backend-gap | `packages/runtime-host/src/__tests__/project-catalog-two-client-uds.test.ts` two UDS clients converge on one Host-owned Project Catalog | `process.platform === 'win32'` |
 | windows-backend-gap | `packages/runtime-host/src/__tests__/runtime-policy-coordinator.test.ts` invalidates when a real published mutation loses its commit reply | `process.platform === 'win32'` |

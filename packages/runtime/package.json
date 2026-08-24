@@ -19,6 +19,7 @@
     "./context-budget": "./dist/context-budget.js",
     "./test-connection": "./dist/test-connection.js",
     "./model-fetcher": "./dist/model-fetcher.js",
+    "./child-process-lifecycle": "./dist/child-process-lifecycle.js",
     "./session-manager": "./dist/session-manager.js",
     "./test-only/fake-backend": "./dist/test-only/fake-backend.js",
     "./test-only/observation-text-reader": "./dist/__tests__/observation-text-reader.js",
