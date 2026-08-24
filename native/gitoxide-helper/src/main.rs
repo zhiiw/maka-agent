@@ -758,6 +758,12 @@ fn read_tree_file(
     if bytes_read != header.size() {
         return Err("tree_file_identity_mismatch");
     }
+    let actual_blob_oid =
+        gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &blob.data)
+            .map_err(|_| "tree_file_identity_mismatch")?;
+    if actual_blob_oid != blob_oid {
+        return Err("tree_file_identity_mismatch");
+    }
     let content = std::str::from_utf8(&blob.data)
         .map_err(|_| "tree_file_not_utf8")?
         .to_owned();
