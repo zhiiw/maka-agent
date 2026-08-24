@@ -21,6 +21,10 @@ import { createHash } from 'node:crypto';
 import { readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import {
+  discoverMarkedStorageRoot,
+  tryAcquireInteractiveRootOwner,
+} from '@maka/storage/root-authority';
+import {
   admitGitoxideHelperArtifactInternal,
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../../server/gitoxide-helper-artifact-authority-internal.js';
@@ -57,10 +61,13 @@ const helperCapability = await admitGitoxideHelperArtifactInternal({
   invocationOwnerToken,
   claim,
 });
+const rootCapability = await discoverMarkedStorageRoot({ path: input.storageRoot });
+const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+if (!rootOwner) throw new Error('Gitoxide candidate fixture could not acquire the storage root');
 const authority = await createGitoxideMutationCandidateAuthorityInternal({
   invocationOwnerToken,
   helperCapability,
-  storageRoot: input.storageRoot,
+  storageRootLease: rootOwner.lease,
   baseHead: input.baseHead,
   async failpoint(point) {
     if (point !== 'after_candidate_ref') return;

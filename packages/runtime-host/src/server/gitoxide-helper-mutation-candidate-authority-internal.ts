@@ -23,6 +23,11 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import { withProcessLifetimeFileUpdateLock } from '@maka/storage/process-lifetime-file-update-lock';
+import {
+  assertStorageRootLease,
+  runWithStorageRootLease,
+  type StorageRootLease,
+} from '@maka/storage/root-authority';
 import { syncDirectory } from '@maka/storage/stable-storage';
 import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
 import {
@@ -115,22 +120,30 @@ export class GitoxideMutationCandidateAuthorityError extends Error {
 }
 
 export async function createGitoxideMutationCandidateAuthorityInternal(input: {
-  readonly storageRoot: string;
+  readonly storageRootLease: StorageRootLease<'interactive', 'write'>;
   readonly baseHead: WorkspaceHeadRecordV1;
   readonly invocationOwnerToken: object;
   readonly helperCapability: GitoxideHelperInvocationCapability;
   readonly failpoint?: (point: GitoxideMutationCandidateFailpoint) => void | Promise<void>;
 }): Promise<GitoxideMutationCandidateAuthorityInternal> {
-  const storageRoot = await realpath(input.storageRoot);
-  const repositoryPath = await realpath(
-    gitoxideManagedRepositoryPathInternal(storageRoot, input.baseHead),
+  await assertStorageRootLease(input.storageRootLease, 'interactive', 'write');
+  const rootContext = await runWithStorageRootLease(
+    input.storageRootLease,
+    'interactive',
+    'write',
+    async (storageRoot) => {
+      const repositoryPath = await realpath(
+        gitoxideManagedRepositoryPathInternal(storageRoot, input.baseHead),
+      );
+      assertWithin(storageRoot, repositoryPath, 'Gitoxide managed repository');
+      const receiptRoot = gitoxideMutationCandidateReceiptRootInternal(storageRoot, input.baseHead);
+      await mkdir(receiptRoot, { recursive: true, mode: 0o700 });
+      const canonicalReceiptRoot = await realpath(receiptRoot);
+      assertWithin(storageRoot, canonicalReceiptRoot, 'Gitoxide candidate receipt root');
+      if (process.platform !== 'win32') await chmod(canonicalReceiptRoot, 0o700);
+      return { storageRoot, repositoryPath, canonicalReceiptRoot };
+    },
   );
-  assertWithin(storageRoot, repositoryPath, 'Gitoxide managed repository');
-  const receiptRoot = gitoxideMutationCandidateReceiptRootInternal(storageRoot, input.baseHead);
-  await mkdir(receiptRoot, { recursive: true, mode: 0o700 });
-  const canonicalReceiptRoot = await realpath(receiptRoot);
-  assertWithin(storageRoot, canonicalReceiptRoot, 'Gitoxide candidate receipt root');
-  if (process.platform !== 'win32') await chmod(canonicalReceiptRoot, 0o700);
 
   const managedRepositoryOwnerToken = {};
   const candidateOwnerToken = {};
@@ -142,7 +155,7 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
     invocationOwnerToken: input.invocationOwnerToken,
     helperCapability: input.helperCapability,
     managedRepositoryOwnerToken,
-    repositoryPath,
+    repositoryPath: rootContext.repositoryPath,
     acceptedRef: ACCEPTED_REF,
     expectedAcceptedCommitOid: input.baseHead.commitOid,
     expectedAcceptedTreeOid: input.baseHead.treeOid,
@@ -152,62 +165,78 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
     request: GitoxideMutationCandidateCaptureInput,
   ): Promise<GitoxideMutationCandidateProofV1> => {
     assertCaptureInput(request);
-    const operationIdentitySha256 = sha256(request.operationId);
-    const receiptPath = join(canonicalReceiptRoot, `${operationIdentitySha256.slice(7)}.json`);
-    return withProcessLifetimeFileUpdateLock(receiptPath, async () => {
-      request.abortSignal?.throwIfAborted();
-      const durable = await readReceipt(receiptPath);
-      const candidate = await prepareGitoxideMutationCandidateInternal({
-        invocationOwnerToken: input.invocationOwnerToken,
-        helperCapability: input.helperCapability,
-        managedRepositoryOwnerToken,
-        managedRepositoryCapability,
-        candidateOwnerToken,
-        operationId: request.operationId,
-        path: request.path,
-        content: request.content,
-        abortSignal: request.abortSignal,
-      });
-      const expected = freezeReceipt({
-        schemaVersion: 1,
-        protocol: 'maka_gitoxide_mutation_candidate_v1',
-        repositoryId: input.baseHead.repositoryId,
-        workspaceId: input.baseHead.workspaceId,
-        workspaceEpochId: input.baseHead.workspaceEpochId,
-        workspaceVersionId: input.baseHead.workspaceVersionId,
-        baseAcceptedEventId: input.baseHead.acceptedEventId,
-        baseHeadRevision: input.baseHead.revision,
-        baseCommitOid: input.baseHead.commitOid,
-        baseTreeOid: input.baseHead.treeOid,
-        operationIdentitySha256,
-        acceptedRef: ACCEPTED_REF,
-        candidateRef: candidate.candidateRef,
-        candidateCommitOid: candidate.successorCommitOid,
-        candidateTreeOid: candidate.successorTreeOid,
-        resultBlobOid: candidate.resultBlobOid,
-        path: candidate.path,
-        contentSha256: sha256(request.content),
-        executionProfileDigest: request.executionProfileDigest,
-      });
-      if (durable && !isDeepStrictEqual(durable, expected)) {
-        throw new GitoxideMutationCandidateAuthorityError(
-          'gitoxide_mutation_candidate_identity_conflict',
-          'Durable Gitoxide candidate receipt conflicts with the exact operation candidate',
+    return runWithStorageRootLease(
+      input.storageRootLease,
+      'interactive',
+      'write',
+      async (storageRoot) => {
+        if (storageRoot !== rootContext.storageRoot) {
+          throw new GitoxideMutationCandidateAuthorityError(
+            'gitoxide_mutation_candidate_identity_conflict',
+            'Gitoxide candidate authority storage root identity changed',
+          );
+        }
+        const operationIdentitySha256 = sha256(request.operationId);
+        const receiptPath = join(
+          rootContext.canonicalReceiptRoot,
+          `${operationIdentitySha256.slice(7)}.json`,
         );
-      }
-      if (!durable) {
-        await input.failpoint?.('after_candidate_ref');
-        await writeReceiptAtomic(receiptPath, expected);
-        await input.failpoint?.('after_candidate_receipt');
-      }
-      const receipt = durable ?? expected;
-      const proof = Object.freeze({
-        receipt,
-        candidateCapability: candidate.candidateCapability,
-      });
-      issuedProofs.set(proof, receipt);
-      return proof;
-    });
+        return withProcessLifetimeFileUpdateLock(receiptPath, async () => {
+          request.abortSignal?.throwIfAborted();
+          const durable = await readReceipt(receiptPath);
+          const candidate = await prepareGitoxideMutationCandidateInternal({
+            invocationOwnerToken: input.invocationOwnerToken,
+            helperCapability: input.helperCapability,
+            managedRepositoryOwnerToken,
+            managedRepositoryCapability,
+            candidateOwnerToken,
+            operationId: request.operationId,
+            path: request.path,
+            content: request.content,
+            abortSignal: request.abortSignal,
+          });
+          const expected = freezeReceipt({
+            schemaVersion: 1,
+            protocol: 'maka_gitoxide_mutation_candidate_v1',
+            repositoryId: input.baseHead.repositoryId,
+            workspaceId: input.baseHead.workspaceId,
+            workspaceEpochId: input.baseHead.workspaceEpochId,
+            workspaceVersionId: input.baseHead.workspaceVersionId,
+            baseAcceptedEventId: input.baseHead.acceptedEventId,
+            baseHeadRevision: input.baseHead.revision,
+            baseCommitOid: input.baseHead.commitOid,
+            baseTreeOid: input.baseHead.treeOid,
+            operationIdentitySha256,
+            acceptedRef: ACCEPTED_REF,
+            candidateRef: candidate.candidateRef,
+            candidateCommitOid: candidate.successorCommitOid,
+            candidateTreeOid: candidate.successorTreeOid,
+            resultBlobOid: candidate.resultBlobOid,
+            path: candidate.path,
+            contentSha256: sha256(request.content),
+            executionProfileDigest: request.executionProfileDigest,
+          });
+          if (durable && !isDeepStrictEqual(durable, expected)) {
+            throw new GitoxideMutationCandidateAuthorityError(
+              'gitoxide_mutation_candidate_identity_conflict',
+              'Durable Gitoxide candidate receipt conflicts with the exact operation candidate',
+            );
+          }
+          if (!durable) {
+            await input.failpoint?.('after_candidate_ref');
+            await writeReceiptAtomic(receiptPath, expected);
+            await input.failpoint?.('after_candidate_receipt');
+          }
+          const receipt = durable ?? expected;
+          const proof = Object.freeze({
+            receipt,
+            candidateCapability: candidate.candidateCapability,
+          });
+          issuedProofs.set(proof, receipt);
+          return proof;
+        });
+      },
+    );
   };
 
   return Object.freeze({

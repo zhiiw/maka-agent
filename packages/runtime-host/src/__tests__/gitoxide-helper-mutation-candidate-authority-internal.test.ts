@@ -27,6 +27,11 @@ import test, { type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import {
+  resolveStorageRoot,
+  StorageRootAuthorityError,
+  tryAcquireInteractiveRootOwner,
+} from '@maka/storage/root-authority';
+import {
   admitGitoxideHelperArtifactInternal,
   type GitoxideHelperInvocationCapability,
   issueGitoxideHelperReleaseArtifactClaimInternal,
@@ -49,12 +54,27 @@ interface AdmittedHelper {
 
 let admittedHelperPromise: Promise<AdmittedHelper | undefined> | undefined;
 
+test('rejects candidate authority creation after its storage-root lease closes', async (t) => {
+  const fixture = await candidateFixture(t);
+  if (!fixture) return;
+  await fixture.rootOwner.close();
+
+  await assert.rejects(
+    createGitoxideMutationCandidateAuthorityInternal({
+      ...fixture.helper,
+      storageRootLease: fixture.rootOwner.lease,
+      baseHead: fixture.baseHead,
+    }),
+    (error) => error instanceof StorageRootAuthorityError && error.code === 'invalid_lease',
+  );
+});
+
 test('persists and revalidates an exact Gitoxide candidate without advancing accepted truth', async (t) => {
   const fixture = await candidateFixture(t);
   if (!fixture) return;
   const authority = await createGitoxideMutationCandidateAuthorityInternal({
     ...fixture.helper,
-    storageRoot: fixture.storageRoot,
+    storageRootLease: fixture.rootOwner.lease,
     baseHead: fixture.baseHead,
   });
   const input = {
@@ -76,7 +96,7 @@ test('persists and revalidates an exact Gitoxide candidate without advancing acc
 
   const reopened = await createGitoxideMutationCandidateAuthorityInternal({
     ...fixture.helper,
-    storageRoot: fixture.storageRoot,
+    storageRootLease: fixture.rootOwner.lease,
     baseHead: fixture.baseHead,
   });
   const retry = await reopened.capture(input);
@@ -89,7 +109,7 @@ test('rejects a candidate proof whose receipt was recomposed around a valid capa
   if (!fixture) return;
   const authority = await createGitoxideMutationCandidateAuthorityInternal({
     ...fixture.helper,
-    storageRoot: fixture.storageRoot,
+    storageRootLease: fixture.rootOwner.lease,
     baseHead: fixture.baseHead,
   });
   const proof = await authority.capture({
@@ -117,7 +137,7 @@ test('converges when execution stops after candidate ref publication and rejects
   let stopped = false;
   const interrupted = await createGitoxideMutationCandidateAuthorityInternal({
     ...fixture.helper,
-    storageRoot: fixture.storageRoot,
+    storageRootLease: fixture.rootOwner.lease,
     baseHead: fixture.baseHead,
     failpoint(point) {
       if (point === 'after_candidate_ref' && !stopped) {
@@ -136,7 +156,7 @@ test('converges when execution stops after candidate ref publication and rejects
 
   const reopened = await createGitoxideMutationCandidateAuthorityInternal({
     ...fixture.helper,
-    storageRoot: fixture.storageRoot,
+    storageRootLease: fixture.rootOwner.lease,
     baseHead: fixture.baseHead,
   });
   const recovered = await reopened.capture(input);
@@ -184,6 +204,7 @@ test('reopens and completes a candidate after the owner process is killed post-r
       readyPath,
     }),
   );
+  await fixture.rootOwner.close();
   const child = spawn(
     process.execPath,
     [
@@ -201,9 +222,12 @@ test('reopens and completes a candidate after the owner process is killed post-r
     child.kill('SIGKILL');
     await waitForExit(child, 10_000);
 
+    const reopenedRootOwner = await tryAcquireInteractiveRootOwner(fixture.rootCapability);
+    assert.ok(reopenedRootOwner);
+    t.after(() => reopenedRootOwner.close());
     const reopened = await createGitoxideMutationCandidateAuthorityInternal({
       ...fixture.helper,
-      storageRoot: fixture.storageRoot,
+      storageRootLease: reopenedRootOwner.lease,
       baseHead: fixture.baseHead,
     });
     const recovered = await reopened.capture(input);
@@ -225,7 +249,14 @@ async function candidateFixture(t: TestContext) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-candidate-owner-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const sourceRoot = join(root, 'source');
-  const storageRoot = join(root, 'storage');
+  const rootCapability = await resolveStorageRoot({
+    path: join(root, 'storage'),
+    kind: 'interactive',
+  });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => (rootOwner.closed ? undefined : rootOwner.close()));
+  const storageRoot = rootOwner.capability.canonicalPath;
   git(root, ['init', '--quiet', '--object-format=sha1', sourceRoot]);
   await writeFile(join(sourceRoot, 'hello.txt'), 'candidate base\n');
   git(sourceRoot, ['add', 'hello.txt']);
@@ -275,7 +306,7 @@ async function candidateFixture(t: TestContext) {
     commitOid: imported.baselineCommitOid,
     treeOid: imported.baselineTreeOid,
   };
-  return { helper, storageRoot, repositoryPath, baseHead };
+  return { helper, storageRoot, rootCapability, rootOwner, repositoryPath, baseHead };
 }
 
 async function admittedHelper(): Promise<AdmittedHelper | undefined> {
