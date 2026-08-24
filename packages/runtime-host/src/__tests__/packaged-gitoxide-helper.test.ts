@@ -32,13 +32,10 @@ import {
 test('turns an exact packaged helper manifest into an owner-bound invocation capability', async () => {
   const fixture = await createFixture();
   try {
-    const releaseOwnerToken = {};
     const invocationOwnerToken = {};
-    const capability = await resolvePackagedGitoxideHelperInternal({
-      resourcesRoot: fixture.root,
-      releaseOwnerToken,
-      invocationOwnerToken,
-    });
+    const capability = await withPackagedResourcesRoot(fixture.root, () =>
+      resolvePackagedGitoxideHelperInternal({ invocationOwnerToken }),
+    );
     const verified = await verifyGitoxideHelperArtifactForInvocationInternal(
       invocationOwnerToken,
       capability,
@@ -55,11 +52,9 @@ test('fails closed when the manifest and packaged helper no longer agree', async
   try {
     await writeFile(fixture.executablePath, 'tampered');
     await assert.rejects(
-      resolvePackagedGitoxideHelperInternal({
-        resourcesRoot: fixture.root,
-        releaseOwnerToken: {},
-        invocationOwnerToken: {},
-      }),
+      withPackagedResourcesRoot(fixture.root, () =>
+        resolvePackagedGitoxideHelperInternal({ invocationOwnerToken: {} }),
+      ),
       (error: unknown) =>
         error instanceof PackagedGitoxideHelperError &&
         error.code === 'packaged_gitoxide_helper_integrity_mismatch',
@@ -77,11 +72,9 @@ test('rejects an unknown or self-declared manifest shape', async () => {
       JSON.stringify({ schemaVersion: 999, executableRelativePath: 'gitoxide/helper' }),
     );
     await assert.rejects(
-      resolvePackagedGitoxideHelperInternal({
-        resourcesRoot: fixture.root,
-        releaseOwnerToken: {},
-        invocationOwnerToken: {},
-      }),
+      withPackagedResourcesRoot(fixture.root, () =>
+        resolvePackagedGitoxideHelperInternal({ invocationOwnerToken: {} }),
+      ),
       (error: unknown) =>
         error instanceof PackagedGitoxideHelperError &&
         error.code === 'packaged_gitoxide_helper_manifest_invalid',
@@ -90,6 +83,20 @@ test('rejects an unknown or self-declared manifest shape', async () => {
     await fixture.cleanup();
   }
 });
+
+async function withPackagedResourcesRoot<T>(root: string, run: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'resourcesPath');
+  Object.defineProperty(process, 'resourcesPath', {
+    configurable: true,
+    value: root,
+  });
+  try {
+    return await run();
+  } finally {
+    if (descriptor) Object.defineProperty(process, 'resourcesPath', descriptor);
+    else delete (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  }
+}
 
 async function createFixture(): Promise<{
   root: string;

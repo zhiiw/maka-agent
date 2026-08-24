@@ -41,6 +41,9 @@ const MANIFEST_KEYS = [
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_HELPER_BYTES = 256 * 1024 * 1024;
+const packagedReleaseOwnerToken = Object.freeze({
+  kind: 'packaged_gitoxide_release_owner_v1' as const,
+});
 
 export type PackagedGitoxideHelperErrorCode =
   | 'packaged_gitoxide_helper_unavailable'
@@ -60,12 +63,10 @@ export class PackagedGitoxideHelperError extends Error {
 }
 
 export async function resolvePackagedGitoxideHelperInternal(input: {
-  readonly resourcesRoot: string;
-  readonly releaseOwnerToken: object;
   readonly invocationOwnerToken: object;
 }): Promise<GitoxideHelperInvocationCapability> {
   try {
-    const resourcesRoot = normalize(await realpath(input.resourcesRoot));
+    const resourcesRoot = normalize(await realpath(requirePackagedProcessResourcesRoot()));
     const manifestPath = normalize(await realpath(join(resourcesRoot, 'gitoxide-helper.json')));
     assertWithinRoot(resourcesRoot, manifestPath, 'Gitoxide helper manifest');
     const manifestInfo = await lstat(manifestPath);
@@ -87,7 +88,7 @@ export async function resolvePackagedGitoxideHelperInternal(input: {
       await realpath(join(resourcesRoot, ...manifest.executableRelativePath.split('/'))),
     );
     assertWithinRoot(resourcesRoot, executablePath, 'Gitoxide helper executable');
-    const claim = issueGitoxideHelperReleaseArtifactClaimInternal(input.releaseOwnerToken, {
+    const claim = issueGitoxideHelperReleaseArtifactClaimInternal(packagedReleaseOwnerToken, {
       executablePath,
       expectedSha256: manifest.sha256,
       expectedBytes: manifest.bytes,
@@ -96,7 +97,7 @@ export async function resolvePackagedGitoxideHelperInternal(input: {
       protocolVersion: manifest.protocolVersion,
     });
     return await admitGitoxideHelperArtifactInternal({
-      releaseOwnerToken: input.releaseOwnerToken,
+      releaseOwnerToken: packagedReleaseOwnerToken,
       invocationOwnerToken: input.invocationOwnerToken,
       claim,
     });
@@ -117,6 +118,18 @@ export async function resolvePackagedGitoxideHelperInternal(input: {
       { cause: error },
     );
   }
+}
+
+function requirePackagedProcessResourcesRoot(): string {
+  const resourcesPath = (process as NodeJS.Process & { readonly resourcesPath?: unknown })
+    .resourcesPath;
+  if (typeof resourcesPath !== 'string' || resourcesPath.length === 0 || !isAbsolute(resourcesPath)) {
+    throw new PackagedGitoxideHelperError(
+      'packaged_gitoxide_helper_unavailable',
+      'Packaged process resources root is unavailable',
+    );
+  }
+  return resourcesPath;
 }
 
 interface PackagedGitoxideHelperManifestV1 {
