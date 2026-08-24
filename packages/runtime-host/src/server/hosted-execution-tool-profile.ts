@@ -109,7 +109,7 @@ export function projectHostedExecutionTools(
       return {
         ...tool,
         recoveryMode: 'reconcile' as const,
-        durableExecutionProfile: 'managed_mutation_v1' as const,
+        durableExecutionProfile: 'gitoxide_managed_mutation_v1' as const,
       };
     }
     return tool;

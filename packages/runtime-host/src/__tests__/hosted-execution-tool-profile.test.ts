@@ -108,6 +108,6 @@ test('the managed coding profile exposes only owner-backed file operations', () 
   const projected = projectHostedExecutionTools(tools, 'managed-coding-v1');
   for (const tool of projected) {
     assert.equal(tool.recoveryMode, 'reconcile');
-    assert.equal(tool.durableExecutionProfile, 'managed_mutation_v1');
+    assert.equal(tool.durableExecutionProfile, 'gitoxide_managed_mutation_v1');
   }
 });
