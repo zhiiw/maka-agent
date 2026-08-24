@@ -89,12 +89,6 @@ const result = await startExecutionRuntimeHostCandidate(
               await new Promise<never>(() => undefined);
             }
           : undefined,
-        onContinuationLifecycleEvent: continuationFailpoint
-          ? (event) => console.error(`[test-continuation] ${JSON.stringify(event)}`)
-          : undefined,
-        onContinuationSafetyError: continuationFailpoint
-          ? (error) => console.error(`[test-continuation-safety] ${inspect(error, { depth: null })}`)
-          : undefined,
       }),
   },
 );

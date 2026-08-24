@@ -138,7 +138,7 @@ test('a started workspace-bound continuation survives Host death without provide
         assert.deepEqual(
           await successorClient.startTurnResume({
             sessionId: fixture.sessionId,
-            turnId: targetTurnId,
+            turnId: `${targetTurnId}-retry`,
             sourceRunId: source.sourceRunId,
             sourceRuntimeEventHighWater: source.sourceRuntimeEventHighWater,
           }),
