@@ -82,7 +82,8 @@ export interface GitoxideManagedInspectionResult {
   readonly kind: 'gitoxide_managed_inspection_v1';
   readonly acceptedCommitOid: string;
   readonly acceptedTreeOid: string;
-  readonly dependencyEnvironmentId: `sha256:${string}`;
+  /** Present only when this operation actually consumed the dependency environment. */
+  readonly dependencyEnvironmentId?: `sha256:${string}`;
   readonly result: ManagedWorkspaceReadOnlyResult;
 }
 
@@ -131,6 +132,7 @@ export async function createGitoxideManagedInspectionComposition(
     activeOperations += 1;
     let operationRoot: string | undefined;
     let dependencyLease: Awaited<ReturnType<typeof input.dependencyAuthority.acquire>> | undefined;
+    let primaryError: unknown;
     try {
       const sourceRoot = await realpath(sourceCwd);
       abortSignal.throwIfAborted();
@@ -157,24 +159,24 @@ export async function createGitoxideManagedInspectionComposition(
         baselineRef: BASELINE_REF,
         abortSignal,
       });
-      const [manifest, lockfile, projection] = await Promise.all([
-        readGitoxideTreeFileInternal({
+      let rawResult: ManagedWorkspaceReadOnlyResult;
+      let dependencyEnvironmentId: `sha256:${string}` | undefined;
+      if (route.root === 'source_tree') {
+        if (operation.kind !== 'read') throw new Error('Invalid source-tree inspection route');
+        const file = await readGitoxideTreeFileInternal({
           invocationOwnerToken,
           helperCapability: input.helperCapability,
           managedRepositoryOwnerToken,
           managedRepositoryCapability: imported.managedRepositoryCapability,
-          path: 'package.json',
+          path: route.workerOperation.path,
           abortSignal,
-        }),
-        readGitoxideTreeFileInternal({
-          invocationOwnerToken,
-          helperCapability: input.helperCapability,
-          managedRepositoryOwnerToken,
-          managedRepositoryCapability: imported.managedRepositoryCapability,
-          path: 'package-lock.json',
-          abortSignal,
-        }),
-        materializeGitoxideProjectionInternal({
+        });
+        rawResult = Object.freeze({
+          kind: 'read' as const,
+          content: sliceReadContent(file.content, operation.offset, operation.limit),
+        });
+      } else if (route.root === 'projection') {
+        const projection = await materializeGitoxideProjectionInternal({
           invocationOwnerToken,
           helperCapability: input.helperCapability,
           managedRepositoryOwnerToken,
@@ -182,65 +184,93 @@ export async function createGitoxideManagedInspectionComposition(
           projectionOwnerToken,
           destinationPath: projectionPath,
           abortSignal,
-        }),
-      ]);
-      const manifestBytes = Buffer.from(manifest.content, 'utf8');
-      const lockfileBytes = Buffer.from(lockfile.content, 'utf8');
-      const producerCapability = createManagedDependencyEnvironmentProducerCapability(
-        input.npmRuntime.runtimeIdentitySha256,
-      );
-      const dependencyIdentity = computeManagedDependencyEnvironmentIdentity({
-        manifestPath: manifest.path,
-        manifestBytes,
-        lockfilePath: lockfile.path,
-        lockfileBytes,
-        packageManagerName: 'npm',
-        packageManagerVersion: input.npmRuntime.npmVersion,
-        nodeVersion: input.npmRuntime.nodeVersion,
-        nodeAbi: input.npmRuntime.nodeAbi,
-        platform: input.npmRuntime.platform,
-        arch: input.npmRuntime.arch,
-        producerRuntimeIdentitySha256: producerCapability.runtimeIdentitySha256,
-        producerPolicyIdentitySha256: producerCapability.policyIdentitySha256,
-        policyVersion: 'managed_dependency_environment_v1',
-      });
-      dependencyLease = await input.dependencyAuthority.acquire(dependencyIdentity, {
-        manifestBytes,
-        lockfileBytes,
-        abortSignal,
-      });
-      abortSignal.throwIfAborted();
-      const rawResult = await input.filesystemWorker.execute({
-        operation: route.workerOperation,
-        cwd:
-          route.root === 'dependency' ? dependencyLease.dependencyRoot : projection.destinationPath,
-        executionBoundary: route.executionBoundary,
-        abortSignal,
-      });
-      const observation = await observeGitoxideProjectionInternal({
-        invocationOwnerToken,
-        helperCapability: input.helperCapability,
-        projectionOwnerToken,
-        projectionCapability: projection.projectionCapability,
-        abortSignal,
-      });
-      if (observation.kind !== 'projection_observed') {
-        throw new Error(
-          `Gitoxide projection drifted at ${observation.path}: ${observation.reason}`,
+        });
+        rawResult = await input.filesystemWorker.execute({
+          operation: route.workerOperation,
+          cwd: projection.destinationPath,
+          executionBoundary: route.executionBoundary,
+          abortSignal,
+        });
+        const observation = await observeGitoxideProjectionInternal({
+          invocationOwnerToken,
+          helperCapability: input.helperCapability,
+          projectionOwnerToken,
+          projectionCapability: projection.projectionCapability,
+          abortSignal,
+        });
+        if (observation.kind !== 'projection_observed') {
+          throw new Error(
+            `Gitoxide projection drifted at ${observation.path}: ${observation.reason}`,
+          );
+        }
+      } else {
+        // These reads are intentionally sequential. A rejected child cannot outlive
+        // the operation and race cleanup of the shared managed repository.
+        const manifest = await readGitoxideTreeFileInternal({
+          invocationOwnerToken,
+          helperCapability: input.helperCapability,
+          managedRepositoryOwnerToken,
+          managedRepositoryCapability: imported.managedRepositoryCapability,
+          path: 'package.json',
+          abortSignal,
+        });
+        const lockfile = await readGitoxideTreeFileInternal({
+          invocationOwnerToken,
+          helperCapability: input.helperCapability,
+          managedRepositoryOwnerToken,
+          managedRepositoryCapability: imported.managedRepositoryCapability,
+          path: 'package-lock.json',
+          abortSignal,
+        });
+        const manifestBytes = Buffer.from(manifest.content, 'utf8');
+        const lockfileBytes = Buffer.from(lockfile.content, 'utf8');
+        const producerCapability = createManagedDependencyEnvironmentProducerCapability(
+          input.npmRuntime.runtimeIdentitySha256,
         );
+        const dependencyIdentity = computeManagedDependencyEnvironmentIdentity({
+          manifestPath: manifest.path,
+          manifestBytes,
+          lockfilePath: lockfile.path,
+          lockfileBytes,
+          packageManagerName: 'npm',
+          packageManagerVersion: input.npmRuntime.npmVersion,
+          nodeVersion: input.npmRuntime.nodeVersion,
+          nodeAbi: input.npmRuntime.nodeAbi,
+          platform: input.npmRuntime.platform,
+          arch: input.npmRuntime.arch,
+          producerRuntimeIdentitySha256: producerCapability.runtimeIdentitySha256,
+          producerPolicyIdentitySha256: producerCapability.policyIdentitySha256,
+          policyVersion: 'managed_dependency_environment_v1',
+        });
+        dependencyLease = await input.dependencyAuthority.acquire(dependencyIdentity, {
+          manifestBytes,
+          lockfileBytes,
+          abortSignal,
+        });
+        abortSignal.throwIfAborted();
+        dependencyEnvironmentId = dependencyLease.environmentId;
+        rawResult = await input.filesystemWorker.execute({
+          operation: route.workerOperation,
+          cwd: dependencyLease.dependencyRoot,
+          executionBoundary: route.executionBoundary,
+          abortSignal,
+        });
       }
       const result = remapInspectionResult(route, rawResult);
       const response = Object.freeze({
         kind: 'gitoxide_managed_inspection_v1' as const,
         acceptedCommitOid: imported.baselineCommitOid,
         acceptedTreeOid: imported.baselineTreeOid,
-        dependencyEnvironmentId: dependencyLease.environmentId,
+        ...(dependencyEnvironmentId ? { dependencyEnvironmentId } : {}),
         result,
       });
       if (Buffer.byteLength(JSON.stringify(response), 'utf8') > MAX_RESULT_BYTES) {
         throw new Error('Managed inspection result exceeds its response limit; narrow the request');
       }
       return response;
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
       const cleanupErrors: unknown[] = [];
       try {
@@ -258,8 +288,20 @@ export async function createGitoxideManagedInspectionComposition(
         for (const resolveWaiter of drainWaiters) resolveWaiter();
         drainWaiters.clear();
       }
-      if (cleanupErrors.length === 1) throw cleanupErrors[0];
-      if (cleanupErrors.length > 1) {
+      if (primaryError instanceof Error && cleanupErrors.length > 0) {
+        const cleanupCause = new AggregateError(
+          cleanupErrors,
+          'Gitoxide managed inspection cleanup also failed',
+        );
+        if (primaryError.cause === undefined) {
+          Object.defineProperty(primaryError, 'cause', {
+            configurable: true,
+            value: cleanupCause,
+          });
+        }
+      }
+      if (primaryError === undefined && cleanupErrors.length === 1) throw cleanupErrors[0];
+      if (primaryError === undefined && cleanupErrors.length > 1) {
         throw new AggregateError(cleanupErrors, 'Gitoxide managed inspection cleanup failed');
       }
     }
@@ -310,14 +352,12 @@ export async function tryOpenPackagedGitoxideManagedInspectionComposition(input:
   const releaseOwnerToken = {};
   const invocationOwnerToken = {};
   try {
-    const [helperCapability, npmRuntime] = await Promise.all([
-      resolvePackagedGitoxideHelperInternal({
-        resourcesRoot,
-        releaseOwnerToken,
-        invocationOwnerToken,
-      }),
-      resolveBundledNpmRuntime({ resourcesRoot }),
-    ]);
+    const helperCapability = await resolvePackagedGitoxideHelperInternal({
+      resourcesRoot,
+      releaseOwnerToken,
+      invocationOwnerToken,
+    });
+    const npmRuntime = await resolveBundledNpmRuntime({ resourcesRoot });
     const producerCapability = createManagedDependencyEnvironmentProducerCapability(
       npmRuntime.runtimeIdentitySha256,
     );
@@ -364,7 +404,7 @@ function runtimeHostPackagedResourcesRoot(): string | undefined {
 }
 
 interface InspectionRoute {
-  readonly root: 'projection' | 'dependency';
+  readonly root: 'source_tree' | 'projection' | 'dependency';
   readonly logicalPath: string;
   readonly workerOperation: ManagedWorkspaceReadOnlyOperation;
   readonly executionBoundary: Parameters<
@@ -385,11 +425,19 @@ function routeInspectionOperation(operation: GitoxideManagedInspectionInput): In
     : canonicalPath;
   const workerPath = dependencyRoot ? segments.slice(1).join('/') || '.' : canonicalPath;
   return Object.freeze({
-    root: dependencyRoot ? 'dependency' : 'projection',
+    root: dependencyRoot ? 'dependency' : operation.kind === 'read' ? 'source_tree' : 'projection',
     logicalPath,
     workerOperation: Object.freeze({ ...operation, path: workerPath }),
     executionBoundary: createReadOnlyBoundary(),
   });
+}
+
+function sliceReadContent(content: string, offset?: number, limit?: number): string {
+  if (offset === undefined && limit === undefined) return content;
+  const lines = content.split('\n');
+  const start = offset ?? 0;
+  const end = limit === undefined ? lines.length : start + limit;
+  return lines.slice(start, end).join('\n');
 }
 
 function canonicalProjectPath(value: string): string {
