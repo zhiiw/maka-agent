@@ -160,7 +160,7 @@ test('replays promotion from the strict durable receipt without recreating the m
   const operationId = 'operation-durable-promote-1';
   const authority = await createGitoxideMutationCandidateAuthorityInternal({
     ...fixture.helper,
-    storageRoot: fixture.storageRoot,
+    storageRootLease: fixture.rootOwner.lease,
     baseHead: fixture.baseHead,
   });
   const proof = await authority.capture({
@@ -171,7 +171,7 @@ test('replays promotion from the strict durable receipt without recreating the m
   });
   const reopened = await createGitoxideMutationCandidateAuthorityInternal({
     ...fixture.helper,
-    storageRoot: fixture.storageRoot,
+    storageRootLease: fixture.rootOwner.lease,
     baseHead: fixture.baseHead,
   });
 
@@ -185,7 +185,7 @@ test('replays promotion from the strict durable receipt without recreating the m
 
   const exactRetry = await createGitoxideMutationCandidateAuthorityInternal({
     ...fixture.helper,
-    storageRoot: fixture.storageRoot,
+    storageRootLease: fixture.rootOwner.lease,
     baseHead: fixture.baseHead,
   });
   assert.deepEqual(await exactRetry.promoteDurable(operationId), receipt);

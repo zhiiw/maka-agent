@@ -33,6 +33,7 @@ import {
   ToolRuntime,
   type MakaTool,
   type RuntimeManagedMutationAdmission,
+  type RuntimeManagedMutationOperationProof,
   type ToolRuntimeInput,
 } from '../tool-runtime.js';
 
@@ -1492,13 +1493,17 @@ function makeHarness(
   return {
     messages,
     events,
-    execute: async (target: MakaTool, abortSignal: AbortSignal = new AbortController().signal) =>
+    execute: async (
+      target: MakaTool,
+      abortSignal: AbortSignal = new AbortController().signal,
+      input: unknown = {},
+    ) =>
       (
         await runtime.settleToolCall({
           tool: target,
           turnId: 'turn-1',
           toolCallId: 'provider-call-1',
-          input: {},
+          input,
           abortSignal,
           eventSink: {
             push: (event) => {

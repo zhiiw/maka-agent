@@ -24,6 +24,7 @@ import { dirname, join } from 'node:path';
 import type { ToolRuntimeInput } from '@maka/runtime/tool-runtime';
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import type { ExecutionStoresWorkspaceMutationAuthorityInternal } from '@maka/storage/execution-stores-workspace-authority-internal';
+import { runWithStorageRootLease, type StorageRootLease } from '@maka/storage/root-authority';
 import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
 import { verifyGitoxideHelperArtifactForInvocationInternal } from './gitoxide-helper-artifact-authority-internal.js';
 import {
@@ -81,7 +82,7 @@ export interface GitoxideManagedMutationSession {
  * versions, and Runtime owns each operation result.
  */
 export async function openGitoxideManagedMutationSession(input: {
-  readonly storageRoot: string;
+  readonly storageRootLease: StorageRootLease<'interactive', 'write'>;
   readonly sourceRoot: string;
   readonly sessionId: string;
   readonly invocationOwnerToken: object;
@@ -92,7 +93,7 @@ export async function openGitoxideManagedMutationSession(input: {
 }): Promise<GitoxideManagedMutationSession> {
   input.abortSignal?.throwIfAborted();
   const [storageRoot, sourceRoot, helper] = await Promise.all([
-    realpath(input.storageRoot),
+    runWithStorageRootLease(input.storageRootLease, 'interactive', 'write', async (root) => root),
     realpath(input.sourceRoot),
     verifyGitoxideHelperArtifactForInvocationInternal(
       input.invocationOwnerToken,
@@ -234,9 +235,9 @@ export async function openGitoxideManagedMutationSession(input: {
     throw new Error('Gitoxide baseline receipt conflicts with accepted baseline authority');
   }
 
-  const candidateAuthorityForHead = (baseHead: typeof head) =>
+  const candidateAuthorityForHead = (baseHead: WorkspaceHeadRecordV1) =>
     createGitoxideMutationCandidateAuthorityInternal({
-      storageRoot,
+      storageRootLease: input.storageRootLease,
       baseHead,
       invocationOwnerToken: input.invocationOwnerToken,
       helperCapability: input.helperCapability,

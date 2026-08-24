@@ -87,7 +87,7 @@ test('opens one durable Gitoxide baseline and exactly reuses it for the session'
       claim,
     });
     const input = {
-      storageRoot: storageCapability.canonicalPath,
+      storageRootLease: storageOwner.lease,
       sourceRoot,
       sessionId: 'session-gitoxide-managed-1',
       invocationOwnerToken,
@@ -167,7 +167,7 @@ test('reopens after process death between successor acceptance and Git ref promo
   const initialHelper = await admitRealHelper(helperPath);
   try {
     const initial = await openGitoxideManagedMutationSession({
-      storageRoot: initialStorage.canonicalPath,
+      storageRootLease: initialOwner.lease,
       sourceRoot,
       sessionId,
       ...initialHelper,
@@ -211,7 +211,7 @@ test('reopens after process death between successor acceptance and Git ref promo
     const reopenedHelper = await admitRealHelper(helperPath);
     try {
       const reopened = await openGitoxideManagedMutationSession({
-        storageRoot: reopenedStorage.canonicalPath,
+        storageRootLease: reopenedOwner.lease,
         sourceRoot,
         sessionId,
         ...reopenedHelper,
@@ -220,7 +220,7 @@ test('reopens after process death between successor acceptance and Git ref promo
       });
       assert.equal(reopened.head.revision, 2);
       const exactRetry = await openGitoxideManagedMutationSession({
-        storageRoot: reopenedStorage.canonicalPath,
+        storageRootLease: reopenedOwner.lease,
         sourceRoot,
         sessionId,
         ...reopenedHelper,

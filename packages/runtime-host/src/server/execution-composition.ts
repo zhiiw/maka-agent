@@ -337,12 +337,9 @@ export async function createExecutionRuntimeHostComposition(
     });
     const packagedResourcesRoot = runtimeHostPackagedResourcesRootInternal();
     if (packagedResourcesRoot) {
-      const releaseOwnerToken = {};
       const invocationOwnerToken = {};
       try {
         const helperCapability = await resolvePackagedGitoxideHelperInternal({
-          resourcesRoot: packagedResourcesRoot,
-          releaseOwnerToken,
           invocationOwnerToken,
         });
         gitoxideManagedMutationRuntime = Object.freeze({
@@ -652,7 +649,7 @@ export async function createExecutionRuntimeHostComposition(
           const managedMutationSession =
             backendContext.header.toolProfile === 'managed-coding-v1'
               ? await openGitoxideManagedMutationSession({
-                  storageRoot: context.owner.capability.canonicalPath,
+                  storageRootLease: context.owner.lease,
                   sourceRoot: backendContext.header.cwd,
                   sessionId: backendContext.sessionId,
                   invocationOwnerToken: requireGitoxideManagedMutationRuntime(

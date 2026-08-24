@@ -58,7 +58,10 @@ const helperCapability = await admitGitoxideHelperArtifactInternal({
   invocationOwnerToken,
   claim,
 });
-const storageCapability = await resolveStorageRoot({ path: input.storageRoot, kind: 'interactive' });
+const storageCapability = await resolveStorageRoot({
+  path: input.storageRoot,
+  kind: 'interactive',
+});
 const storageOwner = await tryAcquireInteractiveRootOwner(storageCapability);
 if (!storageOwner) throw new Error('Crash fixture could not own the storage root');
 const stores = await openInteractiveExecutionStoresForWrite(storageOwner.lease);
@@ -66,7 +69,7 @@ const operationId = 'operation-gitoxide-process-crash';
 const toolCallId = `${operationId}-call`;
 const args = { path: 'notes.txt', content: 'after crash boundary\n' };
 const session = await openGitoxideManagedMutationSession({
-  storageRoot: storageCapability.canonicalPath,
+  storageRootLease: storageOwner.lease,
   sourceRoot: input.sourceRoot,
   sessionId: input.sessionId,
   invocationOwnerToken,

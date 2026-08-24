@@ -349,12 +349,9 @@ export async function tryOpenPackagedGitoxideManagedInspectionComposition(input:
 }): Promise<GitoxideManagedInspectionComposition | undefined> {
   const resourcesRoot = runtimeHostPackagedResourcesRootInternal();
   if (!resourcesRoot || !input.filesystemWorker) return undefined;
-  const releaseOwnerToken = {};
   const invocationOwnerToken = {};
   try {
     const helperCapability = await resolvePackagedGitoxideHelperInternal({
-      resourcesRoot,
-      releaseOwnerToken,
       invocationOwnerToken,
     });
     const npmRuntime = await resolveBundledNpmRuntime({ resourcesRoot });
