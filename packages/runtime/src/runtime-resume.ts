@@ -624,6 +624,17 @@ export class RuntimeContinuationPlanner {
       isTerminalRunStatus(targetRun.status) &&
       terminalRunHeaderMatchesFact(targetRun, terminalClassification.fact)
     ) {
+      if (
+        state.startKind === 'runtime_admission' &&
+        terminalClassification.fact.runStatus === 'failed' &&
+        terminalClassification.fact.failureClass === 'app_restarted'
+      ) {
+        return parkedPlan(
+          'continuation_started_indeterminate',
+          'continuation-start is durable and Host restart closure does not prove provider absence',
+          detail,
+        );
+      }
       return parkedPlan(
         'continuation_already_exists',
         'source boundary already has a terminal continuation',
