@@ -140,7 +140,7 @@ export async function recoverGitoxideManagedMutationBeforeRunClosureInternal(inp
  * a continuation boundary.
  */
 export async function inspectGitoxideManagedContinuationBoundary(input: {
-  readonly storageRoot: string;
+  readonly storageRootLease: StorageRootLease<'interactive', 'write'>;
   readonly sourceRoot: string;
   readonly sessionId: string;
   readonly invocationOwnerToken: object;
@@ -150,7 +150,7 @@ export async function inspectGitoxideManagedContinuationBoundary(input: {
 }): Promise<ManagedWorkspaceContinuationBoundaryV1 | undefined> {
   input.abortSignal?.throwIfAborted();
   const [storageRoot, sourceRoot, helper] = await Promise.all([
-    realpath(input.storageRoot),
+    runWithStorageRootLease(input.storageRootLease, 'interactive', 'write', async (root) => root),
     realpath(input.sourceRoot),
     verifyGitoxideHelperArtifactForInvocationInternal(
       input.invocationOwnerToken,

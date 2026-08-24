@@ -1010,7 +1010,7 @@ export async function createExecutionRuntimeHostComposition(
           if (header.toolProfile !== 'managed-coding-v1') return undefined;
           const runtime = requireGitoxideManagedMutationRuntime(gitoxideManagedMutationRuntime);
           return inspectGitoxideManagedContinuationBoundary({
-            storageRoot: context.owner.capability.canonicalPath,
+            storageRootLease: context.owner.lease,
             sourceRoot: header.cwd,
             sessionId,
             invocationOwnerToken: runtime.invocationOwnerToken,
