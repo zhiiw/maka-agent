@@ -144,6 +144,64 @@ test('rejects lifecycle-script lock entries before starting npm', {
   await assert.rejects(readFile(marker, 'utf8'), { code: 'ENOENT' });
 });
 
+test('rejects non-canonical lockfile package paths before starting npm', {
+  skip: productionProfileSkip,
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-managed-npm-unsafe-package-path-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const projectRoot = join(root, 'project');
+  const outputRoot = join(projectRoot, 'node_modules');
+  const scratchRoot = join(projectRoot, '.maka-runtime');
+  const npmCliPath = join(root, 'must-not-run.cjs');
+  const marker = join(root, 'spawned');
+  await Promise.all([
+    mkdir(outputRoot, { recursive: true }),
+    mkdir(scratchRoot, { recursive: true }),
+  ]);
+  await writeFile(
+    npmCliPath,
+    `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'spawned')`,
+    'utf8',
+  );
+  for (const packagePath of [
+    'node_modules/../../outside',
+    'node_modules/./outside',
+    'node_modules//outside',
+    'node_modules\\outside',
+    '/node_modules/outside',
+    'node_modules/C:/outside',
+    'node_modules/NUL',
+    'node_modules/trailing.',
+    'node_modules/trailing ',
+  ]) {
+    const producerInput = fixtureProducerInput(outputRoot, scratchRoot);
+    producerInput.lockfileBytes = Buffer.from(
+      `${JSON.stringify({
+        lockfileVersion: 3,
+        packages: {
+          '': { name: 'fixture' },
+          [packagePath]: {
+            resolved: 'https://registry.npmjs.org/outside/-/outside-1.0.0.tgz',
+            integrity: 'sha512-YQ==',
+          },
+        },
+      })}\n`,
+    );
+
+    await assert.rejects(
+      runManagedNpmDependencyProvision({
+        producerInput,
+        nodeExecutablePath: process.execPath,
+        npmRuntimeRoot: root,
+        npmCliPath,
+      }),
+      /unsafe dependency entry/u,
+      packagePath,
+    );
+  }
+  await assert.rejects(readFile(marker, 'utf8'), { code: 'ENOENT' });
+});
+
 test('rejects a pre-positioned scratch redirect before starting npm', {
   skip: productionProfileSkip,
 }, async (t) => {

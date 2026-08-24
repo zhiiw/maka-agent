@@ -169,7 +169,7 @@ function assertSafeNpmInputs(input: ManagedDependencyEnvironmentProducerInput): 
     const entry = value as Record<string, unknown>;
     if (packagePath === '') continue;
     if (
-      !packagePath.startsWith('node_modules/') ||
+      !isSafeManagedNpmPackagePath(packagePath) ||
       entry.link === true ||
       entry.hasInstallScript === true ||
       typeof entry.resolved !== 'string' ||
@@ -180,6 +180,47 @@ function assertSafeNpmInputs(input: ManagedDependencyEnvironmentProducerInput): 
       throw new Error('Managed npm producer rejected an unsafe dependency entry');
     }
   }
+}
+
+function isSafeManagedNpmPackagePath(packagePath: string): boolean {
+  if (
+    packagePath.includes('\\') ||
+    packagePath.includes('\0') ||
+    Buffer.byteLength(packagePath, 'utf8') > 32_768
+  ) {
+    return false;
+  }
+  const segments = packagePath.split('/');
+  if (segments[0] !== 'node_modules') return false;
+  let index = 0;
+  while (index < segments.length) {
+    if (segments[index] !== 'node_modules') return false;
+    index += 1;
+    const packageSegment = segments[index];
+    if (!isSafeManagedNpmPathSegment(packageSegment)) return false;
+    index += 1;
+    if (packageSegment.startsWith('@')) {
+      if (packageSegment.length === 1) return false;
+      if (!isSafeManagedNpmPathSegment(segments[index])) return false;
+      index += 1;
+    }
+  }
+  return true;
+}
+
+function isSafeManagedNpmPathSegment(segment: string | undefined): segment is string {
+  if (
+    !segment ||
+    segment === '.' ||
+    segment === '..' ||
+    segment.endsWith('.') ||
+    segment.endsWith(' ') ||
+    /[<>:"|?*]/u.test(segment) ||
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/iu.test(segment)
+  ) {
+    return false;
+  }
+  return Buffer.byteLength(segment, 'utf8') <= 255;
 }
 
 function decodeJsonObject(bytes: Uint8Array, label: string): Record<string, unknown> {
