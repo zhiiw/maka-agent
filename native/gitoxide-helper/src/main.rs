@@ -44,6 +44,7 @@ const MANAGED_TREE_POLICY_V1: ManagedTreePolicy = ManagedTreePolicy {
     max_file_bytes: MAX_IMPORT_FILE_BYTES,
     max_bytes: MAX_IMPORT_BYTES,
 };
+const MAX_TREE_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(
@@ -83,6 +84,12 @@ enum Request {
         repository_path: PathBuf,
         accepted_commit_oid: String,
         projection_path: PathBuf,
+    },
+    ReadTreeFile {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_commit_oid: String,
+        path: String,
     },
 }
 
@@ -168,6 +175,17 @@ enum Response<'a> {
         projection_path: PathBuf,
     },
     #[serde(rename_all = "camelCase")]
+    TreeFileRead {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        blob_oid: String,
+        path: String,
+        content: String,
+        bytes_read: u64,
+    },
+    #[serde(rename_all = "camelCase")]
     HelperError {
         protocol_version: u8,
         reason: &'a str,
@@ -246,6 +264,15 @@ fn run() -> Result<ExitCode, &'static str> {
         } => {
             assert_protocol_version(protocol_version)?;
             observe_projection(repository_path, accepted_commit_oid, projection_path)
+        }
+        Request::ReadTreeFile {
+            protocol_version,
+            repository_path,
+            accepted_commit_oid,
+            path,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            read_tree_file(repository_path, accepted_commit_oid, path)
         }
     }
 }
@@ -681,17 +708,76 @@ fn validate_managed_tree_inner(
 }
 
 fn is_canonical_successor_path(path: &str) -> bool {
-    path.len() <= 4096
+    path.len() as u64 <= MANAGED_TREE_POLICY_V1.max_relative_path_bytes
         && !path.is_empty()
         && !path.starts_with('/')
         && !path.contains('\\')
         && !path.contains('\0')
         && path.split('/').all(|component| {
-            !component.is_empty()
-                && component != "."
-                && component != ".."
-                && !component.eq_ignore_ascii_case(".git")
+            component.len() as u64 <= MANAGED_TREE_POLICY_V1.max_component_bytes
+                && is_supported_source_component(component)
         })
+}
+
+fn read_tree_file(
+    repository_path: PathBuf,
+    accepted_commit_oid: String,
+    path: String,
+) -> Result<ExitCode, &'static str> {
+    if !is_canonical_successor_path(&path) {
+        return Err("invalid_tree_file_path");
+    }
+    let repository = open_repository(repository_path)?;
+    let (accepted_commit, accepted_tree) =
+        accepted_commit_identity(&repository, &accepted_commit_oid)?;
+    let entry = repository
+        .find_tree(accepted_tree)
+        .map_err(|_| "accepted_tree_unavailable")?
+        .lookup_entry_by_path(path.as_str())
+        .map_err(|_| "tree_file_lookup_failed")?
+        .ok_or("tree_file_unavailable")?;
+    if !matches!(
+        entry.mode().kind(),
+        gix::objs::tree::EntryKind::Blob | gix::objs::tree::EntryKind::BlobExecutable
+    ) {
+        return Err("tree_file_invalid");
+    }
+    let header = entry.id().header().map_err(|_| "tree_file_unavailable")?;
+    if header.kind() != gix::objs::Kind::Blob
+        || header.size() > MAX_TREE_FILE_BYTES.min(MANAGED_TREE_POLICY_V1.max_file_bytes)
+    {
+        return Err("tree_file_size_limit_exceeded");
+    }
+    let blob_oid = entry.object_id();
+    let blob = entry
+        .object()
+        .map_err(|_| "tree_file_unavailable")?
+        .try_into_blob()
+        .map_err(|_| "tree_file_invalid")?;
+    let bytes_read = blob.data.len() as u64;
+    if bytes_read != header.size() {
+        return Err("tree_file_identity_mismatch");
+    }
+    let actual_blob_oid =
+        gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &blob.data)
+            .map_err(|_| "tree_file_identity_mismatch")?;
+    if actual_blob_oid != blob_oid {
+        return Err("tree_file_identity_mismatch");
+    }
+    let content = std::str::from_utf8(&blob.data)
+        .map_err(|_| "tree_file_not_utf8")?
+        .to_owned();
+    write_response(&Response::TreeFileRead {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        accepted_commit_oid: accepted_commit.to_string(),
+        accepted_tree_oid: accepted_tree.to_string(),
+        blob_oid: blob_oid.to_string(),
+        path,
+        content,
+        bytes_read,
+    });
+    Ok(ExitCode::SUCCESS)
 }
 
 #[derive(Default)]
@@ -1361,6 +1447,16 @@ mod tests {
             stats.observe_blob(1, policy),
             Err("source_file_limit_exceeded")
         );
+    }
+
+    #[test]
+    fn direct_tree_paths_share_the_managed_tree_policy() {
+        assert!(!is_canonical_successor_path(".gitattributes"));
+        assert!(!is_canonical_successor_path(&format!(
+            "{}.txt",
+            "a".repeat(MANAGED_TREE_POLICY_V1.max_component_bytes as usize)
+        )));
+        assert!(is_canonical_successor_path("docs/guide.txt"));
     }
 }
 
