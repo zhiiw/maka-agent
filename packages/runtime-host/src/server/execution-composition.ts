@@ -362,6 +362,9 @@ export async function createExecutionRuntimeHostComposition(
         const helperCapability = await resolvePackagedGitoxideHelperInternal({
           invocationOwnerToken,
         });
+        requireExecutionStoresWorkspaceMutationAuthorityInternal(
+          stores,
+        ).adoptRootForManagedExecution();
         gitoxideManagedMutationRuntime = Object.freeze({
           invocationOwnerToken,
           helperCapability,
