@@ -134,6 +134,10 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
 
   const managedRepositoryOwnerToken = {};
   const candidateOwnerToken = {};
+  const issuedProofs = new WeakMap<
+    GitoxideMutationCandidateProofV1,
+    GitoxideMutationCandidateReceiptV1
+  >();
   const managedRepositoryCapability = await reopenGitoxideManagedRepositoryInternal({
     invocationOwnerToken: input.invocationOwnerToken,
     helperCapability: input.helperCapability,
@@ -196,16 +200,26 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
         await writeReceiptAtomic(receiptPath, expected);
         await input.failpoint?.('after_candidate_receipt');
       }
-      return Object.freeze({
-        receipt: durable ?? expected,
+      const receipt = durable ?? expected;
+      const proof = Object.freeze({
+        receipt,
         candidateCapability: candidate.candidateCapability,
       });
+      issuedProofs.set(proof, receipt);
+      return proof;
     });
   };
 
   return Object.freeze({
     capture,
     validate(proof: GitoxideMutationCandidateProofV1) {
+      const issuedReceipt = issuedProofs.get(proof);
+      if (!issuedReceipt || proof.receipt !== issuedReceipt) {
+        throw new GitoxideMutationCandidateAuthorityError(
+          'gitoxide_mutation_candidate_identity_conflict',
+          'Gitoxide candidate proof was not issued by this authority',
+        );
+      }
       const candidate = requireGitoxideMutationCandidateInternal(
         candidateOwnerToken,
         proof.candidateCapability,
@@ -222,7 +236,7 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
           'Gitoxide candidate capability does not match its durable receipt',
         );
       }
-      return proof.receipt;
+      return issuedReceipt;
     },
   });
 }

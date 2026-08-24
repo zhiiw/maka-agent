@@ -84,6 +84,33 @@ test('persists and revalidates an exact Gitoxide candidate without advancing acc
   assert.notEqual(retry.candidateCapability, first.candidateCapability);
 });
 
+test('rejects a candidate proof whose receipt was recomposed around a valid capability', async (t) => {
+  const fixture = await candidateFixture(t);
+  if (!fixture) return;
+  const authority = await createGitoxideMutationCandidateAuthorityInternal({
+    ...fixture.helper,
+    storageRoot: fixture.storageRoot,
+    baseHead: fixture.baseHead,
+  });
+  const proof = await authority.capture({
+    operationId: 'operation-recomposed-proof-1',
+    path: 'docs/result.txt',
+    content: 'candidate result\n',
+    executionProfileDigest: `sha256:${'a'.repeat(64)}`,
+  });
+
+  assert.throws(
+    () =>
+      authority.validate({
+        candidateCapability: proof.candidateCapability,
+        receipt: { ...proof.receipt, repositoryId: 'forged-repository' },
+      }),
+    (error) =>
+      error instanceof GitoxideMutationCandidateAuthorityError &&
+      error.code === 'gitoxide_mutation_candidate_identity_conflict',
+  );
+});
+
 test('converges when execution stops after candidate ref publication and rejects receipt tampering', async (t) => {
   const fixture = await candidateFixture(t);
   if (!fixture) return;
