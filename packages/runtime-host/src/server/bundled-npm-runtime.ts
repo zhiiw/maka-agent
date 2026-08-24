@@ -24,9 +24,8 @@ import { isAbsolute, join, normalize, relative } from 'node:path';
 
 import {
   isManagedNpmNodeVersionSupported,
-  issueManagedNpmRuntimeCapabilityInternal,
   type ManagedNpmRuntimeCapability,
-} from './managed-dependency-producer-process.js';
+} from './managed-npm-runtime-contract.js';
 
 const MANIFEST_KEYS = [
   'arch',
@@ -69,6 +68,11 @@ export class BundledNpmRuntimeError extends Error {
 export interface ResolveBundledNpmRuntimeInput {
   readonly resourcesRoot: string;
 }
+
+const attestedNpmRuntimeCapabilities = new WeakMap<
+  ManagedNpmRuntimeCapability,
+  () => Promise<void>
+>();
 
 export async function resolveBundledNpmRuntime(
   input: ResolveBundledNpmRuntimeInput,
@@ -118,19 +122,19 @@ export async function resolveBundledNpmRuntime(
       throw invalidManifest('Bundled npm CLI must be a regular non-symlink file');
     }
     await assertRuntimeTreeMatchesManifest(manifest, npmRuntimeRoot);
-    const capability = issueManagedNpmRuntimeCapabilityInternal(
-      {
+    const capability: ManagedNpmRuntimeCapability = Object.freeze({
         npmVersion: manifest.npmVersion,
         nodeVersion: process.versions.node,
         nodeAbi: process.versions.modules ?? 'unknown',
         platform,
         arch,
+        resourcesRoot,
         nodeExecutablePath,
         npmRuntimeRoot,
         npmCliPath,
         runtimeIdentitySha256: runtimeIdentity(manifest, nodeExecutableSha256),
-      },
-      async () => {
+      });
+    attestedNpmRuntimeCapabilities.set(capability, async () => {
         const currentNodeExecutable = await canonicalRegularFile(
           process.execPath,
           'Host Node executable',
@@ -145,8 +149,7 @@ export async function resolveBundledNpmRuntime(
           );
         }
         await assertRuntimeTreeMatchesManifest(manifest, npmRuntimeRoot);
-      },
-    );
+      });
     return capability;
   } catch (error) {
     if (error instanceof BundledNpmRuntimeError) throw error;
@@ -156,6 +159,16 @@ export async function resolveBundledNpmRuntime(
       { cause: error },
     );
   }
+}
+
+/** @internal Producer-side consumption check; this module alone owns issuance. */
+export async function requireBundledNpmRuntimeCapabilityInternal(
+  capability: ManagedNpmRuntimeCapability,
+): Promise<ManagedNpmRuntimeCapability> {
+  const revalidate = attestedNpmRuntimeCapabilities.get(capability);
+  if (!revalidate) throw new Error('Managed npm producer requires an attested runtime capability');
+  await revalidate();
+  return capability;
 }
 
 interface BundledNpmManifestFileV1 {

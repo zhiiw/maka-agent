@@ -26,63 +26,35 @@ import {
   manageChildProcessLifecycle,
 } from '@maka/runtime/child-process-lifecycle';
 import type { ManagedDependencyEnvironmentProducerInput } from '@maka/storage/managed-dependency-environment';
+import { requireBundledNpmRuntimeCapabilityInternal } from './bundled-npm-runtime.js';
+import {
+  MANAGED_NPM_PACKAGE_MANAGER_VERSION,
+  isManagedNpmNodeVersionSupported,
+  type ManagedNpmRuntimeCapability,
+} from './managed-npm-runtime-contract.js';
+
+export {
+  MANAGED_NPM_PACKAGE_MANAGER_VERSION,
+  isManagedNpmNodeVersionSupported,
+  type ManagedNpmRuntimeCapability,
+} from './managed-npm-runtime-contract.js';
 
 const DEFAULT_PRODUCER_TIMEOUT_MS = 10 * 60 * 1_000;
 const DEFAULT_KILL_GRACE_MS = 2_000;
 const MAX_OUTPUT_TAIL_BYTES = 1024 * 1024;
 const QUOTA_MONITOR_INTERVAL_MS = 100;
-export const MANAGED_NPM_PACKAGE_MANAGER_VERSION = '12.0.2';
 const MANAGED_NPM_MAX_OBSERVED_BYTES = 2 * 1024 * 1024 * 1024;
 const MANAGED_NPM_MAX_OBSERVED_ENTRIES = 250_000;
-
-export function isManagedNpmNodeVersionSupported(version: string): boolean {
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/u.exec(version);
-  if (!match) return false;
-  const major = Number(match[1]);
-  const minor = Number(match[2]);
-  const patch = Number(match[3]);
-  if (major === 26) return true;
-  if (major === 24) return minor > 15 || (minor === 15 && patch >= 0);
-  if (major === 22) return minor > 22 || (minor === 22 && patch >= 2);
-  return false;
-}
 
 export interface RunManagedNpmDependencyProvisionInput {
   readonly producerInput: ManagedDependencyEnvironmentProducerInput;
   readonly runtime: ManagedNpmRuntimeCapability;
 }
 
-export interface ManagedNpmRuntimeCapability {
-  readonly npmVersion: typeof MANAGED_NPM_PACKAGE_MANAGER_VERSION;
-  readonly nodeVersion: string;
-  readonly nodeAbi: string;
-  readonly platform: NodeJS.Platform;
-  readonly arch: string;
-  readonly nodeExecutablePath: string;
-  readonly npmRuntimeRoot: string;
-  readonly npmCliPath: string;
-  readonly runtimeIdentitySha256: `sha256:${string}`;
-}
-
-const attestedNpmRuntimeCapabilities = new WeakMap<
-  ManagedNpmRuntimeCapability,
-  () => Promise<void>
->();
-
-/** @internal Only the bundled runtime attestation owner may issue this capability. */
-export function issueManagedNpmRuntimeCapabilityInternal(
-  input: ManagedNpmRuntimeCapability,
-  revalidate: () => Promise<void>,
-): ManagedNpmRuntimeCapability {
-  const capability = Object.freeze({ ...input });
-  attestedNpmRuntimeCapabilities.set(capability, revalidate);
-  return capability;
-}
-
 export async function runManagedNpmDependencyProvision(
   input: RunManagedNpmDependencyProvisionInput,
 ): Promise<void> {
-  const runtime = await requireAttestedNpmRuntimeCapability(input.runtime);
+  const runtime = await requireBundledNpmRuntimeCapabilityInternal(input.runtime);
   assertSafeNpmInputs(input.producerInput);
   const outputRoot = normalize(await realpath(input.producerInput.outputRoot));
   const scratchRoot = normalize(await realpath(input.producerInput.scratchRoot));
@@ -159,15 +131,6 @@ export async function runManagedNpmDependencyProvision(
 function requiresExplicitNetworkPermission(nodeVersion: string): boolean {
   const major = Number.parseInt(nodeVersion.split('.')[0] ?? '', 10);
   return Number.isSafeInteger(major) && major >= 26;
-}
-
-async function requireAttestedNpmRuntimeCapability(
-  capability: ManagedNpmRuntimeCapability,
-): Promise<ManagedNpmRuntimeCapability> {
-  const revalidate = attestedNpmRuntimeCapabilities.get(capability);
-  if (!revalidate) throw new Error('Managed npm producer requires an attested runtime capability');
-  await revalidate();
-  return capability;
 }
 
 function assertSafeNpmInputs(input: ManagedDependencyEnvironmentProducerInput): void {
