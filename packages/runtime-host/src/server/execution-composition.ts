@@ -34,6 +34,7 @@ import {
   BackendRegistry,
   SessionManager,
   type BackendFactory,
+  type RuntimeContinuationLifecycleEvent,
 } from '@maka/runtime/session-manager';
 import { buildToolsForAgentDefinition } from '@maka/runtime/agent-catalog';
 import { buildHostCapabilitiesFromBinding } from '@maka/runtime/tool-catalog-derive';
@@ -211,6 +212,10 @@ export interface ExecutionRuntimeHostCompositionDependencies {
       | 'after_terminal_event_committed'
       | 'after_terminal_header_committed',
   ) => Promise<void>;
+  /** Test/telemetry seam; it observes decisions but owns no durable state. */
+  readonly onContinuationLifecycleEvent?: (
+    event: RuntimeContinuationLifecycleEvent,
+  ) => void | Promise<void>;
   readonly oauthAuthorization?: Pick<
     HostOAuthCoordinatorInput,
     'startCodexAuthorization' | 'pollCodexAuthorization' | 'exchangeCodexCode'
@@ -968,6 +973,7 @@ export async function createExecutionRuntimeHostComposition(
       now: Date.now,
       safeBoundaryResumeEnabled: process.env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME === '1',
       continuationFailpoint: dependencies.continuationFailpoint,
+      onContinuationLifecycleEvent: dependencies.onContinuationLifecycleEvent,
       generateSessionTitle: (input) => sessionEffectCoordinator.generateTitle(input),
       onSessionTitleChanged: (sessionId) =>
         continuityCoordinator.enqueueCanonicalRefresh(sessionId),
