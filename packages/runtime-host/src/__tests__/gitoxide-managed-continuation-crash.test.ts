@@ -119,16 +119,31 @@ test('a started workspace-bound continuation survives Host death without provide
           turnId: targetTurnId,
         });
         assert.equal(target.runId, admission.runId);
-        assert.equal(
-          target.status === 'created' || target.status === 'running',
-          true,
-          JSON.stringify(target),
-        );
-        assert.deepEqual(await successorClient.queryTurnResume({ sessionId: fixture.sessionId }), {
+        assert.equal(target.status, 'failed');
+        if (target.status !== 'failed') assert.fail('Crashed continuation Run was not closed');
+        assert.equal(target.failureClass, 'app_restarted');
+        const plan = {
           sessionId: fixture.sessionId,
-          disposition: 'parked',
-          reason: 'continuation_started_indeterminate',
-        });
+          disposition: 'parked' as const,
+          reason: 'continuation_started_indeterminate' as const,
+        };
+        assert.deepEqual(
+          await successorClient.queryTurnResume({
+            sessionId: fixture.sessionId,
+            sourceRunId: source.sourceRunId,
+            expectedRuntimeEventHighWater: source.sourceRuntimeEventHighWater,
+          }),
+          plan,
+        );
+        assert.deepEqual(
+          await successorClient.startTurnResume({
+            sessionId: fixture.sessionId,
+            turnId: targetTurnId,
+            sourceRunId: source.sourceRunId,
+            sourceRuntimeEventHighWater: source.sourceRuntimeEventHighWater,
+          }),
+          { kind: 'parked', plan },
+        );
         assert.equal(await readFile(callLog, 'utf8'), '');
       } finally {
         await successorClient.close();
