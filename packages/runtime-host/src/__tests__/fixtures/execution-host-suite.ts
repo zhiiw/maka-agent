@@ -181,7 +181,6 @@ export class ExecutionFixture {
       const sourceTurnId = randomUUID();
       const createdAt = Date.now();
       const workspace = await resolveWorkspaceIdentity({ path: this.root });
-      const session = await stores.sessionStore.readHeaderSnapshot(this.sessionId);
       const sourceRun: AgentRunHeader = {
         runId: sourceRunId,
         invocationId: sourceInvocationId,
@@ -195,7 +194,6 @@ export class ExecutionFixture {
         workspaceIdentity: workspace.workspaceIdentity,
         permissionMode: 'ask',
         collaborationMode: 'agent',
-        ...(session.toolProfile ? { toolProfile: session.toolProfile } : {}),
         createdAt,
         updatedAt: createdAt,
       };
