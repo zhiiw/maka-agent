@@ -227,9 +227,7 @@ test('rejects non-canonical lockfile package paths before starting npm', {
     await assert.rejects(
       runManagedNpmDependencyProvision({
         producerInput,
-        nodeExecutablePath: process.execPath,
-        npmRuntimeRoot: root,
-        npmCliPath,
+        runtime: await attestFixtureRuntime(root, npmCliPath),
       }),
       /unsafe dependency entry/u,
       packagePath,
