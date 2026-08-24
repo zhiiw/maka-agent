@@ -100,6 +100,7 @@ jobs:
       - name: Prepare and license the packaged helper
         run: >-
           npm run prepare:gitoxide-helper &&
+          npm run prepare:bundled-npm &&
           npm run generate:gitoxide-cargo-notices &&
           node --test scripts/prepare-gitoxide-helper.test.mjs
       - name: Build the helper invocation owner
@@ -111,6 +112,7 @@ jobs:
       - name: Test the real helper invocation contract
         env:
           MAKA_GITOXIDE_HELPER_PATH: ${{ github.workspace }}/native/gitoxide-helper/target/debug/maka-gitoxide-helper${{ runner.os == 'Windows' && '.exe' || '' }}
+          MAKA_BUNDLED_NPM_RESOURCES_ROOT: ${{ github.workspace }}/apps/desktop/.generated/bundled-npm
         run: >-
           node --test
           packages/runtime-host/dist/__tests__/gitoxide-helper-artifact-authority-internal.test.js

@@ -23,6 +23,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmod,
+  cp,
   copyFile,
   mkdir,
   mkdtemp,
@@ -56,13 +57,17 @@ import {
 
 test('a started workspace-bound continuation survives Host death without provider replay', async (t) => {
   const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
-  if (!helperPath) {
-    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the real helper continuation test');
+  const bundledNpmResourcesRoot = process.env.MAKA_BUNDLED_NPM_RESOURCES_ROOT;
+  if (!helperPath || !bundledNpmResourcesRoot) {
+    t.skip(
+      'MAKA_GITOXIDE_HELPER_PATH and MAKA_BUNDLED_NPM_RESOURCES_ROOT are required for the real helper continuation test',
+    );
     return;
   }
 
   await withManagedContinuationFixture(
     helperPath,
+    bundledNpmResourcesRoot,
     async ({ fixture, resourcesRoot, callLog, boundary }) => {
       const source = await fixture.seedSafeBoundaryContinuationSource();
       const crashHost = await fixture.startHost(undefined, true, {
@@ -148,6 +153,7 @@ test('a started workspace-bound continuation survives Host death without provide
 
 async function withManagedContinuationFixture(
   helperInputPath: string,
+  bundledNpmResourcesRoot: string,
   run: (input: {
     fixture: ExecutionFixture;
     resourcesRoot: string;
@@ -174,7 +180,11 @@ async function withManagedContinuationFixture(
     'baseline',
   ]);
 
-  const resourcesRoot = await preparePackagedHelper(base, helperInputPath);
+  const resourcesRoot = await preparePackagedResources(
+    base,
+    helperInputPath,
+    bundledNpmResourcesRoot,
+  );
   const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const owner = await tryAcquireInteractiveRootOwner(capability);
   assert.ok(owner);
@@ -221,7 +231,11 @@ async function withManagedContinuationFixture(
   }
 }
 
-async function preparePackagedHelper(base: string, helperInputPath: string): Promise<string> {
+async function preparePackagedResources(
+  base: string,
+  helperInputPath: string,
+  bundledNpmResourcesInputRoot: string,
+): Promise<string> {
   const resourcesRoot = join(base, 'resources');
   const helperDirectory = join(resourcesRoot, 'gitoxide');
   const executableName =
@@ -247,6 +261,15 @@ async function preparePackagedHelper(base: string, helperInputPath: string): Pro
     })}\n`,
     'utf8',
   );
+  const bundledNpmResourcesRoot = await realpath(bundledNpmResourcesInputRoot);
+  await copyFile(
+    join(bundledNpmResourcesRoot, 'bundled-npm.json'),
+    join(resourcesRoot, 'bundled-npm.json'),
+  );
+  await cp(join(bundledNpmResourcesRoot, 'npm'), join(resourcesRoot, 'npm'), {
+    recursive: true,
+    verbatimSymlinks: true,
+  });
   return resourcesRoot;
 }
 
