@@ -216,6 +216,8 @@ export interface ExecutionRuntimeHostCompositionDependencies {
   readonly onContinuationLifecycleEvent?: (
     event: RuntimeContinuationLifecycleEvent,
   ) => void | Promise<void>;
+  /** Production-shaped test diagnostic; correctness still fails closed. */
+  readonly onContinuationSafetyError?: (error: unknown) => void;
   readonly oauthAuthorization?: Pick<
     HostOAuthCoordinatorInput,
     'startCodexAuthorization' | 'pollCodexAuthorization' | 'exchangeCodexCode'
@@ -996,45 +998,52 @@ export async function createExecutionRuntimeHostComposition(
             : {}),
         });
       },
-      inspectContinuationSafety: createLocalContinuationSafetyInspector({
-        readSessionCwd: async (sessionId) =>
-          (await stores.sessionStore.readHeaderSnapshot(sessionId)).cwd,
-        resolveWorkspaceIdentity: async (cwd) => resolveWorkspaceIdentity({ path: cwd }),
-        listAvailableToolNames: resolveAvailableToolNames,
-        hasPendingBackgroundOperations: async (sessionId) => {
-          const graph = requireGraphCoordinator(graphCoordinator);
-          const graphWake = requireGraphSupervisorWake(graphSupervisorWake);
-          const [resourcesLive, graphLive, descendantLive] = await Promise.all([
-            runtimeResources!.hasLiveSessionResources(sessionId),
-            graph.hasLiveSessionState(sessionId),
-            hasLiveLinkedDescendantState(
-              requireSessionManager(manager),
-              stores.agentRunStore,
-              sessionId,
-              async (descendantSessionId) =>
-                (await runtimeResources!.hasLiveSessionResources(descendantSessionId)) ||
-                graph.hasLiveSessionState(descendantSessionId) ||
-                graphWake.hasLiveSessionState(descendantSessionId),
-            ),
-          ]);
-          return (
-            resourcesLive || graphLive || graphWake.hasLiveSessionState(sessionId) || descendantLive
-          );
-        },
-        readManagedWorkspaceBoundary: async (sessionId) => {
-          const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
-          if (header.toolProfile !== 'managed-coding-v1') return undefined;
-          const runtime = requireGitoxideManagedMutationRuntime(gitoxideManagedMutationRuntime);
-          return inspectGitoxideManagedContinuationBoundary({
-            storageRootLease: context.owner.lease,
-            sourceRoot: header.cwd,
-            sessionId,
-            invocationOwnerToken: runtime.invocationOwnerToken,
-            helperCapability: runtime.helperCapability,
-            settlementAuthority: requireExecutionStoresWorkspaceMutationAuthorityInternal(stores),
-          });
-        },
-      }),
+      inspectContinuationSafety: observeContinuationSafetyErrors(
+        createLocalContinuationSafetyInspector({
+          readSessionCwd: async (sessionId) =>
+            (await stores.sessionStore.readHeaderSnapshot(sessionId)).cwd,
+          resolveWorkspaceIdentity: async (cwd) => resolveWorkspaceIdentity({ path: cwd }),
+          listAvailableToolNames: resolveAvailableToolNames,
+          hasPendingBackgroundOperations: async (sessionId) => {
+            const graph = requireGraphCoordinator(graphCoordinator);
+            const graphWake = requireGraphSupervisorWake(graphSupervisorWake);
+            const [resourcesLive, graphLive, descendantLive] = await Promise.all([
+              runtimeResources!.hasLiveSessionResources(sessionId),
+              graph.hasLiveSessionState(sessionId),
+              hasLiveLinkedDescendantState(
+                requireSessionManager(manager),
+                stores.agentRunStore,
+                sessionId,
+                async (descendantSessionId) =>
+                  (await runtimeResources!.hasLiveSessionResources(descendantSessionId)) ||
+                  graph.hasLiveSessionState(descendantSessionId) ||
+                  graphWake.hasLiveSessionState(descendantSessionId),
+              ),
+            ]);
+            return (
+              resourcesLive ||
+              graphLive ||
+              graphWake.hasLiveSessionState(sessionId) ||
+              descendantLive
+            );
+          },
+          readManagedWorkspaceBoundary: async (sessionId) => {
+            const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
+            if (header.toolProfile !== 'managed-coding-v1') return undefined;
+            const runtime = requireGitoxideManagedMutationRuntime(gitoxideManagedMutationRuntime);
+             return inspectGitoxideManagedContinuationBoundary({
+               storageRootLease: context.owner.lease,
+               sourceRoot: header.cwd,
+               sessionId,
+              invocationOwnerToken: runtime.invocationOwnerToken,
+              helperCapability: runtime.helperCapability,
+              settlementAuthority:
+                requireExecutionStoresWorkspaceMutationAuthorityInternal(stores),
+            });
+          },
+        }),
+        dependencies.onContinuationSafetyError,
+      ),
       runBackendActivation: (operation) => runtimePolicyActivation.runBackendActivation(operation),
       messageAuthority: runtimeAuthority,
       hostedAgentGraphExecution: {
@@ -1912,6 +1921,20 @@ function requireDailyReview(
 function requireSessionManager(manager: SessionManager | undefined): SessionManager {
   if (!manager) throw new Error('Runtime Host SessionManager is not composed');
   return manager;
+}
+
+function observeContinuationSafetyErrors(
+  inspectContinuationSafety: ReturnType<typeof createLocalContinuationSafetyInspector>,
+  onError: ((error: unknown) => void) | undefined,
+): ReturnType<typeof createLocalContinuationSafetyInspector> {
+  return async (sessionId) => {
+    try {
+      return await inspectContinuationSafety(sessionId);
+    } catch (error) {
+      onError?.(error);
+      throw error;
+    }
+  };
 }
 
 function requireGraphCoordinator(
