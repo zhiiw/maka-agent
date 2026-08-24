@@ -42,6 +42,15 @@ reservation；generic T2 writer 在数据库层拒绝 managed mutation。
 
 因此 SQLite 提交后、ref 推进前崩溃时，只重放 ref projection，不重新执行 Write/Edit。
 
+baseline intent 会绑定签发时的 exact Gitoxide helper artifact SHA-256。重开时若 packaged helper
+已经升级，当前 v1 不会把新二进制静默接入旧 workspace epoch，而是 fail closed；由后续显式
+rebaseline/新 epoch 流程选择升级。这里绑定的是 materialization artifact identity，不把二进制摘要
+冒充稳定的语义 execution profile。
+
+本切片对 baseline intent/receipt 的 durable JSON 只承诺进程崩溃后的收敛；它不声明断电持久性。
+若后续需要 power-loss contract，文件内容、父目录与 SQLite 提交顺序必须由同一个平台 durability
+设计证明，不能从当前 atomic rename 推导出来。
+
 ## 失败状态与回滚
 
 - candidate 创建失败：不产生 accepted successor；保留或清理由 candidate 生命周期 owner 处理。
