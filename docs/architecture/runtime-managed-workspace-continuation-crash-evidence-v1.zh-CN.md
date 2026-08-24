@@ -12,6 +12,8 @@
 - Gitoxide helper 只重验 claim 绑定的 commit/tree；它不决定是否重新执行 provider。
 - Runtime Host startup recovery 读取 v2 claim state，并在 provider dispatch 已不可判定时停在 `continuation_started_indeterminate`。
 - `openInteractiveExecutionStoresForWrite()` 的受限 RuntimeEvent facade 显式暴露 v2 capability 和唯一的一组 v2 writer；不存在旁路 writer。
+- packaged Gitoxide capability 通过验证后，Host 在 continuation safety inspection 之前采用已持久化的 storage-root binding；重启不依赖某个 backend 先被创建。
+- AgentRun root admission 对 legacy descriptor 保持原协议，同时严格保存 workspace-bound descriptor 独立的 `replayManifestDigest`。
 
 原子性边界是 `commitWorkspaceBoundContinuationStart()` 的 SQLite transaction。该 transaction 之前可以安全重试 admission；提交之后不得根据进程内状态推断 provider 是否执行。
 
@@ -21,6 +23,7 @@
 | --- | --- |
 | claim/start 绑定的 workspace head 与当前 accepted head 不一致 | fail closed；不启动 provider |
 | durable start 已存在、provider outcome 不可证明 | park 为 `continuation_started_indeterminate` |
+| Host 将未终结 target Run 关闭为 `failed/app_restarted` | 该本地关闭事实不证明 provider 未收到请求；v2 claim 仍保持 `continuation_started_indeterminate` |
 | v2 authority/capability 缺失 | fail closed；禁止回退 v1 |
 | Gitoxide helper/manifest 不可验证 | managed continuation unavailable；不启动 provider |
 
@@ -35,8 +38,9 @@
 3. 启动真实 Runtime Host，提交 workspace-bound claim 与 durable start；
 4. 在 `after_continuation_start_committed` 杀死整个 Host 进程；
 5. 使用同一 storage root 与 helper 启动新 Host；
-6. 验证 claim 仍绑定原 commit/tree/revision，恢复结果为 `continuation_started_indeterminate`；
-7. 验证 provider invocation log 始终为空。
+6. 验证 target Run 被 Host 明确关闭为 `failed/app_restarted`，但该本地终态不会覆盖 provider T1 的不确定性；
+7. 使用新的 Turn identity 重试同一 source boundary，验证结果仍为 `continuation_started_indeterminate`；
+8. 验证 claim 仍绑定原 commit/tree/revision，provider invocation log 始终为空。
 
 这项测试有意不声称可以恢复 provider 的网络执行。它证明的是“未知时不重发”，不是 bit-exact provider continuation。
 
