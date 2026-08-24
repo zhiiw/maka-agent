@@ -1372,7 +1372,7 @@ export class ToolRuntime {
 
     const reservedSubagentSlot = this.reserveSubagentSlot(tool);
     if (!reservedSubagentSlot) {
-      await managedMutationAdmission?.dispose();
+      await disposeManagedMutationAdmission(managedMutationAdmission);
       trace?.emit('tool', 'tool_failed', 'Tool execution rejected by runtime limit', {
         toolUseId,
         toolName: tool.name,
@@ -1400,7 +1400,7 @@ export class ToolRuntime {
       });
     } catch (error) {
       if (reservedSubagentSlot) this.releaseSubagentSlot(tool);
-      await managedMutationAdmission?.dispose();
+      await disposeManagedMutationAdmission(managedMutationAdmission);
       throw error;
     }
     if (durableAttempt) {
@@ -1918,7 +1918,7 @@ export class ToolRuntime {
     } finally {
       this.recordLoopGateOutcome(callSignature, attemptFailed);
       if (reservedSubagentSlot) this.releaseSubagentSlot(tool);
-      await managedMutationAdmission?.dispose();
+      await disposeManagedMutationAdmission(managedMutationAdmission);
     }
   }
 
@@ -3585,6 +3585,17 @@ function isAmbiguousComputerFailure(raw: unknown): boolean {
 
 function durableAttemptKey(turnId: string, toolUseId: string): string {
   return JSON.stringify([turnId, toolUseId]);
+}
+
+async function disposeManagedMutationAdmission(
+  admission: RuntimeManagedMutationAdmission | undefined,
+): Promise<void> {
+  try {
+    await admission?.dispose();
+  } catch {
+    // Cleanup is best-effort. It must never rewrite a durable terminal outcome,
+    // nor obscure the primary pre-T1 or execution failure.
+  }
 }
 
 function providerToolErrorMessage(output: unknown): string | undefined {

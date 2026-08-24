@@ -261,6 +261,46 @@ describe('ToolRuntime durable boundary', () => {
     );
   });
 
+  it('does not replace a committed managed result when admission cleanup fails', async () => {
+    let operationId = '';
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return {
+            durableDispatch: managedMutationDispatch(),
+            execute: async (operation) => {
+              const proof = await operation();
+              return {
+                kind: 'workspace_successor_committed',
+                durableOutcome: managedOutcomeEvent(operationId, proof.content, false, {
+                  durationMs: proof.durationMs,
+                }),
+              };
+            },
+            dispose: async () => {
+              throw new Error('cleanup failed after commit');
+            },
+          };
+        },
+      },
+    );
+    const managedTool = tool(() => ({ ok: true }));
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+
+    assert.deepEqual(await harness.execute(managedTool), { ok: true });
+  });
+
   it('leaves a managed T1 unsettled without publishing or writing generic T2', async () => {
     let genericOutcomeCalls = 0;
     const harness = makeHarness(
