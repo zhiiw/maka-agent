@@ -170,18 +170,21 @@ test('reads source and dependency files through the real Gitoxide product data p
     { kind: 'read', path: 'src/index.ts' },
     toolContext(sourceRoot),
   );
+  assert.deepEqual(source.result, { kind: 'read', content: 'export const answer = 42;\n' });
+  assert.equal(source.dependencyEnvironmentId, undefined);
+  assert.equal(identities.length, 0);
+  assert.equal(seenCwds.length, 0);
+
   const dependency = await composition.tool.impl(
     { kind: 'read', path: 'node_modules/fixture-package/package.json' },
     toolContext(sourceRoot),
   );
-  assert.deepEqual(source.result, { kind: 'read', content: 'export const answer = 42;\n' });
   assert.deepEqual(dependency.result, {
     kind: 'read',
     content: '{"name":"fixture-package"}\n',
   });
-  assert.equal(identities.length, 2);
-  assert.notEqual(seenCwds[0], sourceRoot);
-  assert.equal(seenCwds[1], dependencyRoot);
+  assert.equal(identities.length, 1);
+  assert.equal(seenCwds[0], dependencyRoot);
   await composition.close();
   assert.equal(closed, true);
 });
