@@ -183,11 +183,14 @@ SQLite transaction 提供三平台一致的数据库原子性；本切片不声�
 
 主要不变量：只有 Git artifact owner 能把一个 operation-bound candidate 证明为 base head 的合法 successor。
 
-- owner：managed Git workspace service；
-- 原子边界：candidate ref/commit publication 与 durable candidate receipt；
-- 失败状态：base drift、额外路径、ignored mutation、artifact missing、unknown metadata 全部 park/fail closed；
+- owner：Runtime Host 内部 Gitoxide mutation candidate authority；
+- 原子边界：从 exact accepted base 对 operation-bound candidate ref 执行 CAS，并写 durable derived receipt；
+- 失败状态：base drift、candidate ref 冲突、artifact/receipt missing 或 identity mismatch 全部 fail closed；
 - 回滚：未被 SQLite 接受的 candidate 是 orphan，可按 receipt/ref 证明后回收；
 - 不做：不写 T2，不推进 workspace head，不接 Desktop/CLI。
+
+Gitoxide 版不从 mutable worktree 扫描 delta。Write/Edit 在 M2.4 中会先成为受限纯转换，再把 exact result
+content/blob 交给 M2.2 固化，因此“额外路径/ignored mutation”不再是 candidate capture 的输入状态。
 
 该 PR 在 M2.4 消费者存在前保持 Draft。
 
