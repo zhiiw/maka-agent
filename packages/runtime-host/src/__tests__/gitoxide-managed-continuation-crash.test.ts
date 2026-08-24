@@ -222,14 +222,14 @@ async function withManagedContinuationFixture(
     sessionId = session.id;
     const helper = await admitRealHelper(helperInputPath);
     await openGitoxideManagedMutationSession({
-      storageRoot: capability.canonicalPath,
+      storageRootLease: owner.lease,
       sourceRoot: root,
       sessionId,
       ...helper,
       settlementAuthority: requireExecutionStoresWorkspaceMutationAuthorityInternal(stores),
     });
     const observedBoundary = await inspectGitoxideManagedContinuationBoundary({
-      storageRoot: capability.canonicalPath,
+      storageRootLease: owner.lease,
       sourceRoot: root,
       sessionId,
       ...helper,
