@@ -1174,6 +1174,12 @@ export class SqliteRuntimeStore
       if (!isDeepStrictEqual(storedClaim, claim)) {
         throw new Error('Continuation start claim identity conflict');
       }
+      if (claim.protocol === 'continuation_claim_v2') {
+        // Claim acquisition and continuation start are separate durable boundaries.
+        // Re-observe the accepted head in this transaction so a stale managed claim
+        // can never start merely because an in-process execution lease survived.
+        this.assertContinuationWorkspaceBoundaryMatchesAuthority(claim.workspaceBoundary);
+      }
       if (row.start_event_id) {
         if (row.start_event_id !== event.id || row.start_kind !== startKind) {
           throw new Error('Continuation claim already has a different start event');

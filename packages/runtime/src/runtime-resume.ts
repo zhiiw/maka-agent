@@ -129,6 +129,7 @@ export type ResumePlanDiagnosticCode =
   | 'source_run_unreadable'
   | 'continuation_already_exists'
   | 'continuation_authority_unavailable'
+  | 'workspace_boundary_unavailable'
   | 'continuation_claim_repair_required'
   | 'continuation_started_indeterminate'
   | 'workspace_identity_missing'
@@ -172,6 +173,7 @@ export type ResumeRejectionReason =
   | 'source_run_unreadable'
   | 'continuation_already_exists'
   | 'continuation_authority_unavailable'
+  | 'workspace_boundary_unavailable'
   | 'continuation_claim_repair_required'
   | 'continuation_started_indeterminate'
   | 'workspace_identity_missing'
@@ -376,6 +378,8 @@ export interface RuntimeContinuationPlannerInput {
   expectedRuntimeEventHighWater?: number;
   workspaceCheckpoint?: SafeBoundaryContinuationFacts['workspaceCheckpoint'];
   workspaceBoundary?: ManagedWorkspaceContinuationBoundaryV1;
+  /** Managed coding requires an authenticated workspace boundary and may never downgrade to v1. */
+  workspaceBoundaryRequirement?: 'optional' | 'required';
 }
 
 export interface RuntimeContinuationPlannerDeps {
@@ -447,6 +451,12 @@ export class RuntimeContinuationPlanner {
       return parkedPlan(
         reason,
         `continuation replay segment ${replay.segmentIndex} is not replayable: ${replay.reason}`,
+      );
+    }
+    if (input.workspaceBoundaryRequirement === 'required' && !input.workspaceBoundary) {
+      return parkedPlan(
+        'workspace_boundary_unavailable',
+        'managed continuation requires an authoritative workspace boundary',
       );
     }
     const plannedBoundaryDigest = input.workspaceBoundary

@@ -2270,6 +2270,8 @@ export class SessionManager {
       currentWorkspaceIdentity: observation.workspaceIdentity,
       backgroundOperationsSettled: observation.backgroundOperationsSettled,
       availableToolNames: observation.availableToolNames,
+      workspaceBoundaryRequirement:
+        header.toolProfile === 'managed-coding-v1' ? 'required' : 'optional',
       ...(input.expectedRuntimeEventHighWater !== undefined
         ? { expectedRuntimeEventHighWater: input.expectedRuntimeEventHighWater }
         : {}),
@@ -4345,6 +4347,8 @@ export class SessionManager {
       currentWorkspaceIdentity: safety.workspaceIdentity,
       backgroundOperationsSettled: safety.backgroundOperationsSettled,
       availableToolNames: input.availableToolNames,
+      workspaceBoundaryRequirement:
+        targetHeader.toolProfile === 'managed-coding-v1' ? 'required' : 'optional',
       ...(safety.workspaceCheckpoint ? { workspaceCheckpoint: safety.workspaceCheckpoint } : {}),
       ...(safety.workspaceBoundary ? { workspaceBoundary: safety.workspaceBoundary } : {}),
     });

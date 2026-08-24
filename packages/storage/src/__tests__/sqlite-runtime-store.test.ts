@@ -934,6 +934,37 @@ describe('SqliteRuntimeStore', () => {
     });
   });
 
+  it('revalidates the accepted workspace boundary when committing continuation start', async () => {
+    await withStore(async (store, dbPath) => {
+      const workspaceBoundary = await openContinuationWorkspaceBoundary(store);
+      const claim = workspaceBoundContinuationClaim(workspaceBoundary);
+      await persistImmutablePrefix(store, continuationSourcePrefix());
+      assert.equal((await store.claimWorkspaceBoundContinuation({ claim })).kind, 'acquired');
+
+      const tamper = new DatabaseSync(dbPath);
+      try {
+        tamper
+          .prepare(
+            `UPDATE runtime_workspace_heads
+             SET revision = revision + 1
+             WHERE workspace_id = ? AND workspace_epoch_id = ?`,
+          )
+          .run(workspaceBoundary.workspaceId, workspaceBoundary.workspaceEpochId);
+      } finally {
+        tamper.close();
+      }
+
+      await assert.rejects(
+        store.commitWorkspaceBoundContinuationStart({
+          claim,
+          event: continuationStartEvent(claim),
+        }),
+        /workspace version projection is incomplete|workspace boundary no longer matches accepted authority/i,
+      );
+      assert.deepEqual(await store.readRuntimeEvents(claim.target.sessionId, claim.target.runId), []);
+    });
+  });
+
   it('rejects a workspace-bound claim when caller evidence differs from accepted authority', async () => {
     await withStore(async (store) => {
       const workspaceBoundary = await openContinuationWorkspaceBoundary(store);
