@@ -112,7 +112,19 @@ function omitUndefinedEnvelopeFields(value: object): object {
       throw new Error('RuntimeEvent is not losslessly serializable');
     }
     if (descriptor.value === undefined) continue;
-    Object.defineProperty(result, key, descriptor);
+    // This is a normalization snapshot, not an alias of the caller's object.
+    // A durable owner is allowed to freeze its event before handing it to the
+    // canonical writer. Copying that non-configurable descriptor verbatim
+    // would make the snapshot impossible to normalize below (`content`,
+    // `refs`, and `actions` are replaced with their undefined-free copies).
+    // Strict-JSON validation still checks prototypes, enumerable keys,
+    // accessors, and values; mutability is not part of the persisted meaning.
+    Object.defineProperty(result, key, {
+      value: descriptor.value,
+      enumerable: descriptor.enumerable,
+      writable: true,
+      configurable: true,
+    });
   }
   return result;
 }

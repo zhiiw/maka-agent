@@ -112,4 +112,27 @@ describe('canonical RuntimeEvent encoding', () => {
       /RuntimeEvent is not losslessly serializable/,
     );
   });
+
+  test('encodes a deeply frozen durable tool outcome without mutating it', () => {
+    const event = Object.freeze({
+      ...baseEvent({
+        role: 'tool',
+        author: 'tool',
+        content: Object.freeze({
+          kind: 'function_response' as const,
+          id: 'call-1',
+          name: 'Write',
+          result: Object.freeze({ kind: 'text' as const, text: 'done' }),
+        }),
+        refs: Object.freeze({ operationId: 'op-1', toolCallId: 'call-1' }),
+        actions: Object.freeze({ stateDelta: Object.freeze({ durationMs: 0 }) }),
+      }),
+    });
+
+    const encoded = encodeCanonicalRuntimeEvent(event);
+
+    assert.deepEqual(encoded.event, event);
+    assert.equal(Object.isFrozen(event), true);
+    assert.equal(Object.isFrozen(event.content), true);
+  });
 });
