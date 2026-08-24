@@ -106,6 +106,55 @@ test('new root admissions reject removed Automation authority', async () => {
   }
 });
 
+test('workspace-bound continuation admission preserves its replay manifest identity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-workspace-continuation-admission-'));
+  const stores: Array<ReturnType<typeof createSqliteAgentRunStore>> = [];
+  try {
+    const store = createSqliteAgentRunStore(root);
+    stores.push(store);
+    const execution = {
+      kind: 'safe_boundary_continuation',
+      sourceInvocationId: 'source-invocation',
+      sourceRunId: 'source-run',
+      sourceTurnId: 'source-turn',
+      sourceRuntimeEventHighWater: 3,
+      claimId: 'continuation-claim',
+      boundaryDigest: `sha256:${'a'.repeat(64)}`,
+      replayManifestDigest: `sha256:${'b'.repeat(64)}`,
+      providerReplayDigest: `sha256:${'c'.repeat(64)}`,
+      safetyDigest: `sha256:${'d'.repeat(64)}`,
+      targetInvocationId: 'target-invocation',
+    } as const;
+    const admitted = await store.admitRootTurn(
+      admissionInput({
+        sessionId: 'continuation-session',
+        turnId: 'continuation-turn',
+        proposedRunId: 'continuation-run',
+        proposedUserMessageId: null,
+        execution,
+        normalizedInput: null,
+      }),
+    );
+    assert.equal(admitted.kind, 'admitted');
+    assert.deepEqual(admitted.admission.execution, execution);
+    store.close?.();
+    stores.pop();
+
+    const reopened = createSqliteAgentRunStore(root);
+    stores.push(reopened);
+    assert.deepEqual(
+      (await reopened.readRootTurnAdmission('continuation-session', 'continuation-turn'))
+        ?.execution,
+      execution,
+    );
+    reopened.close?.();
+    stores.pop();
+  } finally {
+    for (const store of stores) store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function admissionInput(overrides: Partial<AdmitRootTurnInput> = {}): AdmitRootTurnInput {
   return {
     sessionId: 'root-session',

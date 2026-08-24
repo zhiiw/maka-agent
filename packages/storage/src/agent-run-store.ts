@@ -1959,7 +1959,7 @@ function normalizeRootExecutionDescriptor(value: unknown): RootExecutionDescript
     });
   }
   if (value.kind === 'safe_boundary_continuation') {
-    const keys = [
+    const legacyKeys = [
       'kind',
       'sourceInvocationId',
       'sourceRunId',
@@ -1971,6 +1971,10 @@ function normalizeRootExecutionDescriptor(value: unknown): RootExecutionDescript
       'safetyDigest',
       'targetInvocationId',
     ];
+    const hasReplayManifestDigest = Object.hasOwn(value, 'replayManifestDigest');
+    const keys = hasReplayManifestDigest
+      ? [...legacyKeys, 'replayManifestDigest']
+      : legacyKeys;
     if (
       !hasExactKeys(value, keys) ||
       typeof value.sourceInvocationId !== 'string' ||
@@ -1984,6 +1988,7 @@ function normalizeRootExecutionDescriptor(value: unknown): RootExecutionDescript
       typeof value.claimId !== 'string' ||
       !isSafeId(value.claimId) ||
       !isSha256Digest(value.boundaryDigest) ||
+      (hasReplayManifestDigest && !isSha256Digest(value.replayManifestDigest)) ||
       !isSha256Digest(value.providerReplayDigest) ||
       !isSha256Digest(value.safetyDigest) ||
       typeof value.targetInvocationId !== 'string' ||
@@ -1999,6 +2004,9 @@ function normalizeRootExecutionDescriptor(value: unknown): RootExecutionDescript
       sourceRuntimeEventHighWater: value.sourceRuntimeEventHighWater as number,
       claimId: value.claimId,
       boundaryDigest: value.boundaryDigest,
+      ...(hasReplayManifestDigest
+        ? { replayManifestDigest: value.replayManifestDigest as `sha256:${string}` }
+        : {}),
       providerReplayDigest: value.providerReplayDigest,
       safetyDigest: value.safetyDigest,
       targetInvocationId: value.targetInvocationId,
