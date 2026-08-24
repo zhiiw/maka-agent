@@ -73,7 +73,8 @@ export class HostedExecutionProjectionReader {
       !start ||
       start.claimId !== execution.claimId ||
       start.boundaryDigest !== execution.boundaryDigest ||
-      start.replayManifestDigest !== execution.boundaryDigest ||
+      start.replayManifestDigest !==
+        (execution.replayManifestDigest ?? execution.boundaryDigest) ||
       start.providerReplayDigest !== execution.providerReplayDigest ||
       start.immediateSource.sessionId !== run.sessionId ||
       start.immediateSource.invocationId !== execution.sourceInvocationId ||
