@@ -313,6 +313,47 @@ fn rejects_a_successor_when_the_target_ref_no_longer_matches_the_base() {
     );
 }
 
+#[test]
+fn rejects_a_successor_tree_outside_the_managed_tree_policy_before_ref_cas() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("managed.git");
+    let imported = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "import_source_head",
+        "sourceRepositoryPath": fixture.root,
+        "expectedSourceHeadCommitOid": source_head,
+        "destinationRepositoryPath": destination,
+        "baselineRef": "refs/maka/accepted",
+    }));
+    assert!(imported.status.success());
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let baseline = imported["baselineCommitOid"].as_str().unwrap();
+    let overdeep_path = (0..65)
+        .map(|index| format!("d{index}"))
+        .chain(std::iter::once("file.txt".to_owned()))
+        .collect::<Vec<_>>()
+        .join("/");
+
+    let rejected = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "create_successor",
+        "repositoryPath": destination,
+        "expectedBaseCommitOid": baseline,
+        "targetRef": "refs/maka/accepted",
+        "path": overdeep_path,
+        "content": "must not publish\n",
+    }));
+
+    assert_eq!(rejected.status.code(), Some(1));
+    let rejected: serde_json::Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(rejected["reason"], "source_tree_depth_exceeded");
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/accepted"]),
+        baseline
+    );
+}
+
 fn invoke_helper(repository_path: &Path) -> Output {
     invoke_request(serde_json::json!({
         "protocolVersion": 1,
