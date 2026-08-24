@@ -28,7 +28,7 @@
 
 ## Production-shaped crash proof
 
-三平台 gate 使用与当前源码匹配的 release Gitoxide helper，并完成下面的真实进程序列：
+三平台 gate 使用与当前源码匹配的 release Gitoxide helper，并同时装配发布形状的 bundled npm runtime。后者不是 continuation 的事实源，但 `managed-coding-v1` 必须先完整解析实际工具目录；测试不能通过删减工具面来绕过这项安全检查。随后执行下面的真实进程序列：
 
 1. 创建 SHA-1 source repository 和 `managed-coding-v1` Session；
 2. 通过真实 Gitoxide helper 创建并重验 accepted baseline；
@@ -49,4 +49,3 @@
 | Windows | 真实 helper、Runtime Host kill/reopen、0 次 provider replay |
 
 证据由 `.github/workflows/gitoxide-helper-admission.yml` 的三平台 matrix 持续执行。CI 绿只证明这些已枚举边界；它不扩大到断电恢复、provider reattach 或 Desktop 自动续跑。
-
