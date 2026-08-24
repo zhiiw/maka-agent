@@ -27,6 +27,7 @@ import {
   buildWorkspaceBaselineAuthorityEvents,
   buildWorkspaceSuccessorAuthorityEvent,
   scanWorkspaceBaselineAuthority,
+  workspaceMutationPolicyHashV1,
   WORKSPACE_AUTHORITY_SESSION_ID,
   WORKSPACE_VERSION_AUTHORITY_CAPABILITY_V1,
   type ScannedWorkspaceBaselineAuthority,
@@ -3364,6 +3365,17 @@ export class SqliteRuntimeStore
       throw new Error('Continuation workspace head has ambiguous accepted evidence');
     }
     const version = baseline?.baseline ?? successor!.successor;
+    if (
+      epoch.epoch.policyHash !== version.policyHash ||
+      workspaceMutationPolicyHashV1(
+        epoch.epoch.materializationProfileDigest,
+        boundary.executionProfileDigest,
+      ) !== epoch.epoch.policyHash ||
+      (successor !== undefined &&
+        successor.successor.executionProfileDigest !== boundary.executionProfileDigest)
+    ) {
+      throw new Error('Continuation workspace boundary execution profile conflict');
+    }
     const expected: ManagedWorkspaceContinuationBoundaryV1 = {
       protocol: 'managed_workspace_continuation_boundary_v1',
       storageRootId: storageRoot.root_id,
@@ -3379,7 +3391,7 @@ export class SqliteRuntimeStore
       treeOid: head.treeOid,
       materializationProfileDigest: epoch.epoch.materializationProfileDigest,
       policyHash: version.policyHash,
-      executionProfileDigest: successor?.successor.executionProfileDigest ?? null,
+      executionProfileDigest: boundary.executionProfileDigest,
     };
     if (!isDeepStrictEqual(boundary, expected)) {
       throw new Error('Continuation workspace boundary no longer matches accepted authority');

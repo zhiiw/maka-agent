@@ -23,7 +23,9 @@
 
 Caller 提交的 `workspaceBoundary` 只是待验证请求，不是事实源。SQLite 会从
 `runtime_storage_root_binding`、workspace authority events 与可重建 projection 重新构造 exact
-boundary，并进行深度相等比较。
+boundary，并进行深度相等比较。`executionProfileDigest` 必须存在；SQLite 还会重新计算
+`workspaceMutationPolicyHashV1(materializationProfileDigest, executionProfileDigest)`，因此 caller
+不能用一个形状合法但未被 epoch policy 承诺的 profile 自认证。
 
 ## Identity protocol
 
@@ -109,4 +111,3 @@ M3 后续必须依次补齐：
 3. v2 continuation-start 与 Run repair 只消费同一 claim；
 4. production-shaped kill/reopen 测试先于 Desktop/CLI 与 startup auto-resume；
 5. 产品入口明确选择 managed continuation，attached checkout 继续 fail closed。
-

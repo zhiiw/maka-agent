@@ -26,7 +26,10 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { type RuntimeEvent } from '@maka/core/runtime-event';
-import { type WorkspaceBaselineAuthorityInput } from '@maka/core/workspace-version-authority';
+import {
+  workspaceMutationPolicyHashV1,
+  type WorkspaceBaselineAuthorityInput,
+} from '@maka/core/workspace-version-authority';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import {
   buildImmutableRuntimePrefix,
@@ -409,6 +412,8 @@ function preparedCommit() {
 }
 
 function workspaceBaselineInput(): WorkspaceBaselineAuthorityInput {
+  const materializationProfileDigest = `sha256:${'3'.repeat(64)}` as const;
+  const executionProfileDigest = `sha256:${'a'.repeat(64)}` as const;
   return {
     epochOpenedEventId: 'workspace-epoch-event-1',
     baselineAcceptedEventId: 'workspace-version-event-1',
@@ -422,9 +427,12 @@ function workspaceBaselineInput(): WorkspaceBaselineAuthorityInput {
       objectFormat: 'sha1',
       sourceCommitOid: '1'.repeat(40),
       sourceTreeOid: '2'.repeat(40),
-      materializationProfileDigest: `sha256:${'3'.repeat(64)}`,
+      materializationProfileDigest,
       materializationSemantics: 'git_tree_materialized_with_fixed_config_v1',
-      policyHash: `sha256:${'4'.repeat(64)}`,
+      policyHash: workspaceMutationPolicyHashV1(
+        materializationProfileDigest,
+        executionProfileDigest,
+      ),
     },
     baseline: {
       workspaceVersionId: `version_${'5'.repeat(32)}`,
@@ -454,8 +462,11 @@ function workspaceBoundContinuationClaim(): ContinuationClaimV2 {
     commitOid: '5'.repeat(40),
     treeOid: '2'.repeat(40),
     materializationProfileDigest: `sha256:${'3'.repeat(64)}` as const,
-    policyHash: `sha256:${'4'.repeat(64)}` as const,
-    executionProfileDigest: null,
+    policyHash: workspaceMutationPolicyHashV1(
+      `sha256:${'3'.repeat(64)}`,
+      `sha256:${'a'.repeat(64)}`,
+    ),
+    executionProfileDigest: `sha256:${'a'.repeat(64)}` as const,
   };
   const boundaryDigest = digestWorkspaceBoundContinuationBoundary(boundary, workspaceBoundary);
   const source = boundary.segments[0];
@@ -646,7 +657,10 @@ function workspaceSuccessorCommit(): WorkspaceSuccessorCommitInput {
         baseHeadRevision: 1,
         commitOid: '7'.repeat(40),
         treeOid: '8'.repeat(40),
-        policyHash: `sha256:${'4'.repeat(64)}`,
+        policyHash: workspaceMutationPolicyHashV1(
+          `sha256:${'3'.repeat(64)}`,
+          `sha256:${'a'.repeat(64)}`,
+        ),
         treeDeltaDigest: `sha256:${'9'.repeat(64)}`,
         changedPaths: ['notes.txt'],
         changedFileCount: 1,

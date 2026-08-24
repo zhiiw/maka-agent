@@ -36,7 +36,10 @@ import {
   type ImmutableRuntimePrefixV1,
   type ManagedWorkspaceContinuationBoundaryV1,
 } from '@maka/core/runtime-boundary';
-import type { WorkspaceBaselineAuthorityInput } from '@maka/core/workspace-version-authority';
+import {
+  workspaceMutationPolicyHashV1,
+  type WorkspaceBaselineAuthorityInput,
+} from '@maka/core/workspace-version-authority';
 import {
   ToolLedgerCorruptionError,
   ToolLedgerRejectionError,
@@ -919,6 +922,22 @@ describe('SqliteRuntimeStore', () => {
       assert.equal(
         await store.readWorkspaceBoundContinuationClaimByBoundary(claim.boundaryDigest),
         undefined,
+      );
+    });
+  });
+
+  it('rejects a caller-asserted execution profile that is not bound by epoch policy', async () => {
+    await withStore(async (store) => {
+      const workspaceBoundary = await openContinuationWorkspaceBoundary(store);
+      const claim = workspaceBoundContinuationClaim({
+        ...workspaceBoundary,
+        executionProfileDigest: `sha256:${'c'.repeat(64)}`,
+      });
+      await persistImmutablePrefix(store, continuationSourcePrefix());
+
+      await assert.rejects(
+        store.claimWorkspaceBoundContinuation({ claim }),
+        /execution profile conflict/i,
       );
     });
   });
@@ -2069,6 +2088,7 @@ async function openContinuationWorkspaceBoundary(
   store: Store,
 ): Promise<ManagedWorkspaceContinuationBoundaryV1> {
   const input = continuationWorkspaceBaselineInput();
+  const executionProfileDigest = `sha256:${'b'.repeat(64)}` as const;
   bindWorkspaceBaselineAuthorityStoreRootInternal(store, TEST_STORAGE_ROOT_ID);
   const opened = await commitWorkspaceBaselineInternal(store, input);
   return {
@@ -2086,11 +2106,13 @@ async function openContinuationWorkspaceBoundary(
     treeOid: opened.head.treeOid,
     materializationProfileDigest: input.epoch.materializationProfileDigest,
     policyHash: input.epoch.policyHash,
-    executionProfileDigest: null,
+    executionProfileDigest,
   };
 }
 
 function continuationWorkspaceBaselineInput(): WorkspaceBaselineAuthorityInput {
+  const materializationProfileDigest = `sha256:${'3'.repeat(64)}` as const;
+  const executionProfileDigest = `sha256:${'b'.repeat(64)}` as const;
   return {
     epochOpenedEventId: 'continuation-workspace-epoch-event',
     baselineAcceptedEventId: 'continuation-workspace-version-event',
@@ -2104,9 +2126,12 @@ function continuationWorkspaceBaselineInput(): WorkspaceBaselineAuthorityInput {
       objectFormat: 'sha1',
       sourceCommitOid: '1'.repeat(40),
       sourceTreeOid: '2'.repeat(40),
-      materializationProfileDigest: `sha256:${'3'.repeat(64)}`,
+      materializationProfileDigest,
       materializationSemantics: 'git_tree_materialized_with_fixed_config_v1',
-      policyHash: `sha256:${'4'.repeat(64)}`,
+      policyHash: workspaceMutationPolicyHashV1(
+        materializationProfileDigest,
+        executionProfileDigest,
+      ),
     },
     baseline: {
       workspaceVersionId: 'version_55555555555555555555555555555555',

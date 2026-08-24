@@ -99,7 +99,7 @@ export interface ManagedWorkspaceContinuationBoundaryV1 {
   treeOid: string;
   materializationProfileDigest: RuntimeBoundaryDigest;
   policyHash: RuntimeBoundaryDigest;
-  executionProfileDigest: RuntimeBoundaryDigest | null;
+  executionProfileDigest: RuntimeBoundaryDigest;
 }
 
 export interface ContinuationClaimV2 extends Omit<ContinuationClaimV1, 'protocol'> {
@@ -426,7 +426,7 @@ export function decodeManagedWorkspaceContinuationBoundary(
     !oidMatchesFormat(value.treeOid, value.objectFormat) ||
     !isBoundaryDigest(value.materializationProfileDigest) ||
     !isBoundaryDigest(value.policyHash) ||
-    (value.executionProfileDigest !== null && !isBoundaryDigest(value.executionProfileDigest))
+    !isBoundaryDigest(value.executionProfileDigest)
   ) {
     throw new Error('Invalid managed workspace continuation boundary');
   }
