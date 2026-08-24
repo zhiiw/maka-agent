@@ -407,6 +407,12 @@ export class RuntimeContinuationPlanner {
   constructor(private readonly deps: RuntimeContinuationPlannerDeps) {}
 
   async plan(input: RuntimeContinuationPlannerInput): Promise<SafeBoundaryContinuationPlan> {
+    if (input.workspaceBoundaryRequirement === 'required' && !input.workspaceBoundary) {
+      return parkedPlan(
+        'workspace_boundary_unavailable',
+        'managed continuation requires an authoritative workspace boundary',
+      );
+    }
     let sourceRun: Awaited<ReturnType<RuntimeContinuationPlannerDeps['readSourceRun']>>;
     try {
       sourceRun = await this.deps.readSourceRun(input.sessionId, input.sourceRunId);
@@ -451,12 +457,6 @@ export class RuntimeContinuationPlanner {
       return parkedPlan(
         reason,
         `continuation replay segment ${replay.segmentIndex} is not replayable: ${replay.reason}`,
-      );
-    }
-    if (input.workspaceBoundaryRequirement === 'required' && !input.workspaceBoundary) {
-      return parkedPlan(
-        'workspace_boundary_unavailable',
-        'managed continuation requires an authoritative workspace boundary',
       );
     }
     const plannedBoundaryDigest = input.workspaceBoundary

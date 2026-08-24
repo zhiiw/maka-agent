@@ -5384,6 +5384,7 @@ describe('SessionManager permission mode updates', () => {
     });
     const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v1' }));
     const header = await store.readHeader(session.id);
+    expect(header.toolProfile).toBe('managed-coding-v1');
     const sourceRunId = 'source-run-managed-boundary-missing';
     const sourceTurnId = 'source-turn-managed-boundary-missing';
     await seedRuntimeRun(
@@ -17541,6 +17542,7 @@ class MemorySessionStore implements SessionStore {
       permissionMode: input.permissionMode,
       collaborationMode: input.collaborationMode ?? 'agent',
       orchestrationMode: input.orchestrationMode ?? 'default',
+      ...(input.toolProfile !== undefined ? { toolProfile: input.toolProfile } : {}),
       schemaVersion: 1,
     };
     this.headers.set(header.id, header);
