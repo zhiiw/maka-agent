@@ -73,10 +73,8 @@ test('a started workspace-bound continuation survives Host death without provide
       const crashClient = await connectClient(fixture.root);
       const targetTurnId = 'turn-workspace-bound-host-crash';
       try {
-        assert.equal(
-          (await crashClient.queryTurnResume({ sessionId: fixture.sessionId })).disposition,
-          'ready',
-        );
+        const initialPlan = await crashClient.queryTurnResume({ sessionId: fixture.sessionId });
+        assert.equal(initialPlan.disposition, 'ready', JSON.stringify(initialPlan));
         const failpoint = waitForContinuationFailpoint(crashHost.child);
         const start = crashClient
           .startTurnResume({
