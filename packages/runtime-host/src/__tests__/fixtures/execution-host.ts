@@ -17,7 +17,8 @@
  * under the License.
  */
 
-import { join } from 'node:path';
+import { appendFile } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
 import { inspect } from 'node:util';
 import { FakeBackend } from '@maka/runtime/test-only/fake-backend';
 import { createSqliteRuntimeStore } from '@maka/storage';
@@ -40,6 +41,33 @@ if (!Number.isSafeInteger(idleGraceMs) || idleGraceMs < 0) {
   throw new Error('execution-host requires a non-negative idle grace');
 }
 
+const packagedResourcesRoot = process.env.MAKA_TEST_PACKAGED_RESOURCES_ROOT;
+if (packagedResourcesRoot) {
+  if (!isAbsolute(packagedResourcesRoot)) {
+    throw new Error('MAKA_TEST_PACKAGED_RESOURCES_ROOT must be absolute');
+  }
+  Object.defineProperty(process.versions, 'electron', {
+    configurable: true,
+    value: 'test-runtime-host',
+  });
+  Object.defineProperty(process, 'resourcesPath', {
+    configurable: true,
+    value: packagedResourcesRoot,
+  });
+}
+
+const providerCallLogPath = process.env.MAKA_TEST_PROVIDER_CALL_LOG;
+const continuationFailpoint = process.env.MAKA_TEST_CONTINUATION_FAILPOINT;
+
+class ObservedFakeBackend extends FakeBackend {
+  override async *send(input: Parameters<FakeBackend['send']>[0]) {
+    if (providerCallLogPath) {
+      await appendFile(providerCallLogPath, `${input.turnId}\n`, 'utf8');
+    }
+    yield* super.send(input);
+  }
+}
+
 // The production composition registers no test backend. This fixture is a
 // candidate host in its own right, so it supplies the deterministic one through
 // the composition's `primaryBackendFactory` seam — the same path Desktop E2E
@@ -53,7 +81,14 @@ const result = await startExecutionRuntimeHostCandidate(
   {
     createComposition: (context, compositionOptions) =>
       createExecutionRuntimeHostComposition(context, compositionOptions, {
-        primaryBackendFactory: (backendContext) => new FakeBackend(backendContext),
+        primaryBackendFactory: (backendContext) => new ObservedFakeBackend(backendContext),
+        continuationFailpoint: continuationFailpoint
+          ? async (point) => {
+              if (point !== continuationFailpoint) return;
+              process.send?.({ type: 'test.continuation_failpoint', point });
+              await new Promise<never>(() => undefined);
+            }
+          : undefined,
       }),
   },
 );

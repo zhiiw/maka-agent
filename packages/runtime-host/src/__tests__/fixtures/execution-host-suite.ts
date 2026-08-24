@@ -117,6 +117,15 @@ export interface ExecutionHostHandle {
   recoveryOutcome?: RuntimeEvent;
 }
 
+export interface ExecutionHostTestOptions {
+  readonly packagedResourcesRoot?: string;
+  readonly providerCallLogPath?: string;
+  readonly continuationFailpoint?:
+    | 'after_continuation_claim_committed'
+    | 'after_run_created'
+    | 'after_continuation_start_committed';
+}
+
 export interface TurnLedger {
   runs: AgentRunHeader[];
   userMessages: Array<Extract<StoredMessage, { type: 'user' }>>;
@@ -172,6 +181,7 @@ export class ExecutionFixture {
       const sourceTurnId = randomUUID();
       const createdAt = Date.now();
       const workspace = await resolveWorkspaceIdentity({ path: this.root });
+      const session = await stores.sessionStore.readHeaderSnapshot(this.sessionId);
       const sourceRun: AgentRunHeader = {
         runId: sourceRunId,
         invocationId: sourceInvocationId,
@@ -185,6 +195,7 @@ export class ExecutionFixture {
         workspaceIdentity: workspace.workspaceIdentity,
         permissionMode: 'ask',
         collaborationMode: 'agent',
+        ...(session.toolProfile ? { toolProfile: session.toolProfile } : {}),
         createdAt,
         updatedAt: createdAt,
       };
@@ -858,8 +869,9 @@ export class ExecutionFixture {
       runId: string;
     },
     safeBoundaryResumeEnabled = true,
+    testOptions: ExecutionHostTestOptions = {},
   ): Promise<ExecutionHostHandle> {
-    const child = this.spawnHost('inherit', recoveryProbe, safeBoundaryResumeEnabled);
+    const child = this.spawnHost('inherit', recoveryProbe, safeBoundaryResumeEnabled, testOptions);
     const ready = await waitForHostReady(child);
     return { child, ...ready };
   }
@@ -1005,10 +1017,26 @@ export class ExecutionFixture {
     stderr: 'inherit' | 'ignore',
     recoveryProbe?: { sessionId: string; runId: string },
     safeBoundaryResumeEnabled = true,
+    testOptions: ExecutionHostTestOptions = {},
   ): ChildProcess {
     const env = { ...process.env };
     if (safeBoundaryResumeEnabled) env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME = '1';
     else delete env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME;
+    if (testOptions.packagedResourcesRoot) {
+      env.MAKA_TEST_PACKAGED_RESOURCES_ROOT = testOptions.packagedResourcesRoot;
+    } else {
+      delete env.MAKA_TEST_PACKAGED_RESOURCES_ROOT;
+    }
+    if (testOptions.providerCallLogPath) {
+      env.MAKA_TEST_PROVIDER_CALL_LOG = testOptions.providerCallLogPath;
+    } else {
+      delete env.MAKA_TEST_PROVIDER_CALL_LOG;
+    }
+    if (testOptions.continuationFailpoint) {
+      env.MAKA_TEST_CONTINUATION_FAILPOINT = testOptions.continuationFailpoint;
+    } else {
+      delete env.MAKA_TEST_CONTINUATION_FAILPOINT;
+    }
     const child = fork(
       new URL('./execution-host.js', import.meta.url),
       [

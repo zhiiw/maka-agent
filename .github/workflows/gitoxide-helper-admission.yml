@@ -28,12 +28,17 @@ on:
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-inspection.test.ts'
       - 'packages/runtime-host/src/server/gitoxide-managed-*.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-*.test.ts'
+      - 'packages/runtime-host/src/server/execution-composition.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/execution-host.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/execution-host-suite.ts'
+      - 'packages/storage/src/execution-stores.ts'
       - 'packages/runtime-host/src/server/packaged-gitoxide-helper-internal.ts'
       - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
       - 'scripts/prepare-gitoxide-helper*'
       - 'scripts/generate-gitoxide-cargo-notices.mjs'
       - 'apps/desktop/electron-builder.config.mjs'
       - 'docs/architecture/gitoxide-*.md'
+      - 'docs/architecture/runtime-managed-workspace-continuation-*.md'
   push:
     branches:
       - main
@@ -46,12 +51,17 @@ on:
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-inspection.test.ts'
       - 'packages/runtime-host/src/server/gitoxide-managed-*.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-*.test.ts'
+      - 'packages/runtime-host/src/server/execution-composition.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/execution-host.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/execution-host-suite.ts'
+      - 'packages/storage/src/execution-stores.ts'
       - 'packages/runtime-host/src/server/packaged-gitoxide-helper-internal.ts'
       - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
       - 'scripts/prepare-gitoxide-helper*'
       - 'scripts/generate-gitoxide-cargo-notices.mjs'
       - 'apps/desktop/electron-builder.config.mjs'
       - 'docs/architecture/gitoxide-*.md'
+      - 'docs/architecture/runtime-managed-workspace-continuation-*.md'
 
 permissions:
   contents: read
@@ -108,5 +118,6 @@ jobs:
           packages/runtime-host/dist/__tests__/gitoxide-helper-mutation-candidate-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-managed-inspection.test.js
+          packages/runtime-host/dist/__tests__/gitoxide-managed-continuation-crash.test.js
           packages/runtime-host/dist/__tests__/gitoxide-managed-mutation-admission.test.js
           packages/runtime-host/dist/__tests__/gitoxide-managed-mutation-session.test.js

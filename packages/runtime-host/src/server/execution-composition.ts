@@ -202,6 +202,15 @@ export interface CreateExecutionRuntimeHostCompositionOptions {
 
 export interface ExecutionRuntimeHostCompositionDependencies {
   readonly primaryBackendFactory?: BackendFactory;
+  /** Production-shaped crash-test seam; product composition never supplies it. */
+  readonly continuationFailpoint?: (
+    point:
+      | 'after_continuation_claim_committed'
+      | 'after_run_created'
+      | 'after_continuation_start_committed'
+      | 'after_terminal_event_committed'
+      | 'after_terminal_header_committed',
+  ) => Promise<void>;
   readonly oauthAuthorization?: Pick<
     HostOAuthCoordinatorInput,
     'startCodexAuthorization' | 'pollCodexAuthorization' | 'exchangeCodexCode'
@@ -958,6 +967,7 @@ export async function createExecutionRuntimeHostComposition(
       newId: randomUUID,
       now: Date.now,
       safeBoundaryResumeEnabled: process.env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME === '1',
+      continuationFailpoint: dependencies.continuationFailpoint,
       generateSessionTitle: (input) => sessionEffectCoordinator.generateTitle(input),
       onSessionTitleChanged: (sessionId) =>
         continuityCoordinator.enqueueCanonicalRefresh(sessionId),
