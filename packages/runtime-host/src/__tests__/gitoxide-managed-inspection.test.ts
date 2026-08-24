@@ -45,6 +45,7 @@ const fakeNpmRuntime = Object.freeze({
   nodeAbi: '137',
   platform: process.platform,
   arch: process.arch,
+  resourcesRoot: join(tmpdir(), 'not-used-packaged-resources'),
   nodeExecutablePath: process.execPath,
   npmRuntimeRoot: join(tmpdir(), 'not-used-npm-runtime'),
   npmCliPath: join(tmpdir(), 'not-used-npm-cli.js'),
