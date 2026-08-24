@@ -1022,6 +1022,10 @@ export async function assertPackagedResources(
     // artifacts that were correct when they shipped. The canonical icon itself
     // is `requireCanonicalIcon` above, not this.
     requireAppIconCatalog = true,
+    // Current artifacts ship the attested npm runtime. Historical Windows
+    // upgrade fixtures predate it and are checked against their own contract.
+    requireBundledNpm = true,
+    requireGitoxideHelper = true,
   } = {},
 ) {
   if (bundledGitContract !== 'forbidden' && bundledGitContract !== 'legacy-required') {
@@ -1031,6 +1035,23 @@ export async function assertPackagedResources(
   const required = [
     'app.asar',
     'bundled-tools.json',
+    ...(requireBundledNpm
+      ? [
+          'bundled-npm.json',
+          join('npm', 'bin', 'npm-cli.js'),
+          join('licenses', 'npm-cli', 'LICENSE'),
+        ]
+      : []),
+    ...(requireGitoxideHelper
+      ? [
+          'gitoxide-helper.json',
+          join(
+            'gitoxide',
+            process.platform === 'win32' ? 'maka-gitoxide-helper.exe' : 'maka-gitoxide-helper',
+          ),
+          join('licenses', 'gitoxide-helper', 'THIRD_PARTY_NOTICES.txt'),
+        ]
+      : []),
     ...(requiresLegacyBundledGit
       ? [
           'bundled-git.json',

@@ -176,6 +176,10 @@ import {
   RuntimeHostWorkspaceExecutionError,
   type RuntimeHostWorkspaceExecutionComposition,
 } from './workspace-execution-composition.js';
+import {
+  tryOpenPackagedGitoxideManagedInspectionComposition,
+  type GitoxideManagedInspectionComposition,
+} from './gitoxide-managed-inspection.js';
 
 export interface ExecutionRuntimeHostComposition extends RuntimeHostComposition {
   readonly workspaceExecution: RuntimeHostWorkspaceExecutionComposition;
@@ -229,6 +233,7 @@ export async function createExecutionRuntimeHostComposition(
   let unsubscribeTranscriptChanges: (() => void) | undefined;
   let unsubscribeUsageChanges: (() => void) | undefined;
   let workspaceExecution: RuntimeHostWorkspaceExecutionComposition | undefined;
+  let gitoxideManagedInspection: GitoxideManagedInspectionComposition | undefined;
   let goalExecutions: HostGoalExecutionCoordinator | undefined;
   try {
     const openedProjectCatalog = storage.projectCatalog;
@@ -311,6 +316,14 @@ export async function createExecutionRuntimeHostComposition(
     const managedFilesystemWorker = filesystemWorker
       ? adaptManagedWorkspaceFilesystemWorker(filesystemWorker)
       : undefined;
+    gitoxideManagedInspection = await tryOpenPackagedGitoxideManagedInspectionComposition({
+      storageRoot: context.owner.capability.canonicalPath,
+      ...(managedFilesystemWorker ? { filesystemWorker: managedFilesystemWorker } : {}),
+      onUnavailable: (error) =>
+        console.warn(
+          `[runtime-host] Gitoxide managed inspection unavailable: ${generalizedErrorMessage(error)}`,
+        ),
+    });
     workspaceExecution = createRuntimeHostWorkspaceExecutionComposition({
       ...(managedFilesystemWorker ? { filesystemWorker: managedFilesystemWorker } : {}),
     });
@@ -361,6 +374,7 @@ export async function createExecutionRuntimeHostComposition(
     const hostTools = [
       createHostWebSearchToolFromService(webSearchService),
       createHostWebFetchToolFromService(webFetchService),
+      ...(gitoxideManagedInspection ? [gitoxideManagedInspection.tool] : []),
       ...runtimePolicy.modelTools,
     ];
     const childAgentTools = createHostChildAgentToolComposition({
@@ -1479,6 +1493,7 @@ export async function createExecutionRuntimeHostComposition(
         },
         drain: [
           () => rootCoordinator?.beginDrain(),
+          () => gitoxideManagedInspection?.beginDrain(),
           () => workspaceExecution?.beginDrain(),
           () => runtimeResources?.beginDrain(),
           () => messages.beginDrain(),
@@ -1492,6 +1507,7 @@ export async function createExecutionRuntimeHostComposition(
             await rootCloseTask;
           },
           () => runtimeResources?.close(),
+          () => gitoxideManagedInspection?.close(),
           () => workspaceExecution?.close(),
           () => sessionEffects?.close(),
           () => messages.close(),
@@ -1591,6 +1607,12 @@ export async function createExecutionRuntimeHostComposition(
   } catch (error) {
     const errors: unknown[] = [error];
     goalExecutions?.beginDrain();
+    gitoxideManagedInspection?.beginDrain();
+    try {
+      await gitoxideManagedInspection?.close();
+    } catch (closeError) {
+      errors.push(closeError);
+    }
     try {
       await workspaceExecution?.close();
     } catch (closeError) {

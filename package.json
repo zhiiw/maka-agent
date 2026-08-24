@@ -63,6 +63,9 @@
     "test:product-release": "node --test scripts/product-release.test.mjs scripts/product-release-artifacts.test.mjs scripts/product-release-authority.test.mjs",
     "generate:windows-cargo-notices": "node scripts/generate-windows-cargo-notices.mjs",
     "check:windows-cargo-notices": "node scripts/generate-windows-cargo-notices.mjs --check",
+    "build:gitoxide-helper": "cargo +1.98.0 build --manifest-path native/gitoxide-helper/Cargo.toml --release --locked",
+    "prepare:gitoxide-helper": "node scripts/prepare-gitoxide-helper.mjs",
+    "generate:gitoxide-cargo-notices": "node scripts/generate-gitoxide-cargo-notices.mjs",
     "check:release": "npm run check:stale && npm run check:third-party-notices && npm run check:cli-third-party-notices && npm run check:model-metadata && npm run check:product-release-identity && npm run check:asf-npm && node --test scripts/product-release.test.mjs scripts/product-release-artifacts.test.mjs scripts/product-release-authority.test.mjs scripts/release-cli-file-policy.test.mjs scripts/release-cli-artifact-policy.test.mjs scripts/release-cli-eval-support.test.mjs scripts/release-cli-publication.test.mjs scripts/release-cli-runtime-host-diagnostics.test.mjs scripts/release-cli-workflow-policy.test.mjs scripts/verify-packaged-app.test.mjs scripts/third-party-closure.test.mjs scripts/generate-third-party-notices.test.mjs scripts/source-legal-inventory.test.mjs scripts/sync-model-metadata.test.mjs",
     "package:macos-arm64": "node scripts/package-macos-arm64.mjs",
     "verify:macos-arm64": "node scripts/verify-macos-arm64-dmg.mjs",
@@ -83,7 +86,10 @@
     "windows:inventory": "node --test scripts/windows-test-inventory.test.mjs && node scripts/windows-test-inventory.mjs --check",
     "windows:inventory:write": "node scripts/windows-test-inventory.mjs --write",
     "smoke:windows": "npm run build && npm run smoke:windows:dist",
-    "smoke:windows:dist": "node scripts/windows-smoke.mjs"
+    "smoke:windows:dist": "node scripts/windows-smoke.mjs",
+    "prepare:bundled-npm": "node scripts/prepare-bundled-npm.mjs",
+    "verify:bundled-npm": "node scripts/verify-bundled-npm-runtime.mjs",
+    "audit:bundled-npm": "npm audit --prefix apps/desktop/.generated/bundled-npm/audit --omit=dev --audit-level=high"
   },
   "devDependencies": {
     "@ai-sdk/provider-utils": "5.0.28",
@@ -92,9 +98,14 @@
     "@astryxdesign/core": "0.4.5",
     "@biomejs/biome": "2.5.9",
     "@types/node": "^26.2.0",
+    "brace-expansion": "5.0.9",
+    "ip-address": "10.4.0",
     "knip": "^6.32.2",
+    "npm": "12.0.2",
     "patch-package": "8.0.1",
+    "tar": "7.5.22",
     "typescript": "^7.0.2",
+    "undici": "6.28.0",
     "yaml": "2.9.0"
   },
   "allowScripts": {

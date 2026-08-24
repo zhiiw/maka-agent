@@ -67,6 +67,26 @@ export default {
   ],
   extraResources: [
     {
+      from: '.generated/bundled-npm/npm',
+      to: 'npm',
+    },
+    {
+      from: '.generated/bundled-npm/bundled-npm.json',
+      to: 'bundled-npm.json',
+    },
+    {
+      from: '.generated/gitoxide-helper/gitoxide',
+      to: 'gitoxide',
+    },
+    {
+      from: '.generated/gitoxide-helper/gitoxide-helper.json',
+      to: 'gitoxide-helper.json',
+    },
+    {
+      from: '.generated/gitoxide-helper/THIRD_PARTY_NOTICES.txt',
+      to: 'licenses/gitoxide-helper/THIRD_PARTY_NOTICES.txt',
+    },
+    {
       from: 'bundled-tools.json',
       to: 'bundled-tools.json',
     },
@@ -104,6 +124,10 @@ export default {
     {
       from: '../../LICENSE',
       to: 'licenses/maka/LICENSE',
+    },
+    {
+      from: '../../node_modules/npm/LICENSE',
+      to: 'licenses/npm-cli/LICENSE',
     },
     {
       from: '../../NOTICE',

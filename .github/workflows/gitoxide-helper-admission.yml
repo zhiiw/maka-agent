@@ -24,6 +24,15 @@ on:
       - 'native/gitoxide-helper/**'
       - 'packages/runtime-host/src/server/gitoxide-helper-*.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-helper-*.test.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-inspection.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-inspection.test.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-*.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-*.test.ts'
+      - 'packages/runtime-host/src/server/packaged-gitoxide-helper-internal.ts'
+      - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
+      - 'scripts/prepare-gitoxide-helper*'
+      - 'scripts/generate-gitoxide-cargo-notices.mjs'
+      - 'apps/desktop/electron-builder.config.mjs'
       - 'docs/architecture/gitoxide-*.md'
   push:
     branches:
@@ -33,6 +42,15 @@ on:
       - 'native/gitoxide-helper/**'
       - 'packages/runtime-host/src/server/gitoxide-helper-*.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-helper-*.test.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-inspection.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-inspection.test.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-*.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-*.test.ts'
+      - 'packages/runtime-host/src/server/packaged-gitoxide-helper-internal.ts'
+      - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
+      - 'scripts/prepare-gitoxide-helper*'
+      - 'scripts/generate-gitoxide-cargo-notices.mjs'
+      - 'apps/desktop/electron-builder.config.mjs'
       - 'docs/architecture/gitoxide-*.md'
 
 permissions:
@@ -65,8 +83,15 @@ jobs:
       - name: Test the short-lived Gitoxide helper
         working-directory: native/gitoxide-helper
         run: cargo test --locked
+      - name: Build the release helper
+        run: npm run build:gitoxide-helper
       - name: Install JavaScript dependencies without packaging hooks
         run: npm ci --ignore-scripts
+      - name: Prepare and license the packaged helper
+        run: >-
+          npm run prepare:gitoxide-helper &&
+          npm run generate:gitoxide-cargo-notices &&
+          node --test scripts/prepare-gitoxide-helper.test.mjs
       - name: Build the helper invocation owner
         run: >-
           npm --workspace @maka/core run build &&
@@ -82,3 +107,6 @@ jobs:
           packages/runtime-host/dist/__tests__/gitoxide-helper-invocation-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-helper-mutation-candidate-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
+          packages/runtime-host/dist/__tests__/gitoxide-managed-inspection.test.js
+          packages/runtime-host/dist/__tests__/gitoxide-managed-mutation-admission.test.js
+          packages/runtime-host/dist/__tests__/gitoxide-managed-mutation-session.test.js

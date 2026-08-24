@@ -27,10 +27,12 @@ import {
 } from './gitoxide-helper-artifact-authority-internal.js';
 
 const MAX_SUCCESSOR_CONTENT_BYTES = 64 * 1024 * 1024;
+const MAX_TREE_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_BYTES = MAX_SUCCESSOR_CONTENT_BYTES + 64 * 1024;
-const MAX_STDOUT_BYTES = 64 * 1024;
+const MAX_STDOUT_BYTES = MAX_TREE_FILE_BYTES * 6 + 64 * 1024;
 const MAX_STDERR_BYTES = 16 * 1024;
 const INVOCATION_TIMEOUT_MS = 5_000;
+const PROJECTION_TIMEOUT_MS = 10 * 60_000;
 const SHA1_OID_PATTERN = /^[0-9a-f]{40}$/;
 const OBJECT_FORMAT_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const MAKA_REF_PATTERN = /^refs\/maka\/[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
@@ -54,6 +56,8 @@ const HELPER_ERROR_REASONS = new Set([
   'base_tree_unavailable',
   'blob_write_failed',
   'commit_write_failed',
+  'accepted_commit_unavailable',
+  'accepted_tree_unavailable',
   'import_destination_create_failed',
   'import_destination_not_fresh',
   'import_destination_object_format_mismatch',
@@ -61,6 +65,7 @@ const HELPER_ERROR_REASONS = new Set([
   'import_hooks_cleanup_failed',
   'invalid_source_head_commit_oid',
   'invalid_base_commit_oid',
+  'invalid_accepted_commit_oid',
   'invalid_successor_path',
   'source_blob_copy_failed',
   'source_blob_identity_mismatch',
@@ -81,6 +86,29 @@ const HELPER_ERROR_REASONS = new Set([
   'source_tree_invalid',
   'source_tree_unavailable',
   'source_tree_visit_limit_exceeded',
+  'projection_blob_invalid',
+  'invalid_tree_file_path',
+  'tree_file_lookup_failed',
+  'tree_file_unavailable',
+  'tree_file_invalid',
+  'tree_file_size_limit_exceeded',
+  'tree_file_identity_mismatch',
+  'tree_file_not_utf8',
+  'projection_blob_unavailable',
+  'projection_byte_limit_exceeded',
+  'projection_destination_create_failed',
+  'projection_destination_not_fresh',
+  'projection_directory_create_failed',
+  'projection_directory_sync_failed',
+  'projection_file_create_failed',
+  'projection_file_limit_exceeded',
+  'projection_file_sync_failed',
+  'projection_file_write_failed',
+  'projection_mode_update_failed',
+  'projection_path_collision',
+  'projection_tree_invalid',
+  'projection_tree_unavailable',
+  'projection_unreadable',
   'successor_content_limit_exceeded',
   'successor_publish_failed',
   'target_ref_outside_maka_namespace',
@@ -88,6 +116,8 @@ const HELPER_ERROR_REASONS = new Set([
   'tree_edit_failed',
   'tree_write_failed',
   'unsupported_base_path_kind',
+  'unsupported_projection_entry_kind',
+  'unsupported_projection_path',
   'unsupported_source_entry_kind',
   'unsupported_source_path',
 ]);
@@ -156,6 +186,71 @@ export interface GitoxideManagedRefObservationV1 {
   readonly commitOid: string;
   readonly treeOid: string;
   readonly targetRef: string;
+}
+
+export interface GitoxideCandidatePromotedV1 {
+  readonly kind: 'candidate_promoted';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly baseCommitOid: string;
+  readonly candidateCommitOid: string;
+  readonly acceptedRef: string;
+  readonly candidateRef: string;
+}
+
+export type GitoxideCandidatePromotionResultV1 =
+  | GitoxideCandidatePromotedV1
+  | GitoxideSuccessorRejectedV1;
+
+export interface GitoxideProjectionMaterializedV1 {
+  readonly kind: 'projection_materialized';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly destinationPath: string;
+  readonly filesMaterialized: number;
+  readonly bytesWritten: number;
+}
+
+export interface GitoxideProjectionObservedV1 {
+  readonly kind: 'projection_observed';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly state: 'clean';
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly projectionPath: string;
+  readonly filesObserved: number;
+  readonly bytesRead: number;
+}
+
+export interface GitoxideProjectionDriftedV1 {
+  readonly kind: 'projection_drifted';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly state: 'drifted';
+  readonly reason: string;
+  readonly path: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly projectionPath: string;
+}
+
+export type GitoxideProjectionObservationV1 =
+  | GitoxideProjectionObservedV1
+  | GitoxideProjectionDriftedV1;
+
+export interface GitoxideTreeFileReadV1 {
+  readonly kind: 'tree_file_read';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly blobOid: string;
+  readonly path: string;
+  readonly content: string;
+  readonly bytesRead: number;
 }
 
 export type GitoxideHelperInvocationErrorCode =
@@ -439,6 +534,179 @@ export async function inspectManagedRefWithGitoxideHelperInternal(input: {
   return decodeManagedRefOutcome(outcome);
 }
 
+export async function materializeProjectionWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedCommitOid: string;
+  readonly destinationPath: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideProjectionMaterializedV1> {
+  const prepared = await prepareProjectionInvocation(input);
+  const request = encodeRequest({
+    protocolVersion: prepared.protocolVersion,
+    operation: 'materialize_projection',
+    repositoryPath: prepared.repositoryPath,
+    acceptedCommitOid: input.acceptedCommitOid,
+    destinationPath: input.destinationPath,
+  });
+  const outcome = await invokeHelper({
+    executablePath: prepared.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    timeoutMs: PROJECTION_TIMEOUT_MS,
+  });
+  return decodeProjectionMaterializationOutcome(outcome);
+}
+
+export async function observeProjectionWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedCommitOid: string;
+  readonly projectionPath: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideProjectionObservationV1> {
+  const prepared = await prepareProjectionInvocation(input);
+  if (!isAbsolute(input.projectionPath)) {
+    throw invocationInvalid('Gitoxide projection path is invalid');
+  }
+  const request = encodeRequest({
+    protocolVersion: prepared.protocolVersion,
+    operation: 'observe_projection',
+    repositoryPath: prepared.repositoryPath,
+    acceptedCommitOid: input.acceptedCommitOid,
+    projectionPath: input.projectionPath,
+  });
+  const outcome = await invokeHelper({
+    executablePath: prepared.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    timeoutMs: PROJECTION_TIMEOUT_MS,
+  });
+  return decodeProjectionObservationOutcome(outcome);
+}
+
+export async function readTreeFileWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedCommitOid: string;
+  readonly path: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideTreeFileReadV1> {
+  const prepared = await prepareProjectionInvocation(input);
+  if (!isCanonicalSuccessorPath(input.path)) {
+    throw invocationInvalid('Gitoxide tree file path is invalid');
+  }
+  const outcome = await invokeHelper({
+    executablePath: prepared.executablePath,
+    request: encodeRequest({
+      protocolVersion: prepared.protocolVersion,
+      operation: 'read_tree_file',
+      repositoryPath: prepared.repositoryPath,
+      acceptedCommitOid: input.acceptedCommitOid,
+      path: input.path,
+    }),
+    abortSignal: input.abortSignal,
+  });
+  const value = decodeTreeFileOutcome(outcome);
+  if (value.acceptedCommitOid !== input.acceptedCommitOid || value.path !== input.path) {
+    throw protocolInvalid('Gitoxide tree file response is invalid');
+  }
+  return value;
+}
+
+async function prepareProjectionInvocation(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedCommitOid: string;
+  readonly destinationPath?: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<{
+  readonly executablePath: string;
+  readonly protocolVersion: 1;
+  readonly repositoryPath: string;
+}> {
+  throwIfAborted(input.abortSignal);
+  if (
+    !isAbsolute(input.repositoryPath) ||
+    !SHA1_OID_PATTERN.test(input.acceptedCommitOid) ||
+    (input.destinationPath !== undefined && !isAbsolute(input.destinationPath))
+  ) {
+    throw invocationInvalid('Gitoxide projection request is invalid');
+  }
+  const [artifact, repositoryPath] = await Promise.all([
+    verifyGitoxideHelperArtifactForInvocationInternal(input.invocationOwnerToken, input.capability),
+    realpath(input.repositoryPath).catch((error) => {
+      throw invocationInvalid(
+        `Gitoxide managed repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }),
+  ]);
+  throwIfAborted(input.abortSignal);
+  return {
+    executablePath: artifact.executablePath,
+    protocolVersion: artifact.protocolVersion,
+    repositoryPath,
+  };
+}
+
+function encodeRequest(value: object): Buffer {
+  const request = Buffer.from(JSON.stringify(value));
+  if (request.length > MAX_REQUEST_BYTES) {
+    throw invocationInvalid('Gitoxide helper request exceeds its byte limit');
+  }
+  return request;
+}
+
+export async function promoteCandidateWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly expectedBaseCommitOid: string;
+  readonly acceptedRef: string;
+  readonly candidateRef: string;
+  readonly expectedCandidateCommitOid: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideCandidatePromotionResultV1> {
+  throwIfAborted(input.abortSignal);
+  if (
+    !isAbsolute(input.repositoryPath) ||
+    !SHA1_OID_PATTERN.test(input.expectedBaseCommitOid) ||
+    !SHA1_OID_PATTERN.test(input.expectedCandidateCommitOid) ||
+    !MAKA_REF_PATTERN.test(input.acceptedRef) ||
+    !isCandidateRef(input.candidateRef) ||
+    input.acceptedRef === input.candidateRef
+  ) {
+    throw invocationInvalid('Gitoxide candidate promotion request is invalid');
+  }
+  const [artifact, repositoryPath] = await Promise.all([
+    verifyGitoxideHelperArtifactForInvocationInternal(input.invocationOwnerToken, input.capability),
+    realpath(input.repositoryPath).catch((error) => {
+      throw invocationInvalid(
+        `Gitoxide managed repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }),
+  ]);
+  throwIfAborted(input.abortSignal);
+  const outcome = await invokeHelper({
+    executablePath: artifact.executablePath,
+    request: encodeRequest({
+      protocolVersion: artifact.protocolVersion,
+      operation: 'promote_candidate',
+      repositoryPath,
+      expectedBaseCommitOid: input.expectedBaseCommitOid,
+      acceptedRef: input.acceptedRef,
+      candidateRef: input.candidateRef,
+      expectedCandidateCommitOid: input.expectedCandidateCommitOid,
+    }),
+    abortSignal: input.abortSignal,
+  });
+  return decodeCandidatePromotionOutcome(outcome);
+}
+
 interface HelperProcessOutcome {
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
@@ -450,6 +718,7 @@ function invokeHelper(input: {
   readonly executablePath: string;
   readonly request: Buffer;
   readonly abortSignal?: AbortSignal;
+  readonly timeoutMs?: number;
 }): Promise<HelperProcessOutcome> {
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
@@ -485,7 +754,7 @@ function invokeHelper(input: {
     let processFailure: GitoxideHelperInvocationError | undefined;
     const timeout = setTimeout(
       () => terminate('gitoxide_helper_invocation_timed_out'),
-      INVOCATION_TIMEOUT_MS,
+      input.timeoutMs ?? INVOCATION_TIMEOUT_MS,
     );
     const abort = () => terminate('gitoxide_helper_invocation_aborted');
     input.abortSignal?.addEventListener('abort', abort, { once: true });
@@ -682,6 +951,208 @@ function decodeManagedRefOutcome(outcome: HelperProcessOutcome): GitoxideManaged
   );
 }
 
+function decodeCandidatePromotionOutcome(
+  outcome: HelperProcessOutcome,
+): GitoxideCandidatePromotionResultV1 {
+  const value = parseHelperOutcome(outcome);
+  if (outcome.exitCode === 0 && isCandidatePromoted(value)) return Object.freeze(value);
+  if (outcome.exitCode === 3 && isSuccessorRejected(value)) return Object.freeze(value);
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('promote the managed candidate', value.reason);
+  }
+  throw protocolInvalid('Gitoxide candidate promotion response disagrees with its exit code');
+}
+
+function decodeProjectionMaterializationOutcome(
+  outcome: HelperProcessOutcome,
+): GitoxideProjectionMaterializedV1 {
+  const value = parseHelperOutcome(outcome);
+  if (outcome.exitCode === 0 && isProjectionMaterialized(value)) return Object.freeze(value);
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('materialize the projection', value.reason);
+  }
+  throw protocolInvalid(
+    'Gitoxide projection materialization response disagrees with its exit code',
+  );
+}
+
+function decodeProjectionObservationOutcome(
+  outcome: HelperProcessOutcome,
+): GitoxideProjectionObservationV1 {
+  const value = parseHelperOutcome(outcome);
+  if (outcome.exitCode === 0 && isProjectionObserved(value)) return Object.freeze(value);
+  if (outcome.exitCode === 3 && isProjectionDrifted(value)) return Object.freeze(value);
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('observe the projection', value.reason);
+  }
+  throw protocolInvalid('Gitoxide projection observation response disagrees with its exit code');
+}
+
+function decodeTreeFileOutcome(outcome: HelperProcessOutcome): GitoxideTreeFileReadV1 {
+  const value = parseHelperOutcome(outcome);
+  if (outcome.exitCode === 0 && isTreeFileRead(value)) return Object.freeze(value);
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('read the accepted tree file', value.reason);
+  }
+  throw protocolInvalid('Gitoxide tree file response disagrees with its exit code');
+}
+
+function parseHelperOutcome(outcome: HelperProcessOutcome): unknown {
+  if (outcome.signal !== null)
+    throw protocolInvalid(`Gitoxide helper exited from signal ${outcome.signal}`);
+  try {
+    return JSON.parse(outcome.stdout.toString('utf8'));
+  } catch {
+    throw protocolInvalid('Gitoxide helper stdout is not one JSON response');
+  }
+}
+
+function operationFailed(operation: string, reason: string): GitoxideHelperInvocationError {
+  return new GitoxideHelperInvocationError(
+    'gitoxide_helper_operation_failed',
+    `Gitoxide helper could not ${operation}: ${reason}`,
+    reason,
+  );
+}
+
+function isProjectionMaterialized(value: unknown): value is GitoxideProjectionMaterializedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'destinationPath',
+      'filesMaterialized',
+      'bytesWritten',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'projection_materialized' &&
+    value.objectFormat === 'sha1' &&
+    isSha1(value.acceptedCommitOid) &&
+    isSha1(value.acceptedTreeOid) &&
+    typeof value.destinationPath === 'string' &&
+    isAbsolute(value.destinationPath) &&
+    isNonNegativeSafeInteger(value.filesMaterialized) &&
+    isNonNegativeSafeInteger(value.bytesWritten)
+  );
+}
+
+function isCandidatePromoted(value: unknown): value is GitoxideCandidatePromotedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'baseCommitOid',
+      'candidateCommitOid',
+      'acceptedRef',
+      'candidateRef',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'candidate_promoted' &&
+    value.objectFormat === 'sha1' &&
+    isSha1(value.baseCommitOid) &&
+    isSha1(value.candidateCommitOid) &&
+    typeof value.acceptedRef === 'string' &&
+    MAKA_REF_PATTERN.test(value.acceptedRef) &&
+    typeof value.candidateRef === 'string' &&
+    isCandidateRef(value.candidateRef)
+  );
+}
+
+function isTreeFileRead(value: unknown): value is GitoxideTreeFileReadV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'blobOid',
+      'path',
+      'content',
+      'bytesRead',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'tree_file_read' &&
+    value.objectFormat === 'sha1' &&
+    isSha1(value.acceptedCommitOid) &&
+    isSha1(value.acceptedTreeOid) &&
+    isSha1(value.blobOid) &&
+    typeof value.path === 'string' &&
+    isCanonicalSuccessorPath(value.path) &&
+    typeof value.content === 'string' &&
+    isNonNegativeSafeInteger(value.bytesRead) &&
+    value.bytesRead <= MAX_TREE_FILE_BYTES &&
+    Buffer.byteLength(value.content, 'utf8') === value.bytesRead
+  );
+}
+
+function isProjectionObserved(value: unknown): value is GitoxideProjectionObservedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'state',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'projectionPath',
+      'filesObserved',
+      'bytesRead',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'projection_observed' &&
+    value.objectFormat === 'sha1' &&
+    value.state === 'clean' &&
+    isSha1(value.acceptedCommitOid) &&
+    isSha1(value.acceptedTreeOid) &&
+    typeof value.projectionPath === 'string' &&
+    isAbsolute(value.projectionPath) &&
+    isNonNegativeSafeInteger(value.filesObserved) &&
+    isNonNegativeSafeInteger(value.bytesRead)
+  );
+}
+
+function isProjectionDrifted(value: unknown): value is GitoxideProjectionDriftedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'state',
+      'reason',
+      'path',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'projectionPath',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'projection_drifted' &&
+    value.objectFormat === 'sha1' &&
+    value.state === 'drifted' &&
+    typeof value.reason === 'string' &&
+    value.reason.length > 0 &&
+    value.reason.length <= 128 &&
+    typeof value.path === 'string' &&
+    value.path.length <= 4096 &&
+    isSha1(value.acceptedCommitOid) &&
+    isSha1(value.acceptedTreeOid) &&
+    typeof value.projectionPath === 'string' &&
+    isAbsolute(value.projectionPath)
+  );
+}
+
+function isSha1(value: unknown): value is string {
+  return typeof value === 'string' && SHA1_OID_PATTERN.test(value);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
 function isSuccessorPublished(value: unknown): value is GitoxideSuccessorPublishedV1 {
   return (
     hasExactKeys(value, [
@@ -855,6 +1326,10 @@ function hasExactKeys(
   const keys = Object.keys(value).sort();
   const expected = [...expectedKeys].sort();
   return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
+}
+
+function invocationInvalid(message: string): GitoxideHelperInvocationError {
+  return new GitoxideHelperInvocationError('gitoxide_helper_invocation_invalid', message);
 }
 
 function isCanonicalSuccessorPath(path: string): boolean {
