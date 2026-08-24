@@ -498,6 +498,7 @@ fn create_successor(
         .upsert(path.as_str(), entry_kind, result_blob)
         .map_err(|_| "tree_edit_failed")?;
     let successor_tree = editor.write().map_err(|_| "tree_write_failed")?.detach();
+    validate_managed_tree(&repository, successor_tree, MANAGED_TREE_POLICY_V1)?;
     let signature = gix::actor::SignatureRef {
         name: b"Maka Workspace Service".as_bstr(),
         email: b"workspace@maka.invalid".as_bstr(),
@@ -556,6 +557,65 @@ fn create_successor(
         path,
     });
     Ok(ExitCode::SUCCESS)
+}
+
+fn validate_managed_tree(
+    repository: &gix::Repository,
+    tree_oid: gix::hash::ObjectId,
+    policy: ManagedTreePolicy,
+) -> Result<ManagedTreeStats, &'static str> {
+    let mut stats = ManagedTreeStats::default();
+    validate_managed_tree_inner(repository, tree_oid, "", 0, policy, &mut stats)?;
+    Ok(stats)
+}
+
+fn validate_managed_tree_inner(
+    repository: &gix::Repository,
+    tree_oid: gix::hash::ObjectId,
+    prefix: &str,
+    depth: u64,
+    policy: ManagedTreePolicy,
+    stats: &mut ManagedTreeStats,
+) -> Result<(), &'static str> {
+    stats.enter_tree(depth, policy)?;
+    let tree = repository
+        .find_tree(tree_oid)
+        .map_err(|_| "source_tree_unavailable")?;
+    for entry in tree.iter() {
+        let entry = entry.map_err(|_| "source_tree_invalid")?;
+        let component =
+            std::str::from_utf8(entry.filename()).map_err(|_| "unsupported_source_path")?;
+        if !is_supported_source_component(component)
+            || component.len() as u64 > policy.max_component_bytes
+        {
+            return Err("unsupported_source_path");
+        }
+        let relative_path = if prefix.is_empty() {
+            component.to_owned()
+        } else {
+            format!("{prefix}/{component}")
+        };
+        stats.observe_entry(&relative_path, policy)?;
+        match entry.mode().kind() {
+            gix::objs::tree::EntryKind::Tree => validate_managed_tree_inner(
+                repository,
+                entry.object_id(),
+                &relative_path,
+                depth.checked_add(1).ok_or("source_tree_depth_exceeded")?,
+                policy,
+                stats,
+            )?,
+            gix::objs::tree::EntryKind::Blob | gix::objs::tree::EntryKind::BlobExecutable => {
+                let header = entry.id().header().map_err(|_| "source_blob_unavailable")?;
+                if header.kind() != gix::objs::Kind::Blob {
+                    return Err("source_blob_invalid");
+                }
+                stats.observe_blob(header.size(), policy)?;
+            }
+            _ => return Err("unsupported_source_entry_kind"),
+        }
+    }
+    Ok(())
 }
 
 fn is_canonical_successor_path(path: &str) -> bool {
