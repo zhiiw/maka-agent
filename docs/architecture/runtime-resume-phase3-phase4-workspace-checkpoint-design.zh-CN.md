@@ -595,6 +595,12 @@ M1.1 合同见
 
 ### M2 — Mutation version acceptance
 
+当前先落地 persistence/runtime authority：managed T1 与 durable reservation 同 transaction，terminal
+success outcome、successor fact 与 canonical head 同 transaction；Runtime 在 T1 后只能 adopt owner 已提交的
+exact durable outcome，禁止 generic T2 fallback。该切片不执行文件 mutation，也不依赖 Git/npm 数据面。
+完整合同见
+[Managed Mutation Lifecycle Authority v1](./runtime-managed-workspace-mutation-lifecycle-authority-v1.zh-CN.md)。
+
 每个 mutating tool 使用 candidate ref/version 协议：
 
 1. T1 前冻结 execution profile、base workspace version 与 mutation identity；
