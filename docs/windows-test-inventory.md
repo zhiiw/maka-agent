@@ -15,11 +15,11 @@ Locations intentionally omit line numbers so unrelated edits do not invalidate t
 
 | Classification | Count |
 |---|---:|
-| windows-backend-gap | 24 |
+| windows-backend-gap | 26 |
 | portable-candidate | 8 |
 | platform-contract | 35 |
 
-Total Windows-excluded declarations: **67**
+Total Windows-excluded declarations: **69**
 
 ## Inventory
 
@@ -40,6 +40,8 @@ Total Windows-excluded declarations: **67**
 | windows-backend-gap | `packages/runtime-host/src/__tests__/gitoxide-helper-invocation-internal.test.ts` applies the import deadline and terminates the helper process tree | `process.platform === 'win32'` |
 | windows-backend-gap | `packages/runtime-host/src/__tests__/gitoxide-helper-invocation-internal.test.ts` rejects an import response that does not match the requested baseline ref | `process.platform === 'win32'` |
 | windows-backend-gap | `packages/runtime-host/src/__tests__/gitoxide-helper-invocation-internal.test.ts` rejects an import response that does not match the requested source HEAD | `process.platform === 'win32'` |
+| windows-backend-gap | `packages/runtime-host/src/__tests__/gitoxide-helper-invocation-internal.test.ts` rejects a candidate response whose blob identity does not match the requested bytes | `process.platform === 'win32'` |
+| windows-backend-gap | `packages/runtime-host/src/__tests__/gitoxide-helper-invocation-internal.test.ts` rejects a direct-read response whose blob identity does not match its content | `process.platform === 'win32'` |
 | windows-backend-gap | `packages/runtime-host/src/__tests__/host-kernel.test.ts` an automatic failed liveness check is connection-fatal and Client close stays local | `process.platform === 'win32'` |
 | windows-backend-gap | `packages/runtime-host/src/__tests__/host-kernel.test.ts` bounded election does not launch a Candidate after handshake exhausts the deadline | `process.platform === 'win32'` |
 | windows-backend-gap | `packages/runtime-host/src/__tests__/host-kernel.test.ts` a non-reading Client overload is isolated to its connection | `process.platform === 'win32'` |
