@@ -424,6 +424,13 @@ export interface RuntimeManagedMutationOperationProof {
   readonly isError: boolean;
   readonly durationMs: number;
   readonly mutationResult?: RuntimeManagedMutationResultProof;
+  /** Exact immutable provider outcome issued by Runtime for atomic owner commit. */
+  readonly durableOutcome: RuntimeEvent;
+  /** Exact no-effect terminal fact, present only when Runtime can prove it. */
+  readonly terminalOutcome?: Readonly<{
+    kind: 'no_workspace_change' | 'operation_failed_no_effect';
+    durableOutcome: RuntimeEvent;
+  }>;
 }
 
 export type RuntimeManagedMutationSettlement =
@@ -453,6 +460,12 @@ export interface RuntimeManagedMutationAdmission {
 interface DurableToolAttempt {
   operationId: string;
   responseEventId: string;
+  prepareOutcome(
+    result: unknown,
+    isError: boolean,
+    durationMs?: number,
+    terminalKind?: 'no_workspace_change' | 'operation_failed_no_effect',
+  ): RuntimeEvent;
   commitOutcome(
     result: unknown,
     isError: boolean,
@@ -463,6 +476,7 @@ interface DurableToolAttempt {
     result: ToolResultContent,
     isError: boolean,
     durationMs: number,
+    terminalKind?: 'no_workspace_change' | 'operation_failed_no_effect',
   ): { id: string; operationId: string; ts: number };
 }
 
@@ -1610,6 +1624,7 @@ export class ToolRuntime {
               kind: 'managed';
               value: RuntimeManagedMutationOperationValue<unknown>;
               durableOutcome: RuntimeEvent;
+              terminalKind?: 'no_workspace_change' | 'operation_failed_no_effect';
             }
           | { kind: 'generic'; value: RuntimeManagedMutationOperationValue<unknown> };
         if (managedMutationAdmission) {
@@ -1632,6 +1647,14 @@ export class ToolRuntime {
               try {
                 const value = await prepareOperationValue(true);
                 runtimeOwnedValue = value;
+                if (!durableAttempt) {
+                  throw new Error('Managed mutation operation has no durable T1 attempt');
+                }
+                const terminalKind = value.outcome.isError
+                  ? ('operation_failed_no_effect' as const)
+                  : value.mutationResult && !value.mutationResult.changed
+                    ? ('no_workspace_change' as const)
+                    : undefined;
                 return {
                   // The canonical content is already recursively immutable, so
                   // the owner can read it without receiving a mutable alias.
@@ -1639,6 +1662,24 @@ export class ToolRuntime {
                   isError: value.outcome.isError,
                   durationMs: value.outcome.durationMs,
                   ...(value.mutationResult ? { mutationResult: value.mutationResult } : {}),
+                  durableOutcome: durableAttempt.prepareOutcome(
+                    value.outcome.content,
+                    value.outcome.isError,
+                    value.outcome.durationMs,
+                  ),
+                  ...(terminalKind
+                    ? {
+                        terminalOutcome: Object.freeze({
+                          kind: terminalKind,
+                          durableOutcome: durableAttempt.prepareOutcome(
+                            value.outcome.content,
+                            value.outcome.isError,
+                            value.outcome.durationMs,
+                            terminalKind,
+                          ),
+                        }),
+                      }
+                    : {}),
                 };
               } finally {
                 if (operationLifecycle.state === 'running') {
@@ -1703,6 +1744,10 @@ export class ToolRuntime {
               kind: 'managed',
               value: normalized.value,
               durableOutcome: normalized.durableOutcome,
+              terminalKind:
+                normalized.kind === 'no_workspace_change_committed'
+                  ? 'no_workspace_change'
+                  : 'operation_failed_no_effect',
             };
           }
         } else {
@@ -1728,6 +1773,7 @@ export class ToolRuntime {
             content,
             outcome.isError,
             durationMs,
+            settledExecution.terminalKind,
           );
         } else {
           durableOutcome = await durableAttempt?.commitOutcome(
@@ -2156,6 +2202,7 @@ export class ToolRuntime {
       isError: boolean,
       durationMs: number | undefined,
       ts: number,
+      terminalKind?: 'no_workspace_change' | 'operation_failed_no_effect',
     ): RuntimeEvent => ({
       id: `${operationId}_response`,
       invocationId,
@@ -2185,12 +2232,50 @@ export class ToolRuntime {
           ? { parentOperationId: input.startEvent.parentOperationId }
           : {}),
       },
-      ...(durationMs !== undefined ? { actions: { stateDelta: { durationMs } } } : {}),
+      ...(durationMs !== undefined || terminalKind
+        ? {
+            actions: {
+              ...(durationMs !== undefined ? { stateDelta: { durationMs } } : {}),
+              ...(terminalKind
+                ? {
+                    managedMutationTerminal: {
+                      protocol: 'managed_mutation_terminal_v1' as const,
+                      operationId,
+                      dispatchEventId: `${operationId}_dispatch`,
+                      workspaceInstanceId: input.managedMutation!.workspaceInstanceId,
+                      terminalKind,
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}),
     });
     let committedOutcome: { id: string; operationId: string; ts: number } | undefined;
     return {
       operationId,
       responseEventId: `${operationId}_response`,
+      prepareOutcome: (result, isError, durationMs, terminalKind) => {
+        if (terminalKind && !input.managedMutation) {
+          throw new Error('Managed mutation terminal outcome has no durable mutation identity');
+        }
+        const responseEvent = buildResponseEvent(
+          result,
+          isError,
+          durationMs,
+          this.input.now(),
+          terminalKind,
+        );
+        decodeRuntimeEvent(responseEvent);
+        if (responseEvent.content) Object.freeze(responseEvent.content);
+        if (responseEvent.refs) Object.freeze(responseEvent.refs);
+        if (responseEvent.actions?.stateDelta) Object.freeze(responseEvent.actions.stateDelta);
+        if (responseEvent.actions?.managedMutationTerminal) {
+          Object.freeze(responseEvent.actions.managedMutationTerminal);
+        }
+        if (responseEvent.actions) Object.freeze(responseEvent.actions);
+        return Object.freeze(responseEvent);
+      },
       commitOutcome: async (result, isError, durationMs) => {
         if (committedOutcome) return committedOutcome;
         const responseEvent = buildResponseEvent(result, isError, durationMs, this.input.now());
@@ -2214,9 +2299,9 @@ export class ToolRuntime {
         );
         return committedOutcome;
       },
-      adoptCommittedOutcome: (event, result, isError, durationMs) => {
+      adoptCommittedOutcome: (event, result, isError, durationMs, terminalKind) => {
         if (committedOutcome) return committedOutcome;
-        const expected = buildResponseEvent(result, isError, durationMs, event.ts);
+        const expected = buildResponseEvent(result, isError, durationMs, event.ts, terminalKind);
         if (!Number.isFinite(event.ts) || !isDeepStrictEqual(event, expected)) {
           throw new RuntimeCommitBoundaryError(
             'T2',
