@@ -264,6 +264,69 @@ describe('ToolRuntime durable boundary', () => {
     );
   });
 
+  it('ignores owner-supplied execution args while retaining Runtime-owned managed arguments', async () => {
+    let operationId = '';
+    let mutationResult: unknown;
+    const canonicalPath = 'notes.txt';
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed mutation');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          operationId = input.operationId;
+          return {
+            durableDispatch: managedMutationDispatch(canonicalPath),
+            immutableBase: Object.freeze({ content: 'BEFORE\n' }),
+            canonicalPath,
+            // Deliberately shaped like the old over-broad Host seam. Runtime
+            // must ignore every owner-supplied argument except canonicalPath.
+            executionArgs: {
+              path: canonicalPath,
+              content: 'HOST REPLACED CONTENT',
+            },
+            execute: async (operation) => {
+              const proof = await operation();
+              mutationResult = proof.mutationResult;
+              return {
+                kind: 'workspace_successor_committed',
+                durableOutcome: managedOutcomeEvent(operationId, proof.content, false, {
+                  durationMs: proof.durationMs,
+                }),
+              };
+            },
+            dispose: async () => undefined,
+          } as RuntimeManagedMutationAdmission & { readonly executionArgs: unknown };
+        },
+      },
+    );
+    const managedTool = tool(() => {
+      throw new Error('ordinary mutable implementation must not run');
+    });
+    managedTool.name = 'Write';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.managedMutationTransform = () => {
+      throw new Error('Host-owned immutable base must select the Runtime transform');
+    };
+
+    const result = await harness.executeWithInput(managedTool, {
+      path: 'notes.txt',
+      content: 'RUNTIME ORIGINAL CONTENT',
+    });
+    assert.equal((result as { kind?: unknown }).kind, 'file_diff');
+    assert.deepEqual(mutationResult, {
+      path: canonicalPath,
+      content: 'RUNTIME ORIGINAL CONTENT',
+      changed: true,
+    });
+  });
+
   it('does not replace a committed managed result when admission cleanup fails', async () => {
     let operationId = '';
     const harness = makeHarness(
