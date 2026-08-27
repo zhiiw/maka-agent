@@ -50,6 +50,8 @@ const MAX_COMMIT_OBJECT_BYTES: u64 = 1024 * 1024;
 const MAX_SINGLE_TREE_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TOTAL_TREE_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_GITOXIDE_OBJECT_ALLOCATION_BYTES: &str = "gitoxide.objects.allocLimit=67108864";
+const MANAGED_IMPORT_OWNER_MARKER_NAME: &str = "maka-managed-import-owner-v1";
+const MANAGED_IMPORT_OWNER_MARKER_BYTES: &[u8] = b"maka-managed-import-owner-v1\n";
 const MANAGED_TREE_POLICY_V3: ManagedTreePolicy = ManagedTreePolicy {
     max_depth: 64,
     max_tree_visits: 250_000,
@@ -697,7 +699,7 @@ fn import_source_head(
     drop(stats);
 
     assert_import_destination_parent(&destination_repository_path)?;
-    let destination = claim_fresh_import_destination(&destination_repository_path)?;
+    let destination = claim_or_reopen_import_destination(&destination_repository_path)?;
     if destination.object_hash() != gix::hash::Kind::Sha1 {
         return Err("import_destination_object_format_mismatch");
     }
@@ -732,14 +734,7 @@ fn import_source_head(
         .map_err(|_| "baseline_commit_write_failed")?
         .id()
         .detach();
-    destination
-        .reference(
-            baseline_ref.as_str(),
-            baseline_commit,
-            gix::refs::transaction::PreviousValue::MustNotExist,
-            "maka managed workspace baseline",
-        )
-        .map_err(|_| "baseline_publish_failed")?;
+    publish_exact_baseline_reference(&destination, &baseline_ref, baseline_commit)?;
 
     write_response(&Response::SourceImported {
         protocol_version: PROTOCOL_VERSION,
@@ -1579,26 +1574,111 @@ fn accepted_commit_identity(
         .detach();
     Ok((accepted_commit, accepted_tree))
 }
-fn claim_fresh_import_destination(path: &Path) -> Result<gix::Repository, &'static str> {
-    match fs::create_dir(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            return Err("import_destination_not_fresh");
+fn claim_or_reopen_import_destination(path: &Path) -> Result<gix::Repository, &'static str> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || is_windows_reparse_point(&metadata)
+            {
+                return Err("import_destination_not_fresh");
+            }
+            assert_managed_import_owner_marker(path)?;
+            let repository = open_repository(path.to_path_buf())?;
+            if repository.work_dir().is_some() || repository.object_hash() != gix::hash::Kind::Sha1
+            {
+                return Err("import_destination_not_fresh");
+            }
+            Ok(repository)
         }
-        Err(_) => return Err("import_destination_create_failed"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(|_| "import_destination_create_failed")?;
+            let repository = gix::ThreadSafeRepository::init_opts(
+                path,
+                gix::create::Kind::Bare,
+                gix::create::Options {
+                    destination_must_be_empty: Some(true),
+                    object_hash: Some(gix::hash::Kind::Sha1),
+                    ..Default::default()
+                },
+                managed_open_options(),
+            )
+            .map_err(|_| "import_destination_create_failed")?
+            .to_thread_local();
+            fs::write(
+                path.join(MANAGED_IMPORT_OWNER_MARKER_NAME),
+                MANAGED_IMPORT_OWNER_MARKER_BYTES,
+            )
+            .map_err(|_| "import_destination_create_failed")?;
+            Ok(repository)
+        }
+        Err(_) => Err("import_destination_create_failed"),
     }
-    gix::ThreadSafeRepository::init_opts(
-        path,
-        gix::create::Kind::Bare,
-        gix::create::Options {
-            destination_must_be_empty: Some(true),
-            object_hash: Some(gix::hash::Kind::Sha1),
-            ..Default::default()
+}
+
+fn assert_managed_import_owner_marker(path: &Path) -> Result<(), &'static str> {
+    let marker = path.join(MANAGED_IMPORT_OWNER_MARKER_NAME);
+    let metadata = fs::symlink_metadata(&marker).map_err(|_| "import_destination_not_fresh")?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || is_windows_reparse_point(&metadata)
+        || metadata.len() != MANAGED_IMPORT_OWNER_MARKER_BYTES.len() as u64
+    {
+        return Err("import_destination_not_fresh");
+    }
+    let bytes = fs::read(marker).map_err(|_| "import_destination_not_fresh")?;
+    if bytes != MANAGED_IMPORT_OWNER_MARKER_BYTES {
+        return Err("import_destination_not_fresh");
+    }
+    Ok(())
+}
+
+fn publish_exact_baseline_reference(
+    repository: &gix::Repository,
+    baseline_ref: &str,
+    baseline_commit: gix::hash::ObjectId,
+) -> Result<(), &'static str> {
+    match repository
+        .try_find_reference(baseline_ref)
+        .map_err(|_| "baseline_publish_failed")?
+    {
+        Some(reference) => {
+            let current = read_direct_commit_reference(
+                repository,
+                reference,
+                "baseline_ref_not_direct",
+                "baseline_ref_target_invalid",
+            )?;
+            if current != baseline_commit {
+                return Err("baseline_request_conflict");
+            }
+            Ok(())
+        }
+        None => match repository.reference(
+            baseline_ref,
+            baseline_commit,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "maka managed workspace baseline",
+        ) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let concurrent = repository
+                    .try_find_reference(baseline_ref)
+                    .map_err(|_| "baseline_publish_failed")?
+                    .ok_or("baseline_publish_failed")?;
+                let concurrent = read_direct_commit_reference(
+                    repository,
+                    concurrent,
+                    "baseline_ref_not_direct",
+                    "baseline_ref_target_invalid",
+                )?;
+                if concurrent != baseline_commit {
+                    return Err("baseline_request_conflict");
+                }
+                Ok(())
+            }
         },
-        managed_open_options(),
-    )
-    .map_err(|_| "import_destination_create_failed")
-    .map(|repository| repository.to_thread_local())
+    }
 }
 
 fn load_verified_object<'repo>(

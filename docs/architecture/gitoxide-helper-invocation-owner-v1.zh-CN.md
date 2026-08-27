@@ -63,7 +63,7 @@ caller 不能提供 executable path、argv、environment、protocol version、ti
 | cancellation | preflight 或运行中 fail closed，`gitoxide_helper_invocation_aborted` |
 | resource failure | repository open 前的本地 metadata 总量 1 MiB、16,384 entries、primary `objects/pack` 1,024 entries；source alternates 一律拒绝；Gitoxide object allocation 64 MiB、object-store slots 固定 1,024、stdout 64 KiB、stderr 16 KiB；超限 fail closed 或 force-kill |
 | malformed protocol | exit code、JSON shape、OID 或字段不一致均拒绝 |
-| rollback | inspect 无 durable side effect；import 只允许 fresh destination，但 partial artifact cleanup 留给未来 storage owner |
+| rollback | inspect 无 durable side effect；import 不接管 foreign destination；已经成功声明并发布的 Maka-owned destination 可做 exact retry，其他 partial artifact cleanup 留给 storage owner |
 
 Rust helper v1 不启动 descendants；Runtime 仍使用共享 process-tree terminator 处理 timeout、abort 和
 output overflow，不允许常驻或 detached helper。

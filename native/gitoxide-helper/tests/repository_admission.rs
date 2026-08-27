@@ -528,7 +528,18 @@ fn imports_an_exact_source_head_into_a_fresh_managed_repository() {
         "baselineRef": "refs/maka/baseline",
         "managedTreePolicyVersion": 3,
     }));
-    assert_helper_error(&retry, "import_destination_not_fresh");
+    assert!(
+        retry.status.success(),
+        "exact helper import retry failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&retry.stdout),
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let retry_response: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
+    assert_eq!(retry_response["sourceHeadCommitOid"], source_head);
+    assert_eq!(retry_response["sourceTreeOid"], source_tree);
+    assert_eq!(retry_response["baselineCommitOid"], baseline_commit);
+    assert_eq!(retry_response["baselineTreeOid"], source_tree);
+    assert_eq!(retry_response["baselineRef"], "refs/maka/baseline");
 }
 
 #[test]
@@ -1517,6 +1528,29 @@ fn rejects_a_foreign_bare_destination_without_modifying_it() {
         &destination,
         ["show-ref", "--verify", "refs/maka/accepted"]
     ));
+}
+
+#[test]
+fn rejects_a_managed_destination_with_a_tampered_owner_marker() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("managed-tampered-marker.git");
+    let imported = invoke_import(&fixture.root, &source_head, &destination);
+    assert!(imported.status.success());
+    let accepted_before = git_bare_output(&destination, ["rev-parse", "refs/maka/baseline"]);
+    fs::write(
+        destination.join("maka-managed-import-owner-v1"),
+        b"foreign-owner\n",
+    )
+    .unwrap();
+
+    let retry = invoke_import(&fixture.root, &source_head, &destination);
+
+    assert_helper_error(&retry, "import_destination_not_fresh");
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/baseline"]),
+        accepted_before
+    );
 }
 
 #[test]
