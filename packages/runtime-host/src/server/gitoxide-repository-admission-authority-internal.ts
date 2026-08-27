@@ -29,11 +29,13 @@ import {
   GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL,
   importSourceHeadWithGitoxideHelperInternal,
   inspectCanonicalRepositoryWithGitoxideHelperInternal,
+  observeAcceptedRefWithGitoxideHelperInternal,
   promoteCandidateWithGitoxideHelperInternal,
   readTreeFileWithGitoxideHelperInternal,
   type GitoxideCandidateNoChangeV1,
   type GitoxideCandidatePublishedV1,
   type GitoxideCandidatePromotedV1,
+  type GitoxideAcceptedRefObservationV1,
   type GitoxideSourceImportObservationV1,
   type GitoxideTreeFileReadV1,
   type GitoxideRepositoryRejectionV1,
@@ -207,7 +209,7 @@ export async function importAdmittedGitoxideRepositoryInternal(input: {
   requireGitoxideHelperOperationsInternal(
     admission.invocationOwnerToken,
     admission.helperCapability,
-    ['create_candidate', 'promote_candidate', 'read_tree_file'],
+    ['create_candidate', 'promote_candidate', 'observe_accepted_ref', 'read_tree_file'],
   );
   const result = await importSourceHeadWithGitoxideHelperInternal({
     invocationOwnerToken: admission.invocationOwnerToken,
@@ -268,6 +270,63 @@ export function requireGitoxideAcceptedRepositoryInternal(
     ...state
   } = record;
   return Object.freeze(state);
+}
+
+export async function reopenGitoxideAcceptedRepositoryInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly helperCapability: GitoxideHelperInvocationCapability;
+  readonly acceptedRepositoryOwnerToken: object;
+  readonly repositoryPath: string;
+  readonly acceptedRef: string;
+  readonly expectedAcceptedCommitOid: string;
+  readonly expectedAcceptedTreeOid: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<
+  GitoxideAcceptedRefObservationV1 & {
+    readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
+  }
+> {
+  requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.helperCapability, [
+    'observe_accepted_ref',
+    'create_candidate',
+    'promote_candidate',
+    'read_tree_file',
+  ]);
+  const observed = await observeAcceptedRefWithGitoxideHelperInternal({
+    invocationOwnerToken: input.invocationOwnerToken,
+    capability: input.helperCapability,
+    repositoryPath: input.repositoryPath,
+    acceptedRef: input.acceptedRef,
+    expectedAcceptedCommitOid: input.expectedAcceptedCommitOid,
+    expectedAcceptedTreeOid: input.expectedAcceptedTreeOid,
+    managedTreePolicyVersion: input.managedTreePolicyVersion,
+    abortSignal: input.abortSignal,
+  });
+  const repositoryPath = await realpath(input.repositoryPath).catch(() => {
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_repository_admission_capability_invalid',
+    );
+  });
+  const repositoryInfo = await lstat(repositoryPath);
+  if (!repositoryInfo.isDirectory() || repositoryInfo.isSymbolicLink()) {
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_repository_admission_capability_invalid',
+    );
+  }
+  const acceptedRepositoryCapability = issueAcceptedRepositoryCapability({
+    acceptedRepositoryOwnerToken: input.acceptedRepositoryOwnerToken,
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    repositoryPath,
+    repositoryDev: repositoryInfo.dev,
+    repositoryIno: repositoryInfo.ino,
+    acceptedRef: observed.acceptedRef,
+    acceptedCommitOid: observed.acceptedCommitOid,
+    acceptedTreeOid: observed.acceptedTreeOid,
+    managedTreePolicyVersion: observed.managedTreePolicyVersion,
+  });
+  return Object.freeze({ ...observed, acceptedRepositoryCapability });
 }
 
 export async function createGitoxideCandidateInternal(input: {

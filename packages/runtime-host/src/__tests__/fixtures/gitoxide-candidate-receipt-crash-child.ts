@@ -75,6 +75,7 @@ const claim = issueGitoxideHelperReleaseArtifactClaimInternal(releaseOwnerToken,
     'import_source_head',
     'create_candidate',
     'promote_candidate',
+    'observe_accepted_ref',
     'read_tree_file',
   ],
 });

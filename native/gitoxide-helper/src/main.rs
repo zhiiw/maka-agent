@@ -206,6 +206,14 @@ enum Request {
         path: String,
         managed_tree_policy_version: u8,
     },
+    ObserveAcceptedRef {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_ref: String,
+        expected_accepted_commit_oid: String,
+        expected_accepted_tree_oid: String,
+        managed_tree_policy_version: u8,
+    },
     ReadTreeFile {
         protocol_version: u8,
         repository_path: PathBuf,
@@ -308,6 +316,15 @@ enum Response<'a> {
         actual_accepted_commit_oid: String,
         accepted_ref: String,
         candidate_ref: String,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    AcceptedRefObserved {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        accepted_ref: String,
         managed_tree_policy_version: u8,
     },
     #[serde(rename_all = "camelCase")]
@@ -421,6 +438,23 @@ fn run() -> Result<ExitCode, &'static str> {
                 expected_result_blob_oid,
                 request_digest_sha256,
                 path,
+                managed_tree_policy_version,
+            )
+        }
+        Request::ObserveAcceptedRef {
+            protocol_version,
+            repository_path,
+            accepted_ref,
+            expected_accepted_commit_oid,
+            expected_accepted_tree_oid,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            observe_accepted_ref(
+                repository_path,
+                accepted_ref,
+                expected_accepted_commit_oid,
+                expected_accepted_tree_oid,
                 managed_tree_policy_version,
             )
         }
@@ -1310,6 +1344,62 @@ fn promote_candidate(
             }
         }
     }
+}
+
+fn observe_accepted_ref(
+    repository_path: PathBuf,
+    accepted_ref: String,
+    expected_accepted_commit_oid: String,
+    expected_accepted_tree_oid: String,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    if !accepted_ref.starts_with("refs/maka/") {
+        return Err("target_ref_outside_maka_namespace");
+    }
+    gix::refs::FullName::try_from(accepted_ref.as_str())
+        .map_err(|_| "target_ref_outside_maka_namespace")?;
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    let repository = open_repository(repository_path)?;
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let expected_commit =
+        parse_sha1_oid(&expected_accepted_commit_oid, "invalid_accepted_commit_oid")?;
+    let expected_tree = parse_sha1_oid(&expected_accepted_tree_oid, "accepted_tree_unavailable")?;
+    let current = read_direct_commit_ref(
+        &repository,
+        &accepted_ref,
+        "accepted_ref_not_direct",
+        "accepted_ref_target_invalid",
+    )?;
+    if current != expected_commit {
+        return Err("accepted_ref_target_invalid");
+    }
+    let (_, actual_tree) = accepted_commit_identity(&repository, &expected_accepted_commit_oid)?;
+    if actual_tree != expected_tree {
+        return Err("accepted_tree_unavailable");
+    }
+    let mut stats = ManagedTreeStats::default();
+    walk_verified_source_tree(
+        &repository,
+        None,
+        expected_tree,
+        "",
+        0,
+        MANAGED_TREE_POLICY_V3,
+        &mut stats,
+    )?;
+    write_response(&Response::AcceptedRefObserved {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        accepted_commit_oid: expected_commit.to_string(),
+        accepted_tree_oid: expected_tree.to_string(),
+        accepted_ref,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
+    Ok(ExitCode::SUCCESS)
 }
 
 fn parse_sha1_oid(

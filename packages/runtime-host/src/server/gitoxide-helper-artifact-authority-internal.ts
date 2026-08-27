@@ -29,6 +29,7 @@ export const GITOXIDE_HELPER_OPERATIONS_INTERNAL = Object.freeze([
   'import_source_head',
   'create_candidate',
   'promote_candidate',
+  'observe_accepted_ref',
   'read_tree_file',
 ] as const);
 export type GitoxideHelperOperationInternal = (typeof GITOXIDE_HELPER_OPERATIONS_INTERNAL)[number];
