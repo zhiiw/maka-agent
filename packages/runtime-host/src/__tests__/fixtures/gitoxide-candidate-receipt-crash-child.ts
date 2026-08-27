@@ -44,8 +44,8 @@ interface Fixture {
   readonly workspaceEpochId: string;
   readonly workspaceVersionId: string;
   readonly acceptedEventId: string;
-  readonly baseCommitOid: string;
-  readonly baseTreeOid: string;
+  readonly sourceHeadCommitOid: string;
+  readonly sourceTreeOid: string;
   readonly operationId: string;
   readonly path: string;
   readonly content: string;
@@ -98,10 +98,11 @@ const imported = await importAdmittedGitoxideRepositoryInternal({
   destinationRepositoryPath: fixture.destinationRepositoryPath,
 });
 if (
-  imported.baselineCommitOid !== fixture.baseCommitOid ||
-  imported.baselineTreeOid !== fixture.baseTreeOid
+  imported.sourceHeadCommitOid !== fixture.sourceHeadCommitOid ||
+  imported.sourceTreeOid !== fixture.sourceTreeOid ||
+  imported.baselineTreeOid !== fixture.sourceTreeOid
 ) {
-  throw new Error('Crash fixture imported a different baseline');
+  throw new Error('Crash fixture imported different source provenance');
 }
 const authority = await createGitoxideMutationCandidateAuthorityInternal({
   storageRootLease: rootOwner.lease,
@@ -111,8 +112,8 @@ const authority = await createGitoxideMutationCandidateAuthorityInternal({
     workspaceEpochId: fixture.workspaceEpochId,
     workspaceVersionId: fixture.workspaceVersionId,
     acceptedEventId: fixture.acceptedEventId,
-    commitOid: fixture.baseCommitOid,
-    treeOid: fixture.baseTreeOid,
+    commitOid: imported.baselineCommitOid,
+    treeOid: imported.baselineTreeOid,
     revision: 1,
   },
   acceptedRepositoryOwnerToken,
