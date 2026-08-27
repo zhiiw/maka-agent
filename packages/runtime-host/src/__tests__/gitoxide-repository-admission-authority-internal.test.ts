@@ -41,6 +41,7 @@ import {
   importAdmittedGitoxideRepositoryInternal,
   promoteGitoxideCandidateInternal,
   readGitoxideTreeFileInternal,
+  reopenGitoxideAcceptedRepositoryInternal,
   requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal,
   requireGitoxideRepositoryAdmissionInternal,
 } from '../server/gitoxide-repository-admission-authority-internal.js';
@@ -453,6 +454,23 @@ test('publishes an operation-bound candidate without advancing accepted authorit
   });
   assert.equal(replayed.replayed, true);
   assert.equal(replayed.acceptedCommitOid, candidate.candidateCommitOid);
+  const reopenedOwnerToken = {};
+  const reopened = await reopenGitoxideAcceptedRepositoryInternal({
+    invocationOwnerToken: helper.invocationOwnerToken,
+    helperCapability: helper.helperCapability,
+    acceptedRepositoryOwnerToken: reopenedOwnerToken,
+    repositoryPath: destinationRepositoryPath,
+    acceptedRef: 'refs/maka/accepted',
+    expectedAcceptedCommitOid: candidate.candidateCommitOid,
+    expectedAcceptedTreeOid: candidate.candidateTreeOid,
+    managedTreePolicyVersion: 3,
+  });
+  const reopenedRead = await readGitoxideTreeFileInternal({
+    acceptedRepositoryOwnerToken: reopenedOwnerToken,
+    acceptedRepositoryCapability: reopened.acceptedRepositoryCapability,
+    path: 'docs/result.txt',
+  });
+  assert.equal(reopenedRead.content, 'candidate result\n');
   await assert.rejects(
     createGitoxideCandidateInternal({
       acceptedRepositoryOwnerToken: {},
@@ -867,6 +885,7 @@ async function admittedHelper(): Promise<AdmittedHelper | undefined> {
         'import_source_head',
         'create_candidate',
         'promote_candidate',
+        'observe_accepted_ref',
         'read_tree_file',
       ],
     });
