@@ -43,6 +43,15 @@ export interface ExecutionStoresWorkspaceMutationAuthorityCapabilityInternal {
   readonly kind: 'execution_stores_workspace_mutation_authority_v1';
 }
 
+export interface WorkspaceSuccessorProjectionCapabilityInternal {
+  readonly kind: 'workspace_successor_projection_capability_v1';
+}
+
+export interface ExecutionStoresWorkspaceSuccessorCommitResult
+  extends WorkspaceSuccessorCommitResult {
+  readonly projectionCapability: WorkspaceSuccessorProjectionCapabilityInternal;
+}
+
 export interface ExecutionStoresWorkspaceMutationAuthorityInternal {
   readHead(
     workspaceId: string,
@@ -53,7 +62,9 @@ export interface ExecutionStoresWorkspaceMutationAuthorityInternal {
     workspaceInstanceId: string,
   ): Promise<ManagedMutationReservationRecordV1 | undefined>;
   issueNoEffectOutcome(claim: ManagedMutationNoEffectClaimV1): object;
-  commitSuccessor(input: WorkspaceSuccessorCommitInput): Promise<WorkspaceSuccessorCommitResult>;
+  commitSuccessor(
+    input: WorkspaceSuccessorCommitInput,
+  ): Promise<ExecutionStoresWorkspaceSuccessorCommitResult>;
   commitTerminal(
     input: ManagedMutationTerminalCommitInput,
   ): Promise<ManagedMutationTerminalCommitResult>;
@@ -76,6 +87,14 @@ interface NoEffectCapabilityRecord extends AuthoritySource {
 const sources = new WeakMap<object, AuthoritySource>();
 const capabilities = new WeakMap<object, AuthorityCapabilityRecord>();
 const noEffectCapabilities = new WeakMap<object, NoEffectCapabilityRecord>();
+const projectionCapabilities = new WeakMap<
+  object,
+  {
+    readonly ownerToken: object;
+    readonly candidateOutcome: object;
+    readonly head: WorkspaceHeadRecordV1;
+  }
+>();
 
 export function registerExecutionStoresWorkspaceMutationSourceInternal(
   stores: object,
@@ -143,8 +162,21 @@ export function requireExecutionStoresWorkspaceMutationAuthorityInternal(
       );
       return noEffectOutcome;
     },
-    commitSuccessor: (input: WorkspaceSuccessorCommitInput) =>
-      commitWorkspaceSuccessorInternal(store, input),
+    commitSuccessor: async (input: WorkspaceSuccessorCommitInput) => {
+      const result = await commitWorkspaceSuccessorInternal(store, input);
+      const projectionCapability = Object.freeze({
+        kind: 'workspace_successor_projection_capability_v1' as const,
+      });
+      projectionCapabilities.set(
+        projectionCapability,
+        Object.freeze({
+          ownerToken,
+          candidateOutcome: input.candidateOutcome,
+          head: result.head,
+        }),
+      );
+      return Object.freeze({ ...result, projectionCapability });
+    },
     commitTerminal: (input: ManagedMutationTerminalCommitInput) => {
       const noEffect = noEffectCapabilities.get(input.noEffectOutcome);
       if (
@@ -158,4 +190,18 @@ export function requireExecutionStoresWorkspaceMutationAuthorityInternal(
       return commitManagedMutationTerminalInternal(store, input);
     },
   });
+}
+
+export function requireWorkspaceSuccessorProjectionInternal(
+  ownerToken: object,
+  capability: WorkspaceSuccessorProjectionCapabilityInternal,
+): Readonly<{
+  candidateOutcome: object;
+  head: WorkspaceHeadRecordV1;
+}> {
+  const record = projectionCapabilities.get(capability);
+  if (!record || record.ownerToken !== ownerToken) {
+    throw new Error('Workspace successor projection capability is invalid');
+  }
+  return Object.freeze({ candidateOutcome: record.candidateOutcome, head: record.head });
 }

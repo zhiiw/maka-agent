@@ -135,6 +135,11 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "candidate_ref_target_invalid",
     "candidate_request_conflict",
     "candidate_publication_indeterminate",
+    "accepted_ref_promotion_indeterminate",
+    "invalid_candidate_commit_oid",
+    "invalid_candidate_tree_oid",
+    "invalid_result_blob_oid",
+    "invalid_request_digest",
     "target_ref_outside_maka_namespace",
     "target_ref_unavailable",
     "tree_edit_failed",
@@ -186,6 +191,19 @@ enum Request {
         candidate_ref: String,
         path: String,
         content_base64: String,
+        managed_tree_policy_version: u8,
+    },
+    PromoteCandidate {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_ref: String,
+        expected_base_commit_oid: String,
+        candidate_ref: String,
+        expected_candidate_commit_oid: String,
+        expected_candidate_tree_oid: String,
+        expected_result_blob_oid: String,
+        request_digest_sha256: String,
+        path: String,
         managed_tree_policy_version: u8,
     },
     ReadTreeFile {
@@ -264,6 +282,30 @@ enum Response<'a> {
         object_format: &'static str,
         expected_base_commit_oid: String,
         actual_base_commit_oid: String,
+        accepted_ref: String,
+        candidate_ref: String,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    CandidatePromoted {
+        protocol_version: u8,
+        object_format: &'static str,
+        base_commit_oid: String,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        accepted_ref: String,
+        candidate_ref: String,
+        replayed: bool,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    CandidatePromotionRejected {
+        protocol_version: u8,
+        reason: &'static str,
+        object_format: &'static str,
+        expected_base_commit_oid: String,
+        expected_candidate_commit_oid: String,
+        actual_accepted_commit_oid: String,
         accepted_ref: String,
         candidate_ref: String,
         managed_tree_policy_version: u8,
@@ -352,6 +394,33 @@ fn run() -> Result<ExitCode, &'static str> {
                 candidate_ref,
                 path,
                 content_base64,
+                managed_tree_policy_version,
+            )
+        }
+        Request::PromoteCandidate {
+            protocol_version,
+            repository_path,
+            accepted_ref,
+            expected_base_commit_oid,
+            candidate_ref,
+            expected_candidate_commit_oid,
+            expected_candidate_tree_oid,
+            expected_result_blob_oid,
+            request_digest_sha256,
+            path,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            promote_candidate(
+                repository_path,
+                accepted_ref,
+                expected_base_commit_oid,
+                candidate_ref,
+                expected_candidate_commit_oid,
+                expected_candidate_tree_oid,
+                expected_result_blob_oid,
+                request_digest_sha256,
+                path,
                 managed_tree_policy_version,
             )
         }
@@ -1070,6 +1139,231 @@ fn create_candidate(
         &path,
     );
     Ok(ExitCode::SUCCESS)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn promote_candidate(
+    repository_path: PathBuf,
+    accepted_ref: String,
+    expected_base_commit_oid: String,
+    candidate_ref: String,
+    expected_candidate_commit_oid: String,
+    expected_candidate_tree_oid: String,
+    expected_result_blob_oid: String,
+    request_digest_sha256: String,
+    path: String,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    if !accepted_ref.starts_with("refs/maka/")
+        || !candidate_ref.starts_with("refs/maka/candidates/")
+        || accepted_ref == candidate_ref
+    {
+        return Err("target_ref_outside_maka_namespace");
+    }
+    gix::refs::FullName::try_from(accepted_ref.as_str())
+        .map_err(|_| "target_ref_outside_maka_namespace")?;
+    gix::refs::FullName::try_from(candidate_ref.as_str())
+        .map_err(|_| "target_ref_outside_maka_namespace")?;
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    if !is_canonical_successor_path_v3(&path) {
+        return Err("invalid_successor_path");
+    }
+    if request_digest_sha256.len() != 64
+        || !request_digest_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("invalid_request_digest");
+    }
+
+    let repository = open_repository(repository_path)?;
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let expected_base = parse_sha1_oid(&expected_base_commit_oid, "invalid_base_commit_oid")?;
+    let expected_candidate = parse_sha1_oid(
+        &expected_candidate_commit_oid,
+        "invalid_candidate_commit_oid",
+    )?;
+    let expected_candidate_tree =
+        parse_sha1_oid(&expected_candidate_tree_oid, "invalid_candidate_tree_oid")?;
+    let expected_result_blob =
+        parse_sha1_oid(&expected_result_blob_oid, "invalid_result_blob_oid")?;
+
+    let candidate_reference = repository
+        .find_reference(candidate_ref.as_str())
+        .map_err(|_| "target_ref_unavailable")?;
+    let candidate_current = read_direct_commit_reference(
+        &repository,
+        candidate_reference,
+        "candidate_ref_not_direct",
+        "candidate_ref_target_invalid",
+    )?;
+    if candidate_current != expected_candidate {
+        return Err("candidate_request_conflict");
+    }
+    verify_candidate_commit_and_result(
+        &repository,
+        expected_candidate,
+        expected_base,
+        expected_candidate_tree,
+        &path,
+        expected_result_blob,
+        &request_digest_sha256,
+    )?;
+    load_verified_object(
+        &repository,
+        expected_result_blob,
+        gix::objs::Kind::Blob,
+        MAX_IMPORT_FILE_BYTES,
+        "candidate_ref_target_invalid",
+        "candidate_ref_target_invalid",
+        "successor_content_limit_exceeded",
+        "candidate_ref_target_invalid",
+    )?;
+    let mut candidate_stats = ManagedTreeStats::default();
+    walk_verified_source_tree(
+        &repository,
+        None,
+        expected_candidate_tree,
+        "",
+        0,
+        MANAGED_TREE_POLICY_V3,
+        &mut candidate_stats,
+    )?;
+
+    let current = read_direct_commit_ref(
+        &repository,
+        &accepted_ref,
+        "accepted_ref_not_direct",
+        "accepted_ref_target_invalid",
+    )?;
+    if current == expected_candidate {
+        write_candidate_promoted_response(
+            expected_base,
+            expected_candidate,
+            expected_candidate_tree,
+            &accepted_ref,
+            &candidate_ref,
+            true,
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    if current != expected_base {
+        write_candidate_promotion_rejected_response(
+            expected_base,
+            expected_candidate,
+            current,
+            &accepted_ref,
+            &candidate_ref,
+        );
+        return Ok(ExitCode::from(3));
+    }
+
+    match repository.reference(
+        accepted_ref.as_str(),
+        expected_candidate,
+        gix::refs::transaction::PreviousValue::MustExistAndMatch(gix::refs::Target::Object(
+            expected_base,
+        )),
+        "maka managed workspace accepted candidate",
+    ) {
+        Ok(_) => {
+            write_candidate_promoted_response(
+                expected_base,
+                expected_candidate,
+                expected_candidate_tree,
+                &accepted_ref,
+                &candidate_ref,
+                false,
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(_) => {
+            let observed = read_direct_commit_ref(
+                &repository,
+                &accepted_ref,
+                "accepted_ref_not_direct",
+                "accepted_ref_target_invalid",
+            )?;
+            if observed == expected_candidate {
+                write_candidate_promoted_response(
+                    expected_base,
+                    expected_candidate,
+                    expected_candidate_tree,
+                    &accepted_ref,
+                    &candidate_ref,
+                    true,
+                );
+                Ok(ExitCode::SUCCESS)
+            } else if observed != expected_base {
+                write_candidate_promotion_rejected_response(
+                    expected_base,
+                    expected_candidate,
+                    observed,
+                    &accepted_ref,
+                    &candidate_ref,
+                );
+                Ok(ExitCode::from(3))
+            } else {
+                Err("accepted_ref_promotion_indeterminate")
+            }
+        }
+    }
+}
+
+fn parse_sha1_oid(
+    value: &str,
+    invalid_reason: &'static str,
+) -> Result<gix::hash::ObjectId, &'static str> {
+    let oid = gix::hash::ObjectId::from_hex(value.as_bytes()).map_err(|_| invalid_reason)?;
+    if oid.kind() != gix::hash::Kind::Sha1 {
+        return Err(invalid_reason);
+    }
+    Ok(oid)
+}
+
+fn write_candidate_promoted_response(
+    base_commit_oid: gix::hash::ObjectId,
+    accepted_commit_oid: gix::hash::ObjectId,
+    accepted_tree_oid: gix::hash::ObjectId,
+    accepted_ref: &str,
+    candidate_ref: &str,
+    replayed: bool,
+) {
+    write_response(&Response::CandidatePromoted {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        base_commit_oid: base_commit_oid.to_string(),
+        accepted_commit_oid: accepted_commit_oid.to_string(),
+        accepted_tree_oid: accepted_tree_oid.to_string(),
+        accepted_ref: accepted_ref.to_owned(),
+        candidate_ref: candidate_ref.to_owned(),
+        replayed,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
+}
+
+fn write_candidate_promotion_rejected_response(
+    expected_base_commit_oid: gix::hash::ObjectId,
+    expected_candidate_commit_oid: gix::hash::ObjectId,
+    actual_accepted_commit_oid: gix::hash::ObjectId,
+    accepted_ref: &str,
+    candidate_ref: &str,
+) {
+    write_response(&Response::CandidatePromotionRejected {
+        protocol_version: PROTOCOL_VERSION,
+        reason: "accepted_ref_conflict",
+        object_format: "sha1",
+        expected_base_commit_oid: expected_base_commit_oid.to_string(),
+        expected_candidate_commit_oid: expected_candidate_commit_oid.to_string(),
+        actual_accepted_commit_oid: actual_accepted_commit_oid.to_string(),
+        accepted_ref: accepted_ref.to_owned(),
+        candidate_ref: candidate_ref.to_owned(),
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
 }
 
 fn verify_existing_candidate_receipt(

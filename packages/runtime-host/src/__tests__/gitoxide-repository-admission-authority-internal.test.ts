@@ -39,6 +39,7 @@ import {
   createGitoxideCandidateInternal,
   GitoxideRepositoryAdmissionAuthorityError,
   importAdmittedGitoxideRepositoryInternal,
+  promoteGitoxideCandidateInternal,
   readGitoxideTreeFileInternal,
   requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal,
   requireGitoxideRepositoryAdmissionInternal,
@@ -421,6 +422,37 @@ test('publishes an operation-bound candidate without advancing accepted authorit
   if (second.kind !== 'candidate_published') return;
   assert.equal(second.baseCommitOid, imported.baselineCommitOid);
   assert.notEqual(second.candidateRef, candidate.candidateRef);
+  const nextAcceptedRepositoryOwnerToken = {};
+  const promoted = await promoteGitoxideCandidateInternal({
+    acceptedRepositoryOwnerToken,
+    acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+    candidateOwnerToken,
+    candidateOutcomeCapability: candidate.candidateOutcomeCapability,
+    nextAcceptedRepositoryOwnerToken,
+  });
+  assert.equal(promoted.kind, 'candidate_promoted');
+  assert.equal(promoted.replayed, false);
+  assert.equal(promoted.acceptedCommitOid, candidate.candidateCommitOid);
+  assert.equal(
+    gitBare(destinationRepositoryPath, ['rev-parse', 'refs/maka/accepted']),
+    candidate.candidateCommitOid,
+  );
+  const promotedRead = await readGitoxideTreeFileInternal({
+    acceptedRepositoryOwnerToken: nextAcceptedRepositoryOwnerToken,
+    acceptedRepositoryCapability: promoted.acceptedRepositoryCapability,
+    path: 'docs/result.txt',
+  });
+  assert.equal(promotedRead.content, 'candidate result\n');
+  const replayedOwnerToken = {};
+  const replayed = await promoteGitoxideCandidateInternal({
+    acceptedRepositoryOwnerToken,
+    acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+    candidateOwnerToken,
+    candidateOutcomeCapability: candidate.candidateOutcomeCapability,
+    nextAcceptedRepositoryOwnerToken: replayedOwnerToken,
+  });
+  assert.equal(replayed.replayed, true);
+  assert.equal(replayed.acceptedCommitOid, candidate.candidateCommitOid);
   await assert.rejects(
     createGitoxideCandidateInternal({
       acceptedRepositoryOwnerToken: {},
@@ -494,6 +526,7 @@ test('publishes a durable operation-bound candidate receipt and rejects tamperin
     baseHead,
     acceptedRepositoryOwnerToken,
     acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+    projectionOwnerToken: {},
   });
   const request = {
     operationId: 'operation-durable-receipt',
@@ -584,6 +617,7 @@ test('converges a ref-only candidate publication by replaying the pure request',
     baseHead,
     acceptedRepositoryOwnerToken,
     acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+    projectionOwnerToken: {},
     failpoint: (point) => {
       if (!stopped && point === 'after_candidate_ref') {
         stopped = true;
@@ -604,6 +638,7 @@ test('converges a ref-only candidate publication by replaying the pure request',
     baseHead,
     acceptedRepositoryOwnerToken,
     acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+    projectionOwnerToken: {},
   });
   const proof = await recovered.capture(request);
   assert.equal(proof.receipt.disposition, 'published');
@@ -703,6 +738,7 @@ test('recovers a ref-only candidate after the publishing process exits', async (
     baseHead,
     acceptedRepositoryOwnerToken,
     acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+    projectionOwnerToken: {},
   });
   const proof = await authority.capture({
     operationId: fixture.operationId,
@@ -830,6 +866,7 @@ async function admittedHelper(): Promise<AdmittedHelper | undefined> {
         'inspect_repository',
         'import_source_head',
         'create_candidate',
+        'promote_candidate',
         'read_tree_file',
       ],
     });

@@ -26,6 +26,10 @@ import { MANAGED_MUTATION_EXECUTION_PROFILE_V1 } from '@maka/core/runtime-event'
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import { withProcessLifetimeFileUpdateLock } from '@maka/storage/process-lifetime-file-update-lock';
 import {
+  requireWorkspaceSuccessorProjectionInternal,
+  type WorkspaceSuccessorProjectionCapabilityInternal,
+} from '@maka/storage/execution-stores-workspace-authority-internal';
+import {
   assertStorageRootLease,
   runWithStorageRootLease,
   type StorageRootLease,
@@ -37,6 +41,7 @@ import {
   type GitoxideCandidateOutcomeCapability,
   requireGitoxideAcceptedRepositoryInternal,
   requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal,
+  promoteGitoxideCandidateInternal,
 } from './gitoxide-repository-admission-authority-internal.js';
 
 const ACCEPTED_REF = 'refs/maka/accepted';
@@ -110,9 +115,22 @@ export interface GitoxideMutationCandidateProofV1 {
   readonly candidateOutcomeCapability: GitoxideCandidateOutcomeCapability;
 }
 
+export interface GitoxideMutationCandidatePromotionInput {
+  readonly proof: GitoxideMutationCandidateProofV1;
+  readonly projectionCapability: WorkspaceSuccessorProjectionCapabilityInternal;
+  readonly nextAcceptedRepositoryOwnerToken: object;
+  readonly abortSignal?: AbortSignal;
+}
+
 export interface GitoxideMutationCandidateAuthorityInternal {
   capture(input: GitoxideMutationCandidateCaptureInput): Promise<GitoxideMutationCandidateProofV1>;
   validate(proof: GitoxideMutationCandidateProofV1): GitoxideMutationCandidateReceiptV1;
+  promote(input: GitoxideMutationCandidatePromotionInput): Promise<{
+    readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
+    readonly acceptedCommitOid: string;
+    readonly acceptedTreeOid: string;
+    readonly replayed: boolean;
+  }>;
 }
 
 export type GitoxideMutationCandidateFailpoint = 'after_candidate_ref' | 'after_candidate_receipt';
@@ -136,6 +154,7 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
   readonly baseHead: WorkspaceHeadRecordV1;
   readonly acceptedRepositoryOwnerToken: object;
   readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
+  readonly projectionOwnerToken: object;
   readonly failpoint?: (point: GitoxideMutationCandidateFailpoint) => void | Promise<void>;
 }): Promise<GitoxideMutationCandidateAuthorityInternal> {
   await assertStorageRootLease(input.storageRootLease, 'interactive', 'write');
@@ -300,50 +319,91 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
     );
   };
 
+  const validate = (proof: GitoxideMutationCandidateProofV1) => {
+    const issuedReceipt = issuedProofs.get(proof);
+    if (!issuedReceipt || proof.receipt !== issuedReceipt) {
+      throw new GitoxideMutationCandidateAuthorityError(
+        'gitoxide_mutation_candidate_identity_conflict',
+        'Gitoxide candidate proof was not issued by this authority',
+      );
+    }
+    const candidate = requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal({
+      acceptedRepositoryOwnerToken: input.acceptedRepositoryOwnerToken,
+      acceptedRepositoryCapability: input.acceptedRepositoryCapability,
+      candidateOwnerToken,
+      candidateOutcomeCapability: proof.candidateOutcomeCapability,
+    });
+    if (sha256(candidate.operationId) !== proof.receipt.operationIdentitySha256) {
+      throw new GitoxideMutationCandidateAuthorityError(
+        'gitoxide_mutation_candidate_identity_conflict',
+        'Gitoxide candidate operation identity does not match its durable receipt',
+      );
+    }
+    if (
+      candidate.disposition !== proof.receipt.disposition ||
+      candidate.objectFormat !== proof.receipt.objectFormat ||
+      candidate.acceptedRef !== proof.receipt.acceptedRef ||
+      candidate.baseCommitOid !== proof.receipt.baseCommitOid ||
+      candidate.baseTreeOid !== proof.receipt.baseTreeOid ||
+      candidate.helperArtifactSha256 !== proof.receipt.helperArtifactSha256 ||
+      candidate.managedTreePolicyVersion !== proof.receipt.managedTreePolicyVersion ||
+      candidate.requestDigestSha256 !== proof.receipt.requestDigestSha256 ||
+      candidate.resultContentSha256 !== proof.receipt.contentSha256 ||
+      candidate.candidateRef !== proof.receipt.candidateRef ||
+      candidate.candidateCommitOid !== proof.receipt.candidateCommitOid ||
+      candidate.candidateTreeOid !== proof.receipt.candidateTreeOid ||
+      candidate.resultBlobOid !== proof.receipt.resultBlobOid ||
+      candidate.path !== proof.receipt.path
+    ) {
+      throw new GitoxideMutationCandidateAuthorityError(
+        'gitoxide_mutation_candidate_identity_conflict',
+        'Gitoxide candidate capability does not match its durable receipt',
+      );
+    }
+    return issuedReceipt;
+  };
+
   return Object.freeze({
     capture,
-    validate(proof: GitoxideMutationCandidateProofV1) {
-      const issuedReceipt = issuedProofs.get(proof);
-      if (!issuedReceipt || proof.receipt !== issuedReceipt) {
+    validate,
+    async promote({
+      proof,
+      projectionCapability,
+      nextAcceptedRepositoryOwnerToken,
+      abortSignal,
+    }: GitoxideMutationCandidatePromotionInput) {
+      const receipt = validate(proof);
+      const accepted = requireWorkspaceSuccessorProjectionInternal(
+        input.projectionOwnerToken,
+        projectionCapability,
+      );
+      if (
+        accepted.candidateOutcome !== proof ||
+        accepted.head.repositoryId !== receipt.repositoryId ||
+        accepted.head.workspaceId !== receipt.workspaceId ||
+        accepted.head.workspaceEpochId !== receipt.workspaceEpochId ||
+        accepted.head.commitOid !== receipt.candidateCommitOid ||
+        accepted.head.treeOid !== receipt.candidateTreeOid
+      ) {
         throw new GitoxideMutationCandidateAuthorityError(
           'gitoxide_mutation_candidate_identity_conflict',
-          'Gitoxide candidate proof was not issued by this authority',
+          'Workspace successor projection capability does not match the durable candidate proof',
         );
       }
-      const candidate = requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal({
+      const promoted = await promoteGitoxideCandidateInternal({
         acceptedRepositoryOwnerToken: input.acceptedRepositoryOwnerToken,
         acceptedRepositoryCapability: input.acceptedRepositoryCapability,
         candidateOwnerToken,
         candidateOutcomeCapability: proof.candidateOutcomeCapability,
+        nextAcceptedRepositoryOwnerToken,
+        abortSignal,
       });
-      if (sha256(candidate.operationId) !== proof.receipt.operationIdentitySha256) {
-        throw new GitoxideMutationCandidateAuthorityError(
-          'gitoxide_mutation_candidate_identity_conflict',
-          'Gitoxide candidate operation identity does not match its durable receipt',
-        );
-      }
-      if (
-        candidate.disposition !== proof.receipt.disposition ||
-        candidate.objectFormat !== proof.receipt.objectFormat ||
-        candidate.acceptedRef !== proof.receipt.acceptedRef ||
-        candidate.baseCommitOid !== proof.receipt.baseCommitOid ||
-        candidate.baseTreeOid !== proof.receipt.baseTreeOid ||
-        candidate.helperArtifactSha256 !== proof.receipt.helperArtifactSha256 ||
-        candidate.managedTreePolicyVersion !== proof.receipt.managedTreePolicyVersion ||
-        candidate.requestDigestSha256 !== proof.receipt.requestDigestSha256 ||
-        candidate.resultContentSha256 !== proof.receipt.contentSha256 ||
-        candidate.candidateRef !== proof.receipt.candidateRef ||
-        candidate.candidateCommitOid !== proof.receipt.candidateCommitOid ||
-        candidate.candidateTreeOid !== proof.receipt.candidateTreeOid ||
-        candidate.resultBlobOid !== proof.receipt.resultBlobOid ||
-        candidate.path !== proof.receipt.path
-      ) {
-        throw new GitoxideMutationCandidateAuthorityError(
-          'gitoxide_mutation_candidate_identity_conflict',
-          'Gitoxide candidate capability does not match its durable receipt',
-        );
-      }
-      return issuedReceipt;
+      return Object.freeze({
+        acceptedRepositoryCapability: promoted.acceptedRepositoryCapability,
+        acceptedCommitOid: promoted.acceptedCommitOid,
+        acceptedTreeOid: promoted.acceptedTreeOid,
+        replayed: promoted.replayed,
+      });
     },
   });
 }

@@ -38,6 +38,7 @@ export const GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL = Object.freeze({
   inspectRepositoryMs: 5_000,
   importSourceHeadMs: 10 * 60_000,
   createCandidateMs: 10 * 60_000,
+  promoteCandidateMs: 10 * 60_000,
   acceptedTreeReadMs: 10 * 60_000,
 });
 const SHA1_OID_PATTERN = /^[0-9a-f]{40}$/;
@@ -109,6 +110,11 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'candidate_ref_target_invalid',
   'candidate_request_conflict',
   'candidate_publication_indeterminate',
+  'accepted_ref_promotion_indeterminate',
+  'invalid_candidate_commit_oid',
+  'invalid_candidate_tree_oid',
+  'invalid_result_blob_oid',
+  'invalid_request_digest',
   'target_ref_outside_maka_namespace',
   'target_ref_unavailable',
   'tree_edit_failed',
@@ -214,6 +220,36 @@ export type GitoxideCandidateResultV1 =
   | GitoxideCandidatePublishedV1
   | GitoxideCandidateNoChangeV1
   | GitoxideCandidateRejectedV1;
+
+export interface GitoxideCandidatePromotedV1 {
+  readonly kind: 'candidate_promoted';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly baseCommitOid: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly acceptedRef: string;
+  readonly candidateRef: string;
+  readonly replayed: boolean;
+  readonly managedTreePolicyVersion: 3;
+}
+
+export interface GitoxideCandidatePromotionRejectedV1 {
+  readonly kind: 'candidate_promotion_rejected';
+  readonly protocolVersion: 1;
+  readonly reason: 'accepted_ref_conflict';
+  readonly objectFormat: 'sha1';
+  readonly expectedBaseCommitOid: string;
+  readonly expectedCandidateCommitOid: string;
+  readonly actualAcceptedCommitOid: string;
+  readonly acceptedRef: string;
+  readonly candidateRef: string;
+  readonly managedTreePolicyVersion: 3;
+}
+
+export type GitoxideCandidatePromotionResultV1 =
+  | GitoxideCandidatePromotedV1
+  | GitoxideCandidatePromotionRejectedV1;
 
 export interface GitoxideTreeFileReadV1 {
   readonly kind: 'tree_file_read';
@@ -549,6 +585,82 @@ export async function createCandidateWithGitoxideHelperInternal(input: {
     requestDigestSha256,
     managedTreePolicyVersion: input.managedTreePolicyVersion,
   });
+}
+
+export async function promoteCandidateWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedRef: string;
+  readonly expectedBaseCommitOid: string;
+  readonly candidateRef: string;
+  readonly expectedCandidateCommitOid: string;
+  readonly expectedCandidateTreeOid: string;
+  readonly expectedResultBlobOid: string;
+  readonly requestDigestSha256: string;
+  readonly path: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideCandidatePromotionResultV1> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.promoteCandidateMs;
+  const { artifact, repositoryPath } = await runGitoxideOperationWithinDeadlineInternal({
+    deadlineAt,
+    abortSignal: input.abortSignal,
+    operation: async () => {
+      if (
+        !isAbsolute(input.repositoryPath) ||
+        !SHA1_OID_PATTERN.test(input.expectedBaseCommitOid) ||
+        !SHA1_OID_PATTERN.test(input.expectedCandidateCommitOid) ||
+        !SHA1_OID_PATTERN.test(input.expectedCandidateTreeOid) ||
+        !SHA1_OID_PATTERN.test(input.expectedResultBlobOid) ||
+        !/^[0-9a-f]{64}$/.test(input.requestDigestSha256) ||
+        !MAKA_REF_PATTERN.test(input.acceptedRef) ||
+        !/^refs\/maka\/candidates\/[0-9a-f]{64}$/.test(input.candidateRef) ||
+        input.acceptedRef === input.candidateRef ||
+        !isBoundedPathTransport(input.path) ||
+        input.managedTreePolicyVersion !== 3
+      ) {
+        throw invocationInvalid('Gitoxide candidate promotion request is invalid');
+      }
+      const [artifact, repositoryPath] = await Promise.all([
+        verifyGitoxideHelperArtifactForInvocationInternal(
+          input.invocationOwnerToken,
+          input.capability,
+        ),
+        realpath(input.repositoryPath).catch((error) => {
+          throw invocationInvalid(
+            `Gitoxide managed repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ]);
+      return { artifact, repositoryPath };
+    },
+  });
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: artifact.protocolVersion,
+      operation: 'promote_candidate',
+      repositoryPath,
+      acceptedRef: input.acceptedRef,
+      expectedBaseCommitOid: input.expectedBaseCommitOid,
+      candidateRef: input.candidateRef,
+      expectedCandidateCommitOid: input.expectedCandidateCommitOid,
+      expectedCandidateTreeOid: input.expectedCandidateTreeOid,
+      expectedResultBlobOid: input.expectedResultBlobOid,
+      requestDigestSha256: input.requestDigestSha256,
+      path: input.path,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
+  const outcome = await invokeHelper({
+    executablePath: artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  return decodeCandidatePromotionOutcome(outcome, input);
 }
 
 export async function readTreeFileWithGitoxideHelperInternal(input: {
@@ -917,6 +1029,105 @@ function decodeCandidateOutcome(
   const stderr = outcome.stderr.toString('utf8').trim();
   throw protocolInvalid(
     `Gitoxide helper exit code and response disagree${stderr ? `: ${stderr}` : ''}`,
+  );
+}
+
+function decodeCandidatePromotionOutcome(
+  outcome: HelperProcessOutcome,
+  expected: {
+    readonly acceptedRef: string;
+    readonly expectedBaseCommitOid: string;
+    readonly candidateRef: string;
+    readonly expectedCandidateCommitOid: string;
+    readonly expectedCandidateTreeOid: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): GitoxideCandidatePromotionResultV1 {
+  const value = parseHelperOutcome(outcome);
+  if (outcome.exitCode === 0 && isCandidatePromoted(value, expected)) {
+    return Object.freeze(value);
+  }
+  if (outcome.exitCode === 3 && isCandidatePromotionRejected(value, expected)) {
+    return Object.freeze(value);
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('promote the accepted candidate', value.reason);
+  }
+  throw protocolInvalid('Gitoxide candidate promotion response is invalid');
+}
+
+function isCandidatePromoted(
+  value: unknown,
+  expected: {
+    readonly acceptedRef: string;
+    readonly expectedBaseCommitOid: string;
+    readonly candidateRef: string;
+    readonly expectedCandidateCommitOid: string;
+    readonly expectedCandidateTreeOid: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): value is GitoxideCandidatePromotedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'baseCommitOid',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'acceptedRef',
+      'candidateRef',
+      'replayed',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'candidate_promoted' &&
+    value.objectFormat === 'sha1' &&
+    value.baseCommitOid === expected.expectedBaseCommitOid &&
+    value.acceptedCommitOid === expected.expectedCandidateCommitOid &&
+    value.acceptedTreeOid === expected.expectedCandidateTreeOid &&
+    value.acceptedRef === expected.acceptedRef &&
+    value.candidateRef === expected.candidateRef &&
+    typeof value.replayed === 'boolean' &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
+  );
+}
+
+function isCandidatePromotionRejected(
+  value: unknown,
+  expected: {
+    readonly acceptedRef: string;
+    readonly expectedBaseCommitOid: string;
+    readonly candidateRef: string;
+    readonly expectedCandidateCommitOid: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): value is GitoxideCandidatePromotionRejectedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'reason',
+      'objectFormat',
+      'expectedBaseCommitOid',
+      'expectedCandidateCommitOid',
+      'actualAcceptedCommitOid',
+      'acceptedRef',
+      'candidateRef',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'candidate_promotion_rejected' &&
+    value.reason === 'accepted_ref_conflict' &&
+    value.objectFormat === 'sha1' &&
+    value.expectedBaseCommitOid === expected.expectedBaseCommitOid &&
+    value.expectedCandidateCommitOid === expected.expectedCandidateCommitOid &&
+    isSha1(value.actualAcceptedCommitOid) &&
+    value.actualAcceptedCommitOid !== expected.expectedBaseCommitOid &&
+    value.actualAcceptedCommitOid !== expected.expectedCandidateCommitOid &&
+    value.acceptedRef === expected.acceptedRef &&
+    value.candidateRef === expected.candidateRef &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
   );
 }
 
