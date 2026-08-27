@@ -14,6 +14,8 @@ commit。响应丢失或进程重启只能重放同一 CAS，不能重新执行 
   candidate capability 与上述 SQLite capability。
 - short-lived Gitoxide helper 是 ref CAS data-plane owner。普通 Host caller、裸 receipt 或裸 OID 都不能
   直接要求 projection。
+- 进程重启后的 capability 不能凭路径恢复；helper 必须以 durable head 的 exact commit/tree 重新观察
+  accepted ref，Host 才能签发新的 owner-bound accepted-repository capability。
 
 ## 原子性边界
 
@@ -41,4 +43,3 @@ ref CAS；accepted ref 已等于 candidate 时返回 exact replay success，任�
 
 Linux、macOS、Windows 使用相同 Gitoxide ref transaction 与 strict protocol。v1 承诺进程崩溃后的
 exact retry；不把普通文件系统/设备的断电持久性描述成三平台统一保证。
-

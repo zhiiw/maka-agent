@@ -39,6 +39,7 @@ export const GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL = Object.freeze({
   importSourceHeadMs: 10 * 60_000,
   createCandidateMs: 10 * 60_000,
   promoteCandidateMs: 10 * 60_000,
+  observeAcceptedRefMs: 10 * 60_000,
   acceptedTreeReadMs: 10 * 60_000,
 });
 const SHA1_OID_PATTERN = /^[0-9a-f]{40}$/;
@@ -250,6 +251,16 @@ export interface GitoxideCandidatePromotionRejectedV1 {
 export type GitoxideCandidatePromotionResultV1 =
   | GitoxideCandidatePromotedV1
   | GitoxideCandidatePromotionRejectedV1;
+
+export interface GitoxideAcceptedRefObservationV1 {
+  readonly kind: 'accepted_ref_observed';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly acceptedRef: string;
+  readonly managedTreePolicyVersion: 3;
+}
 
 export interface GitoxideTreeFileReadV1 {
   readonly kind: 'tree_file_read';
@@ -661,6 +672,66 @@ export async function promoteCandidateWithGitoxideHelperInternal(input: {
     deadlineAt,
   });
   return decodeCandidatePromotionOutcome(outcome, input);
+}
+
+export async function observeAcceptedRefWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedRef: string;
+  readonly expectedAcceptedCommitOid: string;
+  readonly expectedAcceptedTreeOid: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideAcceptedRefObservationV1> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.observeAcceptedRefMs;
+  const { artifact, repositoryPath } = await runGitoxideOperationWithinDeadlineInternal({
+    deadlineAt,
+    abortSignal: input.abortSignal,
+    operation: async () => {
+      if (
+        !isAbsolute(input.repositoryPath) ||
+        !MAKA_REF_PATTERN.test(input.acceptedRef) ||
+        !SHA1_OID_PATTERN.test(input.expectedAcceptedCommitOid) ||
+        !SHA1_OID_PATTERN.test(input.expectedAcceptedTreeOid) ||
+        input.managedTreePolicyVersion !== 3
+      ) {
+        throw invocationInvalid('Gitoxide accepted-ref observation request is invalid');
+      }
+      const [artifact, repositoryPath] = await Promise.all([
+        verifyGitoxideHelperArtifactForInvocationInternal(
+          input.invocationOwnerToken,
+          input.capability,
+        ),
+        realpath(input.repositoryPath).catch((error) => {
+          throw invocationInvalid(
+            `Gitoxide managed repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ]);
+      return { artifact, repositoryPath };
+    },
+  });
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: artifact.protocolVersion,
+      operation: 'observe_accepted_ref',
+      repositoryPath,
+      acceptedRef: input.acceptedRef,
+      expectedAcceptedCommitOid: input.expectedAcceptedCommitOid,
+      expectedAcceptedTreeOid: input.expectedAcceptedTreeOid,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
+  const outcome = await invokeHelper({
+    executablePath: artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  return decodeAcceptedRefObservation(outcome, input);
 }
 
 export async function readTreeFileWithGitoxideHelperInternal(input: {
@@ -1129,6 +1200,43 @@ function isCandidatePromotionRejected(
     value.candidateRef === expected.candidateRef &&
     value.managedTreePolicyVersion === expected.managedTreePolicyVersion
   );
+}
+
+function decodeAcceptedRefObservation(
+  outcome: HelperProcessOutcome,
+  expected: {
+    readonly acceptedRef: string;
+    readonly expectedAcceptedCommitOid: string;
+    readonly expectedAcceptedTreeOid: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): GitoxideAcceptedRefObservationV1 {
+  const value = parseHelperOutcome(outcome);
+  if (
+    outcome.exitCode === 0 &&
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'acceptedRef',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'accepted_ref_observed' &&
+    value.objectFormat === 'sha1' &&
+    value.acceptedCommitOid === expected.expectedAcceptedCommitOid &&
+    value.acceptedTreeOid === expected.expectedAcceptedTreeOid &&
+    value.acceptedRef === expected.acceptedRef &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
+  ) {
+    return Object.freeze(value) as unknown as GitoxideAcceptedRefObservationV1;
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('observe the accepted ref', value.reason);
+  }
+  throw protocolInvalid('Gitoxide accepted-ref response is invalid');
 }
 
 function isCandidatePublished(

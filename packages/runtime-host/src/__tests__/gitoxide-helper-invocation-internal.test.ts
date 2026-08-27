@@ -55,6 +55,7 @@ test('uses bounded mutation/import deadlines distinct from repository inspection
     importSourceHeadMs: 10 * 60_000,
     createCandidateMs: 10 * 60_000,
     promoteCandidateMs: 10 * 60_000,
+    observeAcceptedRefMs: 10 * 60_000,
     acceptedTreeReadMs: 10 * 60_000,
   });
 });
@@ -636,6 +637,7 @@ async function admitHelperPath(
     | 'import_source_head'
     | 'create_candidate'
     | 'promote_candidate'
+    | 'observe_accepted_ref'
     | 'read_tree_file'
   )[] = ['inspect_repository', 'import_source_head'],
 ): Promise<AdmittedHelper> {

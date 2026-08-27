@@ -826,6 +826,24 @@ fn promotes_a_verified_candidate_with_exact_cas_and_replays_without_moving_again
     assert_eq!(replay["kind"], "candidate_promoted");
     assert_eq!(replay["replayed"], true);
     assert_eq!(replay["acceptedCommitOid"], candidate["candidateCommitOid"]);
+
+    let observed = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "observe_accepted_ref",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedAcceptedCommitOid": candidate["candidateCommitOid"],
+        "expectedAcceptedTreeOid": candidate["candidateTreeOid"],
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(observed.status.success());
+    let observed: serde_json::Value = serde_json::from_slice(&observed.stdout).unwrap();
+    assert_eq!(observed["kind"], "accepted_ref_observed");
+    assert_eq!(
+        observed["acceptedCommitOid"],
+        candidate["candidateCommitOid"]
+    );
+    assert_eq!(observed["acceptedTreeOid"], candidate["candidateTreeOid"]);
 }
 
 #[test]
