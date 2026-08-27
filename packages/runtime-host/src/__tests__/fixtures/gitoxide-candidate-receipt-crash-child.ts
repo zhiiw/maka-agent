@@ -74,6 +74,7 @@ const claim = issueGitoxideHelperReleaseArtifactClaimInternal(releaseOwnerToken,
     'inspect_repository',
     'import_source_head',
     'create_candidate',
+    'promote_candidate',
     'read_tree_file',
   ],
 });
@@ -118,6 +119,7 @@ const authority = await createGitoxideMutationCandidateAuthorityInternal({
   },
   acceptedRepositoryOwnerToken,
   acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+  projectionOwnerToken: {},
   failpoint: (point) => {
     if (point === 'after_candidate_ref') process.exit(71);
   },
