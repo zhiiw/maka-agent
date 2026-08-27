@@ -43,6 +43,7 @@ import {
   commitWorkspaceBaselineInternal,
   commitWorkspaceSuccessorInternal,
   readActiveManagedMutationInternal,
+  readWorkspaceVersionInternal,
   registerWorkspaceSuccessorCandidateVerifierInternal,
   type WorkspaceSuccessorCommitInput,
 } from '../workspace-version-authority-internal.js';
@@ -136,6 +137,10 @@ describe('workspace version persistence authority', () => {
       );
       assert.equal(
         (await store.readWorkspaceVersion(input.baseline.workspaceVersionId))?.origin.kind,
+        'baseline',
+      );
+      assert.equal(
+        (await readWorkspaceVersionInternal(store, input.baseline.workspaceVersionId))?.origin.kind,
         'baseline',
       );
       assert.deepEqual(
