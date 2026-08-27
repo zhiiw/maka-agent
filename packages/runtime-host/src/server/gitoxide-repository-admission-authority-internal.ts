@@ -29,9 +29,11 @@ import {
   GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL,
   importSourceHeadWithGitoxideHelperInternal,
   inspectCanonicalRepositoryWithGitoxideHelperInternal,
+  promoteCandidateWithGitoxideHelperInternal,
   readTreeFileWithGitoxideHelperInternal,
   type GitoxideCandidateNoChangeV1,
   type GitoxideCandidatePublishedV1,
+  type GitoxideCandidatePromotedV1,
   type GitoxideSourceImportObservationV1,
   type GitoxideTreeFileReadV1,
   type GitoxideRepositoryRejectionV1,
@@ -205,7 +207,7 @@ export async function importAdmittedGitoxideRepositoryInternal(input: {
   requireGitoxideHelperOperationsInternal(
     admission.invocationOwnerToken,
     admission.helperCapability,
-    ['create_candidate', 'read_tree_file'],
+    ['create_candidate', 'promote_candidate', 'read_tree_file'],
   );
   const result = await importSourceHeadWithGitoxideHelperInternal({
     invocationOwnerToken: admission.invocationOwnerToken,
@@ -379,6 +381,84 @@ export async function readGitoxideTreeFileInternal(input: {
     );
   }
   return result;
+}
+
+export async function promoteGitoxideCandidateInternal(input: {
+  readonly acceptedRepositoryOwnerToken: object;
+  readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
+  readonly candidateOwnerToken: object;
+  readonly candidateOutcomeCapability: GitoxideCandidateOutcomeCapability;
+  readonly nextAcceptedRepositoryOwnerToken: object;
+  readonly abortSignal?: AbortSignal;
+}): Promise<
+  GitoxideCandidatePromotedV1 & {
+    readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
+  }
+> {
+  const managed = requireAcceptedRepositoryRecord(
+    input.acceptedRepositoryOwnerToken,
+    input.acceptedRepositoryCapability,
+  );
+  const candidate = candidateOutcomes.get(input.candidateOutcomeCapability);
+  if (
+    !candidate ||
+    candidate.candidateOwnerToken !== input.candidateOwnerToken ||
+    candidate.acceptedRepositoryCapability !== input.acceptedRepositoryCapability ||
+    candidate.repositoryPath !== managed.repositoryPath ||
+    candidate.acceptedRef !== managed.acceptedRef ||
+    candidate.baseCommitOid !== managed.acceptedCommitOid ||
+    candidate.baseTreeOid !== managed.acceptedTreeOid
+  ) {
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_repository_admission_capability_invalid',
+    );
+  }
+  const result = await promoteCandidateWithGitoxideHelperInternal({
+    invocationOwnerToken: managed.invocationOwnerToken,
+    capability: managed.helperCapability,
+    repositoryPath: managed.repositoryPath,
+    acceptedRef: candidate.acceptedRef,
+    expectedBaseCommitOid: candidate.baseCommitOid,
+    candidateRef: candidate.candidateRef,
+    expectedCandidateCommitOid: candidate.candidateCommitOid,
+    expectedCandidateTreeOid: candidate.candidateTreeOid,
+    expectedResultBlobOid: candidate.resultBlobOid,
+    requestDigestSha256: candidate.requestDigestSha256,
+    path: candidate.path,
+    managedTreePolicyVersion: candidate.managedTreePolicyVersion,
+    abortSignal: input.abortSignal,
+  });
+  if (result.kind === 'candidate_promotion_rejected') {
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_managed_repository_base_mismatch',
+    );
+  }
+  const repositoryInfo = await lstat(managed.repositoryPath);
+  if (
+    !repositoryInfo.isDirectory() ||
+    repositoryInfo.isSymbolicLink() ||
+    repositoryInfo.dev !== managed.repositoryDev ||
+    repositoryInfo.ino !== managed.repositoryIno ||
+    result.acceptedCommitOid !== candidate.candidateCommitOid ||
+    result.acceptedTreeOid !== candidate.candidateTreeOid
+  ) {
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_repository_admission_capability_invalid',
+    );
+  }
+  const acceptedRepositoryCapability = issueAcceptedRepositoryCapability({
+    acceptedRepositoryOwnerToken: input.nextAcceptedRepositoryOwnerToken,
+    invocationOwnerToken: managed.invocationOwnerToken,
+    helperCapability: managed.helperCapability,
+    repositoryPath: managed.repositoryPath,
+    repositoryDev: repositoryInfo.dev,
+    repositoryIno: repositoryInfo.ino,
+    acceptedRef: result.acceptedRef,
+    acceptedCommitOid: result.acceptedCommitOid,
+    acceptedTreeOid: result.acceptedTreeOid,
+    managedTreePolicyVersion: result.managedTreePolicyVersion,
+  });
+  return Object.freeze({ ...result, acceptedRepositoryCapability });
 }
 
 export function requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal(input: {
