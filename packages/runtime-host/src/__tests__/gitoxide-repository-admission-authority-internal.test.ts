@@ -18,12 +18,15 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { once } from 'node:events';
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { MANAGED_MUTATION_EXECUTION_PROFILE_V1 } from '@maka/core/runtime-event';
+import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import {
   admitGitoxideHelperArtifactInternal,
   GitoxideHelperArtifactAuthorityError,
@@ -41,6 +44,11 @@ import {
   requireGitoxideRepositoryAdmissionInternal,
 } from '../server/gitoxide-repository-admission-authority-internal.js';
 import { GitoxideHelperInvocationError } from '../server/gitoxide-helper-invocation-internal.js';
+import {
+  createGitoxideMutationCandidateAuthorityInternal,
+  gitoxideMutationCandidateReceiptRootInternal,
+  GitoxideMutationCandidateAuthorityError,
+} from '../server/gitoxide-mutation-candidate-receipt-authority-internal.js';
 
 interface AdmittedHelper {
   readonly invocationOwnerToken: object;
@@ -428,6 +436,287 @@ test('publishes an operation-bound candidate without advancing accepted authorit
   );
 });
 
+test('publishes a durable operation-bound candidate receipt and rejects tampering', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the real helper contract test');
+    return;
+  }
+  const sourceRepositoryPath = await createRepository(t, 'sha1');
+  await writeFile(join(sourceRepositoryPath, 'hello.txt'), 'durable candidate base\n');
+  git(sourceRepositoryPath, ['add', 'hello.txt']);
+  git(sourceRepositoryPath, [
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=maka@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'fixture',
+  ]);
+  const storageRoot = await realpath(
+    await mkdtemp(join(tmpdir(), 'maka-gitoxide-candidate-receipt-')),
+  );
+  t.after(() => rm(storageRoot, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+
+  const admissionOwnerToken = {};
+  const acceptedRepositoryOwnerToken = {};
+  const admitted = await admitGitoxideRepositoryInternal({
+    ...helper,
+    admissionOwnerToken,
+    repositoryPath: sourceRepositoryPath,
+  });
+  assert.equal(admitted.kind, 'accepted');
+  if (admitted.kind !== 'accepted') return;
+  const imported = await importAdmittedGitoxideRepositoryInternal({
+    admissionOwnerToken,
+    repositoryCapability: admitted.capability,
+    acceptedRepositoryOwnerToken,
+    destinationRepositoryPath: join(storageRoot, 'managed.git'),
+  });
+  const baseHead = {
+    repositoryId: 'repository_11111111111111111111111111111111',
+    workspaceId: 'workspace_22222222222222222222222222222222',
+    workspaceEpochId: 'epoch_33333333333333333333333333333333',
+    workspaceVersionId: 'version_44444444444444444444444444444444',
+    acceptedEventId: 'baseline-event-1',
+    commitOid: imported.baselineCommitOid,
+    treeOid: imported.baselineTreeOid,
+    revision: 1,
+  } as const;
+  const authority = await createGitoxideMutationCandidateAuthorityInternal({
+    storageRootLease: rootOwner.lease,
+    baseHead,
+    acceptedRepositoryOwnerToken,
+    acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+  });
+  const request = {
+    operationId: 'operation-durable-receipt',
+    path: 'docs/result.txt',
+    content: 'durable result\n',
+    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+  } as const;
+
+  const first = await authority.capture(request);
+  assert.equal(authority.validate(first), first.receipt);
+  assert.equal(first.receipt.disposition, 'published');
+  assert.equal(first.receipt.baseCommitOid, baseHead.commitOid);
+  assert.equal(first.receipt.baseTreeOid, baseHead.treeOid);
+  assert.equal(first.receipt.path, request.path);
+  assert.equal(first.receipt.contentSha256, sha256(request.content));
+  assert.deepEqual((await authority.capture(request)).receipt, first.receipt);
+
+  const receiptPath = join(
+    gitoxideMutationCandidateReceiptRootInternal(storageRoot, baseHead),
+    `${sha256(request.operationId).slice(7)}.json`,
+  );
+  const tampered = JSON.parse(await readFile(receiptPath, 'utf8')) as Record<string, unknown>;
+  tampered.path = 'forged.txt';
+  await writeFile(receiptPath, `${JSON.stringify(tampered)}\n`, 'utf8');
+  await assert.rejects(
+    authority.capture(request),
+    (error) =>
+      error instanceof GitoxideMutationCandidateAuthorityError &&
+      error.code === 'gitoxide_mutation_candidate_identity_conflict',
+  );
+});
+
+test('converges a ref-only candidate publication by replaying the pure request', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the real helper contract test');
+    return;
+  }
+  const sourceRepositoryPath = await createRepository(t, 'sha1');
+  await writeFile(join(sourceRepositoryPath, 'hello.txt'), 'ref-only base\n');
+  git(sourceRepositoryPath, ['add', 'hello.txt']);
+  git(sourceRepositoryPath, [
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=maka@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'fixture',
+  ]);
+  const storageRoot = await realpath(
+    await mkdtemp(join(tmpdir(), 'maka-gitoxide-candidate-replay-')),
+  );
+  t.after(() => rm(storageRoot, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const admissionOwnerToken = {};
+  const acceptedRepositoryOwnerToken = {};
+  const admitted = await admitGitoxideRepositoryInternal({
+    ...helper,
+    admissionOwnerToken,
+    repositoryPath: sourceRepositoryPath,
+  });
+  assert.equal(admitted.kind, 'accepted');
+  if (admitted.kind !== 'accepted') return;
+  const imported = await importAdmittedGitoxideRepositoryInternal({
+    admissionOwnerToken,
+    repositoryCapability: admitted.capability,
+    acceptedRepositoryOwnerToken,
+    destinationRepositoryPath: join(storageRoot, 'managed.git'),
+  });
+  const baseHead = {
+    repositoryId: 'repository_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    workspaceId: 'workspace_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    workspaceEpochId: 'epoch_cccccccccccccccccccccccccccccccc',
+    workspaceVersionId: 'version_dddddddddddddddddddddddddddddddd',
+    acceptedEventId: 'baseline-event-replay',
+    commitOid: imported.baselineCommitOid,
+    treeOid: imported.baselineTreeOid,
+    revision: 1,
+  } as const;
+  let stopped = false;
+  const interrupted = await createGitoxideMutationCandidateAuthorityInternal({
+    storageRootLease: rootOwner.lease,
+    baseHead,
+    acceptedRepositoryOwnerToken,
+    acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+    failpoint: (point) => {
+      if (!stopped && point === 'after_candidate_ref') {
+        stopped = true;
+        throw new Error('simulated process stop after candidate ref');
+      }
+    },
+  });
+  const request = {
+    operationId: 'operation-ref-only',
+    path: 'result.txt',
+    content: 'replayed pure result\n',
+    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+  } as const;
+  await assert.rejects(interrupted.capture(request), /simulated process stop/);
+
+  const recovered = await createGitoxideMutationCandidateAuthorityInternal({
+    storageRootLease: rootOwner.lease,
+    baseHead,
+    acceptedRepositoryOwnerToken,
+    acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+  });
+  const proof = await recovered.capture(request);
+  assert.equal(proof.receipt.disposition, 'published');
+  assert.equal(recovered.validate(proof), proof.receipt);
+});
+
+test('recovers a ref-only candidate after the publishing process exits', async (t) => {
+  const helper = await admittedHelper();
+  const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
+  if (!helper || !helperPath) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the real helper crash test');
+    return;
+  }
+  const sourceRepositoryPath = await createRepository(t, 'sha1');
+  await writeFile(join(sourceRepositoryPath, 'hello.txt'), 'process crash base\n');
+  git(sourceRepositoryPath, ['add', 'hello.txt']);
+  git(sourceRepositoryPath, [
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=maka@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'fixture',
+  ]);
+  const baseCommitOid = git(sourceRepositoryPath, ['rev-parse', 'HEAD']);
+  const baseTreeOid = git(sourceRepositoryPath, ['rev-parse', 'HEAD^{tree}']);
+  const storageRoot = await realpath(
+    await mkdtemp(join(tmpdir(), 'maka-gitoxide-candidate-process-crash-')),
+  );
+  t.after(() => rm(storageRoot, { recursive: true, force: true }));
+  await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const destinationRepositoryPath = join(storageRoot, 'managed.git');
+  const fixture = {
+    storageRoot,
+    sourceRepositoryPath,
+    destinationRepositoryPath,
+    helperPath: await realpath(helperPath),
+    repositoryId: 'repository_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+    workspaceId: 'workspace_ffffffffffffffffffffffffffffffff',
+    workspaceEpochId: 'epoch_11111111111111111111111111111111',
+    workspaceVersionId: 'version_22222222222222222222222222222222',
+    acceptedEventId: 'baseline-event-process-crash',
+    baseCommitOid,
+    baseTreeOid,
+    operationId: 'operation-process-crash',
+    path: 'result.txt',
+    content: 'process recovered result\n',
+  } as const;
+  const fixturePath = join(storageRoot, 'candidate-crash-fixture.json');
+  await writeFile(fixturePath, `${JSON.stringify(fixture)}\n`, 'utf8');
+  const child = spawn(
+    process.execPath,
+    [
+      join(import.meta.dirname, 'fixtures', 'gitoxide-candidate-receipt-crash-child.js'),
+      fixturePath,
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  const stderr: Buffer[] = [];
+  child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+  const [exitCode] = (await once(child, 'exit')) as [number | null];
+  assert.equal(exitCode, 71, Buffer.concat(stderr).toString('utf8'));
+
+  const rootCapability = await resolveStorageRoot({ path: storageRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const admissionOwnerToken = {};
+  const acceptedRepositoryOwnerToken = {};
+  const admitted = await admitGitoxideRepositoryInternal({
+    ...helper,
+    admissionOwnerToken,
+    repositoryPath: sourceRepositoryPath,
+  });
+  assert.equal(admitted.kind, 'accepted');
+  if (admitted.kind !== 'accepted') return;
+  const imported = await importAdmittedGitoxideRepositoryInternal({
+    admissionOwnerToken,
+    repositoryCapability: admitted.capability,
+    acceptedRepositoryOwnerToken,
+    destinationRepositoryPath,
+  });
+  const baseHead = {
+    repositoryId: fixture.repositoryId,
+    workspaceId: fixture.workspaceId,
+    workspaceEpochId: fixture.workspaceEpochId,
+    workspaceVersionId: fixture.workspaceVersionId,
+    acceptedEventId: fixture.acceptedEventId,
+    commitOid: baseCommitOid,
+    treeOid: baseTreeOid,
+    revision: 1,
+  } as const;
+  const authority = await createGitoxideMutationCandidateAuthorityInternal({
+    storageRootLease: rootOwner.lease,
+    baseHead,
+    acceptedRepositoryOwnerToken,
+    acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+  });
+  const proof = await authority.capture({
+    operationId: fixture.operationId,
+    path: fixture.path,
+    content: fixture.content,
+    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+  });
+  assert.equal(
+    proof.receipt.candidateCommitOid,
+    gitBare(destinationRepositoryPath, ['rev-parse', proof.receipt.candidateRef]),
+  );
+  assert.equal(authority.validate(proof), proof.receipt);
+});
+
 test('reads an immutable accepted-tree file without consulting the projection filesystem', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {
@@ -598,4 +887,8 @@ function gitBare(repositoryPath: string, args: readonly string[]): string {
   return execFileSync('git', [`--git-dir=${repositoryPath}`, ...args], {
     encoding: 'utf8',
   }).trim();
+}
+
+function sha256(value: string): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(value, 'utf8').digest('hex')}`;
 }
