@@ -630,8 +630,8 @@ test('recovers a ref-only candidate after the publishing process exits', async (
     '-m',
     'fixture',
   ]);
-  const baseCommitOid = git(sourceRepositoryPath, ['rev-parse', 'HEAD']);
-  const baseTreeOid = git(sourceRepositoryPath, ['rev-parse', 'HEAD^{tree}']);
+  const sourceHeadCommitOid = git(sourceRepositoryPath, ['rev-parse', 'HEAD']);
+  const sourceTreeOid = git(sourceRepositoryPath, ['rev-parse', 'HEAD^{tree}']);
   const storageRoot = await realpath(
     await mkdtemp(join(tmpdir(), 'maka-gitoxide-candidate-process-crash-')),
   );
@@ -648,8 +648,8 @@ test('recovers a ref-only candidate after the publishing process exits', async (
     workspaceEpochId: 'epoch_11111111111111111111111111111111',
     workspaceVersionId: 'version_22222222222222222222222222222222',
     acceptedEventId: 'baseline-event-process-crash',
-    baseCommitOid,
-    baseTreeOid,
+    sourceHeadCommitOid,
+    sourceTreeOid,
     operationId: 'operation-process-crash',
     path: 'result.txt',
     content: 'process recovered result\n',
@@ -694,8 +694,8 @@ test('recovers a ref-only candidate after the publishing process exits', async (
     workspaceEpochId: fixture.workspaceEpochId,
     workspaceVersionId: fixture.workspaceVersionId,
     acceptedEventId: fixture.acceptedEventId,
-    commitOid: baseCommitOid,
-    treeOid: baseTreeOid,
+    commitOid: imported.baselineCommitOid,
+    treeOid: imported.baselineTreeOid,
     revision: 1,
   } as const;
   const authority = await createGitoxideMutationCandidateAuthorityInternal({
