@@ -59,7 +59,7 @@ fresh SHA-1 bare baseline repository
 | observation owner | short-lived invocation owner |
 | capability owner | repository admission authority |
 | admission 原子性边界 | 一次 canonical path observation + 一次 exact helper response + 进程内 capability 签发 |
-| import 原子性边界 | 完整 preflight 后用 `create_dir()` 领取 fresh destination；baseline ref 只允许 `MustNotExist` |
+| import 原子性边界 | 首次 import 用 `create_dir()` 领取 fresh destination 并写入严格 owner marker；exact retry 只接受同一 marker、bare identity 与确定性 baseline ref |
 | accepted | SHA-1 exact commit/tree，签发 opaque capability |
 | policy rejected | SHA-256/未知 format，返回 rejection，不签发 capability |
 | helper/路径失败 | 沿用 invocation owner 的稳定 fail-closed error |
