@@ -84,6 +84,33 @@ export interface ContinuationClaimV1 {
   claimedAt: number;
 }
 
+export interface ManagedWorkspaceContinuationBoundaryV1 {
+  protocol: 'managed_workspace_continuation_boundary_v1';
+  storageRootId: string;
+  repositoryId: string;
+  workspaceId: string;
+  workspaceEpochId: string;
+  workspaceInstanceId: string;
+  workspaceVersionId: string;
+  acceptedEventId: string;
+  revision: number;
+  objectFormat: 'sha1' | 'sha256';
+  sourceCommitOid: string;
+  sourceTreeOid: string;
+  commitOid: string;
+  treeOid: string;
+  materializationProfileDigest: RuntimeBoundaryDigest;
+  policyHash: RuntimeBoundaryDigest;
+  executionProfileDigest: RuntimeBoundaryDigest;
+}
+
+export interface ContinuationClaimV2 extends Omit<ContinuationClaimV1, 'protocol'> {
+  protocol: 'continuation_claim_v2';
+  workspaceBoundary: ManagedWorkspaceContinuationBoundaryV1;
+}
+
+export type ContinuationClaim = ContinuationClaimV1 | ContinuationClaimV2;
+
 export function buildImmutableRuntimePrefix(
   identity: RuntimePrefixIdentityV1,
   rows: readonly RuntimePrefixRowV1[],
@@ -182,6 +209,28 @@ export function digestRuntimeBoundaryManifest(
   return `sha256:${hash.digest('hex')}`;
 }
 
+export function digestWorkspaceBoundContinuationBoundary(
+  boundary: RuntimeBoundaryCursorV1,
+  workspaceBoundary: ManagedWorkspaceContinuationBoundaryV1,
+): RuntimeBoundaryDigest {
+  const runtime = decodeRuntimeBoundaryCursor(boundary);
+  const workspace = decodeManagedWorkspaceContinuationBoundary(workspaceBoundary);
+  const hash = nodeCrypto.createHash('sha256');
+  updateLengthPrefixed(hash, Buffer.from('maka.workspace-bound-continuation.v1', 'utf8'));
+  updateLengthPrefixed(
+    hash,
+    Buffer.from(
+      stableJsonStringify({
+        protocol: 'workspace_bound_continuation_boundary_v1',
+        runtime,
+        workspace,
+      }),
+      'utf8',
+    ),
+  );
+  return `sha256:${hash.digest('hex')}`;
+}
+
 export function decodeRuntimePrefixSegment(value: unknown): RuntimePrefixSegmentV1 {
   if (
     !isRecord(value) ||
@@ -220,21 +269,24 @@ export function decodeRuntimeBoundaryCursor(value: unknown): RuntimeBoundaryCurs
   return cursor;
 }
 
-export function decodeContinuationClaim(value: unknown): ContinuationClaimV1 {
+export function decodeContinuationClaim(value: unknown): ContinuationClaim {
+  const isV2 = isRecord(value) && value.protocol === 'continuation_claim_v2';
+  const expectedKeys = [
+    'protocol',
+    'claimId',
+    'boundaryDigest',
+    'boundary',
+    ...(isV2 ? ['workspaceBoundary'] : []),
+    'providerProjectionVersion',
+    'providerReplayDigest',
+    'target',
+    'targetRunHeader',
+    'claimedAt',
+  ];
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, [
-      'protocol',
-      'claimId',
-      'boundaryDigest',
-      'boundary',
-      'providerProjectionVersion',
-      'providerReplayDigest',
-      'target',
-      'targetRunHeader',
-      'claimedAt',
-    ]) ||
-    value.protocol !== 'continuation_claim_v1' ||
+    !hasExactKeys(value, expectedKeys) ||
+    (value.protocol !== 'continuation_claim_v1' && value.protocol !== 'continuation_claim_v2') ||
     !isNonEmptyString(value.claimId) ||
     !isRecord(value.target) ||
     !hasExactKeys(value.target, ['sessionId', 'invocationId', 'runId', 'turnId']) ||
@@ -251,8 +303,18 @@ export function decodeContinuationClaim(value: unknown): ContinuationClaimV1 {
   const boundary = decodeRuntimeBoundaryCursor(value.boundary);
   const boundaryDigest = decodeBoundaryDigest(value.boundaryDigest);
   const providerReplayDigest = decodeBoundaryDigest(value.providerReplayDigest);
-  if (boundaryDigest !== boundary.manifestDigest) {
-    throw new Error('Continuation claim boundary digest mismatch');
+  const workspaceBoundary = isV2
+    ? decodeManagedWorkspaceContinuationBoundary(value.workspaceBoundary)
+    : undefined;
+  const expectedBoundaryDigest = workspaceBoundary
+    ? digestWorkspaceBoundContinuationBoundary(boundary, workspaceBoundary)
+    : boundary.manifestDigest;
+  if (boundaryDigest !== expectedBoundaryDigest) {
+    throw new Error(
+      workspaceBoundary
+        ? 'Continuation claim workspace boundary digest mismatch'
+        : 'Continuation claim boundary digest mismatch',
+    );
   }
   const source = boundary.segments.at(-1)!;
   if (value.target.sessionId !== source.identity.sessionId) {
@@ -285,7 +347,8 @@ export function decodeContinuationClaim(value: unknown): ContinuationClaimV1 {
     targetRunHeader.failureMessage !== undefined ||
     !continuationSource ||
     !('protocol' in continuationSource) ||
-    continuationSource.protocol !== 'continuation_source_v2' ||
+    continuationSource.protocol !==
+      (workspaceBoundary ? 'continuation_source_v3' : 'continuation_source_v2') ||
     continuationSource.claimId !== value.claimId ||
     continuationSource.boundaryDigest !== boundaryDigest ||
     continuationSource.sourceInvocationId !== source.identity.invocationId ||
@@ -297,11 +360,14 @@ export function decodeContinuationClaim(value: unknown): ContinuationClaimV1 {
   ) {
     throw new Error('Continuation claim target Run header mismatch');
   }
-  return {
-    protocol: 'continuation_claim_v1',
+  const claim = {
+    protocol: workspaceBoundary
+      ? ('continuation_claim_v2' as const)
+      : ('continuation_claim_v1' as const),
     claimId: value.claimId,
     boundaryDigest,
     boundary,
+    ...(workspaceBoundary ? { workspaceBoundary } : {}),
     providerProjectionVersion: 1,
     providerReplayDigest,
     target: {
@@ -313,6 +379,92 @@ export function decodeContinuationClaim(value: unknown): ContinuationClaimV1 {
     targetRunHeader,
     claimedAt: value.claimedAt as number,
   };
+  return claim as ContinuationClaim;
+}
+
+export function decodeManagedWorkspaceContinuationBoundary(
+  value: unknown,
+): ManagedWorkspaceContinuationBoundaryV1 {
+  const keys = [
+    'protocol',
+    'storageRootId',
+    'repositoryId',
+    'workspaceId',
+    'workspaceEpochId',
+    'workspaceInstanceId',
+    'workspaceVersionId',
+    'acceptedEventId',
+    'revision',
+    'objectFormat',
+    'sourceCommitOid',
+    'sourceTreeOid',
+    'commitOid',
+    'treeOid',
+    'materializationProfileDigest',
+    'policyHash',
+    'executionProfileDigest',
+  ];
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, keys) ||
+    value.protocol !== 'managed_workspace_continuation_boundary_v1' ||
+    typeof value.storageRootId !== 'string' ||
+    !/^[0-9a-f]{64}$/u.test(value.storageRootId) ||
+    typeof value.repositoryId !== 'string' ||
+    !/^repository_[0-9a-f]{32}$/u.test(value.repositoryId) ||
+    typeof value.workspaceId !== 'string' ||
+    !/^workspace_[0-9a-f]{32}$/u.test(value.workspaceId) ||
+    typeof value.workspaceEpochId !== 'string' ||
+    !/^epoch_[0-9a-f]{32}$/u.test(value.workspaceEpochId) ||
+    typeof value.workspaceInstanceId !== 'string' ||
+    !/^instance_[0-9a-f]{32}$/u.test(value.workspaceInstanceId) ||
+    typeof value.workspaceVersionId !== 'string' ||
+    !/^version_[0-9a-f]{32}$/u.test(value.workspaceVersionId) ||
+    !isNonEmptyString(value.acceptedEventId) ||
+    !Number.isSafeInteger(value.revision) ||
+    (value.revision as number) <= 0 ||
+    (value.objectFormat !== 'sha1' && value.objectFormat !== 'sha256') ||
+    typeof value.sourceCommitOid !== 'string' ||
+    typeof value.sourceTreeOid !== 'string' ||
+    !oidMatchesFormat(value.sourceCommitOid, value.objectFormat) ||
+    !oidMatchesFormat(value.sourceTreeOid, value.objectFormat) ||
+    typeof value.commitOid !== 'string' ||
+    typeof value.treeOid !== 'string' ||
+    !oidMatchesFormat(value.commitOid, value.objectFormat) ||
+    !oidMatchesFormat(value.treeOid, value.objectFormat) ||
+    !isBoundaryDigest(value.materializationProfileDigest) ||
+    !isBoundaryDigest(value.policyHash) ||
+    !isBoundaryDigest(value.executionProfileDigest)
+  ) {
+    throw new Error('Invalid managed workspace continuation boundary');
+  }
+  return {
+    protocol: 'managed_workspace_continuation_boundary_v1',
+    storageRootId: value.storageRootId,
+    repositoryId: value.repositoryId,
+    workspaceId: value.workspaceId,
+    workspaceEpochId: value.workspaceEpochId,
+    workspaceInstanceId: value.workspaceInstanceId,
+    workspaceVersionId: value.workspaceVersionId,
+    acceptedEventId: value.acceptedEventId,
+    revision: value.revision as number,
+    objectFormat: value.objectFormat,
+    sourceCommitOid: value.sourceCommitOid,
+    sourceTreeOid: value.sourceTreeOid,
+    commitOid: value.commitOid,
+    treeOid: value.treeOid,
+    materializationProfileDigest: value.materializationProfileDigest,
+    policyHash: value.policyHash,
+    executionProfileDigest: value.executionProfileDigest,
+  };
+}
+
+function oidMatchesFormat(value: string, format: 'sha1' | 'sha256'): boolean {
+  return new RegExp(`^[0-9a-f]{${format === 'sha1' ? 40 : 64}}$`, 'u').test(value);
+}
+
+function isBoundaryDigest(value: unknown): value is RuntimeBoundaryDigest {
+  return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/u.test(value);
 }
 
 function canonicalizePrefixRows(

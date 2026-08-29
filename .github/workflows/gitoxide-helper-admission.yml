@@ -34,6 +34,8 @@ on:
       - 'packages/runtime-host/src/__tests__/gitoxide-repository-admission-authority-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-write-edit-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-session-owner-internal.test.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-continuation-crash.test.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/execution-host*.ts'
       - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
       - 'packages/runtime-host/src/__tests__/hosted-execution-tool-profile.test.ts'
       - 'scripts/prepare-gitoxide-helper*'
@@ -63,6 +65,8 @@ on:
       - 'packages/runtime-host/src/__tests__/gitoxide-repository-admission-authority-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-write-edit-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-session-owner-internal.test.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-continuation-crash.test.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/execution-host*.ts'
       - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
       - 'packages/runtime-host/src/__tests__/hosted-execution-tool-profile.test.ts'
       - 'scripts/prepare-gitoxide-helper*'
@@ -125,6 +129,7 @@ jobs:
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-managed-write-edit-owner-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-managed-session-owner-internal.test.js
+          packages/runtime-host/dist/__tests__/gitoxide-managed-continuation-crash.test.js
           packages/runtime-host/dist/__tests__/packaged-gitoxide-helper.test.js
           packages/runtime-host/dist/__tests__/hosted-execution-tool-profile.test.js
       - name: Test packaged helper preparation

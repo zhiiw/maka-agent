@@ -5351,6 +5351,64 @@ describe('SessionManager permission mode updates', () => {
     expect(plan.rejectionReasons).toEqual(['safety_observation_unavailable']);
   });
 
+  test('never downgrades a managed session when its workspace boundary is unavailable', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends: new BackendRegistry(),
+      safeBoundaryResumeEnabled: true,
+      inspectContinuationSafety: async () => ({
+        workspaceIdentity: 'workspace-managed',
+        backgroundOperationsSettled: true,
+        availableToolNames: ['Write', 'Edit'],
+      }),
+      newId: nextId(),
+      now: nextNow(6_533),
+    });
+    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v1' }));
+    const header = await store.readHeader(session.id);
+    expect(header.toolProfile).toBe('managed-coding-v1');
+    const sourceRunId = 'source-run-managed-boundary-missing';
+    const sourceTurnId = 'source-turn-managed-boundary-missing';
+    await seedRuntimeRun(
+      runStore,
+      makeRunHeader({
+        runId: sourceRunId,
+        sessionId: session.id,
+        turnId: sourceTurnId,
+        status: 'failed',
+        cwd: header.cwd,
+        workspaceIdentity: 'workspace-managed',
+        createdAt: 1,
+        updatedAt: 2,
+        completedAt: 2,
+        failureClass: 'app_restarted',
+      }),
+      [
+        runtimeEvent({
+          id: 'source-terminal-managed-boundary-missing',
+          invocationId: 'source-invocation-managed-boundary-missing',
+          runId: sourceRunId,
+          sessionId: session.id,
+          turnId: sourceTurnId,
+          ts: 2,
+          status: 'failed',
+          actions: { endInvocation: true, stateDelta: { failureClass: 'app_restarted' } },
+        }),
+      ],
+    );
+
+    const plan = await manager.planAuthoritativeSafeBoundaryContinuation(session.id, {
+      sourceRunId,
+    });
+
+    expect(plan.disposition).toBe('park');
+    expect(plan.rejectionReasons).toEqual(['workspace_boundary_unavailable']);
+  });
+
   test('keeps the authoritative continuation entry disabled unless the host enables it', async () => {
     const store = new MemorySessionStore();
     const backends = new BackendRegistry();
@@ -16599,6 +16657,7 @@ class MemorySessionStore implements SessionStore {
       permissionMode: input.permissionMode,
       collaborationMode: input.collaborationMode ?? 'agent',
       orchestrationMode: input.orchestrationMode ?? 'default',
+      ...(input.toolProfile !== undefined ? { toolProfile: input.toolProfile } : {}),
       schemaVersion: 1,
     };
     this.headers.set(header.id, header);
@@ -17142,6 +17201,9 @@ class MemoryAgentRunStore
 
   async claimContinuation(input: { claim: ContinuationClaimV1 }) {
     const claim = decodeContinuationClaim(input.claim);
+    if (claim.protocol !== 'continuation_claim_v1') {
+      throw new Error('Memory continuation authority only supports v1 claims');
+    }
     const existing = this.continuationClaims.get(claim.boundaryDigest);
     if (existing) return { kind: 'existing' as const, claim: existing };
     const conflict = [...this.continuationClaims.values()].find(

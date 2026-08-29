@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { createHash } from 'node:crypto';
 import { isCanonicalManagedMutationPathV1, type RuntimeEvent } from './runtime-event.js';
 
 export const WORKSPACE_EPOCH_OPENED_FACT_KIND = 'maka.workspace.epoch_opened' as const;
@@ -30,6 +31,25 @@ export const WORKSPACE_MATERIALIZATION_SEMANTICS_V1 =
   'git_tree_materialized_with_fixed_config_v1' as const;
 
 export type WorkspaceGitObjectFormat = 'sha1' | 'sha256';
+
+/** Durable commitment to both Git materialization and Runtime transform semantics. */
+export function workspaceMutationPolicyHashV1(
+  materializationProfileDigest: `sha256:${string}`,
+  mutationExecutionProfileDigest: `sha256:${string}`,
+): `sha256:${string}` {
+  if (
+    !isSha256Digest(materializationProfileDigest) ||
+    !isSha256Digest(mutationExecutionProfileDigest)
+  ) {
+    throw new Error('Invalid workspace mutation policy profile digest');
+  }
+  const hash = createHash('sha256');
+  hash.update('maka.workspace-mutation-policy.v1\0', 'utf8');
+  hash.update(materializationProfileDigest, 'utf8');
+  hash.update('\0', 'utf8');
+  hash.update(mutationExecutionProfileDigest, 'utf8');
+  return `sha256:${hash.digest('hex')}`;
+}
 
 export interface WorkspaceEpochDescriptorV1 {
   repositoryId: string;

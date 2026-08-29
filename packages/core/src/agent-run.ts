@@ -70,9 +70,20 @@ export interface AgentRunContinuationSourceV2 extends AgentRunContinuationSource
   replayManifestDigest: `sha256:${string}`;
 }
 
+export interface AgentRunContinuationSourceV3 extends AgentRunContinuationSourceV1 {
+  protocol: 'continuation_source_v3';
+  claimId: string;
+  /** Composite RuntimeEvent + accepted workspace boundary identity. */
+  boundaryDigest: `sha256:${string}`;
+  sourcePrefixDigest: `sha256:${string}`;
+  /** RuntimeEvent-only replay lineage identity. */
+  replayManifestDigest: `sha256:${string}`;
+}
+
 export type AgentRunContinuationSource =
   | AgentRunContinuationSourceV1
-  | AgentRunContinuationSourceV2;
+  | AgentRunContinuationSourceV2
+  | AgentRunContinuationSourceV3;
 
 export type RootExecutionDescriptor =
   | {
@@ -104,6 +115,7 @@ export type RootExecutionDescriptor =
       sourceRuntimeEventHighWater: number;
       claimId: string;
       boundaryDigest: `sha256:${string}`;
+      replayManifestDigest?: `sha256:${string}`;
       providerReplayDigest: `sha256:${string}`;
       safetyDigest: `sha256:${string}`;
       targetInvocationId: string;
@@ -137,6 +149,20 @@ const AGENT_RUN_CONTINUATION_SOURCE_V1_SHAPE = defineObjectShape<AgentRunContinu
   [],
 );
 const AGENT_RUN_CONTINUATION_SOURCE_V2_SHAPE = defineObjectShape<AgentRunContinuationSourceV2>()(
+  [
+    'protocol',
+    'claimId',
+    'boundaryDigest',
+    'sourceInvocationId',
+    'sourceRunId',
+    'sourceTurnId',
+    'sourceRuntimeEventHighWater',
+    'sourcePrefixDigest',
+    'replayManifestDigest',
+  ],
+  [],
+);
+const AGENT_RUN_CONTINUATION_SOURCE_V3_SHAPE = defineObjectShape<AgentRunContinuationSourceV3>()(
   [
     'protocol',
     'claimId',
@@ -280,14 +306,16 @@ export function agentRunMatchesHostedRootExecution(
       run.parentTurnId === execution.sourceTurnId &&
       source !== undefined &&
       'protocol' in source &&
-      source.protocol === 'continuation_source_v2' &&
+      (source.protocol === 'continuation_source_v2' ||
+        source.protocol === 'continuation_source_v3') &&
       source.sourceInvocationId === execution.sourceInvocationId &&
       source.sourceRunId === execution.sourceRunId &&
       source.sourceTurnId === execution.sourceTurnId &&
       source.sourceRuntimeEventHighWater === execution.sourceRuntimeEventHighWater &&
       source.claimId === execution.claimId &&
       source.boundaryDigest === execution.boundaryDigest &&
-      source.replayManifestDigest === execution.boundaryDigest &&
+      source.replayManifestDigest ===
+        (execution.replayManifestDigest ?? execution.boundaryDigest) &&
       run.resumedFromRunId === undefined &&
       run.retriedFromRunId === undefined &&
       run.agentId === undefined &&
@@ -713,9 +741,14 @@ function isAgentRunContinuationSource(value: unknown): value is AgentRunContinua
     value.sourceRuntimeEventHighWater >= 0;
   if (!common) return false;
   if (hasExactShape(value, AGENT_RUN_CONTINUATION_SOURCE_V1_SHAPE)) return true;
-  return (
+  const isV2 =
     hasExactShape(value, AGENT_RUN_CONTINUATION_SOURCE_V2_SHAPE) &&
-    value.protocol === 'continuation_source_v2' &&
+    value.protocol === 'continuation_source_v2';
+  const isV3 =
+    hasExactShape(value, AGENT_RUN_CONTINUATION_SOURCE_V3_SHAPE) &&
+    value.protocol === 'continuation_source_v3';
+  return (
+    (isV2 || isV3) &&
     typeof value.claimId === 'string' &&
     value.claimId.length > 0 &&
     typeof value.sourceInvocationId === 'string' &&
@@ -729,7 +762,7 @@ function isAgentRunContinuationSource(value: unknown): value is AgentRunContinua
     isSha256Digest(value.boundaryDigest) &&
     isSha256Digest(value.sourcePrefixDigest) &&
     isSha256Digest(value.replayManifestDigest) &&
-    value.replayManifestDigest === value.boundaryDigest
+    (!isV2 || value.replayManifestDigest === value.boundaryDigest)
   );
 }
 

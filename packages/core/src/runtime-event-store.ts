@@ -20,6 +20,7 @@
 import type { RuntimeEvent } from './runtime-event.js';
 import type {
   ContinuationClaimV1,
+  ContinuationClaimV2,
   ImmutableRuntimePrefixV1,
   RuntimeBoundaryDigest,
 } from './runtime-boundary.js';
@@ -33,6 +34,8 @@ import { WORKSPACE_VERSION_AUTHORITY_CAPABILITY_V1 } from './workspace-version-a
 
 export const TOOL_RECOVERY_BUNDLE_CAPABILITY_V1 = 'tool_recovery_bundle_v1' as const;
 export const RUNTIME_CONTINUATION_AUTHORITY_V1 = 'runtime_continuation_authority_v1' as const;
+export const RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_V1 =
+  'runtime_workspace_bound_continuation_authority_v1' as const;
 
 export interface RuntimeRecoveryBundleCommit {
   operationId: string;
@@ -148,6 +151,41 @@ export interface RuntimeContinuationAuthorityStore extends RuntimeEventStore {
     claim: ContinuationClaimV1;
     event: RuntimeEvent;
   }): Promise<{ created: boolean; runtimeEventSeq: number }>;
+}
+
+export type WorkspaceBoundContinuationClaimResult =
+  | { kind: 'acquired'; claim: ContinuationClaimV2 }
+  | { kind: 'existing'; claim: ContinuationClaimV2 }
+  | { kind: 'conflict'; claim: ContinuationClaimV2 };
+
+export interface RuntimeWorkspaceBoundContinuationAuthorityStore extends RuntimeEventStore {
+  readonly workspaceBoundContinuationAuthorityCapability: typeof RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_V1;
+  claimWorkspaceBoundContinuation(input: {
+    claim: ContinuationClaimV2;
+  }): Promise<WorkspaceBoundContinuationClaimResult>;
+  readWorkspaceBoundContinuationClaimByBoundary(
+    boundaryDigest: RuntimeBoundaryDigest,
+  ): Promise<ContinuationClaimV2 | undefined>;
+  readWorkspaceBoundContinuationClaimStateByBoundary(
+    boundaryDigest: RuntimeBoundaryDigest,
+  ): Promise<ContinuationClaimStateV2 | undefined>;
+  listWorkspaceBoundContinuationClaimsForRecovery(
+    sessionId: string,
+  ): Promise<ContinuationClaimStateV2[]>;
+  commitWorkspaceBoundContinuationStart(input: {
+    claim: ContinuationClaimV2;
+    event: RuntimeEvent;
+  }): Promise<{ created: boolean; runtimeEventSeq: number }>;
+  commitWorkspaceBoundContinuationRepairStart(input: {
+    claim: ContinuationClaimV2;
+    event: RuntimeEvent;
+  }): Promise<{ created: boolean; runtimeEventSeq: number }>;
+}
+
+export interface ContinuationClaimStateV2 {
+  claim: ContinuationClaimV2;
+  startEventId?: string;
+  startKind?: 'runtime_admission' | 'claim_repair';
 }
 
 export interface RuntimeWorkspaceVersionAuthorityStore extends RuntimeEventStore {
