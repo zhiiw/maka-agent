@@ -45,6 +45,10 @@ import {
   type GitoxideManagedInspectionOwnerInternal,
 } from './gitoxide-managed-inspection-owner-internal.js';
 import {
+  createGitoxideManagedReviewOwnerInternal,
+  type GitoxideManagedReviewOwnerInternal,
+} from './gitoxide-managed-review-owner-internal.js';
+import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
   reopenGitoxideAcceptedRepositoryInternal,
@@ -60,6 +64,7 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly workspaceId: string;
   readonly workspaceEpochId: string;
   readonly inspection: GitoxideManagedInspectionOwnerInternal;
+  readonly review: GitoxideManagedReviewOwnerInternal;
   readonly writeEdit: GitoxideManagedWriteEditOwnerInternal;
 }
 
@@ -332,6 +337,56 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       return Object.freeze({ commitOid: head.commitOid, treeOid: head.treeOid });
     },
   });
+  const review = createGitoxideManagedReviewOwnerInternal({
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    repositoryPath,
+    async readReviewBoundary() {
+      const [epoch, baseline, head] = await Promise.all([
+        baselineAuthority.readEpoch(identity.workspaceId, identity.workspaceEpochId),
+        baselineAuthority.readVersion(identity.workspaceVersionId),
+        baselineAuthority.readHead(identity.workspaceId, identity.workspaceEpochId),
+      ]);
+      if (
+        !epoch ||
+        !baseline ||
+        !head ||
+        epoch.repositoryId !== identity.repositoryId ||
+        epoch.workspaceId !== identity.workspaceId ||
+        epoch.workspaceEpochId !== identity.workspaceEpochId ||
+        baseline.protocol !== 'workspace_baseline_accepted_v1' ||
+        baseline.repositoryId !== identity.repositoryId ||
+        baseline.workspaceId !== identity.workspaceId ||
+        baseline.workspaceEpochId !== identity.workspaceEpochId ||
+        baseline.workspaceVersionId !== identity.workspaceVersionId ||
+        head.repositoryId !== identity.repositoryId ||
+        head.workspaceId !== identity.workspaceId ||
+        head.workspaceEpochId !== identity.workspaceEpochId
+      ) {
+        throw new Error('Gitoxide managed review durable workspace boundary is unavailable');
+      }
+      const accepted = await baselineAuthority.readVersion(head.workspaceVersionId);
+      if (
+        !accepted ||
+        accepted.repositoryId !== head.repositoryId ||
+        accepted.workspaceId !== head.workspaceId ||
+        accepted.workspaceEpochId !== head.workspaceEpochId ||
+        accepted.workspaceVersionId !== head.workspaceVersionId ||
+        accepted.acceptedEventId !== head.acceptedEventId ||
+        accepted.commitOid !== head.commitOid ||
+        accepted.treeOid !== head.treeOid ||
+        accepted.policyHash !== baseline.policyHash
+      ) {
+        throw new Error('Gitoxide managed review accepted workspace version is unavailable');
+      }
+      return Object.freeze({
+        baselineCommitOid: baseline.commitOid,
+        baselineTreeOid: baseline.treeOid,
+        acceptedCommitOid: accepted.commitOid,
+        acceptedTreeOid: accepted.treeOid,
+      });
+    },
+  });
   await writeEdit.reconcileAcceptedProjection(input.abortSignal);
   return Object.freeze({
     repositoryPath,
@@ -339,6 +394,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     workspaceId: identity.workspaceId,
     workspaceEpochId: identity.workspaceEpochId,
     inspection,
+    review,
     writeEdit,
   });
 }

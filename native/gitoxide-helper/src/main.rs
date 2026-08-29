@@ -18,7 +18,7 @@
  */
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
@@ -48,6 +48,7 @@ const MAX_TREE_QUERY_PATTERN_BYTES: usize = 4096;
 const MAX_TREE_QUERY_RESULTS: u16 = 200;
 const MAX_TREE_QUERY_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TREE_QUERY_REGEX_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TREE_DIFF_ENTRIES: usize = 4096;
 const MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_IMPORT_FILES: u64 = 200_000;
 const MAX_COMMIT_OBJECT_BYTES: u64 = 1024 * 1024;
@@ -164,6 +165,7 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "invalid_tree_grep_pattern",
     "invalid_tree_query_limit",
     "tree_query_output_limit_exceeded",
+    "tree_diff_limit_exceeded",
     "unsupported_source_entry_kind",
     "unsupported_source_attributes",
     "unsupported_source_path",
@@ -250,6 +252,24 @@ enum Request {
         limit: u16,
         managed_tree_policy_version: u8,
     },
+    CompareAcceptedTrees {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        baseline_commit_oid: String,
+        accepted_commit_oid: String,
+        managed_tree_policy_version: u8,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TreeDiffEntry {
+    path: String,
+    status: &'static str,
+    old_blob_oid: Option<String>,
+    new_blob_oid: Option<String>,
+    old_executable: Option<bool>,
+    new_executable: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -391,6 +411,17 @@ enum Response<'a> {
         glob: Option<String>,
         matches: Vec<String>,
         truncated: bool,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    AcceptedTreesCompared {
+        protocol_version: u8,
+        object_format: &'static str,
+        baseline_commit_oid: String,
+        baseline_tree_oid: String,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        changes: Vec<TreeDiffEntry>,
         managed_tree_policy_version: u8,
     },
     #[serde(rename_all = "camelCase")]
@@ -566,6 +597,21 @@ fn run() -> Result<ExitCode, &'static str> {
                 glob,
                 max_count_per_file,
                 limit,
+                managed_tree_policy_version,
+            )
+        }
+        Request::CompareAcceptedTrees {
+            protocol_version,
+            repository_path,
+            baseline_commit_oid,
+            accepted_commit_oid,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            compare_accepted_trees(
+                repository_path,
+                baseline_commit_oid,
+                accepted_commit_oid,
                 managed_tree_policy_version,
             )
         }
@@ -1982,7 +2028,7 @@ fn list_tree_files(
         "",
         0,
         &mut stats,
-        &mut |relative_path, _blob_oid| {
+        &mut |relative_path, _blob_oid, _executable| {
             let Some(scoped_path) = tree_query_scoped_path(&path, relative_path) else {
                 return Ok(true);
             };
@@ -2075,7 +2121,7 @@ fn grep_tree_files(
         "",
         0,
         &mut stats,
-        &mut |relative_path, blob_oid| {
+        &mut |relative_path, blob_oid, _executable| {
             let Some(scoped_path) = tree_query_scoped_path(&path, relative_path) else {
                 return Ok(true);
             };
@@ -2150,6 +2196,82 @@ fn grep_tree_files(
     Ok(ExitCode::SUCCESS)
 }
 
+fn compare_accepted_trees(
+    repository_path: PathBuf,
+    baseline_commit_oid: String,
+    accepted_commit_oid: String,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    let repository = open_repository(repository_path)?;
+    let (baseline_commit, baseline_tree) =
+        accepted_commit_identity(&repository, &baseline_commit_oid)?;
+    let (accepted_commit, accepted_tree) =
+        accepted_commit_identity(&repository, &accepted_commit_oid)?;
+    let baseline_files = collect_accepted_tree_files(&repository, baseline_tree)?;
+    let accepted_files = collect_accepted_tree_files(&repository, accepted_tree)?;
+    let paths: BTreeSet<&String> = baseline_files.keys().chain(accepted_files.keys()).collect();
+    let mut changes = Vec::new();
+    for path in paths {
+        let old = baseline_files.get(path);
+        let new = accepted_files.get(path);
+        if old == new {
+            continue;
+        }
+        if changes.len() >= MAX_TREE_DIFF_ENTRIES {
+            return Err("tree_diff_limit_exceeded");
+        }
+        let status = match (old, new) {
+            (None, Some(_)) => "added",
+            (Some(_), None) => "deleted",
+            (Some((old_oid, _)), Some((new_oid, _))) if old_oid == new_oid => "mode_changed",
+            (Some(_), Some(_)) => "modified",
+            (None, None) => unreachable!(),
+        };
+        changes.push(TreeDiffEntry {
+            path: path.clone(),
+            status,
+            old_blob_oid: old.map(|(oid, _)| oid.clone()),
+            new_blob_oid: new.map(|(oid, _)| oid.clone()),
+            old_executable: old.map(|(_, executable)| *executable),
+            new_executable: new.map(|(_, executable)| *executable),
+        });
+    }
+    write_response(&Response::AcceptedTreesCompared {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        baseline_commit_oid: baseline_commit.to_string(),
+        baseline_tree_oid: baseline_tree.to_string(),
+        accepted_commit_oid: accepted_commit.to_string(),
+        accepted_tree_oid: accepted_tree.to_string(),
+        changes,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+fn collect_accepted_tree_files(
+    repository: &gix::Repository,
+    tree_oid: gix::hash::ObjectId,
+) -> Result<BTreeMap<String, (String, bool)>, &'static str> {
+    let mut files = BTreeMap::new();
+    let mut stats = ManagedTreeStats::default();
+    walk_accepted_tree_files(
+        repository,
+        tree_oid,
+        "",
+        0,
+        &mut stats,
+        &mut |path, blob_oid, executable| {
+            files.insert(path.to_owned(), (blob_oid.to_string(), executable));
+            Ok(true)
+        },
+    )?;
+    Ok(files)
+}
+
 fn assert_tree_query_input(path: &str, pattern: &str, limit: u16) -> Result<(), &'static str> {
     if path != "." && !is_canonical_successor_path_v3(path) {
         return Err("invalid_tree_query_path");
@@ -2182,7 +2304,7 @@ fn walk_accepted_tree_files<F>(
     visitor: &mut F,
 ) -> Result<bool, &'static str>
 where
-    F: FnMut(&str, gix::hash::ObjectId) -> Result<bool, &'static str>,
+    F: FnMut(&str, gix::hash::ObjectId, bool) -> Result<bool, &'static str>,
 {
     let tree = load_verified_object(
         repository,
@@ -2236,7 +2358,14 @@ where
                 }
             }
             gix::objs::tree::EntryKind::Blob | gix::objs::tree::EntryKind::BlobExecutable => {
-                if !visitor(&relative_path, entry.object_id())? {
+                if !visitor(
+                    &relative_path,
+                    entry.object_id(),
+                    matches!(
+                        entry.mode().kind(),
+                        gix::objs::tree::EntryKind::BlobExecutable
+                    ),
+                )? {
                     return Ok(false);
                 }
             }
