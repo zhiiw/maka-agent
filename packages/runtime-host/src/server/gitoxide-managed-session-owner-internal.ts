@@ -21,14 +21,18 @@ import { createHash } from 'node:crypto';
 import { mkdir, realpath } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { MANAGED_MUTATION_EXECUTION_PROFILE_V1 } from '@maka/core/runtime-event';
+import type { ManagedWorkspaceContinuationBoundaryV1 } from '@maka/core/runtime-boundary';
 import {
   WORKSPACE_MATERIALIZATION_SEMANTICS_V1,
+  workspaceMutationPolicyHashV1,
   type WorkspaceBaselineAuthorityInput,
 } from '@maka/core/workspace-version-authority';
 import type { InteractiveExecutionStoresWriter } from '@maka/storage/execution-stores';
 import {
   issueExecutionStoresWorkspaceBaselineAuthorityInternal,
+  issueExecutionStoresWorkspaceContinuationAuthorityInternal,
   requireExecutionStoresWorkspaceBaselineAuthorityInternal,
+  requireExecutionStoresWorkspaceContinuationAuthorityInternal,
 } from '@maka/storage/execution-stores-workspace-authority-internal';
 import { runWithStorageRootLease, type StorageRootLease } from '@maka/storage/root-authority';
 import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
@@ -43,10 +47,12 @@ import {
 import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
+  reopenGitoxideAcceptedRepositoryInternal,
   requireGitoxideRepositoryAdmissionInternal,
 } from './gitoxide-repository-admission-authority-internal.js';
 
 const MANAGED_REPOSITORY_DIRECTORY = 'gitoxide-managed-repositories';
+const ACCEPTED_REF = 'refs/maka/accepted';
 
 export interface GitoxideManagedSessionOwnerInternal {
   readonly repositoryPath: string;
@@ -58,6 +64,94 @@ export interface GitoxideManagedSessionOwnerInternal {
 }
 
 export type GitoxideManagedSessionOwnerFailpoint = 'after_repository_import';
+
+/**
+ * Re-observes an existing managed workspace without gaining mutation authority.
+ * The returned value is derived from one SQLite read transaction, then bound to
+ * the exact source HEAD and accepted Gitoxide ref before it reaches Runtime.
+ */
+export async function inspectGitoxideManagedContinuationBoundaryInternal(input: {
+  readonly storageRootLease: StorageRootLease<'interactive', 'write'>;
+  readonly stores: InteractiveExecutionStoresWriter;
+  readonly invocationOwnerToken: object;
+  readonly helperCapability: GitoxideHelperInvocationCapability;
+  readonly sourceRoot: string;
+  readonly sessionId: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<ManagedWorkspaceContinuationBoundaryV1 | undefined> {
+  input.abortSignal?.throwIfAborted();
+  const [storageRoot, sourceRoot] = await Promise.all([
+    runWithStorageRootLease(input.storageRootLease, 'interactive', 'write', async (root) => root),
+    realpath(input.sourceRoot),
+  ]);
+  const identity = deriveManagedSessionIdentity(sourceRoot, input.sessionId);
+  const continuationOwnerToken = {};
+  const capability = issueExecutionStoresWorkspaceContinuationAuthorityInternal({
+    ownerToken: continuationOwnerToken,
+    stores: input.stores,
+  });
+  const authority = requireExecutionStoresWorkspaceContinuationAuthorityInternal(
+    continuationOwnerToken,
+    capability,
+  );
+  const boundary = await authority.readContinuationBoundary(
+    identity.workspaceId,
+    identity.workspaceEpochId,
+    MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+  );
+  if (!boundary) return undefined;
+  if (
+    boundary.repositoryId !== identity.repositoryId ||
+    boundary.workspaceId !== identity.workspaceId ||
+    boundary.workspaceEpochId !== identity.workspaceEpochId ||
+    boundary.workspaceInstanceId !== identity.workspaceInstanceId ||
+    boundary.objectFormat !== 'sha1'
+  ) {
+    throw new Error('Gitoxide managed continuation boundary conflicts with session identity');
+  }
+
+  const sourceOwnerToken = {};
+  const sourceAdmission = await admitGitoxideRepositoryInternal({
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    admissionOwnerToken: sourceOwnerToken,
+    repositoryPath: sourceRoot,
+    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+  });
+  if (sourceAdmission.kind !== 'accepted') {
+    throw new Error(`Gitoxide managed continuation rejected source: ${sourceAdmission.reason}`);
+  }
+  const source = requireGitoxideRepositoryAdmissionInternal(
+    sourceOwnerToken,
+    sourceAdmission.capability,
+  );
+  if (
+    source.headCommitOid !== boundary.sourceCommitOid ||
+    source.headTreeOid !== boundary.sourceTreeOid
+  ) {
+    throw new Error('Gitoxide managed continuation source has drifted');
+  }
+
+  const repositoryPath = join(
+    storageRoot,
+    MANAGED_REPOSITORY_DIRECTORY,
+    identity.workspaceEpochId,
+    'repository.git',
+  );
+  await reopenGitoxideAcceptedRepositoryInternal({
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    acceptedRepositoryOwnerToken: {},
+    repositoryPath,
+    acceptedRef: ACCEPTED_REF,
+    expectedAcceptedCommitOid: boundary.commitOid,
+    expectedAcceptedTreeOid: boundary.treeOid,
+    managedTreePolicyVersion: 3,
+    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+  });
+  input.abortSignal?.throwIfAborted();
+  return boundary;
+}
 
 export async function openGitoxideManagedSessionOwnerInternal(input: {
   readonly storageRootLease: StorageRootLease<'interactive', 'write'>;
@@ -101,8 +195,9 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
   const materializationProfileDigest = sha256(
     `maka-gitoxide-materialization-v3\0${source.helperArtifactSha256}\0`,
   );
-  const policyHash = sha256(
-    `maka-managed-write-edit-policy-v1\0${materializationProfileDigest}\0${MANAGED_MUTATION_EXECUTION_PROFILE_V1}\0`,
+  const policyHash = workspaceMutationPolicyHashV1(
+    materializationProfileDigest,
+    MANAGED_MUTATION_EXECUTION_PROFILE_V1,
   );
   const baselineOwnerToken = {};
   const verifiedBaselines = new WeakMap<object, WorkspaceBaselineAuthorityInput>();

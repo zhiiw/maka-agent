@@ -24,7 +24,10 @@ import type {
   AgentRunProjectionKey,
 } from '@maka/core/agent-run';
 import type { RuntimeEvent, ToolBoundaryProtocol } from '@maka/core/runtime-event';
-import type { RuntimeContinuationAuthorityStore } from '@maka/core/runtime-event-store';
+import type {
+  RuntimeContinuationAuthorityStore,
+  RuntimeWorkspaceBoundContinuationAuthorityStore,
+} from '@maka/core/runtime-event-store';
 import type { SessionHeader, SessionSummary, StoredMessage, TurnRecord } from '@maka/core/session';
 import type { SessionListFilter } from '@maka/core/runtime-inputs';
 import {
@@ -134,7 +137,8 @@ export type {
 export type ExecutionSessionWriter = SessionAuthorityStore;
 export type ExecutionAgentRunWriter = DurableAgentRunStore;
 export type ExecutionRuntimeEventWriter = DurableRuntimeEventStore &
-  RuntimeContinuationAuthorityStore & {
+  RuntimeContinuationAuthorityStore &
+  RuntimeWorkspaceBoundContinuationAuthorityStore & {
     readonly toolBoundaryProtocol: ToolBoundaryProtocol;
     commitToolPrepared(input: CommitToolPreparedInput): Promise<ToolCommitResult>;
     commitToolOutcome(input: CommitToolOutcomeInput): Promise<ToolCommitResult>;
@@ -510,6 +514,8 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
     runtimeEventStore: {
       durability: runtimeEventStore.durability,
       continuationAuthorityCapability: runtimeEventStore.continuationAuthorityCapability,
+      workspaceBoundContinuationAuthorityCapability:
+        runtimeEventStore.workspaceBoundContinuationAuthorityCapability,
       toolBoundaryProtocol: runtimePersistence.runtimeCommitStore.toolBoundaryProtocol,
       appendRuntimeEvent: (sessionId, runId, event, options) =>
         run(() => runtimeEventStore.appendRuntimeEvent(sessionId, runId, event, options)),
@@ -544,6 +550,20 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
         run(() => runtimeEventStore.commitContinuationStart(input)),
       commitContinuationRepairStart: (input) =>
         run(() => runtimeEventStore.commitContinuationRepairStart(input)),
+      claimWorkspaceBoundContinuation: (input) =>
+        run(() => runtimeEventStore.claimWorkspaceBoundContinuation(input)),
+      readWorkspaceBoundContinuationClaimByBoundary: (boundaryDigest) =>
+        run(() => runtimeEventStore.readWorkspaceBoundContinuationClaimByBoundary(boundaryDigest)),
+      readWorkspaceBoundContinuationClaimStateByBoundary: (boundaryDigest) =>
+        run(() =>
+          runtimeEventStore.readWorkspaceBoundContinuationClaimStateByBoundary(boundaryDigest),
+        ),
+      listWorkspaceBoundContinuationClaimsForRecovery: (sessionId) =>
+        run(() => runtimeEventStore.listWorkspaceBoundContinuationClaimsForRecovery(sessionId)),
+      commitWorkspaceBoundContinuationStart: (input) =>
+        run(() => runtimeEventStore.commitWorkspaceBoundContinuationStart(input)),
+      commitWorkspaceBoundContinuationRepairStart: (input) =>
+        run(() => runtimeEventStore.commitWorkspaceBoundContinuationRepairStart(input)),
       readImmutableSteeringMessageProof: (sessionId, messageId) =>
         run(() => runtimeEventStore.readImmutableSteeringMessageProof(sessionId, messageId)),
       repairImmutableSteeringMessageProofsForRecovery: (sessionId) =>

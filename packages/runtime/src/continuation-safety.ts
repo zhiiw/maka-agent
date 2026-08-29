@@ -32,6 +32,9 @@ export interface LocalContinuationSafetyInspectorDeps {
   readWorkspaceCheckpoint?: (
     sessionId: string,
   ) => Promise<RuntimeContinuationSafetyObservation['workspaceCheckpoint']>;
+  readManagedWorkspaceBoundary?: (
+    sessionId: string,
+  ) => Promise<RuntimeContinuationSafetyObservation['workspaceBoundary']>;
 }
 
 export function createLocalContinuationSafetyInspector(
@@ -39,19 +42,26 @@ export function createLocalContinuationSafetyInspector(
 ): (sessionId: string) => Promise<RuntimeContinuationSafetyObservation> {
   return async (sessionId) => {
     const cwd = await deps.readSessionCwd(sessionId);
-    const [workspace, availableToolNames, hasPendingBackgroundOperations, workspaceCheckpoint] =
-      await Promise.all([
-        deps.resolveWorkspaceIdentity(cwd),
-        deps.listAvailableToolNames(sessionId),
-        deps.hasPendingBackgroundOperations(sessionId),
-        deps.readWorkspaceCheckpoint?.(sessionId),
-      ]);
+    const [
+      workspace,
+      availableToolNames,
+      hasPendingBackgroundOperations,
+      workspaceCheckpoint,
+      workspaceBoundary,
+    ] = await Promise.all([
+      deps.resolveWorkspaceIdentity(cwd),
+      deps.listAvailableToolNames(sessionId),
+      deps.hasPendingBackgroundOperations(sessionId),
+      deps.readWorkspaceCheckpoint?.(sessionId),
+      deps.readManagedWorkspaceBoundary?.(sessionId),
+    ]);
     return {
       workspaceIdentity: workspace.workspaceIdentity,
       workspacePath: workspace.canonicalPath,
       backgroundOperationsSettled: !hasPendingBackgroundOperations,
       availableToolNames: [...new Set(availableToolNames)].sort(),
       ...(workspaceCheckpoint ? { workspaceCheckpoint } : {}),
+      ...(workspaceBoundary ? { workspaceBoundary } : {}),
     };
   };
 }

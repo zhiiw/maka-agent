@@ -32,7 +32,10 @@ import {
   type GitoxideHelperInvocationCapability,
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../server/gitoxide-helper-artifact-authority-internal.js';
-import { openGitoxideManagedSessionOwnerInternal } from '../server/gitoxide-managed-session-owner-internal.js';
+import {
+  inspectGitoxideManagedContinuationBoundaryInternal,
+  openGitoxideManagedSessionOwnerInternal,
+} from '../server/gitoxide-managed-session-owner-internal.js';
 
 test('opens one durable Gitoxide baseline and reuses it for the same session', async (t) => {
   const helper = await admittedHelper();
@@ -168,6 +171,48 @@ test('fails closed when the source advances after its managed epoch opens', asyn
   await assert.rejects(
     openGitoxideManagedSessionOwnerInternal(common),
     /source or durable epoch has drifted/i,
+  );
+});
+
+test('issues a continuation boundary only for the exact source and accepted Gitoxide head', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the continuation boundary test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'before\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'baseline');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-continuation-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+  const common = {
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-managed-continuation',
+  } as const;
+  const opened = await openGitoxideManagedSessionOwnerInternal(common);
+  const boundary = await inspectGitoxideManagedContinuationBoundaryInternal(common);
+  assert.ok(boundary);
+  assert.equal(boundary.repositoryId, opened.repositoryId);
+  assert.equal(boundary.workspaceEpochId, opened.workspaceEpochId);
+  assert.equal(boundary.sourceCommitOid, git(sourceRoot, ['rev-parse', 'HEAD']));
+  assert.equal(boundary.commitOid, git(opened.repositoryPath, ['rev-parse', 'refs/maka/accepted']));
+
+  await writeFile(join(sourceRoot, 'notes.txt'), 'source advanced\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'advance after boundary');
+  await assert.rejects(
+    inspectGitoxideManagedContinuationBoundaryInternal(common),
+    /source has drifted/i,
   );
 });
 
