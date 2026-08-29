@@ -929,6 +929,7 @@ async function admittedHelper(): Promise<AdmittedHelper | undefined> {
         'list_tree_files',
         'grep_tree_files',
         'compare_accepted_trees',
+        'materialize_accepted_tree',
       ],
     });
     const helperCapability = await admitGitoxideHelperArtifactInternal({

@@ -1649,6 +1649,70 @@ fn compares_one_baseline_and_accepted_tree_without_a_projection() {
 }
 
 #[test]
+fn materializes_one_exact_accepted_tree_into_an_empty_isolated_directory() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    fs::create_dir_all(fixture.root.join("src")).unwrap();
+    fs::write(
+        fixture.root.join("src/lib.ts"),
+        b"export const restored = true;\n",
+    )
+    .unwrap();
+    fixture.git(["add", "src/lib.ts"]);
+    fixture.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "restore fixture",
+    ]);
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("accepted-restore.git");
+    let imported = invoke_import(&fixture.root, &source_head, &destination);
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let accepted = imported["baselineCommitOid"].as_str().unwrap();
+    let accepted_tree = imported["baselineTreeOid"].as_str().unwrap();
+    let restored = fixture.root.join("restored-workspace");
+
+    let output = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "materialize_accepted_tree",
+        "repositoryPath": destination,
+        "acceptedCommitOid": accepted,
+        "destinationPath": restored,
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "accepted_tree_materialized");
+    assert_eq!(response["acceptedCommitOid"], accepted);
+    assert_eq!(response["acceptedTreeOid"], accepted_tree);
+    assert_eq!(
+        fs::read(restored.join("hello.txt")).unwrap(),
+        b"hello from sha1\n"
+    );
+    assert_eq!(
+        fs::read(restored.join("src/lib.ts")).unwrap(),
+        b"export const restored = true;\n"
+    );
+
+    let replay = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "materialize_accepted_tree",
+        "repositoryPath": destination,
+        "acceptedCommitOid": accepted,
+        "destinationPath": restored,
+        "managedTreePolicyVersion": 3,
+    }));
+    assert_helper_error(&replay, "restore_destination_conflict");
+}
+
+#[test]
 fn refuses_to_read_a_tree_file_from_an_unavailable_commit_identity() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let output = invoke_request(serde_json::json!({
