@@ -17,16 +17,17 @@
   under the License.
 -->
 
-# Runtime Resume Phase 3–4 实施路线
+# Runtime Resume / Durable Coding M2–M6 实施路线
 
-> 路线更新（2026-08-29）：旧 Git executable managed-workspace path 已删除，后续 workspace 主线从
-> **Gitoxide data plane** 重新建立 production admission。本文保留 Recovery/Continuation 已落地协议与旧路线的历史论证；
-> 新实现不再以通用 per-file checkpoint、native manifest、CAS object store 或旧 Git CLI owner 为前置。
+> 路线定型（2026-08-30）：旧 Git executable managed-workspace path 已删除，后续 workspace 主线从
+> **Gitoxide data plane** 重新建立 production admission。本文是 M2–M6 的最新实施权威；
+> 旧 Phase 3/4、generic per-file checkpoint、native manifest、CAS object store 和 Git CLI owner
+> 只保留为历史论证，不得作为新代码的实现依据。
 > 已保留的 baseline authority 合同见
 > [Workspace Version Authority v1](./runtime-workspace-version-authority-v1.zh-CN.md)。
 
 - 状态：Implementation tracked
-- 更新日期：2026-08-29
+- 更新日期：2026-08-30
 - 事实权威：immutable RuntimeEvents
 - 主要平台：Linux、macOS；Windows 有限支持
 - 拆分审计：`runtime-resume-extraction-ledger.zh-CN.md`
@@ -537,35 +538,173 @@ Attached 模式继续服务现有用户目录与兼容场景，但不冒充强 w
 receipt、worktree materialization 与 Runtime Host admission path 已删除。schema 9 RuntimeEvents、workspace
 projection reader/rebuild 与升级合同继续保留；它们是历史事实 authority，不是可执行 Git path。
 
-## 4. Gitoxide managed workspace 后续边界
-
-后续强模式必须从 Gitoxide data plane 建立新的 production composition，并分别证明：
-
-- packaged helper 的 trust root、artifact identity 与 bounded invocation；
-- repository admission 与 schema 9 workspace authority 的单一写入边界；
-- mutation T1/T2、workspace version 与 tool outcome 的原子接受；
-- workspace-bound continuation、restore、rebaseline 与 product workflow。
-
-不能恢复旧 Git CLI、receipt、quarantine、write owner 或 `managed_worktree_v1` profile，也不能让 Gitoxide
-foundation 在尚无 Desktop/CLI/T1 consumer 时冒充产品能力。
-
-## 5. 依赖顺序
+## 4. 定型后的主线
 
 ```text
-PR A recovery persistence authority (merged)
-└─> PR B continuation correctness (merged)
-
-Gitoxide foundation/data plane
-└─> production artifact admission
-    └─> schema 9 workspace authority writer composition
-        └─> mutation acceptance
-            └─> workspace-bound continuation and product workflows
+M2  Mutation durability
+    一次 Write/Edit 可证明、可恢复
+        ↓
+M3  Task continuity
+    整个 Managed Task 在同一个代码世界里安全继续
+        ↓
+M4  Workspace lifecycle
+    审查、恢复、发布、撤销、迁移与回收
+        ↓
+M5  Durable coding loop
+    Toolchain / Bash / npm / Build / Tests
+        ↓
+M6  Distributed workspace
+    跨设备、同步与多 Agent merge
 ```
 
-旧 PR C–H 与 Git-CLI managed-workspace 路线只作为历史论证；其中没有真实消费者的 checkpoint、carrier、
-receipt 与 owner 抽象不得迁入新主线。
+Fork 中 #34–#39 的最新实现是 durable kernel 的提取来源，不是可整体合并的最终分支。
+后续切片必须从当时最新 `main` 建立，按行为和不变量迁移，不整体 rebase 长期
+integration history。
 
-## 6. 工程门槛
+## 5. M2 — Mutation durability
+
+M2 的完成标准是：
+
+```text
+accepted Git content
++ canonical Write/Edit arguments
+        ↓
+bounded pure transform
+        ↓
+immutable Gitoxide candidate
+        ↓
+SQLite atomic acceptance
+        ↓
+accepted ref / replaceable projection
+```
+
+必须证明：
+
+- T1 前冻结 operation、base、canonical path 与 execution profile；
+- Write/Edit 不直接修改 canonical worktree，只计算受限的纯内容变换；
+- Runtime result、durable outcome 与 candidate content 只有一个事实源；
+- candidate 未接受时可回收；事实已接受但 artifact 缺失时 fail closed；
+- projection 只是 accepted tree 的可重建缓存，不得反向写入 accepted truth；
+- 崩溃恢复不重新执行已产生副作用的 Write/Edit。
+
+## 6. M3 — Task continuity
+
+M3 的唯一产品目标是：
+
+> Managed Task 中的 Runtime history、读取视图和 accepted Git history 必须属于同一个
+> causal boundary。Desktop 重启后从该边界创建新 Run 继续，绝不恢复旧内存现场，
+> 也不重放已完成 Write/Edit。
+
+### M3.1 Managed Task identity
+
+Desktop 提供显式 `New Managed Task` 入口。创建流程固定为 repository admission、source HEAD
+import、workspace epoch、accepted baseline 和 Runtime Run。`attached_checkout` 与
+`managed_workspace` 必须是不可混淆的 typed profile，T1 后不得互相 fallback。
+
+### M3.2 Accepted-tree Read / Glob / Grep
+
+这是 M3 的硬门槛。不允许 `Read -> user checkout` 而 `Write/Edit -> accepted Git tree`。
+Read、Glob 与 Grep 必须共享同一个 owner-bound accepted-tree read capability，并绑定同一
+commit/tree。Projection 可以加速读取，但漂移时只能回到 Gitoxide object graph 或 fail closed，
+不能改读用户 checkout。
+
+### M3.3 ManagedContinuationBoundary
+
+Continuation boundary 同时绑定：
+
+- immutable RuntimeEvent high-water 与 digest；
+- repository identity 与 object format；
+- workspace epoch；
+- accepted commit/tree；
+- execution profile hash 与 workspace policy hash。
+
+Planner 与执行前 revalidation 必须读取同一 boundary。Runtime history 或 Git history 任一漂移都
+park。
+
+### M3.4 Resume planner
+
+启动恢复依次解释旧 Run 的 committed prefix、未结算 T1、durable Write/Edit outcome、accepted
+commit/tree、repository/storage/profile/policy identity；全部通过后原子取得 continuation
+claim，创建新 Run。不恢复旧 Promise、provider stream 或 JavaScript 指令位置。
+
+### M3.5 Desktop Resume
+
+手动 Resume 默认可用；自动续跑是单独设置且默认关闭。Desktop 必须展示最后 accepted
+workspace、已完成 operation、安全继续的证据或稳定 machine-readable park reason。
+
+### M3.6 Production-shaped crash proof
+
+真实 Host/worker crash matrix 覆盖 T1、transform、candidate durability、SQLite acceptance、provider
+response、continuation claim 和 new Run start 之间的每个边界。Linux、macOS、Windows 分别声明
+实际证明的能力，不得用单元测试代替进程崩溃证据。
+
+## 7. M4 — Workspace lifecycle
+
+### M4.1 Diff / Review
+
+Diff authority 来自 baseline accepted tree 与 current accepted tree。UI 只渲染 Gitoxide diff 结果，不扫描
+projection 猜测变更。
+
+### M4.2 Isolated restore
+
+Projection 缺失、损坏或漂移时，从 SQLite accepted fact、accepted ref 和 Git object graph
+物化全新 isolated projection。不覆盖用户 checkout，并提交 workspace transition fact。
+
+### M4.3 Publish / Apply
+
+优先支持导出 patch 和 publish 到新 branch；apply 到用户 checkout 前必须重新观察 baseline/drift、
+构造 merge/apply candidate、获得用户确认、执行后验证并写 publish receipt。
+
+### M4.4 Undo / Time travel
+
+Undo 不 rewind canonical accepted ref，而是产生一个内容等价于旧版本的新 successor，保持
+Runtime lineage 和审计历史连续。
+
+### M4.5 Explicit rebaseline
+
+以当前 source/checkout 为新起点时必须 capture 新 baseline、记录受影响路径、使
+`workspaceEpoch + 1`，并强制模型重读受影响文件。
+
+### M4.6 Retention / Quarantine / Orphan GC
+
+Active task、pending continuation、accepted head、published history、restore point、audit retention 和 active
+lease 是 GC roots。Abandoned candidate、unreferenced projection、expired quarantine、orphan artifact 和
+superseded epoch 只能由 durable、crash-convergent GC intent 回收。
+
+### M4.7 Relocation
+
+Managed storage root 移动时，repository identity 不得依赖绝对路径。新 root 重新绑定，projection
+重新物化，旧 root 只能作为 orphan 进入 GC；不得借 relocation 宣称已实现跨设备复制。
+
+## 8. M5 — Durable coding loop
+
+M5 再引入 toolchain capability、command sandbox、dependency environment、build/test execution 和外部副作用
+reconciler。命令必须分成只读观察、disposable compute、workspace mutation 和 external effect。
+外部效果没有 provider idempotency key、remote transaction ID、可查询 acceptance evidence 或 fencing token
+时必须 park。
+
+## 9. M6 — Distributed workspace
+
+Replication、cross-device 和 multi-agent merge 独立为 M6。它们会引入 artifact transport、多 writer、
+分叉 accepted heads、merge authority、distributed fencing 和 distributed GC，不得作为 M4 的普通延伸。
+
+## 10. 依赖顺序
+
+```text
+Gitoxide repository admission/import (merged foundation)
+└─> M2 durable mutation kernel (#34–#39 为提取来源)
+    └─> M3.1 Managed Task
+        └─> M3.2 accepted Read / Glob / Grep
+            └─> M3.3 continuation boundary
+                └─> M3.4 resume planner
+                    └─> M3.5 Desktop Resume
+                        └─> M3.6 crash proof
+                            └─> M4.1–M4.7 workspace lifecycle
+                                └─> M5 durable coding loop
+                                    └─> M6 distributed workspace
+```
+
+## 11. 工程门槛
 
 每个 PR 必须：
 
@@ -576,6 +715,13 @@ receipt 与 owner 抽象不得迁入新主线。
 - 不把平台假设伪装为跨平台保证；
 - 文档、类型、writer、reader、rebuild、Resolver 同步更新；
 - range-diff/path diff 证明没有带入相邻阶段代码。
+
+无生产消费者不再是自动拒绝合并的理由。一个 inert enabling slice 可以独立合并，但必须：
+
+- 不在默认产品路径上自动启用；
+- 有明确的 owner、入口权限和版本化合同；
+- 文档如实声明它是 foundation 而不是已交付产品能力；
+- 它解决的不变量能在该切片内独立验证。
 
 性能与可靠性指标在启用前定义：
 
@@ -588,11 +734,13 @@ receipt 与 owner 抽象不得迁入新主线。
 - `workspace_drift`、`mode_mismatch`、`artifact_missing` park 比例；
 - 自动恢复成功率必须把长命令、大仓库、dirty workspace 纳入分母。
 
-## 7. 不做的承诺
+## 12. 不做的承诺
 
 - PR A 不提供真实工具自动恢复；
 - PR B 不恢复 workspace；
-- M0 不把 managed worktree 交给生产工具；
+- M2 不等于整个 Desktop task 已可 Resume；
+- M3 不恢复 Bash、npm、build、test 或任意外部副作用；
+- M4 不宣称已支持 replication 或 multi-agent merge；
 - attached checkout 不提供 managed 级 workspace continuity；
 - Maka-owned Git artifact 不覆盖用户当前 checkout；
 - 无法证明的 Bash/远程 API 副作用不自动重试；
