@@ -208,7 +208,9 @@ test('Desktop packaging does not distribute the retired bundled Git runtime', ()
     false,
   );
   assert.equal(
-    resources.some(({ to }) => to === 'git' || to.startsWith('licenses/git')),
+    resources.some(
+      ({ to }) => to === 'git' || to === 'licenses/git' || to.startsWith('licenses/git/'),
+    ),
     false,
   );
   assert.equal(
@@ -218,6 +220,28 @@ test('Desktop packaging does not distribute the retired bundled Git runtime', ()
   assert.equal(
     resources.some(({ to }) => to.startsWith('licenses/dugite')),
     false,
+  );
+});
+
+test('Desktop packaging includes only the admitted Gitoxide helper artifact', () => {
+  const resources = desktopBuilderConfig.extraResources.map(({ from, to }) => ({ from, to }));
+  assert.ok(
+    resources.some(
+      ({ from, to }) => from === '.generated/gitoxide-helper/gitoxide' && to === 'gitoxide',
+    ),
+  );
+  assert.ok(
+    resources.some(
+      ({ from, to }) =>
+        from === '.generated/gitoxide-helper/gitoxide-helper.json' && to === 'gitoxide-helper.json',
+    ),
+  );
+  assert.ok(
+    resources.some(
+      ({ from, to }) =>
+        from === '.generated/gitoxide-helper/THIRD_PARTY_NOTICES.txt' &&
+        to === 'licenses/gitoxide-helper/THIRD_PARTY_NOTICES.txt',
+    ),
   );
 });
 
