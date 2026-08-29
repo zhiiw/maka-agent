@@ -115,11 +115,7 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
     runWithStorageRootLease(input.storageRootLease, 'interactive', 'write', async (root) => root),
     realpath(input.sourceRoot),
   ]);
-  const identity = deriveManagedSessionIdentity(
-    sourceRoot,
-    input.sessionId,
-    input.workspaceEpochSeed,
-  );
+  const identity = deriveManagedSessionIdentity(input.sessionId, input.workspaceEpochSeed);
   const continuationOwnerToken = {};
   const capability = issueExecutionStoresWorkspaceContinuationAuthorityInternal({
     ownerToken: continuationOwnerToken,
@@ -204,11 +200,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     runWithStorageRootLease(input.storageRootLease, 'interactive', 'write', async (root) => root),
     realpath(input.sourceRoot),
   ]);
-  const identity = deriveManagedSessionIdentity(
-    sourceRoot,
-    input.sessionId,
-    input.workspaceEpochSeed,
-  );
+  const identity = deriveManagedSessionIdentity(input.sessionId, input.workspaceEpochSeed);
   const repositoryPath = join(
     storageRoot,
     MANAGED_REPOSITORY_DIRECTORY,
@@ -544,16 +536,10 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
   });
 }
 
-function deriveManagedSessionIdentity(
-  sourceRoot: string,
-  sessionId: string,
-  workspaceEpochSeed?: string,
-) {
+function deriveManagedSessionIdentity(sessionId: string, workspaceEpochSeed?: string) {
   if (!sessionId.trim()) throw new Error('Gitoxide managed session identity is invalid');
   const workspaceDigest = createHash('sha256')
-    .update('maka-gitoxide-managed-session-v1\0', 'utf8')
-    .update(sourceRoot, 'utf8')
-    .update('\0')
+    .update('maka-gitoxide-managed-session-v2\0', 'utf8')
     .update(sessionId, 'utf8')
     .digest('hex')
     .slice(0, 32);
