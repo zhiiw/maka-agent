@@ -35,6 +35,7 @@ export const GITOXIDE_HELPER_RELEASE_OPERATIONS = Object.freeze([
   'list_tree_files',
   'grep_tree_files',
   'compare_accepted_trees',
+  'materialize_accepted_tree',
 ]);
 
 export async function prepareGitoxideHelper({ sourceExecutablePath, outputRoot, platform, arch }) {

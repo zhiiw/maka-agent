@@ -20,7 +20,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
-import { dirname, isAbsolute } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { manageChildProcessLifecycle } from '@maka/runtime/child-process-lifecycle';
 import {
   type GitoxideHelperInvocationCapability,
@@ -138,6 +138,9 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'invalid_tree_query_limit',
   'tree_query_output_limit_exceeded',
   'tree_diff_limit_exceeded',
+  'restore_destination_conflict',
+  'restore_destination_create_failed',
+  'restore_file_write_failed',
   'unsupported_source_entry_kind',
   'unsupported_source_attributes',
   'unsupported_source_path',
@@ -327,6 +330,17 @@ export interface GitoxideAcceptedTreesComparedV1 {
   readonly acceptedCommitOid: string;
   readonly acceptedTreeOid: string;
   readonly changes: readonly GitoxideAcceptedTreeChangeV1[];
+  readonly managedTreePolicyVersion: 3;
+}
+
+export interface GitoxideAcceptedTreeMaterializedV1 {
+  readonly protocolVersion: 1;
+  readonly kind: 'accepted_tree_materialized';
+  readonly objectFormat: 'sha1';
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly filesMaterialized: number;
+  readonly bytesMaterialized: number;
   readonly managedTreePolicyVersion: 3;
 }
 
@@ -955,6 +969,52 @@ export async function compareAcceptedTreesWithGitoxideHelperInternal(input: {
     deadlineAt,
   });
   return decodeAcceptedTreesComparedOutcome(outcome, input);
+}
+
+export async function materializeAcceptedTreeWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedCommitOid: string;
+  readonly destinationPath: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideAcceptedTreeMaterializedV1> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.importSourceHeadMs;
+  if (!isAbsolute(input.destinationPath)) {
+    throw invocationInvalid('Gitoxide accepted-tree restore destination is invalid');
+  }
+  const prepared = await prepareAcceptedTreeInvocation({
+    ...input,
+    deadlineAt,
+  });
+  const destinationParent = await realpath(dirname(input.destinationPath)).catch((error) => {
+    throw invocationInvalid(
+      `Gitoxide accepted-tree restore parent could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
+  if (join(destinationParent, basename(input.destinationPath)) !== input.destinationPath) {
+    throw invocationInvalid('Gitoxide accepted-tree restore destination is not canonical');
+  }
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: prepared.artifact.protocolVersion,
+      operation: 'materialize_accepted_tree',
+      repositoryPath: prepared.repositoryPath,
+      acceptedCommitOid: input.acceptedCommitOid,
+      destinationPath: input.destinationPath,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
+  const outcome = await invokeHelper({
+    executablePath: prepared.artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  return decodeAcceptedTreeMaterializedOutcome(outcome, input);
 }
 
 function assertTreeQueryInput(path: string, pattern: string, limit: number): void {
@@ -1675,6 +1735,28 @@ function decodeAcceptedTreesComparedOutcome(
   throw protocolInvalid('Gitoxide accepted-tree comparison response is invalid');
 }
 
+function decodeAcceptedTreeMaterializedOutcome(
+  outcome: HelperProcessOutcome,
+  expected: {
+    readonly acceptedCommitOid: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): GitoxideAcceptedTreeMaterializedV1 {
+  const value = parseHelperOutcome(outcome);
+  if (
+    outcome.exitCode === 0 &&
+    isAcceptedTreeMaterialized(value) &&
+    value.acceptedCommitOid === expected.acceptedCommitOid &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
+  ) {
+    return Object.freeze(value);
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('materialize accepted tree', value.reason);
+  }
+  throw protocolInvalid('Gitoxide accepted-tree materialization response is invalid');
+}
+
 function gitBlobOid(content: Buffer): string {
   return createHash('sha1')
     .update(`blob ${content.length}\0`, 'utf8')
@@ -1858,6 +1940,31 @@ function isAcceptedTreesCompared(value: unknown): value is GitoxideAcceptedTrees
     value.changes.length <= 4096 &&
     value.changes.every(isAcceptedTreeChange) &&
     new Set(value.changes.map((change) => change.path)).size === value.changes.length &&
+    value.managedTreePolicyVersion === 3
+  );
+}
+
+function isAcceptedTreeMaterialized(value: unknown): value is GitoxideAcceptedTreeMaterializedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'filesMaterialized',
+      'bytesMaterialized',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'accepted_tree_materialized' &&
+    value.objectFormat === 'sha1' &&
+    isSha1(value.acceptedCommitOid) &&
+    isSha1(value.acceptedTreeOid) &&
+    isNonNegativeSafeInteger(value.filesMaterialized) &&
+    value.filesMaterialized <= 200_000 &&
+    isNonNegativeSafeInteger(value.bytesMaterialized) &&
+    value.bytesMaterialized <= 2 * 1024 * 1024 * 1024 &&
     value.managedTreePolicyVersion === 3
   );
 }

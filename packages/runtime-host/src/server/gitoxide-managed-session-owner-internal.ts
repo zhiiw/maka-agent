@@ -49,6 +49,10 @@ import {
   type GitoxideManagedReviewOwnerInternal,
 } from './gitoxide-managed-review-owner-internal.js';
 import {
+  createGitoxideManagedRestoreOwnerInternal,
+  type GitoxideManagedRestoreOwnerInternal,
+} from './gitoxide-managed-restore-owner-internal.js';
+import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
   reopenGitoxideAcceptedRepositoryInternal,
@@ -65,6 +69,7 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly workspaceEpochId: string;
   readonly inspection: GitoxideManagedInspectionOwnerInternal;
   readonly review: GitoxideManagedReviewOwnerInternal;
+  readonly restore: GitoxideManagedRestoreOwnerInternal;
   readonly writeEdit: GitoxideManagedWriteEditOwnerInternal;
 }
 
@@ -387,6 +392,41 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       });
     },
   });
+  const restore = createGitoxideManagedRestoreOwnerInternal({
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    repositoryPath,
+    storageRoot,
+    workspaceEpochId: identity.workspaceEpochId,
+    async readAcceptedIdentity() {
+      const head = await baselineAuthority.readHead(
+        identity.workspaceId,
+        identity.workspaceEpochId,
+      );
+      if (
+        !head ||
+        head.repositoryId !== identity.repositoryId ||
+        head.workspaceId !== identity.workspaceId ||
+        head.workspaceEpochId !== identity.workspaceEpochId
+      ) {
+        throw new Error('Gitoxide managed restore durable workspace head is unavailable');
+      }
+      const version = await baselineAuthority.readVersion(head.workspaceVersionId);
+      if (
+        !version ||
+        version.repositoryId !== head.repositoryId ||
+        version.workspaceId !== head.workspaceId ||
+        version.workspaceEpochId !== head.workspaceEpochId ||
+        version.workspaceVersionId !== head.workspaceVersionId ||
+        version.acceptedEventId !== head.acceptedEventId ||
+        version.commitOid !== head.commitOid ||
+        version.treeOid !== head.treeOid
+      ) {
+        throw new Error('Gitoxide managed restore accepted workspace version is unavailable');
+      }
+      return Object.freeze({ commitOid: version.commitOid, treeOid: version.treeOid });
+    },
+  });
   await writeEdit.reconcileAcceptedProjection(input.abortSignal);
   return Object.freeze({
     repositoryPath,
@@ -395,6 +435,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     workspaceEpochId: identity.workspaceEpochId,
     inspection,
     review,
+    restore,
     writeEdit,
   });
 }

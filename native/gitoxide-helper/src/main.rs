@@ -166,6 +166,9 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "invalid_tree_query_limit",
     "tree_query_output_limit_exceeded",
     "tree_diff_limit_exceeded",
+    "restore_destination_conflict",
+    "restore_destination_create_failed",
+    "restore_file_write_failed",
     "unsupported_source_entry_kind",
     "unsupported_source_attributes",
     "unsupported_source_path",
@@ -257,6 +260,13 @@ enum Request {
         repository_path: PathBuf,
         baseline_commit_oid: String,
         accepted_commit_oid: String,
+        managed_tree_policy_version: u8,
+    },
+    MaterializeAcceptedTree {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_commit_oid: String,
+        destination_path: PathBuf,
         managed_tree_policy_version: u8,
     },
 }
@@ -422,6 +432,16 @@ enum Response<'a> {
         accepted_commit_oid: String,
         accepted_tree_oid: String,
         changes: Vec<TreeDiffEntry>,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    AcceptedTreeMaterialized {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        files_materialized: u64,
+        bytes_materialized: u64,
         managed_tree_policy_version: u8,
     },
     #[serde(rename_all = "camelCase")]
@@ -612,6 +632,21 @@ fn run() -> Result<ExitCode, &'static str> {
                 repository_path,
                 baseline_commit_oid,
                 accepted_commit_oid,
+                managed_tree_policy_version,
+            )
+        }
+        Request::MaterializeAcceptedTree {
+            protocol_version,
+            repository_path,
+            accepted_commit_oid,
+            destination_path,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            materialize_accepted_tree(
+                repository_path,
+                accepted_commit_oid,
+                destination_path,
                 managed_tree_policy_version,
             )
         }
@@ -2247,6 +2282,97 @@ fn compare_accepted_trees(
         accepted_commit_oid: accepted_commit.to_string(),
         accepted_tree_oid: accepted_tree.to_string(),
         changes,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+fn materialize_accepted_tree(
+    repository_path: PathBuf,
+    accepted_commit_oid: String,
+    destination_path: PathBuf,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    if !destination_path.is_absolute() || destination_path.exists() {
+        return Err("restore_destination_conflict");
+    }
+    let parent = destination_path
+        .parent()
+        .ok_or("restore_destination_create_failed")?;
+    if !parent.is_dir() {
+        return Err("restore_destination_create_failed");
+    }
+    let repository = open_repository(repository_path)?;
+    let (accepted_commit, accepted_tree) =
+        accepted_commit_identity(&repository, &accepted_commit_oid)?;
+    fs::create_dir(&destination_path).map_err(|_| "restore_destination_create_failed")?;
+    let materialized = (|| {
+        let mut files_materialized = 0_u64;
+        let mut bytes_materialized = 0_u64;
+        let mut stats = ManagedTreeStats::default();
+        walk_accepted_tree_files(
+            &repository,
+            accepted_tree,
+            "",
+            0,
+            &mut stats,
+            &mut |path, blob_oid, executable| {
+                let destination = destination_path.join(path);
+                let destination_parent = destination.parent().ok_or("restore_file_write_failed")?;
+                fs::create_dir_all(destination_parent).map_err(|_| "restore_file_write_failed")?;
+                let blob = load_verified_object(
+                    &repository,
+                    blob_oid,
+                    gix::objs::Kind::Blob,
+                    MANAGED_TREE_POLICY_V3.max_file_bytes,
+                    "tree_file_unavailable",
+                    "tree_file_invalid",
+                    "tree_file_size_limit_exceeded",
+                    "tree_file_identity_mismatch",
+                )?
+                .try_into_blob()
+                .map_err(|_| "tree_file_invalid")?;
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                let mut output = options
+                    .open(&destination)
+                    .map_err(|_| "restore_file_write_failed")?;
+                io::Write::write_all(&mut output, &blob.data)
+                    .map_err(|_| "restore_file_write_failed")?;
+                #[cfg(unix)]
+                if executable {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&destination, fs::Permissions::from_mode(0o755))
+                        .map_err(|_| "restore_file_write_failed")?;
+                }
+                files_materialized = files_materialized
+                    .checked_add(1)
+                    .ok_or("source_file_limit_exceeded")?;
+                bytes_materialized = bytes_materialized
+                    .checked_add(blob.data.len() as u64)
+                    .ok_or("source_byte_limit_exceeded")?;
+                Ok(true)
+            },
+        )?;
+        Ok::<_, &'static str>((files_materialized, bytes_materialized))
+    })();
+    let (files_materialized, bytes_materialized) = match materialized {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&destination_path);
+            return Err(error);
+        }
+    };
+    write_response(&Response::AcceptedTreeMaterialized {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        accepted_commit_oid: accepted_commit.to_string(),
+        accepted_tree_oid: accepted_tree.to_string(),
+        files_materialized,
+        bytes_materialized,
         managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
     });
     Ok(ExitCode::SUCCESS)
