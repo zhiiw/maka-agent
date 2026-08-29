@@ -49,6 +49,23 @@ export interface ExecutionStoresWorkspaceMutationAuthorityCapabilityInternal {
   readonly kind: 'execution_stores_workspace_mutation_authority_v1';
 }
 
+export interface ExecutionStoresWorkspaceBaselineAuthorityCapabilityInternal {
+  readonly kind: 'execution_stores_workspace_baseline_authority_v1';
+}
+
+export interface ExecutionStoresWorkspaceBaselineAuthorityInternal {
+  commitBaseline(importedRepositoryProof: object): Promise<WorkspaceBaselineCommitResult>;
+  readEpoch(
+    workspaceId: string,
+    workspaceEpochId: string,
+  ): Promise<WorkspaceEpochRecordV1 | undefined>;
+  readHead(
+    workspaceId: string,
+    workspaceEpochId: string,
+  ): Promise<WorkspaceHeadRecordV1 | undefined>;
+  readVersion(workspaceVersionId: string): Promise<WorkspaceVersionRecordV1 | undefined>;
+}
+
 export interface WorkspaceSuccessorProjectionCapabilityInternal {
   readonly kind: 'workspace_successor_projection_capability_v1';
 }
@@ -96,9 +113,15 @@ interface NoEffectCapabilityRecord extends AuthoritySource {
   readonly claim: ManagedMutationNoEffectClaimV1;
 }
 
+interface BaselineAuthorityCapabilityRecord extends AuthoritySource {
+  readonly ownerToken: object;
+  readonly verifyBaseline: (importedRepositoryProof: object) => WorkspaceBaselineAuthorityInput;
+}
+
 const sources = new WeakMap<object, AuthoritySource>();
 const capabilities = new WeakMap<object, AuthorityCapabilityRecord>();
 const noEffectCapabilities = new WeakMap<object, NoEffectCapabilityRecord>();
+const baselineCapabilities = new WeakMap<object, BaselineAuthorityCapabilityRecord>();
 const projectionCapabilities = new WeakMap<
   object,
   {
@@ -158,6 +181,49 @@ export function issueExecutionStoresWorkspaceMutationAuthorityInternal(input: {
     }),
   );
   return capability;
+}
+
+export function issueExecutionStoresWorkspaceBaselineAuthorityInternal(input: {
+  readonly ownerToken: object;
+  readonly stores: object;
+  readonly verifyBaseline: (importedRepositoryProof: object) => WorkspaceBaselineAuthorityInput;
+}): ExecutionStoresWorkspaceBaselineAuthorityCapabilityInternal {
+  const source = sources.get(input.stores);
+  if (!source) throw new Error('Execution stores workspace baseline source is unavailable');
+  adoptWorkspaceBaselineAuthorityStoreRootInternal(source.store, source.rootId);
+  const capability = Object.freeze({
+    kind: 'execution_stores_workspace_baseline_authority_v1' as const,
+  });
+  baselineCapabilities.set(
+    capability,
+    Object.freeze({
+      ownerToken: input.ownerToken,
+      store: source.store,
+      rootId: source.rootId,
+      verifyBaseline: input.verifyBaseline,
+    }),
+  );
+  return capability;
+}
+
+export function requireExecutionStoresWorkspaceBaselineAuthorityInternal(
+  ownerToken: object,
+  capability: ExecutionStoresWorkspaceBaselineAuthorityCapabilityInternal,
+): ExecutionStoresWorkspaceBaselineAuthorityInternal {
+  const record = baselineCapabilities.get(capability);
+  if (!record || record.ownerToken !== ownerToken) {
+    throw new Error('Execution stores workspace baseline authority capability is invalid');
+  }
+  return Object.freeze({
+    commitBaseline: async (importedRepositoryProof: object) =>
+      commitWorkspaceBaselineInternal(record.store, record.verifyBaseline(importedRepositoryProof)),
+    readEpoch: (workspaceId: string, workspaceEpochId: string) =>
+      readWorkspaceEpochInternal(record.store, workspaceId, workspaceEpochId),
+    readHead: (workspaceId: string, workspaceEpochId: string) =>
+      readWorkspaceHeadInternal(record.store, workspaceId, workspaceEpochId),
+    readVersion: (workspaceVersionId: string) =>
+      readWorkspaceVersionInternal(record.store, workspaceVersionId),
+  });
 }
 
 export function requireExecutionStoresWorkspaceMutationAuthorityInternal(
