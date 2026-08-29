@@ -1007,6 +1007,9 @@ export async function assertPackagedResources(
     // require the bundled distribution and its compliance files; keep that
     // baseline explicit instead of judging old bytes by today's absence rule.
     bundledGitContract = 'forbidden',
+    // Current releases replace the retired Git distribution with one bounded,
+    // short-lived Gitoxide helper. Historical upgrade baselines predate it.
+    requireGitoxideHelper = bundledGitContract === 'forbidden',
     // The upgrade-lifecycle check runs this against a previously released
     // build, which predates the disclaimer being packaged. Requiring it there
     // would fail a release that was correct when it shipped.
@@ -1041,6 +1044,16 @@ export async function assertPackagedResources(
           join('licenses', 'git', 'SOURCE_OFFER.txt'),
           join('licenses', 'dugite', 'LICENSE'),
           join('licenses', 'git', 'NOTICE.txt'),
+        ]
+      : []),
+    ...(requireGitoxideHelper
+      ? [
+          join(
+            'gitoxide',
+            process.platform === 'win32' ? 'maka-gitoxide-helper.exe' : 'maka-gitoxide-helper',
+          ),
+          'gitoxide-helper.json',
+          join('licenses', 'gitoxide-helper', 'THIRD_PARTY_NOTICES.txt'),
         ]
       : []),
     ...(requireCanonicalIcon ? [join('assets', 'icon.png')] : []),

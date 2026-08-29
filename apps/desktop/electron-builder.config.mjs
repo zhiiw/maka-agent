@@ -92,6 +92,18 @@ const baseDesktopBuilderConfig = {
   ],
   extraResources: [
     {
+      from: '.generated/gitoxide-helper/gitoxide',
+      to: 'gitoxide',
+    },
+    {
+      from: '.generated/gitoxide-helper/gitoxide-helper.json',
+      to: 'gitoxide-helper.json',
+    },
+    {
+      from: '.generated/gitoxide-helper/THIRD_PARTY_NOTICES.txt',
+      to: 'licenses/gitoxide-helper/THIRD_PARTY_NOTICES.txt',
+    },
+    {
       from: 'bundled-tools.json',
       to: 'bundled-tools.json',
     },
