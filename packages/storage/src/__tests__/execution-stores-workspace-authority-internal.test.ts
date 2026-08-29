@@ -24,7 +24,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { openInteractiveExecutionStoresForWrite } from '../execution-stores.js';
 import {
+  issueExecutionStoresWorkspaceBaselineAuthorityInternal,
   issueExecutionStoresWorkspaceMutationAuthorityInternal,
+  requireExecutionStoresWorkspaceBaselineAuthorityInternal,
   requireExecutionStoresWorkspaceMutationAuthorityInternal,
 } from '../execution-stores-workspace-authority-internal.js';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '../root-authority.js';
@@ -82,6 +84,38 @@ test('binds each workspace mutation verifier to its execution-stores owner capab
       ),
       undefined,
     );
+  } finally {
+    await stores.sessionStore.close?.();
+    await rootOwner.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('keeps baseline descriptors behind an owner-bound imported-repository proof', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-execution-workspace-baseline-authority-'));
+  const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(rootOwner);
+  if (!rootOwner) return;
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  try {
+    const ownerToken = {};
+    const baselineCapability = issueExecutionStoresWorkspaceBaselineAuthorityInternal({
+      ownerToken,
+      stores,
+      verifyBaseline: () => {
+        throw new Error('unknown imported repository proof');
+      },
+    });
+    assert.throws(
+      () => requireExecutionStoresWorkspaceBaselineAuthorityInternal({}, baselineCapability),
+      /capability is invalid/i,
+    );
+    const authority = requireExecutionStoresWorkspaceBaselineAuthorityInternal(
+      ownerToken,
+      baselineCapability,
+    );
+    await assert.rejects(authority.commitBaseline({}), /unknown imported repository proof/i);
   } finally {
     await stores.sessionStore.close?.();
     await rootOwner.close();
