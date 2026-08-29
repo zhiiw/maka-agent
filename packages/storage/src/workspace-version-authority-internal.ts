@@ -20,6 +20,7 @@
 import type {
   WorkspaceBaselineAuthorityInput,
   WorkspaceBaselineCommitResult,
+  WorkspaceEpochRecordV1,
   WorkspaceHeadRecordV1,
   WorkspaceSuccessorAuthorityInput,
   WorkspaceVersionRecordV1,
@@ -42,7 +43,7 @@ export interface WorkspaceSuccessorCommitInput {
     committedAt: number;
   };
 }
-interface VerifiedWorkspaceSuccessorCommitInput {
+export interface VerifiedWorkspaceSuccessorCommitInput {
   successor: WorkspaceSuccessorAuthorityInput;
   toolOutcome: WorkspaceSuccessorCommitInput['toolOutcome'];
 }
@@ -73,6 +74,10 @@ type WorkspaceHeadReader = (
   workspaceId: string,
   workspaceEpochId: string,
 ) => Promise<WorkspaceHeadRecordV1 | undefined>;
+type WorkspaceEpochReader = (
+  workspaceId: string,
+  workspaceEpochId: string,
+) => Promise<WorkspaceEpochRecordV1 | undefined>;
 type WorkspaceVersionReader = (
   workspaceVersionId: string,
 ) => Promise<WorkspaceVersionRecordV1 | undefined>;
@@ -92,18 +97,29 @@ export interface ManagedMutationReservationRecordV1 {
   readonly executionProfileDigest: string;
   readonly reservedAt: number;
 }
+export interface ManagedMutationEvidenceRecordV1 {
+  readonly operationId: string;
+  readonly callEvent: RuntimeEvent;
+  readonly dispatchEvent: RuntimeEvent;
+  readonly outcomeEvent: RuntimeEvent;
+}
 type ManagedMutationReservationReader = (
   workspaceInstanceId: string,
 ) => Promise<ManagedMutationReservationRecordV1 | undefined>;
+type ManagedMutationEvidenceReader = (
+  operationId: string,
+) => Promise<ManagedMutationEvidenceRecordV1 | undefined>;
 
 interface WorkspaceBaselineAuthorityRegistration {
   readonly writer: WorkspaceBaselineAuthorityWriter;
   readonly successorWriter: WorkspaceSuccessorAuthorityWriter;
   candidateVerifier?: WorkspaceSuccessorCandidateVerifier;
   readonly terminalWriter: ManagedMutationTerminalAuthorityWriter;
+  readonly readEpoch: WorkspaceEpochReader;
   readonly readHead: WorkspaceHeadReader;
   readonly readVersion: WorkspaceVersionReader;
   readonly readActiveManagedMutation: ManagedMutationReservationReader;
+  readonly readManagedMutationEvidence: ManagedMutationEvidenceReader;
   readonly bindStorageRoot: WorkspaceStorageRootBinder;
   readonly adoptStorageRoot: WorkspaceStorageRootAdopter;
   boundRootId?: string;
@@ -121,9 +137,11 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   terminalWriter: ManagedMutationTerminalAuthorityWriter,
   bindStorageRoot: WorkspaceStorageRootBinder,
   adoptStorageRoot: WorkspaceStorageRootAdopter,
+  readEpoch: WorkspaceEpochReader,
   readHead: WorkspaceHeadReader,
   readVersion: WorkspaceVersionReader,
   readActiveManagedMutation: ManagedMutationReservationReader,
+  readManagedMutationEvidence: ManagedMutationEvidenceReader,
 ): void {
   if (workspaceBaselineAuthorityWriters.has(store)) {
     throw new Error('Workspace baseline authority writer is already registered');
@@ -132,9 +150,11 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
     writer,
     successorWriter,
     terminalWriter,
+    readEpoch,
     readHead,
     readVersion,
     readActiveManagedMutation,
+    readManagedMutationEvidence,
     bindStorageRoot,
     adoptStorageRoot,
   });
@@ -147,6 +167,25 @@ export function readActiveManagedMutationInternal(
   const registration = workspaceBaselineAuthorityWriters.get(store);
   if (!registration) throw new Error('Managed mutation reservation reader is unavailable');
   return registration.readActiveManagedMutation(workspaceInstanceId);
+}
+
+export function readManagedMutationEvidenceInternal(
+  store: object,
+  operationId: string,
+): Promise<ManagedMutationEvidenceRecordV1 | undefined> {
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Managed mutation evidence reader is unavailable');
+  return registration.readManagedMutationEvidence(operationId);
+}
+
+export function readWorkspaceEpochInternal(
+  store: object,
+  workspaceId: string,
+  workspaceEpochId: string,
+): Promise<WorkspaceEpochRecordV1 | undefined> {
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Workspace baseline authority reader is unavailable');
+  return registration.readEpoch(workspaceId, workspaceEpochId);
 }
 
 export function readWorkspaceHeadInternal(
@@ -200,10 +239,27 @@ export function commitWorkspaceSuccessorInternal(
     throw new Error('Workspace successor candidate verifier is unavailable');
   }
   const successor = registration.candidateVerifier(input.candidateOutcome);
-  return registration.successorWriter(
-    { successor, toolOutcome: input.toolOutcome },
-    registration.boundRootId,
-  );
+  return commitVerifiedWorkspaceSuccessorInternal(store, {
+    successor,
+    toolOutcome: input.toolOutcome,
+  });
+}
+
+/**
+ * Storage-internal seam for an owner-bound candidate verifier. This module is
+ * not a package export; production callers can reach it only through the
+ * execution-stores capability that owns the verifier.
+ */
+export function commitVerifiedWorkspaceSuccessorInternal(
+  store: object,
+  input: VerifiedWorkspaceSuccessorCommitInput,
+): Promise<WorkspaceSuccessorCommitResult> {
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Workspace successor authority writer is unavailable');
+  if (!registration.boundRootId) {
+    throw new Error('Workspace successor authority store has no durable storage-root binding');
+  }
+  return registration.successorWriter(input, registration.boundRootId);
 }
 
 export function registerWorkspaceSuccessorCandidateVerifierInternal(
