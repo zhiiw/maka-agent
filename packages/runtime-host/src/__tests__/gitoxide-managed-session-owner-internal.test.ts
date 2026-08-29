@@ -253,6 +253,44 @@ test('Publish pins the exact durable accepted head without modifying the source 
   assert.equal(git(sourceRoot, ['rev-parse', 'HEAD']), sourceHead);
 });
 
+test('Time travel restores a historical accepted version without rewinding the current head', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the time-travel restore test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'historical baseline\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'time travel baseline');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-time-travel-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+  const session = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-time-travel',
+  });
+  const acceptedHead = git(session.repositoryPath, ['rev-parse', 'refs/maka/accepted']);
+
+  const restored = await session.timeTravel.restoreVersion(
+    session.baselineWorkspaceVersionId,
+    'baseline',
+  );
+  assert.equal(
+    await readFile(join(restored.destinationPath, 'notes.txt'), 'utf8'),
+    'historical baseline\n',
+  );
+  assert.equal(git(session.repositoryPath, ['rev-parse', 'refs/maka/accepted']), acceptedHead);
+});
+
 test('fails closed when the source advances after its managed epoch opens', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {

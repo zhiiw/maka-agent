@@ -57,6 +57,10 @@ import {
   type GitoxideManagedPublishOwnerInternal,
 } from './gitoxide-managed-publish-owner-internal.js';
 import {
+  createGitoxideManagedTimeTravelOwnerInternal,
+  type GitoxideManagedTimeTravelOwnerInternal,
+} from './gitoxide-managed-time-travel-owner-internal.js';
+import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
   reopenGitoxideAcceptedRepositoryInternal,
@@ -69,12 +73,14 @@ const ACCEPTED_REF = 'refs/maka/accepted';
 export interface GitoxideManagedSessionOwnerInternal {
   readonly repositoryPath: string;
   readonly repositoryId: string;
+  readonly baselineWorkspaceVersionId: string;
   readonly workspaceId: string;
   readonly workspaceEpochId: string;
   readonly inspection: GitoxideManagedInspectionOwnerInternal;
   readonly publish: GitoxideManagedPublishOwnerInternal;
   readonly review: GitoxideManagedReviewOwnerInternal;
   readonly restore: GitoxideManagedRestoreOwnerInternal;
+  readonly timeTravel: GitoxideManagedTimeTravelOwnerInternal;
   readonly writeEdit: GitoxideManagedWriteEditOwnerInternal;
 }
 
@@ -465,16 +471,37 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       return Object.freeze({ commitOid: version.commitOid, treeOid: version.treeOid });
     },
   });
+  const timeTravel = createGitoxideManagedTimeTravelOwnerInternal({
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    repositoryPath,
+    storageRoot,
+    workspaceEpochId: identity.workspaceEpochId,
+    async readVersionIdentity(workspaceVersionId) {
+      const version = await baselineAuthority.readVersion(workspaceVersionId);
+      if (
+        !version ||
+        version.repositoryId !== identity.repositoryId ||
+        version.workspaceId !== identity.workspaceId ||
+        version.workspaceEpochId !== identity.workspaceEpochId
+      ) {
+        throw new Error('Gitoxide managed time-travel workspace version is unavailable');
+      }
+      return Object.freeze({ commitOid: version.commitOid, treeOid: version.treeOid });
+    },
+  });
   await writeEdit.reconcileAcceptedProjection(input.abortSignal);
   return Object.freeze({
     repositoryPath,
     repositoryId: identity.repositoryId,
+    baselineWorkspaceVersionId: identity.workspaceVersionId,
     workspaceId: identity.workspaceId,
     workspaceEpochId: identity.workspaceEpochId,
     inspection,
     publish,
     review,
     restore,
+    timeTravel,
     writeEdit,
   });
 }
