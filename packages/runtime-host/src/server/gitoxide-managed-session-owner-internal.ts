@@ -66,6 +66,10 @@ import {
   type GitoxideManagedTimeTravelOwnerInternal,
 } from './gitoxide-managed-time-travel-owner-internal.js';
 import {
+  createGitoxideManagedGcOwnerInternal,
+  type GitoxideManagedGcOwnerInternal,
+} from './gitoxide-managed-gc-owner-internal.js';
+import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
   reopenGitoxideAcceptedRepositoryInternal,
@@ -86,6 +90,7 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly repositoryPath: string;
   readonly repositoryId: string;
   readonly baselineWorkspaceVersionId: string;
+  readonly gc: GitoxideManagedGcOwnerInternal;
   readonly workspaceId: string;
   readonly workspaceEpochId: string;
   readonly inspection: GitoxideManagedInspectionOwnerInternal;
@@ -625,6 +630,10 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       return Object.freeze({ commitOid: version.commitOid, treeOid: version.treeOid });
     },
   });
+  const gc = createGitoxideManagedGcOwnerInternal({
+    storageRoot,
+    workspaceEpochId: identity.workspaceEpochId,
+  });
   await writeEdit.reconcileAcceptedProjection(input.abortSignal);
   const rebaseline = async (
     rebaselineId: string,
@@ -644,6 +653,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     repositoryPath,
     repositoryId: identity.repositoryId,
     baselineWorkspaceVersionId: identity.workspaceVersionId,
+    gc,
     workspaceId: identity.workspaceId,
     workspaceEpochId: identity.workspaceEpochId,
     inspection,
