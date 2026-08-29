@@ -82,6 +82,10 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly restore: GitoxideManagedRestoreOwnerInternal;
   readonly timeTravel: GitoxideManagedTimeTravelOwnerInternal;
   readonly writeEdit: GitoxideManagedWriteEditOwnerInternal;
+  rebaseline(
+    rebaselineId: string,
+    abortSignal?: AbortSignal,
+  ): Promise<GitoxideManagedSessionOwnerInternal>;
 }
 
 export type GitoxideManagedSessionOwnerFailpoint = 'after_repository_import';
@@ -98,6 +102,7 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
   readonly helperCapability: GitoxideHelperInvocationCapability;
   readonly sourceRoot: string;
   readonly sessionId: string;
+  readonly workspaceEpochSeed?: string;
   readonly abortSignal?: AbortSignal;
 }): Promise<ManagedWorkspaceContinuationBoundaryV1 | undefined> {
   input.abortSignal?.throwIfAborted();
@@ -105,7 +110,11 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
     runWithStorageRootLease(input.storageRootLease, 'interactive', 'write', async (root) => root),
     realpath(input.sourceRoot),
   ]);
-  const identity = deriveManagedSessionIdentity(sourceRoot, input.sessionId);
+  const identity = deriveManagedSessionIdentity(
+    sourceRoot,
+    input.sessionId,
+    input.workspaceEpochSeed,
+  );
   const continuationOwnerToken = {};
   const capability = issueExecutionStoresWorkspaceContinuationAuthorityInternal({
     ownerToken: continuationOwnerToken,
@@ -181,6 +190,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
   readonly helperCapability: GitoxideHelperInvocationCapability;
   readonly sourceRoot: string;
   readonly sessionId: string;
+  readonly workspaceEpochSeed?: string;
   readonly abortSignal?: AbortSignal;
   readonly failpoint?: (point: GitoxideManagedSessionOwnerFailpoint) => void | Promise<void>;
 }): Promise<GitoxideManagedSessionOwnerInternal> {
@@ -189,7 +199,11 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     runWithStorageRootLease(input.storageRootLease, 'interactive', 'write', async (root) => root),
     realpath(input.sourceRoot),
   ]);
-  const identity = deriveManagedSessionIdentity(sourceRoot, input.sessionId);
+  const identity = deriveManagedSessionIdentity(
+    sourceRoot,
+    input.sessionId,
+    input.workspaceEpochSeed,
+  );
   const repositoryPath = join(
     storageRoot,
     MANAGED_REPOSITORY_DIRECTORY,
@@ -491,6 +505,19 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     },
   });
   await writeEdit.reconcileAcceptedProjection(input.abortSignal);
+  const rebaseline = async (
+    rebaselineId: string,
+    abortSignal?: AbortSignal,
+  ): Promise<GitoxideManagedSessionOwnerInternal> => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(rebaselineId)) {
+      throw new Error('Gitoxide managed rebaseline identity is invalid');
+    }
+    return openGitoxideManagedSessionOwnerInternal({
+      ...input,
+      workspaceEpochSeed: rebaselineId,
+      ...(abortSignal ? { abortSignal } : {}),
+    });
+  };
   return Object.freeze({
     repositoryPath,
     repositoryId: identity.repositoryId,
@@ -503,22 +530,36 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     restore,
     timeTravel,
     writeEdit,
+    rebaseline,
   });
 }
 
-function deriveManagedSessionIdentity(sourceRoot: string, sessionId: string) {
+function deriveManagedSessionIdentity(
+  sourceRoot: string,
+  sessionId: string,
+  workspaceEpochSeed?: string,
+) {
   if (!sessionId.trim()) throw new Error('Gitoxide managed session identity is invalid');
-  const digest = createHash('sha256')
+  const workspaceDigest = createHash('sha256')
     .update('maka-gitoxide-managed-session-v1\0', 'utf8')
     .update(sourceRoot, 'utf8')
     .update('\0')
     .update(sessionId, 'utf8')
     .digest('hex')
     .slice(0, 32);
+  const digest = workspaceEpochSeed
+    ? createHash('sha256')
+        .update('maka-gitoxide-managed-rebaseline-v1\0', 'utf8')
+        .update(workspaceDigest, 'utf8')
+        .update('\0')
+        .update(workspaceEpochSeed, 'utf8')
+        .digest('hex')
+        .slice(0, 32)
+    : workspaceDigest;
   return Object.freeze({
     digest,
-    repositoryId: `repository_${digest}`,
-    workspaceId: `workspace_${digest}`,
+    repositoryId: `repository_${workspaceDigest}`,
+    workspaceId: `workspace_${workspaceDigest}`,
     workspaceEpochId: `epoch_${digest}`,
     workspaceInstanceId: `instance_${digest}`,
     workspaceVersionId: `version_${digest}`,

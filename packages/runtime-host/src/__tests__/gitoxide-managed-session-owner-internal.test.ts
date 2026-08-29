@@ -326,6 +326,49 @@ test('fails closed when the source advances after its managed epoch opens', asyn
   );
 });
 
+test('explicit rebaseline opens a new epoch and preserves the prior epoch', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the explicit rebaseline test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'epoch one\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'epoch one');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-rebaseline-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+  const original = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-explicit-rebaseline',
+  });
+  await writeFile(join(sourceRoot, 'notes.txt'), 'epoch two\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'epoch two');
+
+  const rebased = await original.rebaseline('source-head-2');
+  assert.equal(rebased.workspaceId, original.workspaceId);
+  assert.equal(rebased.repositoryId, original.repositoryId);
+  assert.notEqual(rebased.workspaceEpochId, original.workspaceEpochId);
+  assert.deepEqual(await rebased.inspection.execute({ kind: 'read', path: 'notes.txt' }), {
+    kind: 'read',
+    content: 'epoch two\n',
+  });
+  assert.deepEqual(await original.inspection.execute({ kind: 'read', path: 'notes.txt' }), {
+    kind: 'read',
+    content: 'epoch one\n',
+  });
+});
+
 test('issues a continuation boundary only for the exact source and accepted Gitoxide head', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {
