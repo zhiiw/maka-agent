@@ -43,6 +43,7 @@ import { stableHash, toolCatalogHash } from '@maka/runtime/request-shape';
 import { toolAvailabilityHash } from '@maka/runtime/tool-availability';
 import { type BackendFactoryContext } from '@maka/runtime/session-manager';
 import { type RuntimeCommitSink } from '@maka/runtime/runtime-commit-sink';
+import type { ToolRuntimeInput } from '@maka/runtime/tool-runtime';
 import type { SandboxDiagnosticsProvider } from '@maka/runtime/sandbox';
 import {
   createAttachmentByteReader,
@@ -74,6 +75,7 @@ export interface HostAiSdkBackendInput {
   readonly usage: HostExecutionUsageAuthority;
   readonly requestDrain: () => void;
   readonly runtimeCommitSink?: RuntimeCommitSink;
+  readonly admitManagedMutation?: ToolRuntimeInput['admitManagedMutation'];
   readonly childAgents?: HostChildAgentBackendCapabilities;
   readonly createFetchTransport?: (proxy: ProxiedFetchProxy | null) => ProxiedFetchTransport;
 }
@@ -427,6 +429,7 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
         assertModelCallAccountingReady,
         recordToolInvocation: (event) => recordToolInvocation({ repo: telemetry }, event),
         ...(input.runtimeCommitSink ? { runtimeCommitSink: input.runtimeCommitSink } : {}),
+        ...(input.admitManagedMutation ? { admitManagedMutation: input.admitManagedMutation } : {}),
         ...(providerRequestCapture
           ? {
               recordProviderRequestCapture: providerRequestCapture,

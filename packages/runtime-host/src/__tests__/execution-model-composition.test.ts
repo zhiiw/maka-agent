@@ -1228,6 +1228,35 @@ test('hosted execution freezes the headless coding provider wire contract', asyn
       );
       assert.equal(stableHash(profiled.body.tools), HEADLESS_CODING_V1_TOOLS_HASH);
     }
+
+    const requestCountBeforeManagedAdmission = provider.requests.length;
+    const managedOutcome = await composition.handlers['hosted.execution.start'](
+      {
+        executionId: '00000000-0000-4000-8000-000000000779',
+        session: {
+          workspace: { kind: 'host_path', path: root },
+          modelTarget: {
+            kind: 'explicit',
+            connectionSlug: 'profile-deepseek',
+            model: 'deepseek-v4-flash',
+          },
+          permissionMode: 'bypass',
+          collaborationMode: 'agent',
+          orchestrationMode: 'default',
+          toolProfile: 'managed-coding-v1',
+        },
+        content: { text: 'Modify the managed workspace.' },
+      },
+      context,
+    );
+    assert.equal(managedOutcome.ok, true);
+    if (!managedOutcome.ok || managedOutcome.result.kind !== 'settled') return;
+    assert.equal(managedOutcome.result.status, 'failed');
+    assert.match(
+      managedOutcome.result.failureReason ?? '',
+      /managed_workspace_profile_unavailable/u,
+    );
+    assert.equal(provider.requests.length, requestCountBeforeManagedAdmission);
   } finally {
     try {
       await composition?.close();

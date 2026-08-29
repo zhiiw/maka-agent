@@ -756,6 +756,8 @@ export interface AiSdkBackendInput extends AiSdkCompactionCapabilities {
   recordToolInvocation?: ToolTelemetryRecorder;
   /** Optional Phase 2 SQLite T1/T2 boundary for real tool execution. */
   runtimeCommitSink?: RuntimeCommitSink;
+  /** Owner-issued admission for managed Write/Edit execution. */
+  admitManagedMutation?: ToolRuntimeInput['admitManagedMutation'];
   /** Durable session-lifetime cumulative usage checkpoint after each completed provider step. */
   recordUsageCheckpoint?: (
     usage: NormalizedAiSdkUsage & { costUsd?: number },
@@ -1377,6 +1379,7 @@ export class AiSdkBackend implements AgentBackend {
       getRunTrace: () => identity.scope().runTrace,
       recordToolInvocation: input.recordToolInvocation,
       runtimeCommitSink: input.runtimeCommitSink,
+      admitManagedMutation: input.admitManagedMutation,
       recordToolArtifacts: input.recordToolArtifacts,
     });
   }

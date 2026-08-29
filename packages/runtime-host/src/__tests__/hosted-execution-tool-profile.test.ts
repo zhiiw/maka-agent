@@ -38,6 +38,13 @@ test('hosted execution tool profiles are durable Session creation inputs', () =>
     content: { text: 'solve' },
   });
   assert.equal(decoded.session.toolProfile, 'headless-coding-v1');
+  assert.equal(
+    decodeHostedExecutionStartInput({
+      ...decoded,
+      session: { ...decoded.session, toolProfile: 'managed-coding-v1' },
+    }).session.toolProfile,
+    'managed-coding-v1',
+  );
   assert.throws(
     () =>
       decodeHostedExecutionStartInput({
@@ -133,4 +140,31 @@ test('the WorkHub coordination profile has conversational authority but zero too
     impl: async () => 'not reachable',
   };
   assert.deepEqual(projectHostedExecutionTools([productTool], 'workhub-coordination-v1'), []);
+});
+
+test('the managed coding profile exposes only owner-settled Write and Edit', () => {
+  const profile = hostedExecutionRunProfile('managed-coding-v1');
+  assert.ok(profile);
+  assert.deepEqual(profile.toolNames, ['Write', 'Edit']);
+  assert.equal(profile.memoryExtraction, false);
+  assert.match(profile.systemPrompt, /managed Git workspace/u);
+  assert.match(profile.systemPrompt, /Write and Edit/u);
+
+  const tools = ['Read', 'Write', 'Edit', 'Bash'].map(
+    (name): MakaTool => ({
+      name,
+      description: name,
+      parameters: z.object({}),
+      impl: async () => 'not used by managed mutation execution',
+    }),
+  );
+  const selected = projectHostedExecutionTools(tools, 'managed-coding-v1');
+  assert.deepEqual(
+    selected.map(({ name }) => name),
+    ['Write', 'Edit'],
+  );
+  for (const tool of selected) {
+    assert.equal(tool.recoveryMode, 'reconcile');
+    assert.equal(tool.durableExecutionProfile, 'managed_mutation_v1');
+  }
 });
