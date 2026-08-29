@@ -35,6 +35,7 @@ export const GITOXIDE_HELPER_OPERATIONS_INTERNAL = Object.freeze([
   'grep_tree_files',
   'compare_accepted_trees',
   'materialize_accepted_tree',
+  'publish_accepted_ref',
 ] as const);
 export type GitoxideHelperOperationInternal = (typeof GITOXIDE_HELPER_OPERATIONS_INTERNAL)[number];
 

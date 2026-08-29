@@ -169,6 +169,7 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "restore_destination_conflict",
     "restore_destination_create_failed",
     "restore_file_write_failed",
+    "published_ref_conflict",
     "unsupported_source_entry_kind",
     "unsupported_source_attributes",
     "unsupported_source_path",
@@ -267,6 +268,14 @@ enum Request {
         repository_path: PathBuf,
         accepted_commit_oid: String,
         destination_path: PathBuf,
+        managed_tree_policy_version: u8,
+    },
+    PublishAcceptedRef {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        published_ref: String,
         managed_tree_policy_version: u8,
     },
 }
@@ -442,6 +451,16 @@ enum Response<'a> {
         accepted_tree_oid: String,
         files_materialized: u64,
         bytes_materialized: u64,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    AcceptedRefPublished {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        published_ref: String,
+        replayed: bool,
         managed_tree_policy_version: u8,
     },
     #[serde(rename_all = "camelCase")]
@@ -647,6 +666,23 @@ fn run() -> Result<ExitCode, &'static str> {
                 repository_path,
                 accepted_commit_oid,
                 destination_path,
+                managed_tree_policy_version,
+            )
+        }
+        Request::PublishAcceptedRef {
+            protocol_version,
+            repository_path,
+            accepted_commit_oid,
+            accepted_tree_oid,
+            published_ref,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            publish_accepted_ref(
+                repository_path,
+                accepted_commit_oid,
+                accepted_tree_oid,
+                published_ref,
                 managed_tree_policy_version,
             )
         }
@@ -2376,6 +2412,103 @@ fn materialize_accepted_tree(
         managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
     });
     Ok(ExitCode::SUCCESS)
+}
+
+fn publish_accepted_ref(
+    repository_path: PathBuf,
+    accepted_commit_oid: String,
+    accepted_tree_oid: String,
+    published_ref: String,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    if !published_ref.starts_with("refs/maka/published/") {
+        return Err("target_ref_outside_maka_namespace");
+    }
+    gix::refs::FullName::try_from(published_ref.as_str())
+        .map_err(|_| "target_ref_outside_maka_namespace")?;
+    let repository = open_repository(repository_path)?;
+    let (accepted_commit, accepted_tree) =
+        accepted_commit_identity(&repository, &accepted_commit_oid)?;
+    if accepted_tree.to_string() != accepted_tree_oid {
+        return Err("accepted_tree_unavailable");
+    }
+    let mut stats = ManagedTreeStats::default();
+    walk_verified_source_tree(
+        &repository,
+        None,
+        accepted_tree,
+        "",
+        0,
+        MANAGED_TREE_POLICY_V3,
+        &mut stats,
+    )?;
+    if let Some(reference) = repository
+        .try_find_reference(published_ref.as_str())
+        .map_err(|_| "target_ref_unavailable")?
+    {
+        let existing = read_direct_commit_reference(
+            &repository,
+            reference,
+            "accepted_ref_not_direct",
+            "accepted_ref_target_invalid",
+        )?;
+        if existing != accepted_commit {
+            return Err("published_ref_conflict");
+        }
+        write_response(&Response::AcceptedRefPublished {
+            protocol_version: PROTOCOL_VERSION,
+            object_format: "sha1",
+            accepted_commit_oid,
+            accepted_tree_oid,
+            published_ref,
+            replayed: true,
+            managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+        });
+        return Ok(ExitCode::SUCCESS);
+    }
+    match repository.reference(
+        published_ref.as_str(),
+        accepted_commit,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "maka publish accepted workspace version",
+    ) {
+        Ok(_) => {
+            write_response(&Response::AcceptedRefPublished {
+                protocol_version: PROTOCOL_VERSION,
+                object_format: "sha1",
+                accepted_commit_oid,
+                accepted_tree_oid,
+                published_ref,
+                replayed: false,
+                managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+            });
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(_) => {
+            let existing = read_direct_commit_ref(
+                &repository,
+                &published_ref,
+                "accepted_ref_not_direct",
+                "accepted_ref_target_invalid",
+            )?;
+            if existing != accepted_commit {
+                return Err("published_ref_conflict");
+            }
+            write_response(&Response::AcceptedRefPublished {
+                protocol_version: PROTOCOL_VERSION,
+                object_format: "sha1",
+                accepted_commit_oid,
+                accepted_tree_oid,
+                published_ref,
+                replayed: true,
+                managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+            });
+            Ok(ExitCode::SUCCESS)
+        }
+    }
 }
 
 fn collect_accepted_tree_files(

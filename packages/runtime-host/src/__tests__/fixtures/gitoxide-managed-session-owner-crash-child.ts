@@ -71,6 +71,7 @@ const helperCapability = await admitGitoxideHelperArtifactInternal({
       'grep_tree_files',
       'compare_accepted_trees',
       'materialize_accepted_tree',
+      'publish_accepted_ref',
     ],
   }),
 });

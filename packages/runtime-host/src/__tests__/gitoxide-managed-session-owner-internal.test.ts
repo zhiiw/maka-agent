@@ -215,6 +215,44 @@ test('Restore materializes an accepted tree without touching the attached checko
   );
 });
 
+test('Publish pins the exact durable accepted head without modifying the source repository', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the accepted publication test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'published content\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'publication baseline');
+  const sourceHead = git(sourceRoot, ['rev-parse', 'HEAD']);
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-publish-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+  const session = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-accepted-publication',
+  });
+
+  const first = await session.publish.publish('manual-review');
+  assert.equal(first.replayed, false);
+  assert.equal(
+    git(session.repositoryPath, ['rev-parse', first.publishedRef]),
+    first.acceptedCommitOid,
+  );
+  const replay = await session.publish.publish('manual-review');
+  assert.equal(replay.replayed, true);
+  assert.equal(git(sourceRoot, ['rev-parse', 'HEAD']), sourceHead);
+});
+
 test('fails closed when the source advances after its managed epoch opens', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {
@@ -385,6 +423,7 @@ async function admittedHelper(): Promise<
       'grep_tree_files',
       'compare_accepted_trees',
       'materialize_accepted_tree',
+      'publish_accepted_ref',
     ],
   });
   return {
