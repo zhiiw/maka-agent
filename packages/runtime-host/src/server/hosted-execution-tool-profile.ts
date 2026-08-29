@@ -31,6 +31,14 @@ const HEADLESS_CODING_V1_TOOL_NAMES = [
   'apply_patch',
 ] as const;
 
+const MANAGED_CODING_V1_TOOL_NAMES = ['Write', 'Edit'] as const;
+const MANAGED_CODING_V1_SYSTEM_PROMPT = [
+  'Modify the managed Git workspace with Write and Edit.',
+  'These tools transform immutable accepted Git content and publish an owner-verified successor.',
+  'No shell, attached-workspace read, or unmanaged filesystem authority is available in this profile.',
+  'Stop when the requested changes are complete.',
+].join('\n');
+
 const HEADLESS_CODING_V1_SYSTEM_PROMPT = [
   'Complete the task by acting with the available tools, not by narrating.',
   'Prefer Read, Glob, and Grep for inspection, Edit and Write for file changes, and Bash for shell commands and tests.',
@@ -73,6 +81,13 @@ export function hostedExecutionRunProfile(
       memoryExtraction: false,
     };
   }
+  if (profile === 'managed-coding-v1') {
+    return {
+      toolNames: MANAGED_CODING_V1_TOOL_NAMES,
+      systemPrompt: MANAGED_CODING_V1_SYSTEM_PROMPT,
+      memoryExtraction: false,
+    };
+  }
   if (profile === 'workhub-coordination-v1') {
     return {
       toolNames: [],
@@ -96,13 +111,20 @@ export function projectHostedExecutionTools(
   if (missing.length > 0) {
     throw new Error(`Hosted tool profile is unavailable: ${missing.join(', ')}`);
   }
-  return (selected as MakaTool[]).map((tool) =>
-    tool.name === 'Bash'
+  return (selected as MakaTool[]).map((tool) => {
+    if (profile === 'managed-coding-v1') {
+      return {
+        ...tool,
+        recoveryMode: 'reconcile',
+        durableExecutionProfile: 'managed_mutation_v1',
+      };
+    }
+    return tool.name === 'Bash'
       ? {
           ...tool,
           description: HEADLESS_CODING_V1_BASH_DESCRIPTION,
           parameters: HEADLESS_CODING_V1_BASH_PARAMETERS,
         }
-      : tool,
-  );
+      : tool;
+  });
 }

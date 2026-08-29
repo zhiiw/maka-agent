@@ -152,6 +152,11 @@ import { HostNetworkProxyCoordinator } from './network-proxy-coordinator.js';
 import { HostOAuthExecutionAuthority } from './oauth-execution-authority.js';
 import { HostOAuthCoordinator, type HostOAuthCoordinatorInput } from './oauth-coordinator.js';
 import { HostPlanCoordinator } from './plan-coordinator.js';
+import { openGitoxideManagedSessionOwnerInternal } from './gitoxide-managed-session-owner-internal.js';
+import {
+  PackagedGitoxideHelperError,
+  resolvePackagedGitoxideHelperInternal,
+} from './packaged-gitoxide-helper-internal.js';
 import {
   HostProjectDirectoryAuthority,
   type PublishedProjectDirectoryRoot,
@@ -260,6 +265,18 @@ export async function createExecutionRuntimeHostComposition(
     );
   }
   const stores = storage.execution;
+  const gitoxideInvocationOwnerToken = {};
+  const gitoxideHelperCapability = await resolvePackagedGitoxideHelperInternal({
+    invocationOwnerToken: gitoxideInvocationOwnerToken,
+  }).catch((error: unknown) => {
+    if (
+      error instanceof PackagedGitoxideHelperError &&
+      error.code === 'packaged_gitoxide_helper_unavailable'
+    ) {
+      return undefined;
+    }
+    throw error;
+  });
   let graphControlStore: ReturnType<typeof createAgentGraphControlStore> | undefined;
   let graphClient: HostAgentGraphCoordinator | undefined;
   let sessionEffects: HostSessionEffectCoordinator | undefined;
@@ -674,8 +691,27 @@ export async function createExecutionRuntimeHostComposition(
     backends.register(
       'ai-sdk',
       dependencies.primaryBackendFactory ??
-        ((backendContext) =>
-          createHostAiSdkBackend({
+        (async (backendContext) => {
+          const managedSession =
+            backendContext.header.toolProfile === 'managed-coding-v1'
+              ? await (async () => {
+                  if (!gitoxideHelperCapability) {
+                    throw new Error(
+                      'managed_workspace_profile_unavailable: packaged Gitoxide helper authority is unavailable',
+                    );
+                  }
+                  return openGitoxideManagedSessionOwnerInternal({
+                    storageRootLease: context.owner.lease,
+                    stores,
+                    invocationOwnerToken: gitoxideInvocationOwnerToken,
+                    helperCapability: gitoxideHelperCapability,
+                    sourceRoot: backendContext.header.cwd,
+                    sessionId: backendContext.sessionId,
+                    abortSignal: backendContext.abortSignal,
+                  });
+                })()
+              : undefined;
+          return createHostAiSdkBackend({
             context: backendContext,
             runtimePolicy: runtimePolicyStores,
             oauthCredentials,
@@ -715,8 +751,12 @@ export async function createExecutionRuntimeHostComposition(
               backendContext.sessionId,
             ),
             runtimeCommitSink: stores.runtimeEventStore,
+            ...(managedSession
+              ? { admitManagedMutation: managedSession.writeEdit.admitManagedMutation }
+              : {}),
             requestDrain: context.requestDrain,
-          })),
+          });
+        }),
     );
     const runtimeAuthority: RuntimeHostedRootAuthority = {
       bindRun: (identity) => messages.bindRun(identity),
