@@ -48,7 +48,7 @@ RuntimeEvent 是语义事实的唯一权威，但不能替代执行所有权的�
 | recovery semantics | immutable RuntimeEvents | call、dispatch、outcome、observation、decision |
 | execution ownership | admission/claim CAS | 一个 source boundary 只能有一个执行者 |
 | projection | SQLite tables | 可删除、可从事件重建 |
-| workspace artifact | 当前无生产 writer；后续 Gitoxide data plane | 保存/验证 workspace 状态，不能单独授权 continuation |
+| workspace artifact | Gitoxide helper + owner-bound Host data plane | 保存/验证 workspace 状态，不能单独授权 continuation |
 
 ## 2. Phase 3A：工具恢复
 
@@ -639,6 +639,25 @@ response、continuation claim 和 new Run start 之间的每个边界。Linux、
 实际证明的能力，不得用单元测试代替进程崩溃证据。
 
 ## 7. M4 — Workspace lifecycle
+
+### 当前实施状态（stack v3）
+
+下表区分“已经落地的最小 authority 合同”和“整个 milestone 的产品完成态”。出现实现不代表该
+milestone 已经完成；未列出的能力不得由 UI 或文档推断为可用。
+
+| 层级 | 已落地合同 | 仍需完成的产品门槛 |
+|---|---|---|
+| M3 | accepted-tree Read/Glob/Grep、workspace-bound continuation、manual managed Resume、Host crash seam | Desktop `New Managed Task`/Resume UX 与三平台发布证据 |
+| M4.1 | baseline/current accepted commit 的 bounded Gitoxide diff + durable boundary revalidation | Desktop diff renderer、逐文件内容 diff/批注 |
+| M4.2 | Maka-owned isolated restore，staging/final 残留整体转 orphan 后重建 | SQLite workspace transition fact、Desktop restore 入口 |
+| M4.3 | accepted head 固定为 immutable `refs/maka/published/*`，exact replay/conflict | patch export、新 branch、checkout drift-aware apply 与 receipt |
+| M4.4 | 任意同 epoch WorkspaceVersion 的 isolated time-travel restore，不 rewind | 把旧 tree 作为“新 successor”原子接受的 undo mutation |
+| M4.5 | 显式 rebaseline identity 创建同 workspace 的新 epoch，旧 epoch 保留 | affected-path/reread policy、Desktop confirmation 与 lineage projection |
+| M4.6 | 有界、tombstone-based restore-orphan GC | candidate/ref/object/superseded-epoch 的完整 roots 与 retention policy |
+| M4.7 | source checkout 路径 relocation；identity 不再依赖 source 绝对路径 | storage-root transition、artifact copy/rebind 与旧 root orphan 收敛 |
+
+因此 stack v3 的含义是：M3 已具备 API/authority 闭环，M4.1–M4.7 各自建立了第一个安全原语；
+它不是对完整 Desktop lifecycle 已 Ready 的声明。
 
 ### M4.1 Diff / Review
 
