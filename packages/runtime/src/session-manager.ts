@@ -2062,10 +2062,14 @@ export class SessionManager {
     sessionId: string,
     input: PlanAuthoritativeSafeBoundaryContinuationInput,
   ): Promise<SafeBoundaryContinuationPlan> {
+    let header: SessionHeader | undefined;
     if (this.deps.safeBoundaryResumeEnabled !== true) {
-      const plan = resumeFeatureDisabledPlan();
-      this.recordContinuationPlan(sessionId, input.sourceRunId, plan);
-      return plan;
+      header = await this.deps.store.readHeader(sessionId).catch(() => undefined);
+      if (header?.toolProfile !== 'managed-coding-v1') {
+        const plan = resumeFeatureDisabledPlan();
+        this.recordContinuationPlan(sessionId, input.sourceRunId, plan);
+        return plan;
+      }
     }
     if (!this.deps.runStore || !this.deps.inspectContinuationSafety) {
       const plan: SafeBoundaryContinuationPlan = {
@@ -2109,7 +2113,7 @@ export class SessionManager {
       this.recordContinuationPlan(sessionId, input.sourceRunId, plan);
       return plan;
     }
-    const header = await this.deps.store.readHeader(sessionId);
+    header ??= await this.deps.store.readHeader(sessionId);
     let observation: RuntimeContinuationSafetyObservation;
     try {
       observation = await this.deps.inspectContinuationSafety(sessionId);

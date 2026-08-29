@@ -4742,6 +4742,24 @@ describe('SessionManager permission mode updates', () => {
     ]);
   });
 
+  test('keeps manual Resume available for an explicit managed coding task', async () => {
+    const store = new MemorySessionStore();
+    const manager = new SessionManager({
+      store,
+      backends: new BackendRegistry(),
+      newId: nextId(),
+      now: nextNow(6_536),
+    });
+    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v1' }));
+
+    const plan = await manager.planAuthoritativeSafeBoundaryContinuation(session.id, {
+      sourceRunId: 'source-run-managed-manual-resume',
+    });
+
+    expect(plan.disposition).toBe('park');
+    expect(plan.rejectionReasons).toEqual(['safety_observation_unavailable']);
+  });
+
   test('discovers the newest resumable top-level source run from durable state', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
