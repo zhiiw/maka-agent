@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -400,6 +400,49 @@ test('explicit rebaseline opens a new epoch and preserves the prior epoch', asyn
   assert.deepEqual(await original.inspection.execute({ kind: 'read', path: 'notes.txt' }), {
     kind: 'read',
     content: 'epoch one\n',
+  });
+});
+
+test('reopens the same managed session after its source checkout moves', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the source relocation test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'relocatable source\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'relocation baseline');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-relocation-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+  const common = {
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sessionId: 'session-source-relocation',
+  } as const;
+  const opened = await openGitoxideManagedSessionOwnerInternal({ ...common, sourceRoot });
+  const relocatedRoot = `${sourceRoot}-relocated`;
+  await rename(sourceRoot, relocatedRoot);
+  t.after(() => rm(relocatedRoot, { recursive: true, force: true }));
+
+  const reopened = await openGitoxideManagedSessionOwnerInternal({
+    ...common,
+    sourceRoot: relocatedRoot,
+  });
+  assert.equal(reopened.repositoryId, opened.repositoryId);
+  assert.equal(reopened.workspaceId, opened.workspaceId);
+  assert.equal(reopened.workspaceEpochId, opened.workspaceEpochId);
+  assert.equal(reopened.repositoryPath, opened.repositoryPath);
+  assert.deepEqual(await reopened.inspection.execute({ kind: 'read', path: 'notes.txt' }), {
+    kind: 'read',
+    content: 'relocatable source\n',
   });
 });
 

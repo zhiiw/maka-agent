@@ -16,4 +16,3 @@ source HEAD 变化时，旧 workspace epoch 永不原地换基线。只有显式
 ## 平台与失败
 
 三平台使用同一 SQLite/Gitoxide 合同。任何 import 或 baseline commit 失败都不会修改旧 epoch；import 成功但 SQLite 尚未提交时，现有 import exact-retry 协议负责收敛。v1 只承诺进程崩溃，不声明断电持久性。
-

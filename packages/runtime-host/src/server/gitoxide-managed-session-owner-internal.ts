@@ -138,7 +138,6 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
     sourceCapability,
   );
   const identity = deriveManagedSessionIdentity(
-    sourceRoot,
     input.sessionId,
     sourceBinding.kind,
     input.workspaceEpochSeed,
@@ -259,7 +258,6 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     sourceCapability,
   );
   const identity = deriveManagedSessionIdentity(
-    sourceRoot,
     input.sessionId,
     sourceBinding.kind,
     input.workspaceEpochSeed,
@@ -667,17 +665,14 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
 }
 
 function deriveManagedSessionIdentity(
-  sourceRoot: string,
   sessionId: string,
   sourceKind: ResumableWorkspaceSourceKindInternal,
   workspaceEpochSeed?: string,
 ) {
   if (!sessionId.trim()) throw new Error('Gitoxide managed session identity is invalid');
   const workspaceDigest = createHash('sha256')
-    .update('maka-resumable-managed-session-v2\0', 'utf8')
+    .update('maka-resumable-managed-session-v3\0', 'utf8')
     .update(sourceKind, 'utf8')
-    .update('\0')
-    .update(sourceRoot, 'utf8')
     .update('\0')
     .update(sessionId, 'utf8')
     .digest('hex')

@@ -59,6 +59,7 @@ This page is the authority map for Maka documentation. Code and contract tests r
 - [Managed Workspace Time Travel v1](./architecture/runtime-managed-workspace-time-travel-v1.zh-CN.md)
 - [Managed Workspace Rebaseline v1](./architecture/runtime-managed-workspace-rebaseline-v1.zh-CN.md)
 - [Managed Workspace GC v1](./architecture/runtime-managed-workspace-gc-v1.zh-CN.md)
+- [Managed Workspace Source Relocation v1](./architecture/runtime-managed-workspace-source-relocation-v1.zh-CN.md)
 - [Skill catalog policy](./skill-catalog-policy.md)
 - [Agent Swarm](./agent-swarm.md)
 - [Agent Graph stream scheduling](./architecture/agent-graph-stream-scheduling-draft.md) ([中文](./architecture/agent-graph-stream-scheduling-draft.zh-CN.md))

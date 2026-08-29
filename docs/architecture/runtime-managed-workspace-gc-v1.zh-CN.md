@@ -13,4 +13,3 @@ GC 只能删除已经失去恢复根资格、且位于 Maka-owned restore `orpha
 ## 失败、保留和平台
 
 rename 失败或身份不可信时 fail closed。Linux/macOS/Windows 均使用相同 tombstone 协议；Windows 文件占用使删除失败时保留 tombstone，下一次重试。v1 只回收 restore orphan，candidate/ref/object 的 reachability GC 要在其全部 durable roots 可枚举后另行扩展。
-
