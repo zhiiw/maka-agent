@@ -29,6 +29,8 @@ import {
 
 const MAX_SUCCESSOR_CONTENT_BYTES = 64 * 1024 * 1024;
 const MAX_TREE_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_TREE_QUERY_PATTERN_BYTES = 4096;
+const MAX_TREE_QUERY_RESULTS = 200;
 const MAX_ENCODED_CONTENT_BYTES = Math.ceil(MAX_SUCCESSOR_CONTENT_BYTES / 3) * 4;
 const MAX_REQUEST_BYTES = MAX_ENCODED_CONTENT_BYTES + 64 * 1024;
 const MAX_STDOUT_BYTES = MAX_TREE_FILE_BYTES * 6 + 64 * 1024;
@@ -130,6 +132,11 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'tree_file_not_utf8',
   'tree_file_size_limit_exceeded',
   'tree_file_unavailable',
+  'invalid_tree_query_path',
+  'invalid_tree_glob_pattern',
+  'invalid_tree_grep_pattern',
+  'invalid_tree_query_limit',
+  'tree_query_output_limit_exceeded',
   'unsupported_source_entry_kind',
   'unsupported_source_attributes',
   'unsupported_source_path',
@@ -271,6 +278,33 @@ export interface GitoxideTreeFileReadV1 {
   readonly path: string;
   readonly content: string;
   readonly bytesRead: number;
+  readonly managedTreePolicyVersion: 3;
+}
+
+export interface GitoxideTreeFilesListedV1 {
+  readonly kind: 'tree_files_listed';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly path: string;
+  readonly pattern: string;
+  readonly files: readonly string[];
+  readonly truncated: boolean;
+  readonly managedTreePolicyVersion: 3;
+}
+
+export interface GitoxideTreeFilesGreppedV1 {
+  readonly kind: 'tree_files_grepped';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly path: string;
+  readonly pattern: string;
+  readonly glob?: string;
+  readonly matches: readonly string[];
+  readonly truncated: boolean;
   readonly managedTreePolicyVersion: 3;
 }
 
@@ -757,6 +791,118 @@ export async function readTreeFileWithGitoxideHelperInternal(input: {
     deadlineAt,
   });
   return decodeTreeFileOutcome(outcome, input);
+}
+
+export async function listTreeFilesWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedCommitOid: string;
+  readonly path: string;
+  readonly pattern: string;
+  readonly limit: number;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideTreeFilesListedV1> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.acceptedTreeReadMs;
+  assertTreeQueryInput(input.path, input.pattern, input.limit);
+  const prepared = await prepareAcceptedTreeInvocation({ ...input, deadlineAt });
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: prepared.artifact.protocolVersion,
+      operation: 'list_tree_files',
+      repositoryPath: prepared.repositoryPath,
+      acceptedCommitOid: input.acceptedCommitOid,
+      path: input.path,
+      pattern: input.pattern,
+      limit: input.limit,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
+  const outcome = await invokeHelper({
+    executablePath: prepared.artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  return decodeTreeFilesListedOutcome(outcome, input);
+}
+
+export async function grepTreeFilesWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedCommitOid: string;
+  readonly path: string;
+  readonly pattern: string;
+  readonly glob?: string;
+  readonly maxCountPerFile: number;
+  readonly limit: number;
+  readonly timeoutMs: number;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideTreeFilesGreppedV1> {
+  if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1) {
+    throw invocationInvalid('Gitoxide accepted-tree grep timeout is invalid');
+  }
+  const deadlineAt =
+    performance.now() +
+    Math.min(input.timeoutMs, GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.acceptedTreeReadMs);
+  assertTreeQueryInput(input.path, input.pattern, input.limit);
+  if (
+    !Number.isSafeInteger(input.maxCountPerFile) ||
+    input.maxCountPerFile < 1 ||
+    input.maxCountPerFile > MAX_TREE_QUERY_RESULTS
+  ) {
+    throw invocationInvalid('Gitoxide accepted-tree grep per-file limit is invalid');
+  }
+  if (
+    input.glob !== undefined &&
+    (input.glob.length === 0 ||
+      Buffer.byteLength(input.glob, 'utf8') > MAX_TREE_QUERY_PATTERN_BYTES ||
+      input.glob.includes('\0'))
+  ) {
+    throw invocationInvalid('Gitoxide accepted-tree grep glob is invalid');
+  }
+  const prepared = await prepareAcceptedTreeInvocation({ ...input, deadlineAt });
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: prepared.artifact.protocolVersion,
+      operation: 'grep_tree_files',
+      repositoryPath: prepared.repositoryPath,
+      acceptedCommitOid: input.acceptedCommitOid,
+      path: input.path,
+      pattern: input.pattern,
+      ...(input.glob === undefined ? {} : { glob: input.glob }),
+      maxCountPerFile: input.maxCountPerFile,
+      limit: input.limit,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
+  const outcome = await invokeHelper({
+    executablePath: prepared.artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  return decodeTreeFilesGreppedOutcome(outcome, input);
+}
+
+function assertTreeQueryInput(path: string, pattern: string, limit: number): void {
+  if (
+    !isBoundedPathTransport(path) ||
+    pattern.length === 0 ||
+    Buffer.byteLength(pattern, 'utf8') > MAX_TREE_QUERY_PATTERN_BYTES ||
+    pattern.includes('\0') ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > MAX_TREE_QUERY_RESULTS
+  ) {
+    throw invocationInvalid('Gitoxide accepted-tree query is invalid');
+  }
 }
 
 async function prepareAcceptedTreeInvocation(input: {
@@ -1378,6 +1524,64 @@ function decodeTreeFileOutcome(
   throw protocolInvalid('Gitoxide tree file response is invalid');
 }
 
+function decodeTreeFilesListedOutcome(
+  outcome: HelperProcessOutcome,
+  expected: {
+    readonly acceptedCommitOid: string;
+    readonly path: string;
+    readonly pattern: string;
+    readonly limit: number;
+    readonly managedTreePolicyVersion: 3;
+  },
+): GitoxideTreeFilesListedV1 {
+  const value = parseHelperOutcome(outcome);
+  if (
+    outcome.exitCode === 0 &&
+    isTreeFilesListed(value) &&
+    value.acceptedCommitOid === expected.acceptedCommitOid &&
+    value.path === expected.path &&
+    value.pattern === expected.pattern &&
+    value.files.length <= expected.limit &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
+  ) {
+    return Object.freeze({ ...value, files: Object.freeze([...value.files]) });
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('list accepted tree files', value.reason);
+  }
+  throw protocolInvalid('Gitoxide accepted-tree glob response is invalid');
+}
+
+function decodeTreeFilesGreppedOutcome(
+  outcome: HelperProcessOutcome,
+  expected: {
+    readonly acceptedCommitOid: string;
+    readonly path: string;
+    readonly pattern: string;
+    readonly glob?: string;
+    readonly limit: number;
+    readonly managedTreePolicyVersion: 3;
+  },
+): GitoxideTreeFilesGreppedV1 {
+  const value = parseHelperOutcome(outcome);
+  if (
+    outcome.exitCode === 0 &&
+    isTreeFilesGrepped(value) &&
+    value.acceptedCommitOid === expected.acceptedCommitOid &&
+    value.path === expected.path &&
+    value.pattern === expected.pattern &&
+    value.glob === expected.glob &&
+    value.matches.length <= expected.limit &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
+  ) {
+    return Object.freeze({ ...value, matches: Object.freeze([...value.matches]) });
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('grep accepted tree files', value.reason);
+  }
+  throw protocolInvalid('Gitoxide accepted-tree grep response is invalid');
+}
+
 function gitBlobOid(content: Buffer): string {
   return createHash('sha1')
     .update(`blob ${content.length}\0`, 'utf8')
@@ -1455,6 +1659,85 @@ function isTreeFileRead(value: unknown): value is GitoxideTreeFileReadV1 {
     value.bytesRead <= MAX_TREE_FILE_BYTES &&
     Buffer.byteLength(value.content, 'utf8') === value.bytesRead &&
     value.managedTreePolicyVersion === 3
+  );
+}
+
+function isTreeFilesListed(value: unknown): value is GitoxideTreeFilesListedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'path',
+      'pattern',
+      'files',
+      'truncated',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'tree_files_listed' &&
+    value.objectFormat === 'sha1' &&
+    isSha1(value.acceptedCommitOid) &&
+    isSha1(value.acceptedTreeOid) &&
+    typeof value.path === 'string' &&
+    isBoundedPathTransport(value.path) &&
+    typeof value.pattern === 'string' &&
+    value.pattern.length > 0 &&
+    Buffer.byteLength(value.pattern, 'utf8') <= MAX_TREE_QUERY_PATTERN_BYTES &&
+    Array.isArray(value.files) &&
+    value.files.length <= MAX_TREE_QUERY_RESULTS &&
+    value.files.every((path) => typeof path === 'string' && isBoundedPathTransport(path)) &&
+    new Set(value.files).size === value.files.length &&
+    typeof value.truncated === 'boolean' &&
+    value.managedTreePolicyVersion === 3
+  );
+}
+
+function isTreeFilesGrepped(value: unknown): value is GitoxideTreeFilesGreppedV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value).sort();
+  const required = [
+    'acceptedCommitOid',
+    'acceptedTreeOid',
+    'kind',
+    'managedTreePolicyVersion',
+    'matches',
+    'objectFormat',
+    'path',
+    'pattern',
+    'protocolVersion',
+    'truncated',
+  ];
+  const allowed = [...required, 'glob'];
+  if (keys.some((key) => !allowed.includes(key)) || required.some((key) => !keys.includes(key))) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return (
+    candidate.protocolVersion === 1 &&
+    candidate.kind === 'tree_files_grepped' &&
+    candidate.objectFormat === 'sha1' &&
+    isSha1(candidate.acceptedCommitOid) &&
+    isSha1(candidate.acceptedTreeOid) &&
+    typeof candidate.path === 'string' &&
+    isBoundedPathTransport(candidate.path) &&
+    typeof candidate.pattern === 'string' &&
+    candidate.pattern.length > 0 &&
+    Buffer.byteLength(candidate.pattern, 'utf8') <= MAX_TREE_QUERY_PATTERN_BYTES &&
+    (candidate.glob === undefined ||
+      (typeof candidate.glob === 'string' &&
+        candidate.glob.length > 0 &&
+        Buffer.byteLength(candidate.glob, 'utf8') <= MAX_TREE_QUERY_PATTERN_BYTES)) &&
+    Array.isArray(candidate.matches) &&
+    candidate.matches.length <= MAX_TREE_QUERY_RESULTS &&
+    candidate.matches.every(
+      (match) =>
+        typeof match === 'string' && Buffer.byteLength(match, 'utf8') <= MAX_TREE_FILE_BYTES + 4096,
+    ) &&
+    typeof candidate.truncated === 'boolean' &&
+    candidate.managedTreePolicyVersion === 3
   );
 }
 

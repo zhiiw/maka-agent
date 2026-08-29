@@ -29,6 +29,8 @@ import {
   GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL,
   importSourceHeadWithGitoxideHelperInternal,
   inspectCanonicalRepositoryWithGitoxideHelperInternal,
+  listTreeFilesWithGitoxideHelperInternal,
+  grepTreeFilesWithGitoxideHelperInternal,
   observeAcceptedRefWithGitoxideHelperInternal,
   promoteCandidateWithGitoxideHelperInternal,
   readTreeFileWithGitoxideHelperInternal,
@@ -38,6 +40,8 @@ import {
   type GitoxideAcceptedRefObservationV1,
   type GitoxideSourceImportObservationV1,
   type GitoxideTreeFileReadV1,
+  type GitoxideTreeFilesListedV1,
+  type GitoxideTreeFilesGreppedV1,
   type GitoxideRepositoryRejectionV1,
 } from './gitoxide-helper-invocation-internal.js';
 
@@ -209,7 +213,14 @@ export async function importAdmittedGitoxideRepositoryInternal(input: {
   requireGitoxideHelperOperationsInternal(
     admission.invocationOwnerToken,
     admission.helperCapability,
-    ['create_candidate', 'promote_candidate', 'observe_accepted_ref', 'read_tree_file'],
+    [
+      'create_candidate',
+      'promote_candidate',
+      'observe_accepted_ref',
+      'read_tree_file',
+      'list_tree_files',
+      'grep_tree_files',
+    ],
   );
   const result = await importSourceHeadWithGitoxideHelperInternal({
     invocationOwnerToken: admission.invocationOwnerToken,
@@ -292,6 +303,8 @@ export async function reopenGitoxideAcceptedRepositoryInternal(input: {
     'create_candidate',
     'promote_candidate',
     'read_tree_file',
+    'list_tree_files',
+    'grep_tree_files',
   ]);
   const observed = await observeAcceptedRefWithGitoxideHelperInternal({
     invocationOwnerToken: input.invocationOwnerToken,
@@ -440,6 +453,80 @@ export async function readGitoxideTreeFileInternal(input: {
     );
   }
   return result;
+}
+
+export async function listGitoxideTreeFilesInternal(input: {
+  readonly acceptedRepositoryOwnerToken: object;
+  readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
+  readonly path: string;
+  readonly pattern: string;
+  readonly limit: number;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideTreeFilesListedV1> {
+  const managed = requireAcceptedRepositoryRecord(
+    input.acceptedRepositoryOwnerToken,
+    input.acceptedRepositoryCapability,
+  );
+  const result = await listTreeFilesWithGitoxideHelperInternal({
+    invocationOwnerToken: managed.invocationOwnerToken,
+    capability: managed.helperCapability,
+    repositoryPath: managed.repositoryPath,
+    acceptedCommitOid: managed.acceptedCommitOid,
+    path: input.path,
+    pattern: input.pattern,
+    limit: input.limit,
+    managedTreePolicyVersion: managed.managedTreePolicyVersion,
+    abortSignal: input.abortSignal,
+  });
+  assertAcceptedTreeIdentity(result, managed);
+  return result;
+}
+
+export async function grepGitoxideTreeFilesInternal(input: {
+  readonly acceptedRepositoryOwnerToken: object;
+  readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
+  readonly path: string;
+  readonly pattern: string;
+  readonly glob?: string;
+  readonly maxCountPerFile: number;
+  readonly limit: number;
+  readonly timeoutMs: number;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideTreeFilesGreppedV1> {
+  const managed = requireAcceptedRepositoryRecord(
+    input.acceptedRepositoryOwnerToken,
+    input.acceptedRepositoryCapability,
+  );
+  const result = await grepTreeFilesWithGitoxideHelperInternal({
+    invocationOwnerToken: managed.invocationOwnerToken,
+    capability: managed.helperCapability,
+    repositoryPath: managed.repositoryPath,
+    acceptedCommitOid: managed.acceptedCommitOid,
+    path: input.path,
+    pattern: input.pattern,
+    glob: input.glob,
+    maxCountPerFile: input.maxCountPerFile,
+    limit: input.limit,
+    timeoutMs: input.timeoutMs,
+    managedTreePolicyVersion: managed.managedTreePolicyVersion,
+    abortSignal: input.abortSignal,
+  });
+  assertAcceptedTreeIdentity(result, managed);
+  return result;
+}
+
+function assertAcceptedTreeIdentity(
+  result: Pick<GitoxideTreeFilesListedV1, 'acceptedCommitOid' | 'acceptedTreeOid'>,
+  managed: AcceptedRepositoryCapabilityRecord,
+): void {
+  if (
+    result.acceptedCommitOid !== managed.acceptedCommitOid ||
+    result.acceptedTreeOid !== managed.acceptedTreeOid
+  ) {
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_repository_admission_capability_invalid',
+    );
+  }
 }
 
 export async function promoteGitoxideCandidateInternal(input: {

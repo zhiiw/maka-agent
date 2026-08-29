@@ -887,6 +887,8 @@ async function admittedHelper(): Promise<AdmittedHelper | undefined> {
         'promote_candidate',
         'observe_accepted_ref',
         'read_tree_file',
+        'list_tree_files',
+        'grep_tree_files',
       ],
     });
     const helperCapability = await admitGitoxideHelperArtifactInternal({

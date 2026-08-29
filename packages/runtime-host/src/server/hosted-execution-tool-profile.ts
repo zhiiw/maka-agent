@@ -31,9 +31,11 @@ const HEADLESS_CODING_V1_TOOL_NAMES = [
   'apply_patch',
 ] as const;
 
-const MANAGED_CODING_V1_TOOL_NAMES = ['Write', 'Edit'] as const;
+const MANAGED_CODING_V1_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Write', 'Edit'] as const;
 const MANAGED_CODING_V1_SYSTEM_PROMPT = [
-  'Modify the managed Git workspace with Write and Edit.',
+  'Inspect the managed Git workspace with Read, Glob, and Grep.',
+  'Modify it with Write and Edit.',
+  'All five tools consume the same immutable accepted Git tree.',
   'These tools transform immutable accepted Git content and publish an owner-verified successor.',
   'No shell, attached-workspace read, or unmanaged filesystem authority is available in this profile.',
   'Stop when the requested changes are complete.',
@@ -113,6 +115,9 @@ export function projectHostedExecutionTools(
   }
   return (selected as MakaTool[]).map((tool) => {
     if (profile === 'managed-coding-v1') {
+      if (tool.name === 'Read' || tool.name === 'Glob' || tool.name === 'Grep') {
+        return { ...tool, recoveryMode: 'replay_safe' };
+      }
       return {
         ...tool,
         recoveryMode: 'reconcile',
