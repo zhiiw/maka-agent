@@ -18,21 +18,27 @@
  */
 
 import type {
+  WorkspaceBaselineAuthorityInput,
+  WorkspaceBaselineCommitResult,
   WorkspaceHeadRecordV1,
+  WorkspaceEpochRecordV1,
   WorkspaceSuccessorAuthorityInput,
   WorkspaceVersionRecordV1,
 } from '@maka/core/workspace-version-authority';
 import {
   adoptWorkspaceBaselineAuthorityStoreRootInternal,
+  commitWorkspaceBaselineInternal,
   commitManagedMutationTerminalInternal,
-  commitWorkspaceSuccessorInternal,
+  commitVerifiedWorkspaceSuccessorInternal,
   readActiveManagedMutationInternal,
+  readManagedMutationEvidenceInternal,
+  readWorkspaceEpochInternal,
   readWorkspaceHeadInternal,
   readWorkspaceVersionInternal,
   registerManagedMutationNoEffectVerifierInternal,
-  registerWorkspaceSuccessorCandidateVerifierInternal,
   type ManagedMutationNoEffectClaimV1,
   type ManagedMutationReservationRecordV1,
+  type ManagedMutationEvidenceRecordV1,
   type ManagedMutationTerminalCommitInput,
   type ManagedMutationTerminalCommitResult,
   type WorkspaceSuccessorCommitInput,
@@ -53,6 +59,10 @@ export interface ExecutionStoresWorkspaceSuccessorCommitResult
 }
 
 export interface ExecutionStoresWorkspaceMutationAuthorityInternal {
+  readEpoch(
+    workspaceId: string,
+    workspaceEpochId: string,
+  ): Promise<WorkspaceEpochRecordV1 | undefined>;
   readHead(
     workspaceId: string,
     workspaceEpochId: string,
@@ -62,6 +72,7 @@ export interface ExecutionStoresWorkspaceMutationAuthorityInternal {
     workspaceInstanceId: string,
   ): Promise<ManagedMutationReservationRecordV1 | undefined>;
   issueNoEffectOutcome(claim: ManagedMutationNoEffectClaimV1): object;
+  readMutationEvidence(operationId: string): Promise<ManagedMutationEvidenceRecordV1 | undefined>;
   commitSuccessor(
     input: WorkspaceSuccessorCommitInput,
   ): Promise<ExecutionStoresWorkspaceSuccessorCommitResult>;
@@ -77,6 +88,7 @@ interface AuthoritySource {
 
 interface AuthorityCapabilityRecord extends AuthoritySource {
   readonly ownerToken: object;
+  readonly verifyCandidate: (candidateOutcome: object) => WorkspaceSuccessorAuthorityInput;
 }
 
 interface NoEffectCapabilityRecord extends AuthoritySource {
@@ -114,6 +126,17 @@ export function registerExecutionStoresWorkspaceMutationSourceInternal(
   });
 }
 
+/** Test-only bridge used by cross-package production-shaped owner tests. */
+export function commitExecutionStoresWorkspaceBaselineForTestInternal(
+  stores: object,
+  input: WorkspaceBaselineAuthorityInput,
+): Promise<WorkspaceBaselineCommitResult> {
+  const source = sources.get(stores);
+  if (!source) throw new Error('Execution stores workspace baseline test source is unavailable');
+  adoptWorkspaceBaselineAuthorityStoreRootInternal(source.store, source.rootId);
+  return commitWorkspaceBaselineInternal(source.store, input);
+}
+
 export function issueExecutionStoresWorkspaceMutationAuthorityInternal(input: {
   readonly ownerToken: object;
   readonly stores: object;
@@ -122,13 +145,17 @@ export function issueExecutionStoresWorkspaceMutationAuthorityInternal(input: {
   const source = sources.get(input.stores);
   if (!source) throw new Error('Execution stores workspace mutation source is unavailable');
   adoptWorkspaceBaselineAuthorityStoreRootInternal(source.store, source.rootId);
-  registerWorkspaceSuccessorCandidateVerifierInternal(source.store, input.verifyCandidate);
   const capability = Object.freeze({
     kind: 'execution_stores_workspace_mutation_authority_v1' as const,
   });
   capabilities.set(
     capability,
-    Object.freeze({ ownerToken: input.ownerToken, store: source.store, rootId: source.rootId }),
+    Object.freeze({
+      ownerToken: input.ownerToken,
+      store: source.store,
+      rootId: source.rootId,
+      verifyCandidate: input.verifyCandidate,
+    }),
   );
   return capability;
 }
@@ -143,6 +170,8 @@ export function requireExecutionStoresWorkspaceMutationAuthorityInternal(
   }
   const store = record.store;
   return Object.freeze({
+    readEpoch: (workspaceId: string, workspaceEpochId: string) =>
+      readWorkspaceEpochInternal(store, workspaceId, workspaceEpochId),
     readHead: (workspaceId: string, workspaceEpochId: string) =>
       readWorkspaceHeadInternal(store, workspaceId, workspaceEpochId),
     readVersion: (workspaceVersionId: string) =>
@@ -162,8 +191,14 @@ export function requireExecutionStoresWorkspaceMutationAuthorityInternal(
       );
       return noEffectOutcome;
     },
+    readMutationEvidence: (operationId: string) =>
+      readManagedMutationEvidenceInternal(store, operationId),
     commitSuccessor: async (input: WorkspaceSuccessorCommitInput) => {
-      const result = await commitWorkspaceSuccessorInternal(store, input);
+      const successor = record.verifyCandidate(input.candidateOutcome);
+      const result = await commitVerifiedWorkspaceSuccessorInternal(store, {
+        successor,
+        toolOutcome: input.toolOutcome,
+      });
       const projectionCapability = Object.freeze({
         kind: 'workspace_successor_projection_capability_v1' as const,
       });

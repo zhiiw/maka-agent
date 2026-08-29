@@ -30,7 +30,7 @@ import {
 } from '../execution-stores-workspace-authority-internal.js';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '../root-authority.js';
 
-test('binds workspace mutation persistence to one execution-stores owner capability', async () => {
+test('binds each workspace mutation verifier to its execution-stores owner capability', async () => {
   const root = await mkdtemp(join(tmpdir(), 'maka-execution-workspace-authority-'));
   const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(capability);
@@ -46,6 +46,20 @@ test('binds workspace mutation persistence to one execution-stores owner capabil
         throw new Error('not used');
       },
     });
+    const secondOwnerToken = {};
+    const secondAuthorityCapability = issueExecutionStoresWorkspaceMutationAuthorityInternal({
+      ownerToken: secondOwnerToken,
+      stores,
+      verifyCandidate: () => {
+        throw new Error('not used');
+      },
+    });
+    assert.ok(
+      requireExecutionStoresWorkspaceMutationAuthorityInternal(
+        secondOwnerToken,
+        secondAuthorityCapability,
+      ),
+    );
     assert.throws(
       () => requireExecutionStoresWorkspaceMutationAuthorityInternal({}, authorityCapability),
       /capability is invalid/i,
@@ -54,6 +68,14 @@ test('binds workspace mutation persistence to one execution-stores owner capabil
       ownerToken,
       authorityCapability,
     );
+    assert.equal(
+      await authority.readEpoch(
+        'workspace_'.concat('1'.repeat(32)),
+        'epoch_'.concat('2'.repeat(32)),
+      ),
+      undefined,
+    );
+    assert.equal(await authority.readMutationEvidence('operation-missing'), undefined);
     assert.equal(
       await authority.readHead(
         'workspace_'.concat('1'.repeat(32)),
