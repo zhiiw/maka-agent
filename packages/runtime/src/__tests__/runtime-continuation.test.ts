@@ -25,6 +25,7 @@ import {
   createRuntimeBoundaryCursor,
   runtimePrefixSegment,
   type ImmutableRuntimePrefixV1,
+  type ManagedWorkspaceContinuationBoundaryV1,
 } from '@maka/core/runtime-boundary';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { AgentRunHeader } from '@maka/core/agent-run';
@@ -879,6 +880,28 @@ function runHeader(runId: string, overrides: Partial<AgentRunHeader> = {}): Agen
     createdAt: 1,
     updatedAt: 1,
     ...overrides,
+  };
+}
+
+function managedWorkspaceBoundary(): ManagedWorkspaceContinuationBoundaryV1 {
+  return {
+    protocol: 'managed_workspace_continuation_boundary_v1',
+    storageRootId: 'a'.repeat(64),
+    repositoryId: `repository_${'1'.repeat(32)}`,
+    workspaceId: `workspace_${'2'.repeat(32)}`,
+    workspaceEpochId: `epoch_${'3'.repeat(32)}`,
+    workspaceInstanceId: `instance_${'4'.repeat(32)}`,
+    workspaceVersionId: `version_${'5'.repeat(32)}`,
+    acceptedEventId: 'accepted-event-1',
+    revision: 2,
+    objectFormat: 'sha1',
+    sourceCommitOid: '9'.repeat(40),
+    sourceTreeOid: 'a'.repeat(40),
+    commitOid: 'b'.repeat(40),
+    treeOid: 'c'.repeat(40),
+    materializationProfileDigest: `sha256:${'d'.repeat(64)}`,
+    policyHash: `sha256:${'e'.repeat(64)}`,
+    executionProfileDigest: `sha256:${'f'.repeat(64)}`,
   };
 }
 

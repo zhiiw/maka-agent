@@ -26,6 +26,10 @@ import type {
   WorkspaceVersionRecordV1,
 } from '@maka/core/workspace-version-authority';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
+import type {
+  ManagedWorkspaceContinuationBoundaryV1,
+  RuntimeBoundaryDigest,
+} from '@maka/core/runtime-boundary';
 
 type WorkspaceBaselineAuthorityWriter = (
   input: WorkspaceBaselineAuthorityInput,
@@ -123,6 +127,12 @@ type ManagedMutationReservationReader = (
 type ManagedMutationEvidenceReader = (
   operationId: string,
 ) => Promise<ManagedMutationEvidenceRecordV1 | undefined>;
+type WorkspaceContinuationBoundaryReader = (
+  workspaceId: string,
+  workspaceEpochId: string,
+  rootId: string,
+  executionProfileDigest: RuntimeBoundaryDigest,
+) => Promise<ManagedWorkspaceContinuationBoundaryV1 | undefined>;
 
 interface WorkspaceBaselineAuthorityRegistration {
   readonly writer: WorkspaceBaselineAuthorityWriter;
@@ -135,6 +145,7 @@ interface WorkspaceBaselineAuthorityRegistration {
   readonly readVersion: WorkspaceVersionReader;
   readonly readActiveManagedMutation: ManagedMutationReservationReader;
   readonly readManagedMutationEvidence: ManagedMutationEvidenceReader;
+  readonly readContinuationBoundary: WorkspaceContinuationBoundaryReader;
   readonly bindStorageRoot: WorkspaceStorageRootBinder;
   readonly adoptStorageRoot: WorkspaceStorageRootAdopter;
   boundRootId?: string;
@@ -157,6 +168,7 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   readVersion: WorkspaceVersionReader,
   readActiveManagedMutation: ManagedMutationReservationReader,
   readManagedMutationEvidence: ManagedMutationEvidenceReader,
+  readContinuationBoundary: WorkspaceContinuationBoundaryReader,
 ): void {
   if (workspaceBaselineAuthorityWriters.has(store)) {
     throw new Error('Workspace baseline authority writer is already registered');
@@ -170,9 +182,29 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
     readVersion,
     readActiveManagedMutation,
     readManagedMutationEvidence,
+    readContinuationBoundary,
     bindStorageRoot,
     adoptStorageRoot,
   });
+}
+
+export function readWorkspaceContinuationBoundaryInternal(
+  store: object,
+  workspaceId: string,
+  workspaceEpochId: string,
+  executionProfileDigest: RuntimeBoundaryDigest,
+): Promise<ManagedWorkspaceContinuationBoundaryV1 | undefined> {
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Workspace continuation boundary reader is unavailable');
+  if (!registration.boundRootId) {
+    throw new Error('Workspace continuation boundary store has no durable storage-root binding');
+  }
+  return registration.readContinuationBoundary(
+    workspaceId,
+    workspaceEpochId,
+    registration.boundRootId,
+    executionProfileDigest,
+  );
 }
 
 export function readActiveManagedMutationInternal(

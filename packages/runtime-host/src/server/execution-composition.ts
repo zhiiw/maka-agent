@@ -41,6 +41,7 @@ import {
   BackendRegistry,
   SessionManager,
   type BackendFactory,
+  type RuntimeContinuationLifecycleEvent,
 } from '@maka/runtime/session-manager';
 import { buildToolsForAgentDefinition } from '@maka/runtime/agent-catalog';
 import { buildHistoryTools } from '@maka/runtime/history-tools';
@@ -152,7 +153,10 @@ import { HostNetworkProxyCoordinator } from './network-proxy-coordinator.js';
 import { HostOAuthExecutionAuthority } from './oauth-execution-authority.js';
 import { HostOAuthCoordinator, type HostOAuthCoordinatorInput } from './oauth-coordinator.js';
 import { HostPlanCoordinator } from './plan-coordinator.js';
-import { openGitoxideManagedSessionOwnerInternal } from './gitoxide-managed-session-owner-internal.js';
+import {
+  inspectGitoxideManagedContinuationBoundaryInternal,
+  openGitoxideManagedSessionOwnerInternal,
+} from './gitoxide-managed-session-owner-internal.js';
 import {
   PackagedGitoxideHelperError,
   resolvePackagedGitoxideHelperInternal,
@@ -227,6 +231,21 @@ export interface CreateExecutionRuntimeHostCompositionOptions {
 
 export interface ExecutionRuntimeHostCompositionDependencies {
   readonly primaryBackendFactory?: BackendFactory;
+  /** Production-shaped crash-test seam; product composition never supplies it. */
+  readonly continuationFailpoint?: (
+    point:
+      | 'after_continuation_claim_committed'
+      | 'after_run_created'
+      | 'after_continuation_start_committed'
+      | 'after_terminal_event_committed'
+      | 'after_terminal_header_committed',
+  ) => Promise<void>;
+  /** Test/telemetry seam; it observes decisions but owns no durable state. */
+  readonly onContinuationLifecycleEvent?: (
+    event: RuntimeContinuationLifecycleEvent,
+  ) => void | Promise<void>;
+  /** Production-shaped test diagnostic; correctness still fails closed. */
+  readonly onContinuationSafetyError?: (error: unknown) => void;
   readonly oauthAuthorization?: Pick<
     HostOAuthCoordinatorInput,
     'startCodexAuthorization' | 'pollCodexAuthorization' | 'exchangeCodexCode'
@@ -1002,6 +1021,11 @@ export async function createExecutionRuntimeHostComposition(
       newId: randomUUID,
       now: Date.now,
       safeBoundaryResumeEnabled: process.env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME === '1',
+      continuationFailpoint: dependencies.continuationFailpoint,
+      onContinuationLifecycleEvent: dependencies.onContinuationLifecycleEvent,
+      generateSessionTitle: (input) => sessionEffectCoordinator.generateTitle(input),
+      onSessionTitleChanged: (sessionId) =>
+        continuityCoordinator.enqueueCanonicalRefresh(sessionId),
       inspectContinuationSafety: createLocalContinuationSafetyInspector({
         readSessionCwd: async (sessionId) =>
           (await stores.sessionStore.readHeaderSnapshot(sessionId)).cwd,
@@ -1026,6 +1050,23 @@ export async function createExecutionRuntimeHostComposition(
           return (
             resourcesLive || graphLive || graphWake.hasLiveSessionState(sessionId) || descendantLive
           );
+        },
+        readManagedWorkspaceBoundary: async (sessionId) => {
+          const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
+          if (header.toolProfile !== 'managed-coding-v1') return undefined;
+          if (!gitoxideHelperCapability) {
+            throw new Error(
+              'managed_workspace_profile_unavailable: packaged Gitoxide helper authority is unavailable',
+            );
+          }
+          return inspectGitoxideManagedContinuationBoundaryInternal({
+            storageRootLease: context.owner.lease,
+            stores,
+            invocationOwnerToken: gitoxideInvocationOwnerToken,
+            helperCapability: gitoxideHelperCapability,
+            sourceRoot: header.cwd,
+            sessionId,
+          });
         },
       }),
       runBackendActivation: (operation) => runtimePolicyActivation.runBackendActivation(operation),
@@ -2040,6 +2081,20 @@ function requireDailyReview(
 function requireSessionManager(manager: SessionManager | undefined): SessionManager {
   if (!manager) throw new Error('Runtime Host SessionManager is not composed');
   return manager;
+}
+
+function observeContinuationSafetyErrors(
+  inspectContinuationSafety: ReturnType<typeof createLocalContinuationSafetyInspector>,
+  onError: ((error: unknown) => void) | undefined,
+): ReturnType<typeof createLocalContinuationSafetyInspector> {
+  return async (sessionId) => {
+    try {
+      return await inspectContinuationSafety(sessionId);
+    } catch (error) {
+      onError?.(error);
+      throw error;
+    }
+  };
 }
 
 function requireGraphCoordinator(
