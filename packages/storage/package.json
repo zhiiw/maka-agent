@@ -17,6 +17,7 @@
     "./encrypted-file-managed-secret-store": "./dist/encrypted-file-managed-secret-store.js",
     "./execution-stores": "./dist/execution-stores.js",
     "./execution-stores-workspace-authority-internal": "./dist/execution-stores-workspace-authority-internal.js",
+    "./test-only/execution-stores-workspace-authority": "./dist/test-only/execution-stores-workspace-authority.js",
     "./external-sessions": "./dist/external-sessions.js",
     "./file-update-lock": "./dist/file-update-lock.js",
     "./foreign-session-store": "./dist/foreign-session-store.js",

@@ -1534,6 +1534,7 @@ export class SqliteRuntimeStore
   }
 
   private registerWorkspaceBaselineAuthorityWriter(databasePath: string): void {
+    const readWorkspaceEpoch = this.readWorkspaceEpoch.bind(this);
     const readWorkspaceHead = this.readWorkspaceHead.bind(this);
     const readWorkspaceVersion = this.readWorkspaceVersion.bind(this);
     registerWorkspaceBaselineAuthorityWriterInternal(
@@ -1544,10 +1545,29 @@ export class SqliteRuntimeStore
       (input, rootId) => this.#commitManagedMutationTerminal(input, rootId),
       (rootId) => this.#bindWorkspaceStorageRoot(rootId),
       (rootId) => this.#adoptWorkspaceStorageRoot(rootId),
+      readWorkspaceEpoch,
       readWorkspaceHead,
       readWorkspaceVersion,
       (workspaceInstanceId) => this.#readActiveManagedMutation(workspaceInstanceId),
+      (operationId) => this.#readManagedMutationEvidence(operationId),
     );
+  }
+
+  async #readManagedMutationEvidence(
+    operationId: string,
+  ): Promise<
+    import('./workspace-version-authority-internal.js').ManagedMutationEvidenceRecordV1 | undefined
+  > {
+    return this.readTransaction(() => {
+      const operation = this.readToolOperationSync(operationId);
+      if (!operation?.dispatchEventId || !operation.resultEventId) return undefined;
+      return Object.freeze({
+        operationId,
+        callEvent: this.readRequiredRuntimeEvent(operation.callEventId),
+        dispatchEvent: this.readRequiredRuntimeEvent(operation.dispatchEventId),
+        outcomeEvent: this.readRequiredRuntimeEvent(operation.resultEventId),
+      });
+    });
   }
 
   async #readActiveManagedMutation(
