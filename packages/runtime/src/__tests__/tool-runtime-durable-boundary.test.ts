@@ -281,7 +281,7 @@ describe('ToolRuntime durable boundary', () => {
         admitManagedMutation: async (input) => {
           operationId = input.operationId;
           return {
-            durableDispatch: managedMutationDispatch(canonicalPath),
+            durableDispatch: managedMutationDispatch(),
             immutableBase: Object.freeze({ content: 'BEFORE\n' }),
             canonicalPath,
             // Deliberately shaped like the old over-broad Host seam. Runtime
@@ -1636,6 +1636,26 @@ function makeHarness(
           toolCallId: 'provider-call-1',
           input: target.durableExecutionProfile ? { path: 'notes.txt' } : {},
           abortSignal,
+          eventSink: {
+            push: (event) => {
+              events.push(event);
+              if (event.type === 'tool_result') order?.push('published-result');
+            },
+            pushAndWaitUntilConsumed: async (event) => {
+              events.push(event);
+              if (event.type === 'tool_result') order?.push('published-result');
+            },
+          },
+        })
+      ).result,
+    executeWithInput: async (target: MakaTool, input: unknown) =>
+      (
+        await runtime.settleToolCall({
+          tool: target,
+          turnId: 'turn-1',
+          toolCallId: 'provider-call-1',
+          input,
+          abortSignal: new AbortController().signal,
           eventSink: {
             push: (event) => {
               events.push(event);
