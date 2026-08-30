@@ -40,6 +40,7 @@ import {
   inspectRepositoryWithGitoxideHelperInternal,
   promoteCandidateWithGitoxideHelperInternal,
   promoteHistoryCandidateWithGitoxideHelperInternal,
+  publishAcceptedTreeToSourceBranchWithGitoxideHelperInternal,
   readTreeFileWithGitoxideHelperInternal,
   runGitoxideOperationWithinDeadlineInternal,
 } from '../server/gitoxide-helper-invocation-internal.js';
@@ -62,6 +63,7 @@ test('uses bounded mutation/import deadlines distinct from repository inspection
     promoteHistoryCandidateMs: 10 * 60_000,
     observeAcceptedRefMs: 10 * 60_000,
     acceptedTreeReadMs: 10 * 60_000,
+    sourceBranchPublishMs: 10 * 60_000,
   });
 });
 
@@ -574,6 +576,46 @@ test('keeps the Rust and TypeScript helper error protocol exhaustive', async () 
   assert.deepEqual(rustReasons, [...GITOXIDE_HELPER_ERROR_REASONS_V1]);
 });
 
+test('accepts only an exactly correlated source-branch publication response', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-source-branch-wire-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const managedRepositoryPath = await createRepository(t, 'sha1');
+  const sourceRepositoryPath = await createRepository(t, 'sha1');
+  const helperPath = join(root, 'source-branch-helper');
+  const input = {
+    sourceBaseCommitOid: 'a'.repeat(40),
+    sourceBaseTreeOid: 'b'.repeat(40),
+    acceptedCommitOid: 'c'.repeat(40),
+    acceptedTreeOid: 'd'.repeat(40),
+    publishedRef: 'refs/heads/maka/review-45',
+  } as const;
+  const response = JSON.stringify({
+    protocolVersion: 1,
+    kind: 'source_branch_published',
+    objectFormat: 'sha1',
+    ...input,
+    publishedCommitOid: 'e'.repeat(40),
+    replayed: false,
+    managedTreePolicyVersion: 3,
+  });
+  await writeFile(helperPath, `#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' '${response}'\n`);
+  await chmod(helperPath, 0o755);
+  const helper = await admitHelperPath(helperPath, ['publish_accepted_tree_to_source_branch']);
+
+  const result = await publishAcceptedTreeToSourceBranchWithGitoxideHelperInternal({
+    ...helper,
+    managedRepositoryPath,
+    sourceRepositoryPath,
+    ...input,
+    managedTreePolicyVersion: 3,
+  });
+  assert.equal(result.kind, 'source_branch_published');
+  assert.equal(result.publishedCommitOid, 'e'.repeat(40));
+  assert.equal(result.replayed, false);
+});
+
 test('observes exact SHA-1 HEAD identity through the admitted helper capability', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {
@@ -749,6 +791,7 @@ async function admitHelperPath(
     | 'promote_history_candidate'
     | 'observe_accepted_ref'
     | 'read_tree_file'
+    | 'publish_accepted_tree_to_source_branch'
   )[] = ['inspect_repository', 'import_source_head'],
 ): Promise<AdmittedHelper> {
   const helperPath = await realpath(configuredHelperPath);

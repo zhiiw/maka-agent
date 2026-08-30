@@ -46,6 +46,7 @@ export const GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL = Object.freeze({
   promoteHistoryCandidateMs: 10 * 60_000,
   observeAcceptedRefMs: 10 * 60_000,
   acceptedTreeReadMs: 10 * 60_000,
+  sourceBranchPublishMs: 10 * 60_000,
 });
 const SHA1_OID_PATTERN = /^[0-9a-f]{40}$/;
 const MAKA_REF_PATTERN = /^refs\/maka\/[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
@@ -151,6 +152,10 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'restore_destination_create_failed',
   'restore_file_write_failed',
   'published_ref_conflict',
+  'source_base_commit_unavailable',
+  'source_base_commit_identity_mismatch',
+  'source_base_tree_unavailable',
+  'source_base_tree_identity_mismatch',
   'unsupported_source_entry_kind',
   'unsupported_source_attributes',
   'unsupported_source_path',
@@ -413,6 +418,20 @@ export interface GitoxideAcceptedRefPublishedV1 {
   readonly objectFormat: 'sha1';
   readonly acceptedCommitOid: string;
   readonly acceptedTreeOid: string;
+  readonly publishedRef: string;
+  readonly replayed: boolean;
+  readonly managedTreePolicyVersion: 3;
+}
+
+export interface GitoxideSourceBranchPublishedV1 {
+  readonly protocolVersion: 1;
+  readonly kind: 'source_branch_published';
+  readonly objectFormat: 'sha1';
+  readonly sourceBaseCommitOid: string;
+  readonly sourceBaseTreeOid: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly publishedCommitOid: string;
   readonly publishedRef: string;
   readonly replayed: boolean;
   readonly managedTreePolicyVersion: 3;
@@ -1365,6 +1384,84 @@ export async function publishAcceptedRefWithGitoxideHelperInternal(input: {
   return decodeAcceptedRefPublishedOutcome(outcome, input);
 }
 
+export async function publishAcceptedTreeToSourceBranchWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly managedRepositoryPath: string;
+  readonly sourceRepositoryPath: string;
+  readonly sourceBaseCommitOid: string;
+  readonly sourceBaseTreeOid: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly publishedRef: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideSourceBranchPublishedV1> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.sourceBranchPublishMs;
+  if (
+    !isAbsolute(input.managedRepositoryPath) ||
+    !isAbsolute(input.sourceRepositoryPath) ||
+    !SHA1_OID_PATTERN.test(input.sourceBaseCommitOid) ||
+    !SHA1_OID_PATTERN.test(input.sourceBaseTreeOid) ||
+    !SHA1_OID_PATTERN.test(input.acceptedCommitOid) ||
+    !SHA1_OID_PATTERN.test(input.acceptedTreeOid) ||
+    !MAKA_REF_PATTERN.test(input.publishedRef) ||
+    !input.publishedRef.startsWith('refs/heads/maka/') ||
+    input.managedTreePolicyVersion !== 3
+  ) {
+    throw invocationInvalid('Gitoxide source-branch publication request is invalid');
+  }
+  const prepared = await runGitoxideOperationWithinDeadlineInternal({
+    deadlineAt,
+    abortSignal: input.abortSignal,
+    operation: async () => {
+      requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.capability, [
+        'publish_accepted_tree_to_source_branch',
+      ]);
+      const [artifact, managedRepositoryPath, sourceRepositoryPath] = await Promise.all([
+        verifyGitoxideHelperArtifactForInvocationInternal(
+          input.invocationOwnerToken,
+          input.capability,
+        ),
+        realpath(input.managedRepositoryPath).catch((error) => {
+          throw invocationInvalid(
+            `Gitoxide managed repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+        realpath(input.sourceRepositoryPath).catch((error) => {
+          throw invocationInvalid(
+            `Gitoxide source repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ]);
+      return { artifact, managedRepositoryPath, sourceRepositoryPath };
+    },
+  });
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: prepared.artifact.protocolVersion,
+      operation: 'publish_accepted_tree_to_source_branch',
+      managedRepositoryPath: prepared.managedRepositoryPath,
+      sourceRepositoryPath: prepared.sourceRepositoryPath,
+      sourceBaseCommitOid: input.sourceBaseCommitOid,
+      sourceBaseTreeOid: input.sourceBaseTreeOid,
+      acceptedCommitOid: input.acceptedCommitOid,
+      acceptedTreeOid: input.acceptedTreeOid,
+      publishedRef: input.publishedRef,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
+  const outcome = await invokeHelper({
+    executablePath: prepared.artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  return decodeSourceBranchPublishedOutcome(outcome, input);
+}
+
 function assertTreeQueryInput(path: string, pattern: string, limit: number): void {
   if (
     !isBoundedPathTransport(path) ||
@@ -2266,6 +2363,36 @@ function decodeAcceptedRefPublishedOutcome(
   throw protocolInvalid('Gitoxide accepted-ref publication response is invalid');
 }
 
+function decodeSourceBranchPublishedOutcome(
+  outcome: HelperProcessOutcome,
+  expected: {
+    readonly sourceBaseCommitOid: string;
+    readonly sourceBaseTreeOid: string;
+    readonly acceptedCommitOid: string;
+    readonly acceptedTreeOid: string;
+    readonly publishedRef: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): GitoxideSourceBranchPublishedV1 {
+  const value = parseHelperOutcome(outcome);
+  if (
+    outcome.exitCode === 0 &&
+    isSourceBranchPublished(value) &&
+    value.sourceBaseCommitOid === expected.sourceBaseCommitOid &&
+    value.sourceBaseTreeOid === expected.sourceBaseTreeOid &&
+    value.acceptedCommitOid === expected.acceptedCommitOid &&
+    value.acceptedTreeOid === expected.acceptedTreeOid &&
+    value.publishedRef === expected.publishedRef &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
+  ) {
+    return Object.freeze(value);
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('publish accepted tree to source branch', value.reason);
+  }
+  throw protocolInvalid('Gitoxide source-branch publication response is invalid');
+}
+
 function gitBlobOid(content: Buffer): string {
   return createHash('sha1')
     .update(`blob ${content.length}\0`, 'utf8')
@@ -2554,6 +2681,37 @@ function isAcceptedRefPublished(value: unknown): value is GitoxideAcceptedRefPub
     typeof value.publishedRef === 'string' &&
     MAKA_REF_PATTERN.test(value.publishedRef) &&
     value.publishedRef.startsWith('refs/maka/published/') &&
+    typeof value.replayed === 'boolean' &&
+    value.managedTreePolicyVersion === 3
+  );
+}
+
+function isSourceBranchPublished(value: unknown): value is GitoxideSourceBranchPublishedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'sourceBaseCommitOid',
+      'sourceBaseTreeOid',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'publishedCommitOid',
+      'publishedRef',
+      'replayed',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'source_branch_published' &&
+    value.objectFormat === 'sha1' &&
+    isSha1(value.sourceBaseCommitOid) &&
+    isSha1(value.sourceBaseTreeOid) &&
+    isSha1(value.acceptedCommitOid) &&
+    isSha1(value.acceptedTreeOid) &&
+    isSha1(value.publishedCommitOid) &&
+    typeof value.publishedRef === 'string' &&
+    MAKA_REF_PATTERN.test(value.publishedRef) &&
+    value.publishedRef.startsWith('refs/heads/maka/') &&
     typeof value.replayed === 'boolean' &&
     value.managedTreePolicyVersion === 3
   );

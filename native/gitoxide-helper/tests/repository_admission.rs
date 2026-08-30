@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const HELPER: &str = env!("CARGO_BIN_EXE_maka-gitoxide-helper");
@@ -649,8 +649,9 @@ fn publishes_and_exactly_retries_an_operation_candidate_without_advancing_accept
     let first = invoke_request(request.clone());
     assert!(
         first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stdout)
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
     );
     let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
     assert_eq!(first["kind"], "candidate_published");
@@ -1872,6 +1873,188 @@ fn publishes_one_immutable_ref_for_the_exact_accepted_commit() {
 }
 
 #[test]
+fn publishes_an_accepted_tree_as_an_isolated_source_branch_and_exactly_replays() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let source_tree = fixture.git_output(["rev-parse", "HEAD^{tree}"]);
+    let original_head = source_head.clone();
+    let managed = fixture.root.join("source-branch-publish.git");
+    let imported = invoke_import(&fixture.root, &source_head, &managed);
+    assert!(imported.status.success());
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let candidate_ref =
+        "refs/maka/candidates/4545454545454545454545454545454545454545454545454545454545454545";
+    let candidate = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "create_candidate",
+        "repositoryPath": managed,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedBaseCommitOid": imported["baselineCommitOid"],
+        "expectedBaseTreeOid": imported["baselineTreeOid"],
+        "candidateRef": candidate_ref,
+        "path": "published.txt",
+        "contentBase64": "cHVibGlzaGVkIGJ5IG1ha2EK",
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(candidate.status.success());
+    let candidate: serde_json::Value = serde_json::from_slice(&candidate.stdout).unwrap();
+    let original_status = fixture.git_output(["status", "--porcelain=v1"]);
+    let request = serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "publish_accepted_tree_to_source_branch",
+        "managedRepositoryPath": managed,
+        "sourceRepositoryPath": fixture.root,
+        "sourceBaseCommitOid": source_head,
+        "sourceBaseTreeOid": source_tree,
+        "acceptedCommitOid": candidate["candidateCommitOid"],
+        "acceptedTreeOid": candidate["candidateTreeOid"],
+        "publishedRef": "refs/heads/maka/review-45",
+        "managedTreePolicyVersion": 3,
+    });
+
+    let first = invoke_request(request.clone());
+    assert!(
+        first.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["kind"], "source_branch_published");
+    assert_eq!(first["replayed"], false);
+    assert_eq!(first["sourceBaseCommitOid"], source_head);
+    assert_eq!(first["sourceBaseTreeOid"], source_tree);
+    assert_eq!(first["acceptedTreeOid"], candidate["candidateTreeOid"]);
+    assert_eq!(
+        fixture.git_output(["rev-parse", "refs/heads/maka/review-45^{tree}"]),
+        candidate["candidateTreeOid"].as_str().unwrap()
+    );
+    assert_eq!(
+        fixture.git_output(["rev-parse", "refs/heads/maka/review-45^"]),
+        source_head
+    );
+    assert_eq!(fixture.git_output(["rev-parse", "HEAD"]), original_head);
+    assert_eq!(
+        fixture.git_output(["status", "--porcelain=v1"]),
+        original_status
+    );
+
+    let replay = invoke_request(request);
+    assert!(replay.status.success());
+    let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(replay["kind"], "source_branch_published");
+    assert_eq!(replay["publishedCommitOid"], first["publishedCommitOid"]);
+    assert_eq!(replay["replayed"], true);
+}
+
+#[test]
+fn refuses_to_overwrite_a_conflicting_source_branch() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let source_tree = fixture.git_output(["rev-parse", "HEAD^{tree}"]);
+    let managed = fixture.root.join("source-branch-conflict.git");
+    let imported = invoke_import(&fixture.root, &source_head, &managed);
+    assert!(imported.status.success());
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    fixture.git(["branch", "maka/review-conflict", "HEAD"]);
+
+    let output = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "publish_accepted_tree_to_source_branch",
+        "managedRepositoryPath": managed,
+        "sourceRepositoryPath": fixture.root,
+        "sourceBaseCommitOid": source_head,
+        "sourceBaseTreeOid": source_tree,
+        "acceptedCommitOid": imported["baselineCommitOid"],
+        "acceptedTreeOid": imported["baselineTreeOid"],
+        "publishedRef": "refs/heads/maka/review-conflict",
+        "managedTreePolicyVersion": 3,
+    }));
+    assert_helper_error(&output, "published_ref_conflict");
+}
+
+#[test]
+fn retries_source_branch_publication_after_the_real_helper_is_killed_during_object_copy() {
+    let source = RepositoryFixture::sha1_with_commit();
+    let source_head = source.git_output(["rev-parse", "HEAD"]);
+    let source_tree = source.git_output(["rev-parse", "HEAD^{tree}"]);
+    let accepted_source = RepositoryFixture::sha1_with_commit();
+    fs::create_dir(accepted_source.root.join("payload")).unwrap();
+    for index in 0..32_u8 {
+        fs::write(
+            accepted_source
+                .root
+                .join("payload")
+                .join(format!("file-{index:02}.bin")),
+            vec![index; 1024 * 1024],
+        )
+        .unwrap();
+    }
+    accepted_source.git(["add", "payload"]);
+    accepted_source.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "large accepted tree",
+    ]);
+    let accepted_source_head = accepted_source.git_output(["rev-parse", "HEAD"]);
+    let managed = accepted_source.root.join("source-publish-crash.git");
+    let imported = invoke_import(&accepted_source.root, &accepted_source_head, &managed);
+    assert!(imported.status.success());
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let first_payload_blob = accepted_source.git_output(["rev-parse", "HEAD:payload/file-00.bin"]);
+    let request = serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "publish_accepted_tree_to_source_branch",
+        "managedRepositoryPath": managed,
+        "sourceRepositoryPath": source.root,
+        "sourceBaseCommitOid": source_head,
+        "sourceBaseTreeOid": source_tree,
+        "acceptedCommitOid": imported["baselineCommitOid"],
+        "acceptedTreeOid": imported["baselineTreeOid"],
+        "publishedRef": "refs/heads/maka/crash-retry",
+        "managedTreePolicyVersion": 3,
+    });
+
+    let mut child = spawn_request(request.clone());
+    let marker = source.loose_object_path(&first_payload_blob);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !marker.exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "helper exited before its object-copy boundary became observable"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "helper did not reach its object-copy boundary"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    child.kill().unwrap();
+    let killed = child.wait_with_output().unwrap();
+    assert!(!killed.status.success());
+    assert!(!source.git_succeeds(["show-ref", "--verify", "refs/heads/maka/crash-retry"]));
+
+    let retry = invoke_request(request);
+    assert!(
+        retry.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&retry.stdout),
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let retry: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
+    assert_eq!(retry["kind"], "source_branch_published");
+    assert_eq!(retry["replayed"], false);
+    assert_eq!(
+        source.git_output(["rev-parse", "refs/heads/maka/crash-retry^{tree}"]),
+        imported["baselineTreeOid"].as_str().unwrap()
+    );
+}
+
+#[test]
 fn refuses_to_read_a_tree_file_from_an_unavailable_commit_identity() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let output = invoke_request(serde_json::json!({
@@ -2737,6 +2920,17 @@ impl RepositoryFixture {
             .unwrap();
         assert!(output.status.success());
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn git_succeeds<const N: usize>(&self, args: [&str; N]) -> bool {
+        Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success()
     }
 
     fn git_input_output<const N: usize>(&self, args: [&str; N], input: &[u8]) -> String {

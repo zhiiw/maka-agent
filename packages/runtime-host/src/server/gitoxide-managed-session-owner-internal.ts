@@ -65,6 +65,10 @@ import {
   type GitoxideManagedPublishOwnerInternal,
 } from './gitoxide-managed-publish-owner-internal.js';
 import {
+  createGitoxideManagedSourceBranchPublishOwnerInternal,
+  type GitoxideManagedSourceBranchPublishOwnerInternal,
+} from './gitoxide-managed-source-branch-publish-owner-internal.js';
+import {
   createGitoxideManagedTimeTravelOwnerInternal,
   type GitoxideManagedTimeTravelOwnerInternal,
 } from './gitoxide-managed-time-travel-owner-internal.js';
@@ -108,6 +112,7 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly workspaceEpochId: string;
   readonly inspection: GitoxideManagedInspectionOwnerInternal;
   readonly publish: GitoxideManagedPublishOwnerInternal;
+  readonly sourceBranchPublish: GitoxideManagedSourceBranchPublishOwnerInternal | undefined;
   readonly review: GitoxideManagedReviewOwnerInternal;
   readonly restore: GitoxideManagedRestoreOwnerInternal;
   readonly timeTravel: GitoxideManagedTimeTravelOwnerInternal;
@@ -694,6 +699,49 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       return Object.freeze({ commitOid: version.commitOid, treeOid: version.treeOid });
     },
   });
+  const sourceBranchPublish =
+    sourceBinding.kind === 'git_repository_v1'
+      ? createGitoxideManagedSourceBranchPublishOwnerInternal({
+          invocationOwnerToken: input.invocationOwnerToken,
+          helperCapability: input.helperCapability,
+          managedRepositoryPath: repositoryPath,
+          sourceRepositoryPath: sourceRoot,
+          sourceBaseCommitOid: sourceCommitOid,
+          sourceBaseTreeOid: sourceTreeOid,
+          async readAcceptedIdentity() {
+            const head = await baselineAuthority.readHead(
+              identity.workspaceId,
+              identity.workspaceEpochId,
+            );
+            if (
+              !head ||
+              head.repositoryId !== identity.repositoryId ||
+              head.workspaceId !== identity.workspaceId ||
+              head.workspaceEpochId !== identity.workspaceEpochId
+            ) {
+              throw new Error(
+                'Gitoxide managed source-branch publication durable workspace head is unavailable',
+              );
+            }
+            const version = await baselineAuthority.readVersion(head.workspaceVersionId);
+            if (
+              !version ||
+              version.repositoryId !== head.repositoryId ||
+              version.workspaceId !== head.workspaceId ||
+              version.workspaceEpochId !== head.workspaceEpochId ||
+              version.workspaceVersionId !== head.workspaceVersionId ||
+              version.acceptedEventId !== head.acceptedEventId ||
+              version.commitOid !== head.commitOid ||
+              version.treeOid !== head.treeOid
+            ) {
+              throw new Error(
+                'Gitoxide managed source-branch publication accepted workspace version is unavailable',
+              );
+            }
+            return Object.freeze({ commitOid: version.commitOid, treeOid: version.treeOid });
+          },
+        })
+      : undefined;
   const timeTravel = createGitoxideManagedTimeTravelOwnerInternal({
     invocationOwnerToken: input.invocationOwnerToken,
     helperCapability: input.helperCapability,
@@ -799,6 +847,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     workspaceEpochId: identity.workspaceEpochId,
     inspection,
     publish,
+    sourceBranchPublish,
     review,
     restore,
     timeTravel,
