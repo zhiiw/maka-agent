@@ -54,6 +54,7 @@ This page is the authority map for Maka documentation. Code and contract tests r
 - [Remote Runtime Host setup](./runtime-host-remote-access.md) ([中文](./runtime-host-remote-access.zh-CN.md))
 - [Runtime resume extraction ledger](./architecture/runtime-resume-extraction-ledger.zh-CN.md)
 - [Runtime resume Phase 3–4 implementation route](./architecture/runtime-resume-phase3-phase4-workspace-checkpoint-design.zh-CN.md)
+- [Durable Coding M3–M5 delivery roadmap](./architecture/runtime-durable-coding-m3-m5-roadmap.zh-CN.md)
 - [Managed Workspace Isolated Restore v1](./architecture/runtime-managed-workspace-isolated-restore-v1.zh-CN.md)
 - [Managed Workspace Publication v1](./architecture/runtime-managed-workspace-publication-v1.zh-CN.md)
 - [Managed Workspace Time Travel v1](./architecture/runtime-managed-workspace-time-travel-v1.zh-CN.md)
