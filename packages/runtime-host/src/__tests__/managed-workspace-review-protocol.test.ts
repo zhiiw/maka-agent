@@ -135,7 +135,7 @@ test('managed History protocol accepts one contiguous newest-first lineage', () 
         treeOid: '3'.repeat(40),
         acceptedEventId: 'accepted-3',
         committedAt: 3,
-        kind: 'tool_mutation',
+        kind: 'history_restore',
         changedFileCount: 1,
       },
       {

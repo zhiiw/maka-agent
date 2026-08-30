@@ -32,12 +32,14 @@ import {
 } from '../server/gitoxide-helper-artifact-authority-internal.js';
 import {
   createCandidateWithGitoxideHelperInternal,
+  createHistoryCandidateWithGitoxideHelperInternal,
   GITOXIDE_HELPER_ERROR_REASONS_V1,
   GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL,
   GitoxideHelperInvocationError,
   importSourceHeadWithGitoxideHelperInternal,
   inspectRepositoryWithGitoxideHelperInternal,
   promoteCandidateWithGitoxideHelperInternal,
+  promoteHistoryCandidateWithGitoxideHelperInternal,
   readTreeFileWithGitoxideHelperInternal,
   runGitoxideOperationWithinDeadlineInternal,
 } from '../server/gitoxide-helper-invocation-internal.js';
@@ -56,6 +58,8 @@ test('uses bounded mutation/import deadlines distinct from repository inspection
     importFilesystemSnapshotMs: 10 * 60_000,
     createCandidateMs: 10 * 60_000,
     promoteCandidateMs: 10 * 60_000,
+    createHistoryCandidateMs: 10 * 60_000,
+    promoteHistoryCandidateMs: 10 * 60_000,
     observeAcceptedRefMs: 10 * 60_000,
     acceptedTreeReadMs: 10 * 60_000,
   });
@@ -413,6 +417,109 @@ test('accepts only an exactly correlated candidate-promotion response', {
   assert.equal(result.replayed, false);
 });
 
+test('accepts only exactly correlated history candidate publication and promotion', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-history-wire-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repositoryPath = await createRepository(t, 'sha1');
+  const acceptedRef = 'refs/maka/accepted';
+  const candidateRef = `refs/maka/history-candidates/${'3'.repeat(64)}`;
+  const expectedBaseCommitOid = 'a'.repeat(40);
+  const expectedBaseTreeOid = 'b'.repeat(40);
+  const targetCommitOid = 'c'.repeat(40);
+  const targetTreeOid = 'd'.repeat(40);
+  const expectedCandidateCommitOid = 'e'.repeat(40);
+  const restoreId = 'restore_1';
+  const requestDigestSha256 = historyCandidateRequestDigestForTest({
+    acceptedRef,
+    expectedBaseCommitOid,
+    expectedBaseTreeOid,
+    targetCommitOid,
+    targetTreeOid,
+    candidateRef,
+    restoreId,
+  });
+  const publicationHelperPath = join(root, 'history-publication-helper');
+  await writeFile(
+    publicationHelperPath,
+    `#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' '${JSON.stringify({
+      protocolVersion: 1,
+      kind: 'history_candidate_published',
+      objectFormat: 'sha1',
+      baseCommitOid: expectedBaseCommitOid,
+      baseTreeOid: expectedBaseTreeOid,
+      targetCommitOid,
+      targetTreeOid,
+      candidateCommitOid: expectedCandidateCommitOid,
+      candidateTreeOid: targetTreeOid,
+      requestDigestSha256,
+      acceptedRef,
+      candidateRef,
+      restoreId,
+      changedFileCount: 2,
+      deletedFileCount: 1,
+      treeDeltaDigestSha256: 'f'.repeat(64),
+      replayed: false,
+      managedTreePolicyVersion: 3,
+    })}'\n`,
+  );
+  await chmod(publicationHelperPath, 0o755);
+  const publicationHelper = await admitHelperPath(publicationHelperPath, [
+    'create_history_candidate',
+  ]);
+  const published = await createHistoryCandidateWithGitoxideHelperInternal({
+    ...publicationHelper,
+    repositoryPath,
+    acceptedRef,
+    expectedBaseCommitOid,
+    expectedBaseTreeOid,
+    targetCommitOid,
+    targetTreeOid,
+    candidateRef,
+    restoreId,
+    managedTreePolicyVersion: 3,
+  });
+  assert.equal(published.candidateCommitOid, expectedCandidateCommitOid);
+  assert.equal(published.treeDeltaDigestSha256, 'f'.repeat(64));
+
+  const promotionHelperPath = join(root, 'history-promotion-helper');
+  await writeFile(
+    promotionHelperPath,
+    `#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' '${JSON.stringify({
+      protocolVersion: 1,
+      kind: 'history_candidate_promoted',
+      objectFormat: 'sha1',
+      baseCommitOid: expectedBaseCommitOid,
+      acceptedCommitOid: expectedCandidateCommitOid,
+      acceptedTreeOid: targetTreeOid,
+      acceptedRef,
+      candidateRef,
+      restoreId,
+      replayed: false,
+      managedTreePolicyVersion: 3,
+    })}'\n`,
+  );
+  await chmod(promotionHelperPath, 0o755);
+  const promotionHelper = await admitHelperPath(promotionHelperPath, ['promote_history_candidate']);
+  const promoted = await promoteHistoryCandidateWithGitoxideHelperInternal({
+    ...promotionHelper,
+    repositoryPath,
+    acceptedRef,
+    expectedBaseCommitOid,
+    expectedBaseTreeOid,
+    candidateRef,
+    expectedCandidateCommitOid,
+    expectedCandidateTreeOid: targetTreeOid,
+    targetCommitOid,
+    targetTreeOid,
+    requestDigestSha256,
+    restoreId,
+    managedTreePolicyVersion: 3,
+  });
+  assert.equal(promoted.acceptedCommitOid, expectedCandidateCommitOid);
+});
+
 test('rejects a direct-read response whose blob identity does not match its content', {
   skip: process.platform === 'win32',
 }, async (t) => {
@@ -638,6 +745,8 @@ async function admitHelperPath(
     | 'import_source_head'
     | 'create_candidate'
     | 'promote_candidate'
+    | 'create_history_candidate'
+    | 'promote_history_candidate'
     | 'observe_accepted_ref'
     | 'read_tree_file'
   )[] = ['inspect_repository', 'import_source_head'],
@@ -681,6 +790,33 @@ function candidateRequestDigestForTest(input: {
     Buffer.from(input.path),
     input.content,
   ]) {
+    const length = Buffer.alloc(8);
+    length.writeBigUInt64BE(BigInt(field.length));
+    hash.update(length).update(field);
+  }
+  return hash.digest('hex');
+}
+
+function historyCandidateRequestDigestForTest(input: {
+  readonly acceptedRef: string;
+  readonly expectedBaseCommitOid: string;
+  readonly expectedBaseTreeOid: string;
+  readonly targetCommitOid: string;
+  readonly targetTreeOid: string;
+  readonly candidateRef: string;
+  readonly restoreId: string;
+}): string {
+  const hash = createHash('sha256').update('maka.gitoxide.history-candidate-request.v1\0');
+  for (const value of [
+    input.acceptedRef,
+    input.expectedBaseCommitOid,
+    input.expectedBaseTreeOid,
+    input.targetCommitOid,
+    input.targetTreeOid,
+    input.candidateRef,
+    input.restoreId,
+  ]) {
+    const field = Buffer.from(value);
     const length = Buffer.alloc(8);
     length.writeBigUInt64BE(BigInt(field.length));
     hash.update(length).update(field);

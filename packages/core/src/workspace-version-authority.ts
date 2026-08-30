@@ -23,12 +23,15 @@ import { isCanonicalManagedMutationPathV1, type RuntimeEvent } from './runtime-e
 export const WORKSPACE_EPOCH_OPENED_FACT_KIND = 'maka.workspace.epoch_opened' as const;
 export const WORKSPACE_BASELINE_ACCEPTED_FACT_KIND = 'maka.workspace.baseline_accepted' as const;
 export const WORKSPACE_VERSION_ACCEPTED_FACT_KIND = 'maka.workspace.version_accepted' as const;
+export const WORKSPACE_HISTORY_VERSION_ACCEPTED_FACT_KIND =
+  'maka.workspace.history_version_accepted' as const;
 export const WORKSPACE_FACT_VERSION = 1 as const;
 export const WORKSPACE_VERSION_AUTHORITY_CAPABILITY_V1 =
   'runtime_workspace_version_authority_v1' as const;
 export const WORKSPACE_AUTHORITY_SESSION_ID = 'maka_workspace_authority' as const;
 export const WORKSPACE_MATERIALIZATION_SEMANTICS_V1 =
   'git_tree_materialized_with_fixed_config_v1' as const;
+const WORKSPACE_HISTORY_RESTORE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 
 export type WorkspaceGitObjectFormat = 'sha1' | 'sha256';
 
@@ -112,6 +115,9 @@ export interface WorkspaceSuccessorDescriptorV1 {
   executionProfileDigest: `sha256:${string}`;
 }
 
+export interface WorkspaceHistorySuccessorDescriptorV1
+  extends Omit<WorkspaceSuccessorDescriptorV1, 'changedPaths'> {}
+
 export interface WorkspaceMutationOriginV1 {
   operationId: string;
   dispatchEventId: string;
@@ -139,7 +145,35 @@ export interface WorkspaceVersionAcceptedV1 {
   executionProfileDigest: `sha256:${string}`;
 }
 
-export type WorkspaceAcceptedVersionV1 = WorkspaceBaselineAcceptedV1 | WorkspaceVersionAcceptedV1;
+export interface WorkspaceHistoryRestoreOriginV1 {
+  restoreId: string;
+  targetWorkspaceVersionId: string;
+}
+
+export interface WorkspaceHistoryVersionAcceptedV1 {
+  protocol: 'workspace_history_version_accepted_v1';
+  repositoryId: string;
+  workspaceId: string;
+  workspaceEpochId: string;
+  workspaceVersionId: string;
+  objectFormat: WorkspaceGitObjectFormat;
+  parents: readonly [string];
+  origin: { kind: 'history_restore' } & WorkspaceHistoryRestoreOriginV1;
+  baseAcceptedEventId: string;
+  baseHeadRevision: number;
+  commitOid: string;
+  treeOid: string;
+  policyHash: `sha256:${string}`;
+  treeDeltaDigest: `sha256:${string}`;
+  changedFileCount: number;
+  deletedFileCount: number;
+  executionProfileDigest: `sha256:${string}`;
+}
+
+export type WorkspaceAcceptedVersionV1 =
+  | WorkspaceBaselineAcceptedV1
+  | WorkspaceVersionAcceptedV1
+  | WorkspaceHistoryVersionAcceptedV1;
 
 export type RuntimeEventWorkspaceFactEnvelope =
   | {
@@ -156,6 +190,11 @@ export type RuntimeEventWorkspaceFactEnvelope =
       kind: typeof WORKSPACE_VERSION_ACCEPTED_FACT_KIND;
       version: typeof WORKSPACE_FACT_VERSION;
       payload: WorkspaceVersionAcceptedV1;
+    }
+  | {
+      kind: typeof WORKSPACE_HISTORY_VERSION_ACCEPTED_FACT_KIND;
+      version: typeof WORKSPACE_FACT_VERSION;
+      payload: WorkspaceHistoryVersionAcceptedV1;
     };
 
 export interface WorkspaceBaselineAuthorityInput {
@@ -171,6 +210,13 @@ export interface WorkspaceSuccessorAuthorityInput {
   committedAt: number;
   successor: WorkspaceSuccessorDescriptorV1;
   origin: WorkspaceMutationOriginV1;
+}
+
+export interface WorkspaceHistorySuccessorAuthorityInput {
+  acceptedEventId: string;
+  committedAt: number;
+  successor: WorkspaceHistorySuccessorDescriptorV1;
+  origin: WorkspaceHistoryRestoreOriginV1;
 }
 
 export interface WorkspaceAuthorityIdentity {
@@ -201,7 +247,7 @@ export interface ScannedWorkspaceBaselineAuthority {
 }
 
 export interface ScannedWorkspaceSuccessorAuthority {
-  successor: WorkspaceVersionAcceptedV1;
+  successor: WorkspaceVersionAcceptedV1 | WorkspaceHistoryVersionAcceptedV1;
   acceptedEventId: string;
   acceptedAt: number;
   eventSeq: number;
@@ -403,6 +449,47 @@ export function buildWorkspaceSuccessorAuthorityEvent(
   };
 }
 
+export function buildWorkspaceHistorySuccessorAuthorityEvent(
+  input: WorkspaceHistorySuccessorAuthorityInput,
+): RuntimeEvent {
+  assertWorkspaceHistorySuccessorAuthorityInput(input);
+  const identity = workspaceAuthorityIdentity(input.successor.workspaceEpochId);
+  const payload: WorkspaceHistoryVersionAcceptedV1 = {
+    protocol: 'workspace_history_version_accepted_v1',
+    repositoryId: input.successor.repositoryId,
+    workspaceId: input.successor.workspaceId,
+    workspaceEpochId: input.successor.workspaceEpochId,
+    workspaceVersionId: input.successor.workspaceVersionId,
+    objectFormat: input.successor.objectFormat,
+    parents: [input.successor.parentWorkspaceVersionId],
+    origin: { kind: 'history_restore', ...input.origin },
+    baseAcceptedEventId: input.successor.baseAcceptedEventId,
+    baseHeadRevision: input.successor.baseHeadRevision,
+    commitOid: input.successor.commitOid,
+    treeOid: input.successor.treeOid,
+    policyHash: input.successor.policyHash,
+    treeDeltaDigest: input.successor.treeDeltaDigest,
+    changedFileCount: input.successor.changedFileCount,
+    deletedFileCount: input.successor.deletedFileCount,
+    executionProfileDigest: input.successor.executionProfileDigest,
+  };
+  return {
+    id: input.acceptedEventId,
+    ...identity,
+    ts: input.committedAt,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      workspaceFact: {
+        kind: WORKSPACE_HISTORY_VERSION_ACCEPTED_FACT_KIND,
+        version: WORKSPACE_FACT_VERSION,
+        payload,
+      },
+    },
+  };
+}
+
 export function isRuntimeEventWorkspaceFactEnvelope(
   value: unknown,
 ): value is RuntimeEventWorkspaceFactEnvelope {
@@ -415,6 +502,9 @@ export function isRuntimeEventWorkspaceFactEnvelope(
   }
   if (value.kind === WORKSPACE_VERSION_ACCEPTED_FACT_KIND) {
     return isWorkspaceVersionAcceptedV1(value.payload);
+  }
+  if (value.kind === WORKSPACE_HISTORY_VERSION_ACCEPTED_FACT_KIND) {
+    return isWorkspaceHistoryVersionAcceptedV1(value.payload);
   }
   return false;
 }
@@ -707,7 +797,11 @@ function assertWorkspaceSuccessorAuthority(input: {
 }): ScannedWorkspaceSuccessorAuthority {
   const lane = validateWorkspaceFactEventLane(input.event);
   const fact = input.event.actions?.workspaceFact;
-  if (!lane.ok || fact?.kind !== WORKSPACE_VERSION_ACCEPTED_FACT_KIND) {
+  if (
+    !lane.ok ||
+    (fact?.kind !== WORKSPACE_VERSION_ACCEPTED_FACT_KIND &&
+      fact?.kind !== WORKSPACE_HISTORY_VERSION_ACCEPTED_FACT_KIND)
+  ) {
     throw new WorkspaceAuthorityContractError(
       'successor_contract_conflict',
       'Invalid workspace successor authority event lane',
@@ -769,6 +863,20 @@ function assertWorkspaceSuccessorAuthorityInput(input: WorkspaceSuccessorAuthori
     !isWorkspaceMutationOrigin(input.origin)
   ) {
     throw new Error('Invalid workspace successor authority input');
+  }
+}
+
+function assertWorkspaceHistorySuccessorAuthorityInput(
+  input: WorkspaceHistorySuccessorAuthorityInput,
+): void {
+  if (
+    !EVENT_ID_PATTERN.test(input.acceptedEventId) ||
+    !Number.isSafeInteger(input.committedAt) ||
+    input.committedAt < 0 ||
+    !isWorkspaceHistorySuccessorDescriptor(input.successor) ||
+    !isWorkspaceHistoryRestoreOrigin(input.origin)
+  ) {
+    throw new Error('Invalid workspace history successor authority input');
   }
 }
 
@@ -884,6 +992,79 @@ function isWorkspaceVersionAcceptedV1(value: unknown): value is WorkspaceVersion
     return false;
   }
   return true;
+}
+
+function isWorkspaceHistorySuccessorDescriptor(
+  value: unknown,
+): value is WorkspaceHistorySuccessorDescriptorV1 {
+  if (!isRecord(value)) return false;
+  return (
+    isIdentifier(value.repositoryId, 'repositoryId') &&
+    isIdentifier(value.workspaceId, 'workspaceId') &&
+    isIdentifier(value.workspaceEpochId, 'workspaceEpochId') &&
+    isIdentifier(value.workspaceVersionId, 'workspaceVersionId') &&
+    isIdentifier(value.parentWorkspaceVersionId, 'workspaceVersionId') &&
+    EVENT_ID_PATTERN.test(String(value.baseAcceptedEventId)) &&
+    value.workspaceVersionId !== value.parentWorkspaceVersionId &&
+    isObjectFormat(value.objectFormat) &&
+    Number.isSafeInteger(value.baseHeadRevision) &&
+    Number(value.baseHeadRevision) > 0 &&
+    isGitOid(value.commitOid, value.objectFormat) &&
+    isGitOid(value.treeOid, value.objectFormat) &&
+    isSha256Digest(value.policyHash) &&
+    isSha256Digest(value.treeDeltaDigest) &&
+    isNonNegativeSafeInteger(value.changedFileCount) &&
+    isNonNegativeSafeInteger(value.deletedFileCount) &&
+    isSha256Digest(value.executionProfileDigest)
+  );
+}
+
+function isWorkspaceHistoryVersionAcceptedV1(
+  value: unknown,
+): value is WorkspaceHistoryVersionAcceptedV1 {
+  if (
+    !hasExactKeys(value, [
+      'protocol',
+      'repositoryId',
+      'workspaceId',
+      'workspaceEpochId',
+      'workspaceVersionId',
+      'objectFormat',
+      'parents',
+      'origin',
+      'baseAcceptedEventId',
+      'baseHeadRevision',
+      'commitOid',
+      'treeOid',
+      'policyHash',
+      'treeDeltaDigest',
+      'changedFileCount',
+      'deletedFileCount',
+      'executionProfileDigest',
+    ]) ||
+    value.protocol !== 'workspace_history_version_accepted_v1' ||
+    !isWorkspaceHistorySuccessorDescriptor({
+      ...value,
+      parentWorkspaceVersionId: Array.isArray(value.parents) ? value.parents[0] : undefined,
+    }) ||
+    !Array.isArray(value.parents) ||
+    value.parents.length !== 1 ||
+    !hasExactKeys(value.origin, ['kind', 'restoreId', 'targetWorkspaceVersionId']) ||
+    value.origin.kind !== 'history_restore' ||
+    !isWorkspaceHistoryRestoreOrigin(value.origin)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isWorkspaceHistoryRestoreOrigin(value: unknown): value is WorkspaceHistoryRestoreOriginV1 {
+  return (
+    isRecord(value) &&
+    typeof value.restoreId === 'string' &&
+    WORKSPACE_HISTORY_RESTORE_ID_PATTERN.test(value.restoreId) &&
+    isIdentifier(value.targetWorkspaceVersionId, 'workspaceVersionId')
+  );
 }
 
 function isWorkspaceSuccessorDescriptor(value: unknown): value is WorkspaceSuccessorDescriptorV1 {

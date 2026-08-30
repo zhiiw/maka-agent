@@ -928,6 +928,131 @@ fn promotes_a_verified_candidate_with_exact_cas_and_replays_without_moving_again
 }
 
 #[test]
+fn restores_history_as_a_new_successor_and_exactly_replays_promotion() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("history-successor.git");
+    let imported = invoke_import(&fixture.root, &source_head, &destination);
+    assert!(imported.status.success());
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let baseline = imported["baselineCommitOid"].as_str().unwrap();
+    let baseline_tree = imported["baselineTreeOid"].as_str().unwrap();
+
+    let mutation_ref =
+        "refs/maka/candidates/2323232323232323232323232323232323232323232323232323232323232323";
+    let mutation = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "create_candidate",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedBaseCommitOid": baseline,
+        "expectedBaseTreeOid": baseline_tree,
+        "candidateRef": mutation_ref,
+        "path": "history.txt",
+        "contentBase64": "bmV3ZXIgY29udGVudAo=",
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(mutation.status.success());
+    let mutation: serde_json::Value = serde_json::from_slice(&mutation.stdout).unwrap();
+    let promote_mutation = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "promote_candidate",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedBaseCommitOid": baseline,
+        "candidateRef": mutation_ref,
+        "expectedCandidateCommitOid": mutation["candidateCommitOid"],
+        "expectedCandidateTreeOid": mutation["candidateTreeOid"],
+        "expectedResultBlobOid": mutation["resultBlobOid"],
+        "requestDigestSha256": mutation["requestDigestSha256"],
+        "path": "history.txt",
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(promote_mutation.status.success());
+    let current = mutation["candidateCommitOid"].as_str().unwrap();
+    let current_tree = mutation["candidateTreeOid"].as_str().unwrap();
+    let history_ref = "refs/maka/history-candidates/2424242424242424242424242424242424242424242424242424242424242424";
+    let request = serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "create_history_candidate",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedBaseCommitOid": current,
+        "expectedBaseTreeOid": current_tree,
+        "targetCommitOid": baseline,
+        "targetTreeOid": baseline_tree,
+        "candidateRef": history_ref,
+        "restoreId": "restore_baseline_1",
+        "managedTreePolicyVersion": 3,
+    });
+
+    let published = invoke_request(request.clone());
+    assert!(
+        published.status.success(),
+        "{}",
+        String::from_utf8_lossy(&published.stdout)
+    );
+    let published: serde_json::Value = serde_json::from_slice(&published.stdout).unwrap();
+    assert_eq!(published["kind"], "history_candidate_published");
+    assert_eq!(published["candidateTreeOid"], baseline_tree);
+    assert_eq!(published["targetCommitOid"], baseline);
+    assert_eq!(published["replayed"], false);
+    assert_eq!(
+        git_bare_output(
+            &destination,
+            [
+                "rev-parse",
+                &format!("{}^", published["candidateCommitOid"].as_str().unwrap())
+            ],
+        ),
+        current
+    );
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/baseline"]),
+        current
+    );
+
+    let retried = invoke_request(request);
+    assert!(retried.status.success());
+    let retried: serde_json::Value = serde_json::from_slice(&retried.stdout).unwrap();
+    assert_eq!(
+        retried["candidateCommitOid"],
+        published["candidateCommitOid"]
+    );
+    assert_eq!(retried["replayed"], true);
+
+    let promotion = serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "promote_history_candidate",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedBaseCommitOid": current,
+        "expectedBaseTreeOid": current_tree,
+        "candidateRef": history_ref,
+        "expectedCandidateCommitOid": published["candidateCommitOid"],
+        "expectedCandidateTreeOid": published["candidateTreeOid"],
+        "targetCommitOid": baseline,
+        "targetTreeOid": baseline_tree,
+        "requestDigestSha256": published["requestDigestSha256"],
+        "restoreId": "restore_baseline_1",
+        "managedTreePolicyVersion": 3,
+    });
+    let promoted = invoke_request(promotion.clone());
+    assert!(promoted.status.success());
+    let promoted: serde_json::Value = serde_json::from_slice(&promoted.stdout).unwrap();
+    assert_eq!(promoted["kind"], "history_candidate_promoted");
+    assert_eq!(promoted["replayed"], false);
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/baseline"]),
+        published["candidateCommitOid"].as_str().unwrap()
+    );
+    let replay = invoke_request(promotion);
+    assert!(replay.status.success());
+    let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(replay["replayed"], true);
+}
+
+#[test]
 fn rejects_a_symbolic_candidate_ref_during_exact_retry() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let source_head = fixture.git_output(["rev-parse", "HEAD"]);

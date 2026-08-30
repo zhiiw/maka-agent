@@ -31,7 +31,7 @@ export interface GitoxideManagedHistoryEntryInternal {
   readonly treeOid: string;
   readonly acceptedEventId: string;
   readonly committedAt: number;
-  readonly kind: 'baseline' | 'tool_mutation';
+  readonly kind: 'baseline' | 'tool_mutation' | 'history_restore';
   readonly changedFileCount: number;
 }
 

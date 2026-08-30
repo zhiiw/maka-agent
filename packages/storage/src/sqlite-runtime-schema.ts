@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_RUNTIME_SCHEMA_VERSION = 15;
+export const SQLITE_RUNTIME_SCHEMA_VERSION = 16;
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY = 'runtime_recovery_authority';
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY_VERSION = 1;
 export const RUNTIME_CONTINUATION_AUTHORITY_CAPABILITY = 'runtime_continuation_authority';
@@ -540,6 +540,101 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
 
     INSERT INTO runtime_capabilities(capability, version)
       VALUES ('runtime_workspace_bound_continuation_authority', 1);
+    `,
+  ],
+  [
+    16,
+    `
+    ALTER TABLE runtime_workspace_heads RENAME TO runtime_workspace_heads_v15;
+    ALTER TABLE runtime_workspace_versions RENAME TO runtime_workspace_versions_v15;
+
+    CREATE TABLE runtime_workspace_versions (
+      workspace_version_id TEXT PRIMARY KEY,
+      repository_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      workspace_epoch_id TEXT NOT NULL,
+      object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')),
+      origin_kind TEXT NOT NULL CHECK (origin_kind IN ('baseline', 'tool_mutation', 'history_restore')),
+      origin_event_id TEXT NOT NULL,
+      parents_json TEXT NOT NULL,
+      operation_id TEXT,
+      dispatch_event_id TEXT REFERENCES runtime_events(event_id),
+      outcome_event_id TEXT REFERENCES runtime_events(event_id),
+      base_head_revision INTEGER CHECK (base_head_revision IS NULL OR base_head_revision > 0),
+      execution_profile_digest TEXT,
+      commit_oid TEXT NOT NULL,
+      tree_oid TEXT NOT NULL,
+      policy_hash TEXT NOT NULL,
+      tree_delta_digest TEXT NOT NULL,
+      changed_file_count INTEGER NOT NULL CHECK (changed_file_count >= 0),
+      deleted_file_count INTEGER NOT NULL CHECK (deleted_file_count >= 0),
+      accepted_event_id TEXT NOT NULL UNIQUE REFERENCES runtime_events(event_id),
+      protocol_version INTEGER NOT NULL CHECK (protocol_version = 1),
+      committed_at INTEGER NOT NULL,
+      changed_paths_json TEXT NOT NULL DEFAULT '[]',
+      history_restore_id TEXT,
+      target_workspace_version_id TEXT,
+      FOREIGN KEY (workspace_id, workspace_epoch_id)
+        REFERENCES runtime_workspace_epochs(workspace_id, workspace_epoch_id),
+      UNIQUE (workspace_id, workspace_epoch_id, workspace_version_id, accepted_event_id),
+      CHECK (
+        (origin_kind = 'baseline' AND parents_json = '[]' AND operation_id IS NULL
+          AND dispatch_event_id IS NULL AND outcome_event_id IS NULL
+          AND base_head_revision IS NULL AND execution_profile_digest IS NULL
+          AND history_restore_id IS NULL AND target_workspace_version_id IS NULL)
+        OR
+        (origin_kind = 'tool_mutation' AND parents_json <> '[]' AND operation_id IS NOT NULL
+          AND dispatch_event_id IS NOT NULL AND outcome_event_id IS NOT NULL
+          AND base_head_revision IS NOT NULL AND execution_profile_digest IS NOT NULL
+          AND history_restore_id IS NULL AND target_workspace_version_id IS NULL)
+        OR
+        (origin_kind = 'history_restore' AND parents_json <> '[]' AND operation_id IS NULL
+          AND dispatch_event_id IS NULL AND outcome_event_id IS NULL
+          AND base_head_revision IS NOT NULL AND execution_profile_digest IS NOT NULL
+          AND history_restore_id IS NOT NULL AND target_workspace_version_id IS NOT NULL)
+      )
+    );
+
+    INSERT INTO runtime_workspace_versions (
+      workspace_version_id, repository_id, workspace_id, workspace_epoch_id,
+      object_format, origin_kind, origin_event_id, parents_json,
+      operation_id, dispatch_event_id, outcome_event_id, base_head_revision,
+      execution_profile_digest, commit_oid, tree_oid, policy_hash,
+      tree_delta_digest, changed_file_count, deleted_file_count,
+      accepted_event_id, protocol_version, committed_at, changed_paths_json,
+      history_restore_id, target_workspace_version_id
+    )
+    SELECT
+      workspace_version_id, repository_id, workspace_id, workspace_epoch_id,
+      object_format, origin_kind, origin_event_id, parents_json,
+      operation_id, dispatch_event_id, outcome_event_id, base_head_revision,
+      execution_profile_digest, commit_oid, tree_oid, policy_hash,
+      tree_delta_digest, changed_file_count, deleted_file_count,
+      accepted_event_id, protocol_version, committed_at, changed_paths_json,
+      NULL, NULL
+    FROM runtime_workspace_versions_v15;
+
+    CREATE TABLE runtime_workspace_heads (
+      workspace_id TEXT NOT NULL,
+      workspace_epoch_id TEXT NOT NULL,
+      repository_id TEXT NOT NULL,
+      workspace_version_id TEXT NOT NULL,
+      accepted_event_id TEXT NOT NULL,
+      commit_oid TEXT NOT NULL,
+      tree_oid TEXT NOT NULL,
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      PRIMARY KEY (workspace_id, workspace_epoch_id),
+      FOREIGN KEY (workspace_id, workspace_epoch_id)
+        REFERENCES runtime_workspace_epochs(workspace_id, workspace_epoch_id),
+      FOREIGN KEY (workspace_id, workspace_epoch_id, workspace_version_id, accepted_event_id)
+        REFERENCES runtime_workspace_versions(
+          workspace_id, workspace_epoch_id, workspace_version_id, accepted_event_id
+        )
+    );
+
+    INSERT INTO runtime_workspace_heads SELECT * FROM runtime_workspace_heads_v15;
+    DROP TABLE runtime_workspace_heads_v15;
+    DROP TABLE runtime_workspace_versions_v15;
     `,
   ],
 ]);

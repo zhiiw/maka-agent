@@ -28,6 +28,7 @@ import {
   buildWorkspaceBaselineAuthorityEvents,
   workspaceAuthorityIdentity,
   type WorkspaceBaselineAuthorityInput,
+  type WorkspaceHistorySuccessorAuthorityInput,
   type WorkspaceSuccessorAuthorityInput,
 } from '@maka/core/workspace-version-authority';
 import { type RuntimeEvent } from '@maka/core/runtime-event';
@@ -41,8 +42,10 @@ import {
   bindWorkspaceBaselineAuthorityStoreRootInternal,
   commitManagedMutationTerminalInternal,
   commitWorkspaceBaselineInternal,
+  commitVerifiedWorkspaceHistorySuccessorInternal,
   commitWorkspaceSuccessorInternal,
   readActiveManagedMutationInternal,
+  readWorkspaceHeadInternal,
   readWorkspaceVersionInternal,
   registerManagedMutationNoEffectVerifierInternal,
   registerWorkspaceSuccessorCandidateVerifierInternal,
@@ -460,6 +463,65 @@ describe('workspace version persistence authority', () => {
     });
   });
 
+  it('atomically accepts a historical tree as a new head without a fake tool outcome', async () => {
+    await withDatabase(async ({ store }) => {
+      const first = await prepareSuccessorCommit(store);
+      const firstResult = await commitWorkspaceSuccessorInternal(store, first.input);
+      const input: WorkspaceHistorySuccessorAuthorityInput = {
+        acceptedEventId: 'workspace-history-successor-event-1',
+        committedAt: first.baseline.committedAt + 3,
+        successor: {
+          repositoryId: first.baseline.epoch.repositoryId,
+          workspaceId: first.baseline.epoch.workspaceId,
+          workspaceEpochId: first.baseline.epoch.workspaceEpochId,
+          workspaceVersionId: `version_${'a'.repeat(32)}`,
+          objectFormat: 'sha1',
+          parentWorkspaceVersionId: firstResult.committedSuccessor.workspaceVersionId,
+          baseAcceptedEventId: firstResult.committedSuccessor.acceptedEventId,
+          baseHeadRevision: firstResult.committedSuccessor.revision,
+          commitOid: 'a'.repeat(40),
+          treeOid: first.baseline.baseline.treeOid,
+          policyHash: first.baseline.epoch.policyHash,
+          treeDeltaDigest: `sha256:${'b'.repeat(64)}`,
+          changedFileCount: 1,
+          deletedFileCount: 0,
+          executionProfileDigest:
+            'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825',
+        },
+        origin: {
+          restoreId: 'restore-history-1',
+          targetWorkspaceVersionId: first.baseline.baseline.workspaceVersionId,
+        },
+      };
+
+      const accepted = await commitVerifiedWorkspaceHistorySuccessorInternal(store, input);
+      assert.equal(accepted.created, true);
+      assert.equal(accepted.committedSuccessor.revision, 3);
+      assert.equal(accepted.committedSuccessor.treeOid, first.baseline.baseline.treeOid);
+      assert.deepEqual(
+        (await readWorkspaceVersionInternal(store, input.successor.workspaceVersionId))?.origin,
+        {
+          kind: 'history_restore',
+          restoreId: input.origin.restoreId,
+          targetWorkspaceVersionId: input.origin.targetWorkspaceVersionId,
+        },
+      );
+      assert.deepEqual(await commitVerifiedWorkspaceHistorySuccessorInternal(store, input), {
+        ...accepted,
+        created: false,
+      });
+      await store.rebuildWorkspaceVersionProjections();
+      assert.deepEqual(
+        await readWorkspaceHeadInternal(
+          store,
+          input.successor.workspaceId,
+          input.successor.workspaceEpochId,
+        ),
+        accepted.committedSuccessor,
+      );
+    });
+  });
+
   it('rejects a raw successor descriptor without an owner-issued candidate capability', async () => {
     await withDatabase(async ({ store }) => {
       const { input, successor } = await prepareSuccessorCommit(store);
@@ -665,7 +727,7 @@ describe('workspace version persistence authority', () => {
       bindWorkspaceBaselineAuthorityStoreRootInternal(upgraded, TEST_STORAGE_ROOT_ID);
       registerWorkspaceSuccessorCandidateVerifierInternal(upgraded, verifyTestCandidate);
       try {
-        assert.equal(upgraded.schemaVersion(), 15);
+        assert.equal(upgraded.schemaVersion(), 16);
         assert.equal(
           (
             await upgraded.readWorkspaceHead(

@@ -22,11 +22,13 @@ import { describe, it } from 'node:test';
 import { decodeRuntimeEvent, type RuntimeEvent } from '../runtime-event.js';
 import {
   buildWorkspaceBaselineAuthorityEvents,
+  buildWorkspaceHistorySuccessorAuthorityEvent,
   buildWorkspaceSuccessorAuthorityEvent,
   scanWorkspaceBaselineAuthority,
   validateWorkspaceFactEventLane,
   workspaceAuthorityIdentity,
   type WorkspaceBaselineAuthorityInput,
+  type WorkspaceHistorySuccessorAuthorityInput,
   type WorkspaceSuccessorAuthorityInput,
 } from '../workspace-version-authority.js';
 
@@ -258,7 +260,10 @@ describe('workspace version authority contract', () => {
 
     assert.equal(scan.hasCorruption, false);
     assert.equal(scan.successors.length, 1);
-    assert.deepEqual(scan.successors[0]?.successor.changedPaths, ['notes.txt']);
+    assert.equal(scan.successors[0]?.successor.protocol, 'workspace_version_accepted_v1');
+    if (scan.successors[0]?.successor.protocol === 'workspace_version_accepted_v1') {
+      assert.deepEqual(scan.successors[0].successor.changedPaths, ['notes.txt']);
+    }
     assert.deepEqual(scan.heads, [
       {
         repositoryId: baselineInput().epoch.repositoryId,
@@ -272,7 +277,60 @@ describe('workspace version authority contract', () => {
       },
     ]);
   });
+
+  it('advances history restoration as a new successor without fabricating a tool mutation', () => {
+    const baseline = buildWorkspaceBaselineAuthorityEvents(baselineInput());
+    const restored = buildWorkspaceHistorySuccessorAuthorityEvent(historySuccessorInput());
+    const scan = scanWorkspaceBaselineAuthority([
+      { event: baseline.epochOpenedEvent, eventSeq: 1 },
+      { event: baseline.baselineAcceptedEvent, eventSeq: 2 },
+      { event: restored, eventSeq: 3 },
+    ]);
+
+    assert.equal(scan.hasCorruption, false);
+    assert.equal(scan.successors.length, 1);
+    assert.deepEqual(scan.successors[0]?.successor.origin, {
+      kind: 'history_restore',
+      restoreId: 'restore_77777777777777777777777777777777',
+      targetWorkspaceVersionId: baselineInput().baseline.workspaceVersionId,
+    });
+    assert.deepEqual(scan.successors[0]?.successor.parents, [
+      baselineInput().baseline.workspaceVersionId,
+    ]);
+    assert.equal(scan.heads[0]?.workspaceVersionId, 'version_88888888888888888888888888888888');
+    assert.equal(scan.heads[0]?.revision, 2);
+  });
 });
+
+function historySuccessorInput(): WorkspaceHistorySuccessorAuthorityInput {
+  const baseline = baselineInput();
+  return {
+    acceptedEventId: 'workspace-history-successor-event-1',
+    committedAt: baseline.committedAt + 1,
+    successor: {
+      repositoryId: baseline.epoch.repositoryId,
+      workspaceId: baseline.epoch.workspaceId,
+      workspaceEpochId: baseline.epoch.workspaceEpochId,
+      workspaceVersionId: 'version_88888888888888888888888888888888',
+      objectFormat: baseline.epoch.objectFormat,
+      parentWorkspaceVersionId: baseline.baseline.workspaceVersionId,
+      baseAcceptedEventId: baseline.baselineAcceptedEventId,
+      baseHeadRevision: 1,
+      commitOid: '8'.repeat(40),
+      treeOid: baseline.baseline.treeOid,
+      policyHash: baseline.epoch.policyHash,
+      treeDeltaDigest: `sha256:${'a'.repeat(64)}`,
+      changedFileCount: 1,
+      deletedFileCount: 0,
+      executionProfileDigest:
+        'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825',
+    },
+    origin: {
+      restoreId: 'restore_77777777777777777777777777777777',
+      targetWorkspaceVersionId: baseline.baseline.workspaceVersionId,
+    },
+  };
+}
 
 function successorInput(): WorkspaceSuccessorAuthorityInput {
   const baseline = baselineInput();

@@ -25,6 +25,7 @@ import type {
   WorkspaceBaselineAuthorityInput,
   WorkspaceBaselineCommitResult,
   WorkspaceHeadRecordV1,
+  WorkspaceHistorySuccessorAuthorityInput,
   WorkspaceEpochRecordV1,
   WorkspaceSuccessorAuthorityInput,
   WorkspaceVersionRecordV1,
@@ -34,6 +35,7 @@ import {
   commitWorkspaceBaselineInternal,
   commitManagedMutationTerminalInternal,
   commitVerifiedWorkspaceSuccessorInternal,
+  commitVerifiedWorkspaceHistorySuccessorInternal,
   readActiveManagedMutationInternal,
   readManagedMutationEvidenceInternal,
   readWorkspaceContinuationBoundaryInternal,
@@ -48,6 +50,7 @@ import {
   type ManagedMutationTerminalCommitResult,
   type WorkspaceSuccessorCommitInput,
   type WorkspaceSuccessorCommitResult,
+  type WorkspaceHistorySuccessorCommitResult,
 } from './workspace-version-authority-internal.js';
 
 export interface ExecutionStoresWorkspaceMutationAuthorityCapabilityInternal {
@@ -60,6 +63,25 @@ export interface ExecutionStoresWorkspaceBaselineAuthorityCapabilityInternal {
 
 export interface ExecutionStoresWorkspaceContinuationAuthorityCapabilityInternal {
   readonly kind: 'execution_stores_workspace_continuation_authority_v1';
+}
+
+export interface ExecutionStoresWorkspaceHistoryAuthorityCapabilityInternal {
+  readonly kind: 'execution_stores_workspace_history_authority_v1';
+}
+
+export interface ExecutionStoresWorkspaceHistoryAuthorityInternal {
+  readHead(
+    workspaceId: string,
+    workspaceEpochId: string,
+  ): Promise<WorkspaceHeadRecordV1 | undefined>;
+  readVersion(workspaceVersionId: string): Promise<WorkspaceVersionRecordV1 | undefined>;
+  commitHistorySuccessor(candidateOutcome: object): Promise<
+    Readonly<{
+      created: boolean;
+      committedSuccessor: WorkspaceHeadRecordV1;
+      projectionCapability: WorkspaceSuccessorProjectionCapabilityInternal;
+    }>
+  >;
 }
 
 export interface ExecutionStoresWorkspaceContinuationAuthorityInternal {
@@ -135,10 +157,16 @@ interface BaselineAuthorityCapabilityRecord extends AuthoritySource {
   readonly verifyBaseline: (importedRepositoryProof: object) => WorkspaceBaselineAuthorityInput;
 }
 
+interface HistoryAuthorityCapabilityRecord extends AuthoritySource {
+  readonly ownerToken: object;
+  readonly verifyCandidate: (candidateOutcome: object) => WorkspaceHistorySuccessorAuthorityInput;
+}
+
 const sources = new WeakMap<object, AuthoritySource>();
 const capabilities = new WeakMap<object, AuthorityCapabilityRecord>();
 const noEffectCapabilities = new WeakMap<object, NoEffectCapabilityRecord>();
 const baselineCapabilities = new WeakMap<object, BaselineAuthorityCapabilityRecord>();
+const historyCapabilities = new WeakMap<object, HistoryAuthorityCapabilityRecord>();
 const continuationCapabilities = new WeakMap<
   object,
   AuthoritySource & { readonly ownerToken: object }
@@ -242,6 +270,61 @@ export function issueExecutionStoresWorkspaceContinuationAuthorityInternal(input
     Object.freeze({ ...source, ownerToken: input.ownerToken }),
   );
   return capability;
+}
+
+export function issueExecutionStoresWorkspaceHistoryAuthorityInternal(input: {
+  readonly ownerToken: object;
+  readonly stores: object;
+  readonly verifyCandidate: (candidateOutcome: object) => WorkspaceHistorySuccessorAuthorityInput;
+}): ExecutionStoresWorkspaceHistoryAuthorityCapabilityInternal {
+  const source = sources.get(input.stores);
+  if (!source) throw new Error('Execution stores workspace history source is unavailable');
+  adoptWorkspaceBaselineAuthorityStoreRootInternal(source.store, source.rootId);
+  const capability = Object.freeze({
+    kind: 'execution_stores_workspace_history_authority_v1' as const,
+  });
+  historyCapabilities.set(
+    capability,
+    Object.freeze({
+      ...source,
+      ownerToken: input.ownerToken,
+      verifyCandidate: input.verifyCandidate,
+    }),
+  );
+  return capability;
+}
+
+export function requireExecutionStoresWorkspaceHistoryAuthorityInternal(
+  ownerToken: object,
+  capability: ExecutionStoresWorkspaceHistoryAuthorityCapabilityInternal,
+): ExecutionStoresWorkspaceHistoryAuthorityInternal {
+  const record = historyCapabilities.get(capability);
+  if (!record || record.ownerToken !== ownerToken) {
+    throw new Error('Execution stores workspace history authority capability is invalid');
+  }
+  return Object.freeze({
+    readHead: (workspaceId: string, workspaceEpochId: string) =>
+      readWorkspaceHeadInternal(record.store, workspaceId, workspaceEpochId),
+    readVersion: (workspaceVersionId: string) =>
+      readWorkspaceVersionInternal(record.store, workspaceVersionId),
+    commitHistorySuccessor: async (candidateOutcome: object) => {
+      const successor = record.verifyCandidate(candidateOutcome);
+      const result: WorkspaceHistorySuccessorCommitResult =
+        await commitVerifiedWorkspaceHistorySuccessorInternal(record.store, successor);
+      const projectionCapability = Object.freeze({
+        kind: 'workspace_successor_projection_capability_v1' as const,
+      });
+      projectionCapabilities.set(
+        projectionCapability,
+        Object.freeze({
+          ownerToken,
+          candidateOutcome,
+          head: result.committedSuccessor,
+        }),
+      );
+      return Object.freeze({ ...result, projectionCapability });
+    },
+  });
 }
 
 export function requireExecutionStoresWorkspaceContinuationAuthorityInternal(
