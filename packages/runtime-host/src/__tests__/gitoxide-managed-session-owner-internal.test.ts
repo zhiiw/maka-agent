@@ -291,6 +291,51 @@ test('Publish pins the exact durable accepted head without modifying the source 
   assert.equal(git(sourceRoot, ['rev-parse', 'HEAD']), sourceHead);
 });
 
+test('Source branch publish creates one replayable branch without touching the checkout', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the source branch publication test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'source branch baseline\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'source branch baseline');
+  const sourceHead = git(sourceRoot, ['rev-parse', 'HEAD']);
+  const sourceStatus = git(sourceRoot, ['status', '--porcelain=v1']);
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-source-branch-owner-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+  const session = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-source-branch-publication',
+  });
+  assert.ok(session.sourceBranchPublish);
+
+  const first = await session.sourceBranchPublish.publish('review-branch');
+  assert.equal(first.replayed, false);
+  assert.equal(first.publishedRef, 'refs/heads/maka/review-branch');
+  assert.equal(git(sourceRoot, ['rev-parse', `${first.publishedRef}^`]), sourceHead);
+  assert.equal(
+    git(sourceRoot, ['rev-parse', `${first.publishedRef}^{tree}`]),
+    first.acceptedTreeOid,
+  );
+  assert.equal(git(sourceRoot, ['rev-parse', 'HEAD']), sourceHead);
+  assert.equal(git(sourceRoot, ['status', '--porcelain=v1']), sourceStatus);
+
+  const replay = await session.sourceBranchPublish.publish('review-branch');
+  assert.equal(replay.publishedCommitOid, first.publishedCommitOid);
+  assert.equal(replay.replayed, true);
+});
+
 test('Time travel restores a historical accepted version without rewinding the current head', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {
@@ -672,6 +717,8 @@ async function admittedHelper(): Promise<
       'import_source_head',
       'create_candidate',
       'promote_candidate',
+      'create_history_candidate',
+      'promote_history_candidate',
       'observe_accepted_ref',
       'read_tree_file',
       'list_tree_files',
@@ -679,6 +726,7 @@ async function admittedHelper(): Promise<
       'compare_accepted_trees',
       'materialize_accepted_tree',
       'publish_accepted_ref',
+      'publish_accepted_tree_to_source_branch',
     ],
   });
   return {

@@ -497,6 +497,7 @@ async function admittedHelper(): Promise<
       'compare_accepted_trees',
       'materialize_accepted_tree',
       'publish_accepted_ref',
+      'publish_accepted_tree_to_source_branch',
     ],
   });
   const helperCapability = await admitGitoxideHelperArtifactInternal({
