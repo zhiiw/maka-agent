@@ -38,6 +38,7 @@ import {
   ICON_SIZE,
   ArrowUp,
   FileText,
+  FolderGit2,
   ListTodo,
   Network,
   Pencil,
@@ -408,6 +409,13 @@ export const Composer = forwardRef<
     planModeActive?: boolean;
     planModeDisabledReason?: string;
     onPlanModeChange?(active: boolean): void | Promise<void>;
+    /**
+     * New-task product choice or existing-task read-only identity. The
+     * Desktop host expands the mutable UI intent into the immutable managed
+     * coding profile when the Session is created.
+     */
+    managedTaskActive?: boolean;
+    onManagedTaskChange?(active: boolean): void | Promise<void>;
     /**
      * The Session's standing orchestration default. Of the field's three
      * values only Swarm and Graph name a way to fan a turn out; `default` is
@@ -1447,6 +1455,10 @@ export const Composer = forwardRef<
   ];
   /** A host that passes no handler cannot be in a mode this control can leave. */
   const planModeActive = props.onPlanModeChange !== undefined && props.planModeActive === true;
+  // Unlike temporary collaboration modes, the managed product identity is
+  // immutable after Session creation. Existing Sessions therefore expose a
+  // read-only mark even though they deliberately have no change handler.
+  const managedTaskActive = props.managedTaskActive === true;
   // Deliberately NOT disabled while the host commits a toggle. The host
   // already drops re-entrant toggles itself, so a disable during its short
   // IPC round trip carries no protection — it only dims the row (and the
@@ -1483,6 +1495,18 @@ export const Composer = forwardRef<
     isDisabled: boolean;
     onDeactivate(): void;
   }> = [
+    ...(managedTaskActive
+      ? [{
+        id: 'managed-workspace',
+        icon: <FolderGit2 size={ICON_SIZE.control} aria-hidden="true" />,
+        label: copy.managedTaskLabel,
+        tooltip: props.onManagedTaskChange
+          ? copy.managedTaskOnTitle
+          : copy.managedTaskLockedTitle,
+        isDisabled: props.disabled === true || props.onManagedTaskChange === undefined,
+        onDeactivate: () => { void props.onManagedTaskChange?.(false); },
+      }]
+      : []),
     ...(planModeActive
       ? [{
         id: 'plan',
@@ -1533,7 +1557,9 @@ export const Composer = forwardRef<
   const hasPlusMenuActions = Boolean(
     props.onPickAttachments || props.mentionSkills || props.onSetGoal,
   );
-  const hasPlusMenuModes = Boolean(props.onPlanModeChange || props.onOrchestrationModeChange);
+  const hasPlusMenuModes = Boolean(
+    props.onManagedTaskChange || props.onPlanModeChange || props.onOrchestrationModeChange,
+  );
   const showPlusMenu = Boolean(hasPlusMenuActions || hasPlusMenuModes);
 
   return (
@@ -1894,6 +1920,25 @@ export const Composer = forwardRef<
                     {hasPlusMenuModes ? (
                       <>
                         {hasPlusMenuActions ? <DropdownMenuDivider /> : null}
+                        {props.onManagedTaskChange ? (
+                          <DropdownMenuCheckboxItem
+                            label={copy.managedTaskLabel}
+                            icon={<FolderGit2 size={ICON_SIZE.control} aria-hidden="true" />}
+                            value={managedTaskActive}
+                            isDisabled={props.disabled === true}
+                            onChange={(next) => {
+                              void props.onManagedTaskChange?.(next);
+                            }}
+                            endContent={managedTaskActive ? (
+                              <SelectionMark state="checked" size="sm" />
+                            ) : undefined}
+                            aria-description={
+                              managedTaskActive
+                                ? copy.disableManagedTask
+                                : copy.enableManagedTask
+                            }
+                          />
+                        ) : null}
                         {props.onPlanModeChange ? (
                           <DropdownMenuCheckboxItem
                             label={copy.planModeLabel}

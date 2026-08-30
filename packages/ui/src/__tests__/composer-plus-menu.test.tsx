@@ -143,6 +143,30 @@ test('each mode row is the control its field is, and none of them is on', async 
   assert.equal(count(menu, 'aria-checked="true"'), 0, 'nothing on is nothing checked');
 });
 
+test('a new task can explicitly select the managed workspace product', async () => {
+  const props = {
+    ...base,
+    managedTaskActive: false,
+    onManagedTaskChange: () => undefined,
+  } as Parameters<typeof Composer>[0];
+  const menu = await plusMenu(props);
+  assert.equal(count(menu, 'Managed workspace'), 1);
+  assert.equal(
+    tagsWith(menu, 'role="menuitemcheckbox"', 'aria-checked="false"').length,
+    2,
+    'Plan and Managed workspace are independent switches',
+  );
+});
+
+test('the selected managed workspace stays visible beside the composer controls', async () => {
+  const props = {
+    ...base,
+    managedTaskActive: true,
+  } as Parameters<typeof Composer>[0];
+  const markup = await render(props);
+  assert.equal(count(markup, 'data-mode="managed-workspace"'), 1);
+});
+
 /** The Skills entry is the menu's only plain-menuitem row under these props. */
 function skillsRow(menu: string): string {
   const rows = tagsWith(menu, 'role="menuitem"');

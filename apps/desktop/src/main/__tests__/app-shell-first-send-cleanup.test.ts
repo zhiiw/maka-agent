@@ -125,6 +125,44 @@ describe('composer first-send cleanup', () => {
     assert.ok(!('permissionMode' in (createInput as Record<string, unknown>)));
   });
 
+  it('carries the managed task product intent on the first session create', async () => {
+    let createInput: unknown;
+    const restoreWindow = installWindow({
+      newTasks: {
+        create: async (_target: unknown, input: unknown) => {
+          createInput = input;
+          return { id: 'session-managed' };
+        },
+      },
+      sessions: {
+        submitMessage: async () => ({
+          ok: true,
+          attachments: [],
+          skillInvocation: { loaded: [], failed: [] },
+        }),
+      },
+    });
+
+    try {
+      const deps = {
+        ...createActionsDeps(),
+        newTaskProductIntent: 'managed_coding' as const,
+      } as unknown as Parameters<typeof createAppShellChatActions>[0];
+      assert.equal(await createAppShellChatActions(deps).send('inspect the repository'), true);
+    } finally {
+      restoreWindow();
+    }
+
+    assert.equal(
+      (createInput as { productIntent?: unknown }).productIntent,
+      'managed_coding',
+    );
+    assert.equal(
+      Object.hasOwn(createInput as Record<string, unknown>, 'toolProfile'),
+      false,
+    );
+  });
+
   it('sends a composer permission choice once without writing it to the Host default', async () => {
     let createInput: unknown;
     let settingsUpdates = 0;

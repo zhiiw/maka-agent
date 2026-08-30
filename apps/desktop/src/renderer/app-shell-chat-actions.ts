@@ -191,6 +191,9 @@ export function createAppShellChatActions(deps: {
   clearNewChatPermissionChoice: () => void;
   newChatCollaborationMode: CollaborationMode;
   newChatOrchestrationMode: OrchestrationMode;
+  /** Product intent selected for this unsent draft. Main expands it into the
+   * immutable internal tool profile; renderer code never sends that profile. */
+  newTaskProductIntent?: 'managed_coding';
   newTaskTarget: DesktopNewTaskTarget | undefined;
 }): AppShellChatActions {
   const {
@@ -222,6 +225,7 @@ export function createAppShellChatActions(deps: {
     clearNewChatPermissionChoice,
     newChatCollaborationMode,
     newChatOrchestrationMode,
+    newTaskProductIntent,
     newTaskTarget,
   } = deps;
   const copy = getShellCopy(uiLocale).chatActions;
@@ -460,6 +464,7 @@ export function createAppShellChatActions(deps: {
           ...(newChatPermissionChoice ? { permissionMode: newChatPermissionChoice } : {}),
           collaborationMode: newChatCollaborationMode,
           orchestrationMode: newChatOrchestrationMode,
+          ...(newTaskProductIntent ? { productIntent: newTaskProductIntent } : {}),
         });
         unsentSessionId = session.id;
         optimisticSessionId = session.id;

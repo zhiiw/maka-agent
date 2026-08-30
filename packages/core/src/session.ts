@@ -399,6 +399,8 @@ export interface SessionSummary {
   connectionLocked: boolean;
   /** Sticky session default model id for renderer/header display. */
   model: string;
+  /** Immutable execution contract selected when the Session was created. */
+  toolProfile?: SessionToolProfile;
   /** Per-model reasoning-depth variant; `undefined` = model default. Cleared on model switch. */
   thinkingLevel?: import('./model-thinking.js').ThinkingLevel;
   permissionMode: PermissionMode;

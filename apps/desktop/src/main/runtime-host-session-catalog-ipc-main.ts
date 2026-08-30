@@ -127,6 +127,7 @@ export function registerRuntimeHostSessionCatalogIpc(
       ...(request.mode === undefined ? {} : { mode: request.mode }),
       ...(request.mode === undefined ? { name: request.name } : {}),
       ...(request.labels === undefined ? {} : { labels: request.labels }),
+      ...(request.toolProfile === undefined ? {} : { toolProfile: request.toolProfile }),
       modelTarget: normalizeModelTarget(input),
       ...normalizeCreateThinkingLevel(input?.thinkingLevel),
       ...(request.mode !== undefined || request.permissionMode === undefined

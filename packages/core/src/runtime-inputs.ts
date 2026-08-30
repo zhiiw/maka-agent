@@ -103,8 +103,14 @@ export interface CreateSessionInput {
  * type-checks against `bridge-contract.d.ts` alone, so a field added on one
  * side and not the other is a type error nowhere.
  */
-export type CreateSessionRequestInput = Partial<CreateSessionInput> & {
+export type CreateSessionRequestInput = Omit<Partial<CreateSessionInput>, 'toolProfile'> & {
   mode?: SessionStartMode;
+  /**
+   * Desktop product intent. The trusted main process expands this into the
+   * immutable internal tool profile before session creation; renderer callers
+   * cannot mint a tool profile directly.
+   */
+  productIntent?: 'managed_coding';
 };
 
 export interface UserMessageInput extends MessageContent {

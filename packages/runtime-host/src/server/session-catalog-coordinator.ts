@@ -1089,6 +1089,7 @@ export function projectSessionCatalogRecord(
     llmConnectionSlug: header.llmConnectionSlug,
     connectionLocked: header.connectionLocked,
     model: header.model,
+    ...(header.toolProfile === undefined ? {} : { toolProfile: header.toolProfile }),
     ...(header.thinkingLevel === undefined ? {} : { thinkingLevel: header.thinkingLevel }),
     permissionMode: header.permissionMode,
     collaborationMode: header.collaborationMode ?? 'agent',

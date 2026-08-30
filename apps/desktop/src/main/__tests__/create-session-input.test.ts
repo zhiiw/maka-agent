@@ -68,6 +68,29 @@ describe('resolveCreateSessionRequest', () => {
     });
   });
 
+  it('maps the managed task product intent to the only managed tool profile', () => {
+    assert.deepEqual(resolve({ productIntent: 'managed_coding' }), {
+      collaborationMode: 'agent',
+      orchestrationMode: 'default',
+      name: DEFAULT_SESSION_NAME,
+      labels: undefined,
+      toolProfile: 'managed-coding-v1',
+    });
+  });
+
+  it('does not let the renderer mint an internal tool profile', () => {
+    const resolved = resolve({ toolProfile: 'managed-coding-v1' });
+    assert.equal(resolved.toolProfile, undefined);
+  });
+
+  it('rejects invalid or conflicting managed task product intents', () => {
+    assert.throws(() => resolve({ productIntent: 'unknown' }), TypeError);
+    assert.throws(
+      () => resolve({ productIntent: 'managed_coding', mode: 'deep_research' }),
+      TypeError,
+    );
+  });
+
   /**
    * `explore` is a boundary a mode confers, never one a caller may open a
    * session at — core names the pickable set `ChatDefaultPermissionMode`.
