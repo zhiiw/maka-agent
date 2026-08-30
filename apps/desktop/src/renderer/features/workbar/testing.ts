@@ -60,6 +60,9 @@ export function createFakeWorkbarServices(
       read: async () => {
         throw new Error('Fake review.read is not configured');
       },
+      publish: async () => {
+        throw new Error('Fake review.publish is not configured');
+      },
       subscribeSessionEvents: noopSubscription,
     },
     terminal: {

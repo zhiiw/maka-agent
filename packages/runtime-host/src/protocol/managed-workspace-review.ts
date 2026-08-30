@@ -25,6 +25,8 @@ import { defineOperation } from './operation-spec.js';
 const RESULT_MAX_BYTES = 640 * 1024;
 const REVIEW_MAX_FILES = 200;
 const REVISION_PATTERN = /^[0-9a-f]{64}$/u;
+const SHA1_PATTERN = /^[0-9a-f]{40}$/u;
+const PUBLISH_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 
 export interface ManagedWorkspaceReviewQueryInput {
   readonly sessionId: string;
@@ -33,6 +35,20 @@ export interface ManagedWorkspaceReviewQueryInput {
 export interface ManagedWorkspaceReviewQueryResult {
   readonly kind: 'accepted_review';
   readonly snapshot: GitReviewSnapshot;
+}
+
+export interface ManagedWorkspacePublishInput {
+  readonly sessionId: string;
+  readonly publishId: string;
+}
+
+export interface ManagedWorkspacePublishResult {
+  readonly kind: 'accepted_snapshot_published';
+  readonly publishId: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly publishedRef: string;
+  readonly replayed: boolean;
 }
 
 const QUERY_ERRORS = [
@@ -60,7 +76,72 @@ export const MANAGED_WORKSPACE_REVIEW_OPERATION_SPECS = {
     },
     decodeOutput: decodeManagedWorkspaceReviewQueryResult,
   }),
+  'managed-workspace.publish.mutate': defineOperation<
+    ManagedWorkspacePublishInput,
+    ManagedWorkspacePublishResult,
+    (typeof QUERY_ERRORS)[number]
+  >({
+    mode: 'command',
+    availability: 'ready',
+    errors: QUERY_ERRORS,
+    decodeInput(value) {
+      const record = requireExactRecord(value, 'managed workspace publication', [
+        'sessionId',
+        'publishId',
+      ]);
+      const publishId = requireEntityId(record.publishId, 'managed publication id');
+      if (!PUBLISH_ID_PATTERN.test(publishId)) {
+        throw invalidProtocolFrame('Invalid managed publication id');
+      }
+      return {
+        sessionId: requireEntityId(record.sessionId, 'managed publication Session id'),
+        publishId,
+      };
+    },
+    decodeOutput: decodeManagedWorkspacePublishResult,
+    assertOutputForInput(input, output) {
+      if (
+        output.publishId !== input.publishId ||
+        output.publishedRef !== `refs/maka/published/${input.publishId}`
+      ) {
+        throw invalidProtocolFrame('Managed workspace publication conflicts with its request');
+      }
+    },
+  }),
 } as const;
+
+export function decodeManagedWorkspacePublishResult(value: unknown): ManagedWorkspacePublishResult {
+  const record = requireExactRecord(value, 'managed workspace publication result', [
+    'kind',
+    'publishId',
+    'acceptedCommitOid',
+    'acceptedTreeOid',
+    'publishedRef',
+    'replayed',
+  ]);
+  if (
+    record.kind !== 'accepted_snapshot_published' ||
+    typeof record.publishId !== 'string' ||
+    !PUBLISH_ID_PATTERN.test(record.publishId) ||
+    typeof record.acceptedCommitOid !== 'string' ||
+    !SHA1_PATTERN.test(record.acceptedCommitOid) ||
+    typeof record.acceptedTreeOid !== 'string' ||
+    !SHA1_PATTERN.test(record.acceptedTreeOid) ||
+    typeof record.publishedRef !== 'string' ||
+    record.publishedRef !== `refs/maka/published/${record.publishId}` ||
+    typeof record.replayed !== 'boolean'
+  ) {
+    throw invalidProtocolFrame('Invalid managed workspace published ref');
+  }
+  return {
+    kind: 'accepted_snapshot_published',
+    publishId: record.publishId,
+    acceptedCommitOid: record.acceptedCommitOid,
+    acceptedTreeOid: record.acceptedTreeOid,
+    publishedRef: record.publishedRef,
+    replayed: record.replayed,
+  };
+}
 
 export function decodeManagedWorkspaceReviewQueryResult(
   value: unknown,

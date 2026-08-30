@@ -92,6 +92,9 @@ test('ordinary Review keeps reading the attached checkout', async (t) => {
         managedReads += 1;
         throw new Error('not used');
       },
+      async publishManagedWorkspaceSnapshot() {
+        throw new Error('not used');
+      },
     },
   });
 
@@ -116,6 +119,9 @@ test('managed Review fails closed instead of reading the attached checkout', asy
       async readManagedWorkspaceReview() {
         throw new Error('accepted review unavailable');
       },
+      async publishManagedWorkspaceSnapshot() {
+        throw new Error('not used');
+      },
     },
   });
 
@@ -125,6 +131,77 @@ test('managed Review fails closed instead of reading the attached checkout', asy
       source: 'branch',
     }),
     /accepted review unavailable/u,
+  );
+});
+
+test('managed workspace Publish delegates one immutable accepted snapshot to Runtime Host', async () => {
+  const ipc = ipcHarness();
+  let publishCalls = 0;
+  registerRuntimeHostWorkspaceIpc({
+    ipcMain: ipc as never,
+    client: {
+      async getSession() {
+        return sessionProjection('managed-coding-v1');
+      },
+      async readManagedWorkspaceReview() {
+        throw new Error('not used');
+      },
+      async publishManagedWorkspaceSnapshot(sessionId: string, publishId: string) {
+        publishCalls += 1;
+        assert.equal(sessionId, 'session-managed');
+        assert.equal(publishId, 'desktop-123');
+        return {
+          kind: 'accepted_snapshot_published' as const,
+          publishId,
+          acceptedCommitOid: 'b'.repeat(40),
+          acceptedTreeOid: 'c'.repeat(40),
+          publishedRef: `refs/maka/published/${publishId}`,
+          replayed: false,
+        };
+      },
+    } as never,
+  });
+
+  assert.deepEqual(
+    await ipc.invoke('managed-workspace:publish', {
+      sessionId: 'session-managed',
+      publishId: 'desktop-123',
+    }),
+    {
+      kind: 'accepted_snapshot_published',
+      publishId: 'desktop-123',
+      acceptedCommitOid: 'b'.repeat(40),
+      acceptedTreeOid: 'c'.repeat(40),
+      publishedRef: 'refs/maka/published/desktop-123',
+      replayed: false,
+    },
+  );
+  assert.equal(publishCalls, 1);
+});
+
+test('ordinary workspace cannot enter managed immutable Publish', async () => {
+  const ipc = ipcHarness();
+  registerRuntimeHostWorkspaceIpc({
+    ipcMain: ipc as never,
+    client: {
+      async getSession() {
+        return sessionProjection(undefined);
+      },
+      async readManagedWorkspaceReview() {
+        throw new Error('not used');
+      },
+      async publishManagedWorkspaceSnapshot() {
+        throw new Error('must not publish');
+      },
+    } as never,
+  });
+
+  await assert.rejects(
+    ipc.invoke('managed-workspace:publish', {
+      sessionId: 'session-managed',
+      publishId: 'desktop-123',
+    }),
+    /does not own a managed workspace/u,
   );
 });
 

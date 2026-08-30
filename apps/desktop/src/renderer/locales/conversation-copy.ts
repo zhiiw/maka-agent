@@ -167,6 +167,12 @@ export interface DesktopConversationCopy {
     deleted(count: number): string;
     loadFailed: string;
     retry: string;
+    publish: string;
+    publishing: string;
+    published: string;
+    publishedDetail(ref: string): string;
+    publishFailed: string;
+    retryPublish: string;
   };
   terminalPanel: {
     ariaLabel: string;
@@ -529,6 +535,12 @@ const COPY = {
       deleted: (count) => `删除 ${count}`,
       loadFailed: '无法读取 Git 变化',
       retry: '重试',
+      publish: '发布快照',
+      publishing: '正在发布',
+      published: '已发布',
+      publishedDetail: (ref) => `已将 accepted 快照发布到 ${ref}`,
+      publishFailed: '无法发布 accepted 快照',
+      retryPublish: '重试发布',
     },
     terminalPanel: {
       ariaLabel: '任务终端',
@@ -760,6 +772,12 @@ const COPY = {
       deleted: (count) => `${count} deleted`,
       loadFailed: 'Could not read Git changes',
       retry: 'Retry',
+      publish: 'Publish snapshot',
+      publishing: 'Publishing',
+      published: 'Published',
+      publishedDetail: (ref) => `Published the accepted snapshot to ${ref}`,
+      publishFailed: 'Could not publish the accepted snapshot',
+      retryPublish: 'Retry publish',
     },
     terminalPanel: {
       ariaLabel: 'Task terminal',

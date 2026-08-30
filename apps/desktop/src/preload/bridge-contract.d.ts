@@ -52,6 +52,7 @@ import type {
 } from '@maka/core/events';
 import type { UserQuestionResponse } from '@maka/core/user-question';
 import type { RuntimeHostProfileKind } from '@maka/runtime-host/profile-kind';
+import type { ManagedWorkspacePublishResult } from '@maka/runtime-host/protocol';
 import type { PermissionMode } from '@maka/core/permission';
 import type { CollaborationMode } from '@maka/core/collaboration';
 import type { OrchestrationMode } from '@maka/core/orchestration';
@@ -1278,6 +1279,10 @@ export interface MakaBridge {
       source: GitReviewSource;
       baseBranch?: string;
     }): Promise<GitReviewReadResult>;
+    publish(input: {
+      sessionId: string;
+      publishId: string;
+    }): Promise<ManagedWorkspacePublishResult>;
   };
   goal: {
     /** The session's current goal (null when none is set). */

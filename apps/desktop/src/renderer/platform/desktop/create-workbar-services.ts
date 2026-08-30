@@ -51,6 +51,7 @@ export function createDesktopWorkbarServices(
   return {
     review: {
       read: (input) => bridge.gitReview.read(input),
+      publish: (input) => bridge.gitReview.publish(input),
       subscribeSessionEvents: (sessionId, handler) =>
         bridge.sessions.subscribeEvents(sessionId, handler),
     },

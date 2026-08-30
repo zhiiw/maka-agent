@@ -19,7 +19,10 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { decodeManagedWorkspaceReviewQueryResult } from '../protocol/managed-workspace-review.js';
+import {
+  decodeManagedWorkspacePublishResult,
+  decodeManagedWorkspaceReviewQueryResult,
+} from '../protocol/managed-workspace-review.js';
 
 const valid = {
   kind: 'accepted_review',
@@ -57,5 +60,33 @@ test('managed Review protocol rejects totals that do not match its files', () =>
         snapshot: { ...valid.snapshot, additions: 2 },
       }),
     /totals conflict/u,
+  );
+});
+
+test('managed Publish protocol accepts one exact immutable ref receipt', () => {
+  const published = {
+    kind: 'accepted_snapshot_published',
+    publishId: 'desktop-123',
+    acceptedCommitOid: 'b'.repeat(40),
+    acceptedTreeOid: 'c'.repeat(40),
+    publishedRef: 'refs/maka/published/desktop-123',
+    replayed: false,
+  } as const;
+
+  assert.deepEqual(decodeManagedWorkspacePublishResult(published), published);
+});
+
+test('managed Publish protocol rejects refs outside the immutable publication namespace', () => {
+  assert.throws(
+    () =>
+      decodeManagedWorkspacePublishResult({
+        kind: 'accepted_snapshot_published',
+        publishId: 'desktop-123',
+        acceptedCommitOid: 'b'.repeat(40),
+        acceptedTreeOid: 'c'.repeat(40),
+        publishedRef: 'refs/heads/main',
+        replayed: false,
+      }),
+    /published ref/u,
   );
 });

@@ -20,7 +20,11 @@
 import type { InteractiveExecutionStoresWriter } from '@maka/storage/execution-stores';
 import { isSessionNotFoundError } from '@maka/storage/execution-stores';
 import type { StorageRootLease } from '@maka/storage/root-authority';
-import type { ManagedWorkspaceReviewQueryInput, OperationOutcome } from '../protocol/index.js';
+import type {
+  ManagedWorkspacePublishInput,
+  ManagedWorkspaceReviewQueryInput,
+  OperationOutcome,
+} from '../protocol/index.js';
 import type { ManagedWorkspaceReviewOperationHandlerMap } from './operation-dispatcher.js';
 import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
 import { openGitoxideManagedSessionOwnerInternal } from './gitoxide-managed-session-owner-internal.js';
@@ -28,6 +32,7 @@ import { openGitoxideManagedSessionOwnerInternal } from './gitoxide-managed-sess
 export class HostManagedWorkspaceReviewCoordinator {
   readonly handlers: ManagedWorkspaceReviewOperationHandlerMap = {
     'managed-workspace.review.query': (input) => this.#query(input),
+    'managed-workspace.publish.mutate': (input) => this.#publish(input),
   };
 
   constructor(
@@ -70,6 +75,45 @@ export class HostManagedWorkspaceReviewCoordinator {
         return failure('not_found', 'Session was not found');
       }
       return failure('persistence_failed', 'Managed workspace Review is unavailable');
+    }
+  }
+
+  async #publish(
+    input: ManagedWorkspacePublishInput,
+  ): Promise<OperationOutcome<'managed-workspace.publish.mutate'>> {
+    if (!this.input.helperCapability) {
+      return failure('operation_unavailable', 'Managed workspace Publish is unavailable');
+    }
+    try {
+      const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
+      if (header.toolProfile !== 'managed-coding-v1') {
+        return failure('invalid_request', 'Session does not own a managed workspace');
+      }
+      const session = await openGitoxideManagedSessionOwnerInternal({
+        storageRootLease: this.input.storageRootLease,
+        stores: this.input.stores,
+        invocationOwnerToken: this.input.invocationOwnerToken,
+        helperCapability: this.input.helperCapability,
+        sourceRoot: header.cwd,
+        sessionId: input.sessionId,
+      });
+      const published = await session.publish.publish(input.publishId);
+      return {
+        ok: true,
+        result: {
+          kind: 'accepted_snapshot_published',
+          publishId: input.publishId,
+          acceptedCommitOid: published.acceptedCommitOid,
+          acceptedTreeOid: published.acceptedTreeOid,
+          publishedRef: published.publishedRef,
+          replayed: published.replayed,
+        },
+      };
+    } catch (error) {
+      if (isSessionNotFoundError(error)) {
+        return failure('not_found', 'Session was not found');
+      }
+      return failure('persistence_failed', 'Managed workspace Publish is unavailable');
     }
   }
 }
