@@ -2088,6 +2088,8 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       planned.sourceTurnId !== execution.sourceTurnId ||
       planned.sourceRuntimeEventHighWater !== execution.sourceRuntimeEventHighWater ||
       continuationBoundaryDigest(planned) !== execution.boundaryDigest ||
+      planned.boundary?.manifestDigest !==
+        (execution.replayManifestDigest ?? execution.boundaryDigest) ||
       planned.providerReplayDigest !== execution.providerReplayDigest
     ) {
       throw new RuntimeMessageAuthorityInvariantError(
@@ -3051,6 +3053,9 @@ function continuationExecutionDescriptor(
     sourceRuntimeEventHighWater: continuation.sourceRuntimeEventHighWater,
     claimId: continuation.claimId,
     boundaryDigest,
+    ...(continuation.workspaceBoundary
+      ? { replayManifestDigest: continuation.boundary!.manifestDigest }
+      : {}),
     providerReplayDigest: continuation.providerReplayDigest,
     safetyDigest: continuationSafetyDigest(continuation),
     targetInvocationId: continuation.invocationId,
