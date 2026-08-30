@@ -65,6 +65,8 @@ export interface GitoxideRepositoryAdmissionStateInternal {
 
 const MANAGED_TREE_POLICY_VERSION = 3 as const;
 const ACCEPTED_REPOSITORY_REF = 'refs/maka/accepted' as const;
+const SHA1_OID_PATTERN = /^[0-9a-f]{40}$/u;
+const SHA256_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 
 export type GitoxideRepositoryAdmissionResultV1 =
   | {
@@ -410,6 +412,88 @@ export async function createGitoxideCandidateInternal(input: {
     }),
   );
   return Object.freeze({ ...result, candidateOutcomeCapability });
+}
+
+/**
+ * Reconstitutes only the in-process bearer needed to promote an already
+ * durable candidate. The caller must own the strict receipt decoder; this
+ * seam binds that receipt back to the current accepted repository and helper
+ * artifact without re-running the mutation transform or candidate creation.
+ */
+export function reopenGitoxideCandidateOutcomeInternal(input: {
+  readonly acceptedRepositoryOwnerToken: object;
+  readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
+  readonly candidateOwnerToken: object;
+  readonly operationId: string;
+  readonly disposition: 'published' | 'no_change';
+  readonly helperArtifactSha256: `sha256:${string}`;
+  readonly requestDigestSha256: string;
+  readonly resultContentSha256: `sha256:${string}`;
+  readonly baseCommitOid: string;
+  readonly baseTreeOid: string;
+  readonly candidateCommitOid: string;
+  readonly candidateTreeOid: string;
+  readonly candidateRef: string;
+  readonly resultBlobOid: string;
+  readonly path: string;
+}): GitoxideCandidateOutcomeCapability {
+  const managed = requireAcceptedRepositoryRecord(
+    input.acceptedRepositoryOwnerToken,
+    input.acceptedRepositoryCapability,
+  );
+  const expectedCandidateRef = `refs/maka/candidates/${createHash('sha256')
+    .update(input.operationId)
+    .digest('hex')}`;
+  const helperArtifact = requireGitoxideHelperArtifactIdentityInternal(
+    managed.invocationOwnerToken,
+    managed.helperCapability,
+  );
+  if (
+    input.operationId.length === 0 ||
+    Buffer.byteLength(input.operationId, 'utf8') > 1024 ||
+    input.helperArtifactSha256 !== helperArtifact.sha256 ||
+    input.baseCommitOid !== managed.acceptedCommitOid ||
+    input.baseTreeOid !== managed.acceptedTreeOid ||
+    input.candidateRef !== expectedCandidateRef ||
+    !SHA1_OID_PATTERN.test(input.candidateCommitOid) ||
+    !SHA1_OID_PATTERN.test(input.candidateTreeOid) ||
+    !SHA1_OID_PATTERN.test(input.resultBlobOid) ||
+    !/^[0-9a-f]{64}$/u.test(input.requestDigestSha256) ||
+    !SHA256_DIGEST_PATTERN.test(input.resultContentSha256) ||
+    (input.disposition === 'published' && input.candidateCommitOid === input.baseCommitOid) ||
+    (input.disposition === 'no_change' && input.candidateCommitOid !== input.baseCommitOid)
+  ) {
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_repository_admission_capability_invalid',
+    );
+  }
+  const candidateOutcomeCapability = Object.freeze({
+    kind: 'gitoxide_candidate_outcome_capability_v1' as const,
+  });
+  candidateOutcomes.set(
+    candidateOutcomeCapability,
+    Object.freeze({
+      candidateOwnerToken: input.candidateOwnerToken,
+      acceptedRepositoryCapability: input.acceptedRepositoryCapability,
+      repositoryPath: managed.repositoryPath,
+      acceptedRef: managed.acceptedRef,
+      objectFormat: 'sha1' as const,
+      managedTreePolicyVersion: managed.managedTreePolicyVersion,
+      helperArtifactSha256: input.helperArtifactSha256,
+      disposition: input.disposition,
+      operationId: input.operationId,
+      requestDigestSha256: input.requestDigestSha256,
+      resultContentSha256: input.resultContentSha256,
+      baseCommitOid: input.baseCommitOid,
+      baseTreeOid: input.baseTreeOid,
+      candidateCommitOid: input.candidateCommitOid,
+      candidateTreeOid: input.candidateTreeOid,
+      candidateRef: input.candidateRef,
+      resultBlobOid: input.resultBlobOid,
+      path: input.path,
+    }),
+  );
+  return candidateOutcomeCapability;
 }
 
 export async function readGitoxideTreeFileInternal(input: {

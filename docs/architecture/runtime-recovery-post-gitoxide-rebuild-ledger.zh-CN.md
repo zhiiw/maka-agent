@@ -126,7 +126,9 @@ Gitoxide helper 与 npm producer 分别保留自己的 trust root。packaged Hos
 - R1：完成。candidate receipt/ref 支持 exact replay 与 source import retry。
 - R2：owner 主链已完成：durable epoch/head、pure transform、candidate、SQLite successor 与 accepted-ref
   projection 已串联；真实子进程会在 SQLite successor 提交后直接退出，新 owner 只从 durable evidence
-  重建 candidate 并推进 accepted ref。该用例已进入三平台 Gitoxide helper workflow。
+  重开 operation-bound candidate receipt 并推进 accepted ref，不重新计算 transform。active T1 则明确
+  返回 replay-required，不会被 projection repair 误报为 already-current。该用例已进入三平台 Gitoxide
+  helper workflow。
 - R3：accepted-ref projection 已实现为 accepted truth 的派生 CAS；filesystem checkout projection 仍保持
   独立延期，不参与 canonical Write/Edit read/write。
 - R4、R5：尚未在新基线上重建。

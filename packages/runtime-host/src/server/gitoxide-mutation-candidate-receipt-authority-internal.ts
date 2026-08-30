@@ -39,6 +39,7 @@ import {
   createGitoxideCandidateInternal,
   type GitoxideAcceptedRepositoryCapability,
   type GitoxideCandidateOutcomeCapability,
+  reopenGitoxideCandidateOutcomeInternal,
   requireGitoxideAcceptedRepositoryInternal,
   requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal,
   promoteGitoxideCandidateInternal,
@@ -122,8 +123,25 @@ export interface GitoxideMutationCandidatePromotionInput {
   readonly abortSignal?: AbortSignal;
 }
 
+export interface GitoxideMutationCandidateReopenInput {
+  readonly operationId: string;
+  readonly expectedRepositoryId: string;
+  readonly expectedWorkspaceId: string;
+  readonly expectedWorkspaceEpochId: string;
+  readonly expectedBaseWorkspaceVersionId: string;
+  readonly expectedBaseAcceptedEventId: string;
+  readonly expectedBaseHeadRevision: number;
+  readonly expectedBaseCommitOid: string;
+  readonly expectedBaseTreeOid: string;
+  readonly expectedCandidateCommitOid: string;
+  readonly expectedCandidateTreeOid: string;
+  readonly expectedPath: string;
+  readonly expectedExecutionProfileDigest: `sha256:${string}`;
+}
+
 export interface GitoxideMutationCandidateAuthorityInternal {
   capture(input: GitoxideMutationCandidateCaptureInput): Promise<GitoxideMutationCandidateProofV1>;
+  reopen(input: GitoxideMutationCandidateReopenInput): Promise<GitoxideMutationCandidateProofV1>;
   validate(proof: GitoxideMutationCandidateProofV1): GitoxideMutationCandidateReceiptV1;
   promote(input: GitoxideMutationCandidatePromotionInput): Promise<{
     readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
@@ -363,8 +381,90 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
     return issuedReceipt;
   };
 
+  const reopen = async (
+    request: GitoxideMutationCandidateReopenInput,
+  ): Promise<GitoxideMutationCandidateProofV1> => {
+    if (
+      request.operationId.length === 0 ||
+      request.expectedExecutionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST
+    ) {
+      throw new GitoxideMutationCandidateAuthorityError(
+        'gitoxide_mutation_candidate_request_invalid',
+        'Gitoxide mutation candidate reopen request is invalid',
+      );
+    }
+    return runWithStorageRootLease(
+      input.storageRootLease,
+      'interactive',
+      'write',
+      async (storageRoot) => {
+        if (storageRoot !== rootContext.storageRoot) {
+          throw new GitoxideMutationCandidateAuthorityError(
+            'gitoxide_mutation_candidate_identity_conflict',
+            'Gitoxide candidate authority storage root identity changed',
+          );
+        }
+        await assertDirectoryIdentity(
+          rootContext.canonicalReceiptRoot,
+          rootContext.receiptRootIdentity,
+        );
+        await assertDirectoryIdentity(rootContext.repositoryPath, rootContext.repositoryIdentity);
+        const receiptPath = join(
+          rootContext.canonicalReceiptRoot,
+          `${sha256(request.operationId).slice(7)}.json`,
+        );
+        return withProcessLifetimeFileUpdateLock(receiptPath, async () => {
+          const receipt = await readReceipt(receiptPath);
+          if (
+            !receipt ||
+            receipt.disposition !== 'published' ||
+            receipt.operationIdentitySha256 !== sha256(request.operationId) ||
+            receipt.repositoryId !== request.expectedRepositoryId ||
+            receipt.workspaceId !== request.expectedWorkspaceId ||
+            receipt.workspaceEpochId !== request.expectedWorkspaceEpochId ||
+            receipt.workspaceVersionId !== request.expectedBaseWorkspaceVersionId ||
+            receipt.baseAcceptedEventId !== request.expectedBaseAcceptedEventId ||
+            receipt.baseHeadRevision !== request.expectedBaseHeadRevision ||
+            receipt.baseCommitOid !== request.expectedBaseCommitOid ||
+            receipt.baseTreeOid !== request.expectedBaseTreeOid ||
+            receipt.candidateCommitOid !== request.expectedCandidateCommitOid ||
+            receipt.candidateTreeOid !== request.expectedCandidateTreeOid ||
+            receipt.path !== request.expectedPath ||
+            receipt.executionProfileDigest !== request.expectedExecutionProfileDigest
+          ) {
+            throw new GitoxideMutationCandidateAuthorityError(
+              'gitoxide_mutation_candidate_identity_conflict',
+              'Durable Gitoxide candidate receipt conflicts with the accepted successor',
+            );
+          }
+          const candidateOutcomeCapability = reopenGitoxideCandidateOutcomeInternal({
+            acceptedRepositoryOwnerToken: input.acceptedRepositoryOwnerToken,
+            acceptedRepositoryCapability: input.acceptedRepositoryCapability,
+            candidateOwnerToken,
+            operationId: request.operationId,
+            disposition: receipt.disposition,
+            helperArtifactSha256: receipt.helperArtifactSha256,
+            requestDigestSha256: receipt.requestDigestSha256,
+            resultContentSha256: receipt.contentSha256,
+            baseCommitOid: receipt.baseCommitOid,
+            baseTreeOid: receipt.baseTreeOid,
+            candidateCommitOid: receipt.candidateCommitOid,
+            candidateTreeOid: receipt.candidateTreeOid,
+            candidateRef: receipt.candidateRef,
+            resultBlobOid: receipt.resultBlobOid,
+            path: receipt.path,
+          });
+          const proof = Object.freeze({ receipt, candidateOutcomeCapability });
+          issuedProofs.set(proof, receipt);
+          return proof;
+        });
+      },
+    );
+  };
+
   return Object.freeze({
     capture,
+    reopen,
     validate,
     async promote({
       proof,

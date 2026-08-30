@@ -33,15 +33,26 @@ Git ref 与 SQLite 无法组成一个物理事务，因此 v1 采用两个有序
 
 进程若死在两者之间，新 owner 按 operation ID 从 `tool_operations` 主键和 RuntimeEvent event ID 读取
 exact call、dispatch、outcome。该读取是有界主键查询，不需要 schema 15 表达式索引，也不扫描完整账本。
-恢复随后：
+恢复先区分 T1 是否仍处于 active：
+
+- active reservation 表示 T2 尚未被 accepted truth 接受；projection owner 返回
+  `gitoxide_managed_mutation_replay_required`，由 continuation/runtime 使用同一 durable operation
+  重新进入纯 transform，绝不能报告 `already_current`；
+- reservation 已释放且 durable successor 存在，表示 T2 已经接受；此时 projection owner 禁止重新计算
+  transform，只允许采用已有 candidate receipt。
+
+后者的恢复步骤是：
 
 1. 以 durable parent head 重开 accepted repository；
-2. 从 immutable base 和 durable call args 重新计算 pure transform；
-3. exact-replay candidate receipt/ref；
+2. 严格验证 immutable call/dispatch/outcome 与 durable successor 的 operation、path、parent 身份；
+3. 直接重开 operation-bound candidate receipt，并把 receipt 中的 candidate commit/tree 与 durable
+   successor 精确比较；
 4. exact-replay 已提交的 SQLite successor，以重新签发 process-local projection capability；
 5. 重放 accepted-ref CAS。
 
-恢复不会调用普通工具实现，也不会产生第二次文件系统副作用。
+post-T2 恢复既不会调用普通工具实现，也不会再次调用 pure transform/candidate creation。pre-T2 的
+deterministic transform 可以由同一 durable operation 重新计算，但最多只能有一个 successor 被 SQLite
+接受。
 
 ## 失败状态与回滚
 
@@ -51,7 +62,9 @@ exact call、dispatch、outcome。该读取是有界主键查询，不需要 sch
 | T1 后 Runtime 证明 no-change/no-effect failure | 原子 terminal T2，释放 reservation，不推进 head |
 | candidate/receipt 与 base、path、content 或 profile 不匹配 | unsettled；保留 reservation 或 accepted truth，禁止覆盖 |
 | SQLite successor 未提交 | 不签发 projection capability，candidate 只是未接受 artifact |
-| SQLite successor 已提交、accepted ref 仍为 base | 重建 proof 并重放 CAS，不重跑工具 |
+| active reservation 仍存在 | 返回 replay-required；禁止把 current ref 误报为已收敛 |
+| SQLite successor 已提交、accepted ref 仍为 base | 从 durable receipt 重开 proof 并重放 CAS，不重算 transform |
+| accepted-ref observation 超时、取消或数据损坏 | 原错误 fail closed；只有 exact target mismatch 才允许进入 parent/candidate recovery |
 | accepted ref 已为 candidate | exact replay success |
 | accepted ref 为第三值或 durable evidence 不一致 | fail closed，不 reset、不自动覆盖 |
 

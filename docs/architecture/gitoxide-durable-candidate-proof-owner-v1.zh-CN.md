@@ -61,11 +61,12 @@ Git candidate ref publication
 | --- | --- | --- |
 | 无 ref、无 receipt | 未开始 | 正常执行纯 transform/candidate 请求 |
 | 有 ref、无 receipt | Git 已发布，receipt 前崩溃 | 用同一纯请求重放；#3857 必须返回同一 candidate，再写 receipt |
-| 有 ref、有匹配 receipt | 已准备 | 签发新的进程内 proof |
+| 有 ref、有匹配 receipt | 已准备 | 在 exact base capability 下直接重开新的进程内 proof，不重算 transform |
 | 有 ref、有冲突 receipt | corruption/identity conflict | fail closed，不覆盖 receipt |
 | receipt 存在但 ref/proof 不匹配 | durable evidence 与 Git 分叉 | fail closed；后续 recovery owner 决定 park |
 
-重放只重做纯 Git transform 请求，不重放 live filesystem side effect。
+ref-only/receipt 前重放只重做确定性的 Git candidate 请求，不重放 live filesystem side effect；receipt
+已经持久化后则直接采用 receipt，不再重做 transform 或 candidate creation。
 
 ## 6. 平台合同
 

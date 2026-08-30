@@ -25,6 +25,8 @@ import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST } from '@maka/core/runtime-event';
+import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import { WORKSPACE_MATERIALIZATION_SEMANTICS_V1 } from '@maka/core/workspace-version-authority';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
@@ -34,7 +36,10 @@ import {
   type GitoxideHelperInvocationCapability,
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../server/gitoxide-helper-artifact-authority-internal.js';
-import { createGitoxideManagedWriteEditOwnerInternal } from '../server/gitoxide-managed-write-edit-owner-internal.js';
+import {
+  createGitoxideManagedWriteEditOwnerInternal,
+  GitoxideManagedWriteEditRecoveryError,
+} from '../server/gitoxide-managed-write-edit-owner-internal.js';
 import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
@@ -106,6 +111,134 @@ test('requires the durable workspace epoch before consulting Gitoxide', async ()
   }
 });
 
+test('does not report a current projection while a durable mutation reservation is active', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-gitoxide-write-edit-active-'));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  const ids = {
+    repositoryId: `repository_${'1'.repeat(32)}`,
+    workspaceId: `workspace_${'2'.repeat(32)}`,
+    workspaceEpochId: `epoch_${'3'.repeat(32)}`,
+    workspaceInstanceId: `instance_${'4'.repeat(32)}`,
+    workspaceVersionId: `version_${'5'.repeat(32)}`,
+  } as const;
+  const commitOid = '6'.repeat(40);
+  const treeOid = '7'.repeat(40);
+  const operationId = 'operation-active-write';
+  const toolCallId = 'call-active-write';
+  const args = { path: 'notes.txt', content: 'after\n' };
+  const identity = {
+    sessionId: 'session-active-write',
+    invocationId: 'invocation-active-write',
+    runId: 'run-active-write',
+    turnId: 'turn-active-write',
+  } as const;
+  try {
+    const baseline = await commitExecutionStoresWorkspaceBaselineForTestInternal(stores, {
+      epochOpenedEventId: 'active-write-epoch',
+      baselineAcceptedEventId: 'active-write-baseline',
+      committedAt: 1,
+      epoch: {
+        repositoryId: ids.repositoryId,
+        workspaceId: ids.workspaceId,
+        workspaceEpochId: ids.workspaceEpochId,
+        workspaceInstanceId: ids.workspaceInstanceId,
+        mode: 'managed_worktree',
+        objectFormat: 'sha1',
+        sourceCommitOid: commitOid,
+        sourceTreeOid: treeOid,
+        materializationProfileDigest: sha256('gitoxide-materialization-v1'),
+        materializationSemantics: WORKSPACE_MATERIALIZATION_SEMANTICS_V1,
+        policyHash: sha256('managed-tree-policy-v3'),
+      },
+      baseline: {
+        workspaceVersionId: ids.workspaceVersionId,
+        commitOid,
+        treeOid,
+        treeDeltaDigest: sha256('gitoxide-baseline-delta-v1'),
+        changedFileCount: 1,
+        deletedFileCount: 0,
+      },
+    });
+    const canonicalArgsHash = canonicalToolArgsHash('Write', args);
+    await stores.runtimeEventStore.commitToolPrepared({
+      operationId,
+      journalEventId: `${operationId}_prepared`,
+      runtimeEvent: {
+        id: 'active-write-call-event',
+        ...identity,
+        ts: 2,
+        partial: false,
+        role: 'model',
+        author: 'agent',
+        content: { kind: 'function_call', id: toolCallId, name: 'Write', args },
+        refs: { operationId, toolCallId },
+      },
+      dispatchRuntimeEvent: {
+        id: 'active-write-dispatch-event',
+        ...identity,
+        ts: 2,
+        partial: false,
+        role: 'system',
+        author: 'system',
+        actions: {
+          toolDispatch: {
+            protocol: 't1_after_preflight_v1',
+            operationId,
+            providerToolCallId: toolCallId,
+            toolName: 'Write',
+            canonicalArgsHash,
+            recoveryMode: 'reconcile',
+            managedMutation: {
+              protocol: 'managed_mutation_v2',
+              repositoryId: ids.repositoryId,
+              workspaceId: ids.workspaceId,
+              workspaceEpochId: ids.workspaceEpochId,
+              workspaceInstanceId: ids.workspaceInstanceId,
+              objectFormat: 'sha1',
+              baseWorkspaceVersionId: ids.workspaceVersionId,
+              baseAcceptedEventId: baseline.head.acceptedEventId,
+              baseHeadRevision: baseline.head.revision,
+              baseCommitOid: commitOid,
+              baseTreeOid: treeOid,
+              expectedPath: args.path,
+              pathPolicyVersion: 3,
+              executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+            },
+          },
+        },
+        refs: { operationId, toolCallId },
+      },
+      providerToolCallId: toolCallId,
+      toolName: 'Write',
+      canonicalArgsHash,
+      recoveryMode: 'reconcile',
+      committedAt: 2,
+    });
+    const owner = createGitoxideManagedWriteEditOwnerInternal({
+      storageRootLease: rootOwner.lease,
+      stores,
+      invocationOwnerToken: {},
+      helperCapability: {} as GitoxideHelperInvocationCapability,
+      repositoryPath: join(root, 'managed.git'),
+      workspaceId: ids.workspaceId,
+      workspaceEpochId: ids.workspaceEpochId,
+    });
+
+    await assert.rejects(owner.reconcileAcceptedProjection(), (error: unknown) => {
+      assert.ok(error instanceof GitoxideManagedWriteEditRecoveryError);
+      assert.equal(error.code, 'gitoxide_managed_mutation_replay_required');
+      return true;
+    });
+  } finally {
+    await stores.sessionStore.close?.();
+    await rootOwner.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('reopens after a process crash and promotes the exact durable Write successor', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {
@@ -161,7 +294,10 @@ test('reopens after a process crash and promotes the exact durable Write success
     baselineAcceptedEventId: 'gitoxide-write-edit-baseline',
     committedAt: 1,
     epoch: {
-      ...ids,
+      repositoryId: ids.repositoryId,
+      workspaceId: ids.workspaceId,
+      workspaceEpochId: ids.workspaceEpochId,
+      workspaceInstanceId: ids.workspaceInstanceId,
       mode: 'managed_worktree',
       objectFormat: 'sha1',
       sourceCommitOid: imported.sourceHeadCommitOid,

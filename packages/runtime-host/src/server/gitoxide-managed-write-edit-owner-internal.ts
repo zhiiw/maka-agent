@@ -38,7 +38,6 @@ import type {
   RuntimeManagedMutationSettlement,
   ToolRuntimeInput,
 } from '@maka/runtime/tool-runtime';
-import { transformManagedMutation } from '@maka/runtime/managed-mutation-transform';
 import type { InteractiveExecutionStoresWriter } from '@maka/storage/execution-stores';
 import {
   issueExecutionStoresWorkspaceMutationAuthorityInternal,
@@ -62,6 +61,19 @@ const ACCEPTED_REF = 'refs/maka/accepted';
 const SHA1_PATTERN = /^[0-9a-f]{40}$/u;
 
 export type GitoxideManagedWriteEditOwnerFailpoint = 'after_workspace_successor_commit';
+
+export class GitoxideManagedWriteEditRecoveryError extends Error {
+  constructor(
+    readonly code:
+      | 'gitoxide_managed_mutation_replay_required'
+      | 'gitoxide_managed_projection_conflict',
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'GitoxideManagedWriteEditRecoveryError';
+  }
+}
 
 export interface GitoxideManagedWriteEditOwnerInternal {
   readonly admitManagedMutation: NonNullable<ToolRuntimeInput['admitManagedMutation']>;
@@ -186,6 +198,13 @@ export function createGitoxideManagedWriteEditOwnerInternal(
     if (!version || !versionMatchesHead(version, head, epoch)) {
       throw new Error('Gitoxide projection recovery workspace version is unavailable');
     }
+    const activeMutation = await persistence.readActiveMutation(epoch.workspaceInstanceId);
+    if (activeMutation) {
+      throw new GitoxideManagedWriteEditRecoveryError(
+        'gitoxide_managed_mutation_replay_required',
+        `Managed mutation ${activeMutation.operationId} must be resumed before projection reconciliation`,
+      );
+    }
     try {
       await reopenExactAcceptedRepository({
         input,
@@ -194,10 +213,15 @@ export function createGitoxideManagedWriteEditOwnerInternal(
       });
       return 'already_current';
     } catch (currentProjectionError) {
+      if (!isAcceptedRefTargetMismatch(currentProjectionError)) throw currentProjectionError;
       if (version.protocol !== 'workspace_version_accepted_v1' || version.parents.length !== 1) {
-        throw new Error('Gitoxide accepted projection does not match its baseline head', {
-          cause: currentProjectionError,
-        });
+        throw new GitoxideManagedWriteEditRecoveryError(
+          'gitoxide_managed_projection_conflict',
+          'Gitoxide accepted projection does not match its baseline head',
+          {
+            cause: currentProjectionError,
+          },
+        );
       }
       const parent = await persistence.readVersion(version.parents[0]);
       if (!parent || !parentMatchesSuccessor(parent, version)) {
@@ -216,27 +240,31 @@ export function createGitoxideManagedWriteEditOwnerInternal(
         revision: version.baseHeadRevision,
       });
       const acceptedRepositoryOwnerToken = {};
-      const accepted = await reopenExactAcceptedRepository({
-        input,
-        head: parentHead,
-        acceptedRepositoryOwnerToken,
-        ...(abortSignal ? { abortSignal } : {}),
-      }).catch((parentProjectionError) => {
-        throw new Error('Gitoxide accepted projection matches neither durable head nor parent', {
-          cause: new AggregateError([currentProjectionError, parentProjectionError]),
+      let accepted: Awaited<ReturnType<typeof reopenExactAcceptedRepository>>;
+      try {
+        accepted = await reopenExactAcceptedRepository({
+          input,
+          head: parentHead,
+          acceptedRepositoryOwnerToken,
+          ...(abortSignal ? { abortSignal } : {}),
         });
-      });
+      } catch (parentProjectionError) {
+        if (!isAcceptedRefTargetMismatch(parentProjectionError)) throw parentProjectionError;
+        throw new GitoxideManagedWriteEditRecoveryError(
+          'gitoxide_managed_projection_conflict',
+          'Gitoxide accepted projection matches neither durable head nor parent',
+          {
+            cause: new AggregateError([currentProjectionError, parentProjectionError]),
+          },
+        );
+      }
       const evidence = await persistence.readMutationEvidence(version.origin.operationId);
       if (!evidence) throw new Error('Gitoxide projection recovery operation evidence is missing');
-      const recovered = await reconstructAcceptedSuccessor({
+      const path = validateAcceptedSuccessorEvidence({
         epoch,
         parentHead,
-        parentVersion: parent,
         successorVersion: version,
         evidence,
-        acceptedRepositoryOwnerToken,
-        acceptedRepositoryCapability: accepted.acceptedRepositoryCapability,
-        ...(abortSignal ? { abortSignal } : {}),
       });
       const candidateAuthority = await createGitoxideMutationCandidateAuthorityInternal({
         storageRootLease: input.storageRootLease,
@@ -245,14 +273,21 @@ export function createGitoxideManagedWriteEditOwnerInternal(
         acceptedRepositoryCapability: accepted.acceptedRepositoryCapability,
         projectionOwnerToken: ownerToken,
       });
-      const candidate = await candidateAuthority.capture({
+      const candidate = await candidateAuthority.reopen({
         operationId: version.origin.operationId,
-        path: recovered.path,
-        content: recovered.content,
-        executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
-        ...(abortSignal ? { abortSignal } : {}),
+        expectedRepositoryId: parentHead.repositoryId,
+        expectedWorkspaceId: parentHead.workspaceId,
+        expectedWorkspaceEpochId: parentHead.workspaceEpochId,
+        expectedBaseWorkspaceVersionId: parentHead.workspaceVersionId,
+        expectedBaseAcceptedEventId: parentHead.acceptedEventId,
+        expectedBaseHeadRevision: parentHead.revision,
+        expectedBaseCommitOid: parentHead.commitOid,
+        expectedBaseTreeOid: parentHead.treeOid,
+        expectedCandidateCommitOid: version.commitOid,
+        expectedCandidateTreeOid: version.treeOid,
+        expectedPath: path,
+        expectedExecutionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
       });
-      assertCandidateProof(candidate, parentHead, recovered.path, recovered.content);
       const successor = buildSuccessor({
         operationId: version.origin.operationId,
         dispatchEventId: evidence.dispatchEvent.id,
@@ -638,10 +673,9 @@ async function reopenExactAcceptedRepository(input: {
   });
 }
 
-async function reconstructAcceptedSuccessor(input: {
+function validateAcceptedSuccessorEvidence(input: {
   readonly epoch: WorkspaceEpochRecordV1;
   readonly parentHead: WorkspaceHeadRecordV1;
-  readonly parentVersion: WorkspaceVersionRecordV1;
   readonly successorVersion: Extract<
     WorkspaceVersionRecordV1,
     { protocol: 'workspace_version_accepted_v1' }
@@ -649,10 +683,7 @@ async function reconstructAcceptedSuccessor(input: {
   readonly evidence: NonNullable<
     Awaited<ReturnType<ExecutionStoresWorkspaceMutationAuthorityInternal['readMutationEvidence']>>
   >;
-  readonly acceptedRepositoryOwnerToken: object;
-  readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
-  readonly abortSignal?: AbortSignal;
-}): Promise<{ readonly path: string; readonly content: string }> {
+}): string {
   const call = input.evidence.callEvent;
   const dispatch = input.evidence.dispatchEvent;
   const outcome = input.evidence.outcomeEvent;
@@ -690,22 +721,15 @@ async function reconstructAcceptedSuccessor(input: {
   ) {
     throw new Error('Gitoxide projection recovery path authority is invalid');
   }
-  const baseContent = await readAcceptedFile({
-    acceptedRepositoryOwnerToken: input.acceptedRepositoryOwnerToken,
-    acceptedRepositoryCapability: input.acceptedRepositoryCapability,
-    path,
-    abortSignal: input.abortSignal ?? new AbortController().signal,
-  });
-  const transformed = transformManagedMutation({
-    toolName: callContent.name,
-    canonicalPath: path,
-    baseContent,
-    args: structuredClone(callContent.args),
-  });
-  if (!transformed.changed) {
-    throw new Error('Gitoxide projection recovery successor has no content change');
-  }
-  return Object.freeze({ path, content: transformed.content });
+  return path;
+}
+
+function isAcceptedRefTargetMismatch(error: unknown): error is GitoxideHelperInvocationError {
+  return (
+    error instanceof GitoxideHelperInvocationError &&
+    error.code === 'gitoxide_helper_operation_failed' &&
+    error.helperReason === 'accepted_ref_target_invalid'
+  );
 }
 
 function managedMutationMatchesParent(

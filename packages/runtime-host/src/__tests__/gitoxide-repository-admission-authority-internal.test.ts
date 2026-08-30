@@ -562,6 +562,31 @@ test('publishes a durable operation-bound candidate receipt and rejects tamperin
   assert.equal(first.receipt.contentSha256, sha256(request.content));
   assert.deepEqual((await authority.capture(request)).receipt, first.receipt);
 
+  const reopenedAuthority = await createGitoxideMutationCandidateAuthorityInternal({
+    storageRootLease: rootOwner.lease,
+    baseHead,
+    acceptedRepositoryOwnerToken,
+    acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+    projectionOwnerToken: {},
+  });
+  const reopened = await reopenedAuthority.reopen({
+    operationId: request.operationId,
+    expectedRepositoryId: baseHead.repositoryId,
+    expectedWorkspaceId: baseHead.workspaceId,
+    expectedWorkspaceEpochId: baseHead.workspaceEpochId,
+    expectedBaseWorkspaceVersionId: baseHead.workspaceVersionId,
+    expectedBaseAcceptedEventId: baseHead.acceptedEventId,
+    expectedBaseHeadRevision: baseHead.revision,
+    expectedBaseCommitOid: baseHead.commitOid,
+    expectedBaseTreeOid: baseHead.treeOid,
+    expectedCandidateCommitOid: first.receipt.candidateCommitOid,
+    expectedCandidateTreeOid: first.receipt.candidateTreeOid,
+    expectedPath: request.path,
+    expectedExecutionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+  });
+  assert.deepEqual(reopened.receipt, first.receipt);
+  assert.equal(reopenedAuthority.validate(reopened), reopened.receipt);
+
   const receiptPath = join(
     gitoxideMutationCandidateReceiptRootInternal(storageRoot, baseHead),
     `${sha256(request.operationId).slice(7)}.json`,
@@ -570,7 +595,21 @@ test('publishes a durable operation-bound candidate receipt and rejects tamperin
   tampered.path = 'forged.txt';
   await writeFile(receiptPath, `${JSON.stringify(tampered)}\n`, 'utf8');
   await assert.rejects(
-    authority.capture(request),
+    reopenedAuthority.reopen({
+      operationId: request.operationId,
+      expectedRepositoryId: baseHead.repositoryId,
+      expectedWorkspaceId: baseHead.workspaceId,
+      expectedWorkspaceEpochId: baseHead.workspaceEpochId,
+      expectedBaseWorkspaceVersionId: baseHead.workspaceVersionId,
+      expectedBaseAcceptedEventId: baseHead.acceptedEventId,
+      expectedBaseHeadRevision: baseHead.revision,
+      expectedBaseCommitOid: baseHead.commitOid,
+      expectedBaseTreeOid: baseHead.treeOid,
+      expectedCandidateCommitOid: first.receipt.candidateCommitOid,
+      expectedCandidateTreeOid: first.receipt.candidateTreeOid,
+      expectedPath: request.path,
+      expectedExecutionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+    }),
     (error) =>
       error instanceof GitoxideMutationCandidateAuthorityError &&
       error.code === 'gitoxide_mutation_candidate_identity_conflict',
