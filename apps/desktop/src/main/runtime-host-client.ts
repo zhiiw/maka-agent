@@ -19,6 +19,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { AttachmentRef, ShellRunUpdate } from "@maka/core/events";
+import type { GitReviewReadResult } from "@maka/core/git-review";
 import type { PlanSessionState, PlanUserControlInput } from "@maka/core/plan";
 import {
   decodeStoredMessage as decodePersistedStoredMessage,
@@ -886,6 +887,11 @@ export class DesktopRuntimeHostClient {
     return result.session === null
       ? null
       : requireSessionProjection(result.session);
+  }
+
+  async readManagedWorkspaceReview(sessionId: string): Promise<GitReviewReadResult> {
+    const result = await this.request("managed-workspace.review.query", { sessionId });
+    return { ok: true, snapshot: result.snapshot };
   }
 
   async createSession(

@@ -28,7 +28,7 @@ workspace content；materialized directory、Desktop UI 和缓存都只是可重
 | accepted Read/Glob/Grep | 已实现 | 已实现 | managed tool profile 已接入 | helper/Host 用例已建立 |
 | Write/Edit successor | 已实现 | 已实现 | managed tool profile 已接入 | candidate + Host kill/reopen 已建立 |
 | automatic continuation | 已实现 | 已实现 | quiet resume 已接入 | Git/非 Git indeterminate matrix 已建立 |
-| accepted-tree Review | 不写 durable state | 已实现 | **缺失** | helper exact-tree test 已建立 |
+| accepted-tree Review | 不写 durable state | 已实现 | 已接入 Desktop Review | helper exact-tree + IPC fail-closed test 已建立 |
 | isolated Restore / immutable Publish | artifact/ref protocol 已实现 | 已实现 | **缺失** | helper tests 已建立，Desktop crash proof 缺失 |
 | time travel | historical read/restore 已实现 | 已实现 | **缺失** | undo-as-successor 尚未实现 |
 | rebaseline / relocation | epoch identity 已实现 | 已实现 | **缺失** | Host cases 已建立，packaged evidence 待 CI |
@@ -143,7 +143,7 @@ Host 后，新的 Run 只采用 durable outcome/candidate/evidence；已完成�
 ## 6. 推荐后续 PR 顺序
 
 1. **M3 closure**：packaged Desktop Git/非 Git quiet-resume crash matrix；
-2. **M4 Desktop Review**：结构化 accepted diff 的 IPC 与 UI consumer；
+2. **M4 Desktop Review**：结构化 accepted diff 的 IPC 与 UI consumer（已实现，等待三平台 packaged 证据）；
 3. **M4 Apply/Publish**：immutable publish + drift-aware checkout apply receipt；
 4. **M4 Restore/Undo**：isolated restore、historical successor 与 timeline；
 5. **M4 Lifecycle**：Desktop rebaseline/relocation、完整 durable-root GC；

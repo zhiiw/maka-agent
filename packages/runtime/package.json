@@ -111,6 +111,7 @@
     "./tool-result-archive-resource": "./dist/tool-result-archive-resource.js",
     "./tool-runtime": "./dist/tool-runtime.js",
     "./managed-mutation-transform": "./dist/managed-mutation-transform.js",
+    "./unified-diff": "./dist/unified-diff.js",
     "./web-fetch-tool": "./dist/web-fetch-tool.js",
     "./web-search-tool": "./dist/web-search-tool.js",
     "./xai-oauth-enrollment": "./dist/xai-oauth-enrollment.js"

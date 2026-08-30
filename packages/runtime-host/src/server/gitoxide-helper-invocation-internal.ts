@@ -340,6 +340,9 @@ export interface GitoxideAcceptedTreeChangeV1 {
   readonly newBlobOid?: string;
   readonly oldExecutable?: boolean;
   readonly newExecutable?: boolean;
+  readonly diffable: boolean;
+  readonly oldContent?: string;
+  readonly newContent?: string;
 }
 
 export interface GitoxideAcceptedTreesComparedV1 {
@@ -351,6 +354,7 @@ export interface GitoxideAcceptedTreesComparedV1 {
   readonly acceptedCommitOid: string;
   readonly acceptedTreeOid: string;
   readonly changes: readonly GitoxideAcceptedTreeChangeV1[];
+  readonly truncated: boolean;
   readonly managedTreePolicyVersion: 3;
 }
 
@@ -2134,6 +2138,7 @@ function isAcceptedTreesCompared(value: unknown): value is GitoxideAcceptedTrees
       'acceptedCommitOid',
       'acceptedTreeOid',
       'changes',
+      'truncated',
       'managedTreePolicyVersion',
     ]) &&
     value.protocolVersion === 1 &&
@@ -2144,9 +2149,10 @@ function isAcceptedTreesCompared(value: unknown): value is GitoxideAcceptedTrees
     isSha1(value.acceptedCommitOid) &&
     isSha1(value.acceptedTreeOid) &&
     Array.isArray(value.changes) &&
-    value.changes.length <= 4096 &&
+    value.changes.length <= 200 &&
     value.changes.every(isAcceptedTreeChange) &&
     new Set(value.changes.map((change) => change.path)).size === value.changes.length &&
+    typeof value.truncated === 'boolean' &&
     value.managedTreePolicyVersion === 3
   );
 }
@@ -2211,6 +2217,9 @@ function isAcceptedTreeChange(value: unknown): value is GitoxideAcceptedTreeChan
     'newBlobOid',
     'oldExecutable',
     'newExecutable',
+    'diffable',
+    'oldContent',
+    'newContent',
   ]);
   if (Object.keys(change).some((key) => !allowed.has(key))) return false;
   if (
@@ -2223,8 +2232,20 @@ function isAcceptedTreeChange(value: unknown): value is GitoxideAcceptedTreeChan
   for (const key of ['oldBlobOid', 'newBlobOid'] as const) {
     if (change[key] !== undefined && !isSha1(change[key])) return false;
   }
-  for (const key of ['oldExecutable', 'newExecutable'] as const) {
+  for (const key of ['oldExecutable', 'newExecutable', 'diffable'] as const) {
     if (change[key] !== undefined && typeof change[key] !== 'boolean') return false;
+  }
+  for (const key of ['oldContent', 'newContent'] as const) {
+    if (
+      change[key] !== undefined &&
+      (typeof change[key] !== 'string' || Buffer.byteLength(change[key], 'utf8') > 32 * 1024)
+    ) {
+      return false;
+    }
+  }
+  if (typeof change.diffable !== 'boolean') return false;
+  if (!change.diffable && (change.oldContent !== undefined || change.newContent !== undefined)) {
+    return false;
   }
   switch (change.status) {
     case 'added':
@@ -2232,14 +2253,18 @@ function isAcceptedTreeChange(value: unknown): value is GitoxideAcceptedTreeChan
         change.oldBlobOid === undefined &&
         change.oldExecutable === undefined &&
         isSha1(change.newBlobOid) &&
-        typeof change.newExecutable === 'boolean'
+        typeof change.newExecutable === 'boolean' &&
+        change.oldContent === undefined &&
+        (!change.diffable || typeof change.newContent === 'string')
       );
     case 'deleted':
       return (
         isSha1(change.oldBlobOid) &&
         typeof change.oldExecutable === 'boolean' &&
         change.newBlobOid === undefined &&
-        change.newExecutable === undefined
+        change.newExecutable === undefined &&
+        change.newContent === undefined &&
+        (!change.diffable || typeof change.oldContent === 'string')
       );
     case 'modified':
       return (
@@ -2247,7 +2272,9 @@ function isAcceptedTreeChange(value: unknown): value is GitoxideAcceptedTreeChan
         isSha1(change.newBlobOid) &&
         change.oldBlobOid !== change.newBlobOid &&
         typeof change.oldExecutable === 'boolean' &&
-        change.oldExecutable === change.newExecutable
+        change.oldExecutable === change.newExecutable &&
+        (!change.diffable ||
+          (typeof change.oldContent === 'string' && typeof change.newContent === 'string'))
       );
     case 'mode_changed':
       return (
@@ -2255,7 +2282,9 @@ function isAcceptedTreeChange(value: unknown): value is GitoxideAcceptedTreeChan
         change.oldBlobOid === change.newBlobOid &&
         typeof change.oldExecutable === 'boolean' &&
         typeof change.newExecutable === 'boolean' &&
-        change.oldExecutable !== change.newExecutable
+        change.oldExecutable !== change.newExecutable &&
+        (!change.diffable ||
+          (typeof change.oldContent === 'string' && typeof change.newContent === 'string'))
       );
     default:
       return false;
