@@ -34,6 +34,7 @@ import {
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { openInteractiveExecutionStoresForRead } from '@maka/storage/execution-stores';
 import { openInteractiveRuntimePolicyStoresForWrite } from '@maka/storage/runtime-policy-stores';
@@ -122,7 +123,12 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
         () => undefined,
         () => undefined,
       );
-    const completedToolResult = await provider.waitForCompletedToolResult();
+    const completedToolResult = await provider.waitForCompletedToolResult().catch((error) => {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; durable snapshot: ${readDurableExecutionSnapshot(root, executionId)}`,
+        { cause: error },
+      );
+    });
     assert.match(completedToolResult, /"passed":1/u);
     assert.match(completedToolResult, /"failed":0/u);
     await fixture.killHost(firstHost);
@@ -183,6 +189,34 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
     await fixture.close();
   }
 });
+
+function readDurableExecutionSnapshot(root: string, sessionId: string): string {
+  const database = new DatabaseSync(join(root, 'runtime.sqlite'), { readOnly: true });
+  try {
+    return JSON.stringify({
+      runtimeEvents: database
+        .prepare(
+          `SELECT event_kind AS eventKind, payload_json AS payloadJson
+           FROM runtime_events
+           WHERE session_id = ?
+           ORDER BY committed_at, event_seq`,
+        )
+        .all(sessionId),
+      toolJournal: database
+        .prepare(
+          `SELECT state, runtime_event_id AS runtimeEventId, metadata_json AS metadataJson
+           FROM tool_journal_events
+           WHERE invocation_id IN (
+             SELECT DISTINCT invocation_id FROM runtime_events WHERE session_id = ?
+           )
+           ORDER BY journal_seq`,
+        )
+        .all(sessionId),
+    });
+  } finally {
+    database.close();
+  }
+}
 
 async function configureProvider(
   capability: Awaited<ReturnType<typeof resolveStorageRoot>>,
