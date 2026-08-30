@@ -2156,9 +2156,16 @@ export class SessionManager {
     sessionId: string,
   ): Promise<SafeBoundaryContinuationPlan> {
     if (this.deps.safeBoundaryResumeEnabled !== true) {
-      const plan = resumeFeatureDisabledPlan();
-      this.recordContinuationPlan(sessionId, '', plan);
-      return plan;
+      // Managed coding is an explicit immutable product contract rather than
+      // an experimental opt-in. Read that durable identity before candidate
+      // discovery; an absent/unreadable/non-managed header stays on the legacy
+      // disabled path and cannot silently gain Resume authority.
+      const managedHeader = await this.deps.store.readHeader(sessionId).catch(() => undefined);
+      if (managedHeader?.toolProfile !== 'managed-coding-v1') {
+        const plan = resumeFeatureDisabledPlan();
+        this.recordContinuationPlan(sessionId, '', plan);
+        return plan;
+      }
     }
     if (!this.deps.runStore) {
       const plan: SafeBoundaryContinuationPlan = {

@@ -4511,6 +4511,75 @@ describe('SessionManager permission mode updates', () => {
     expect(run?.workspaceIdentity).toBeUndefined();
   });
 
+  test('captures managed workspace identity without the global resume experiment flag', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    let inspectionCalls = 0;
+    backends.register('ai-sdk', (ctx) => new FinalTextTestBackend(ctx));
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      inspectContinuationSafety: async () => {
+        inspectionCalls += 1;
+        return {
+          workspaceIdentity: 'workspace-managed-product',
+          backgroundOperationsSettled: true,
+          availableToolNames: ['Write', 'Edit'],
+        };
+      },
+      newId: nextId(),
+      now: nextNow(6_528),
+    });
+    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v1' }));
+
+    await collectSessionEvents(
+      manager.sendMessage(session.id, {
+        turnId: 'turn-managed-product-boundary',
+        text: 'make a durable edit',
+      }),
+    );
+
+    expect(inspectionCalls).toBe(1);
+    const [run] = await runStore.listSessionRuns(session.id);
+    expect(run?.workspaceIdentity).toBe('workspace-managed-product');
+  });
+
+  test('does not dispatch a managed turn without workspace boundary authority', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    let backendCreated = false;
+    backends.register('ai-sdk', (ctx) => {
+      backendCreated = true;
+      return new FinalTextTestBackend(ctx);
+    });
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      newId: nextId(),
+      now: nextNow(6_529),
+    });
+    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v1' }));
+
+    await expectRejects(
+      collectSessionEvents(
+        manager.sendMessage(session.id, {
+          turnId: 'turn-managed-boundary-authority-missing',
+          text: 'must not dispatch',
+        }),
+      ),
+      /workspace boundary authority is unavailable/i,
+    );
+
+    expect(backendCreated).toBe(false);
+    expect(await runStore.listSessionRuns(session.id)).toEqual([]);
+  });
+
   test('declares the T1 protocol for an AiSdk run when the host wires the durable boundary', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
@@ -4757,6 +4826,37 @@ describe('SessionManager permission mode updates', () => {
     });
 
     expect(plan.disposition).toBe('park');
+    expect(plan.rejectionReasons).toEqual(['safety_observation_unavailable']);
+  });
+
+  test('discovers a managed coding Resume candidate without the global experiment flag', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends: new BackendRegistry(),
+      newId: nextId(),
+      now: nextNow(6_537),
+    });
+    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v1' }));
+    const header = await store.readHeader(session.id);
+    await runStore.createRun(
+      makeRunHeader({
+        runId: 'source-run-managed-latest-resume',
+        sessionId: session.id,
+        turnId: 'source-turn-managed-latest-resume',
+        status: 'failed',
+        cwd: header.cwd,
+        workspaceIdentity: 'workspace-managed',
+        completedAt: 2,
+        failureClass: 'app_restarted',
+      }),
+    );
+
+    const plan = await manager.planLatestAuthoritativeSafeBoundaryContinuation(session.id);
+
     expect(plan.rejectionReasons).toEqual(['safety_observation_unavailable']);
   });
 
