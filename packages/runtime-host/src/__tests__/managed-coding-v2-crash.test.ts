@@ -385,7 +385,14 @@ function readManagedNodeTestResult(request: unknown): Readonly<Record<string, un
       typeof (message as { readonly content?: unknown }).content === 'string',
   );
   if (!toolMessage) throw new Error('Provider request has no tool result');
-  const value = JSON.parse(toolMessage.content) as Record<string, unknown>;
+  let value: Record<string, unknown>;
+  try {
+    value = JSON.parse(toolMessage.content) as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`Managed Node test returned a non-JSON result: ${toolMessage.content}`, {
+      cause: error,
+    });
+  }
   return Object.freeze({
     protocolVersion: value.protocolVersion,
     kind: value.kind,
