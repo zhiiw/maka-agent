@@ -232,6 +232,7 @@ test('rejects a no-effect proof issued by another execution store', async () => 
       rm(rootA, { recursive: true, force: true }),
       rm(rootB, { recursive: true, force: true }),
     ]);
+  }
 });
 
 test('keeps baseline descriptors behind an owner-bound imported-repository proof', async () => {
