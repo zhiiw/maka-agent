@@ -111,11 +111,6 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
   readonly sourceOwner: ManagedNodeTestSourceOwnerInternal;
   readonly commandOwner: ManagedCommandSandboxOwnerInternal;
 }): ManagedNodeTestAdmissionOwnerInternal {
-  const traceAdmission = (stage: string): void => {
-    if (process.env.MAKA_TEST_MANAGED_OBSERVATION_TRACE === '1') {
-      console.error(`[managed-observation-test] ${stage}`);
-    }
-  };
   const admittedFilesByInputRoot = new Map<
     string,
     readonly RuntimeEventManagedObservationFileV1[]
@@ -152,7 +147,6 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
   const owner: ManagedNodeTestAdmissionOwnerInternal = {
     tool: Object.freeze(tool),
     async admit(request) {
-      traceAdmission('admit:start');
       request.abortSignal.throwIfAborted();
       if (
         request.toolName !== 'ManagedNodeTest' ||
@@ -165,7 +159,6 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
         input.sourceOwner.readAcceptedBoundary(request.abortSignal),
         input.commandOwner.readToolchainIdentity(),
       ]);
-      traceAdmission('admit:boundary-and-toolchain');
       request.abortSignal.throwIfAborted();
       assertAcceptedBoundary(boundary);
       if (
@@ -175,21 +168,17 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
         throw new Error('Managed Node test toolchain identity is invalid');
       }
       const executionRootLease = await input.executionRootOwner.allocate();
-      traceAdmission('admit:execution-root');
       const executionRoot = requireManagedNodeTestExecutionRootInternal(executionRootLease);
       const { inputRoot, scratchRoot } = executionRoot;
       let admitted = false;
       try {
         await mkdir(scratchRoot);
-        traceAdmission('admit:scratch');
-        traceAdmission('admit:materialize:start');
         const materialized = await input.sourceOwner.materializeAcceptedTree({
           destinationPath: inputRoot,
           acceptedCommitOid: boundary.acceptedCommitOid,
           acceptedTreeOid: boundary.acceptedTreeOid,
           abortSignal: request.abortSignal,
         });
-        traceAdmission('admit:materialize:done');
         if (
           materialized.acceptedCommitOid !== boundary.acceptedCommitOid ||
           materialized.acceptedTreeOid !== boundary.acceptedTreeOid
@@ -199,14 +188,12 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
         const files: RuntimeEventManagedObservationFileV1[] = [];
         for (const relativePath of relativePaths) {
           request.abortSignal.throwIfAborted();
-          traceAdmission(`admit:inspect:start:${relativePath}`);
           const observed = await input.commandOwner.inspectFile({
             relativePath,
             inputRoot,
             scratchRoot,
             abortSignal: request.abortSignal,
           });
-          traceAdmission(`admit:inspect:done:${relativePath}`);
           if (observed.relativePath !== relativePath) {
             throw new Error('Managed Node test file observation identity is invalid');
           }
@@ -232,7 +219,6 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
         let state: 'ready' | 'running' | 'complete' | 'disposed' = 'ready';
         admittedFilesByInputRoot.set(inputRoot, durableDispatch.files);
         admitted = true;
-        traceAdmission('admit:done');
         return Object.freeze({
           durableDispatch,
           execute<T>(run: (execution: { inputRoot: string; scratchRoot: string }) => Promise<T>) {
@@ -242,14 +228,12 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
               );
             }
             state = 'running';
-            traceAdmission('execute:start');
             const current = run(
               Object.freeze({
                 inputRoot,
                 scratchRoot,
               }),
             ).finally(() => {
-              traceAdmission('execute:done');
               if (state === 'running') state = 'complete';
             });
             operation = current;
