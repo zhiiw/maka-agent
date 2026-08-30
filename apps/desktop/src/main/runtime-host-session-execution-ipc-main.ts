@@ -644,14 +644,18 @@ export function registerRuntimeHostSessionExecutionIpc(
     deps.emitSessionsChanged("status-change", sessionId, { turnId });
     return result;
   });
+  handleReconnectableRead(
+    ipcMain,
+    'sessions:queryResumeLatest',
+    async (_event, sessionId: unknown) =>
+      projectDesktopResumePlan(
+        await deps.client.queryTurnResume({ sessionId: requiredId(sessionId, 'Session') }),
+      ),
+  );
   ipcMain.handle("sessions:resumeLatest", async (_event, sessionId: string) => {
     const plan = await deps.client.queryTurnResume({ sessionId });
     if (plan.disposition === "parked") {
-      return {
-        disposition: "park" as const,
-        rejectionReasons: [plan.reason],
-        diagnostics: [],
-      };
+      return { ...projectDesktopResumePlan(plan), diagnostics: [] };
     }
     const turnId = newId();
     const result = await deps.client.startTurnResume({
@@ -756,6 +760,16 @@ export function registerRuntimeHostSessionExecutionIpc(
   return async (sessionId) => {
     await stopSession(sessionId);
   };
+}
+
+function projectDesktopResumePlan(
+  plan: Awaited<ReturnType<RuntimeHostSessionExecutionClient['queryTurnResume']>>,
+):
+  | { readonly disposition: 'ready' }
+  | { readonly disposition: 'park'; readonly rejectionReasons: readonly string[] } {
+  return plan.disposition === 'ready'
+    ? { disposition: 'ready' }
+    : { disposition: 'park', rejectionReasons: [plan.reason] };
 }
 
 function normalizeTranscriptRangeRequest(input: unknown): DesktopTranscriptRangeRequest {

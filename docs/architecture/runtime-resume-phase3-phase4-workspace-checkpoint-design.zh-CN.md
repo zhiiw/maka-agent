@@ -559,6 +559,23 @@ Session 创建后 UI 只能展示只读的 managed identity，不能在第一个
 显式 Resume 读取同一个持久化 tool profile 与 continuation evidence；feature flag 不能把已经创建的 managed
 task 静默降级成 attached task。
 
+Runtime Host startup recovery 在普通 recovery/interaction repair 完成后，才允许 automatic managed resume
+owner 工作。它只处理持久化为 `managed-coding-v1` 且 strict recovery 已经证明可继续的 Session：
+
+- 先重验 immutable RuntimeEvent prefix、accepted commit/tree、workspace epoch、source identity、tool
+  catalog 与 background quiescence；
+- 通过同一个 durable continuation claim 固定 target Turn/Run/Invocation，创建新 Run 而不是恢复旧内存现场；
+- 已完成的 Write/Edit outcome 只从 durable evidence 回放，不重新执行 transform 或 provider side effect；
+- 用户取消、普通 provider/tool failure、artifact corruption 或 identity drift 只产生稳定 park reason，不进入
+  自动重启循环；
+- Git repository 与 filesystem snapshot 使用同一 resume owner 和 crash matrix，不能为 non-Git source
+  退回 per-file checkpoint；
+- evidence-complete 的正常恢复只展示轻量状态；只有 park、冲突、权限和 Publish/Apply 才要求用户交互。
+
+线性化边界是 SQLite continuation claim；Host kill 可以发生在 claim、new Run creation、provider dispatch 或
+response publication 之间。重启必须重读 claim/Run 状态并 exact retry，不能因 UI 重连创建第二个 provider
+execution。
+
 ## 4. Gitoxide managed workspace 后续边界
 
 后续强模式必须从 Gitoxide data plane 建立新的 production composition，并分别证明：

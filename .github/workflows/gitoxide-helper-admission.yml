@@ -31,6 +31,7 @@ on:
       - 'packages/runtime-host/src/server/packaged-gitoxide-helper-internal.ts'
       - 'packages/runtime-host/src/server/hosted-execution-tool-profile.ts'
       - 'packages/runtime-host/src/server/execution-composition.ts'
+      - 'packages/runtime-host/src/server/root-turn-coordinator.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-repository-admission-authority-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-write-edit-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-session-owner-internal.test.ts'
@@ -62,6 +63,7 @@ on:
       - 'packages/runtime-host/src/server/packaged-gitoxide-helper-internal.ts'
       - 'packages/runtime-host/src/server/hosted-execution-tool-profile.ts'
       - 'packages/runtime-host/src/server/execution-composition.ts'
+      - 'packages/runtime-host/src/server/root-turn-coordinator.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-repository-admission-authority-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-write-edit-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-session-owner-internal.test.ts'
@@ -130,8 +132,11 @@ jobs:
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-managed-write-edit-owner-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-managed-session-owner-internal.test.js
-          packages/runtime-host/dist/__tests__/gitoxide-managed-continuation-crash.test.js
           packages/runtime-host/dist/__tests__/packaged-gitoxide-helper.test.js
           packages/runtime-host/dist/__tests__/hosted-execution-tool-profile.test.js
+      - name: Test the Git and non-Git managed continuation crash matrix
+        env:
+          MAKA_GITOXIDE_HELPER_PATH: ${{ github.workspace }}/native/gitoxide-helper/target/debug/maka-gitoxide-helper${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: node --test packages/runtime-host/dist/__tests__/gitoxide-managed-continuation-crash.test.js
       - name: Test packaged helper preparation
         run: node --test scripts/prepare-gitoxide-helper.test.mjs

@@ -810,7 +810,13 @@ function AppShellContent({
     resumePendingSessionId,
     resumeParkDescriptionBySession,
     resumeInterruptedSession,
-  } = useShellResume({ activeId: ownerActiveId, toastApi, shellCopy, uiLocale });
+  } = useShellResume({
+    activeId: ownerActiveId,
+    managed: activeCatalogSession?.toolProfile === 'managed-coding-v1',
+    toastApi,
+    shellCopy,
+    uiLocale,
+  });
   const rendererMountedRef = useRef(true);
   const goals = useGoalController({
     activeSessionId: ownerActiveId,
