@@ -928,6 +928,7 @@ async function admittedHelper(): Promise<AdmittedHelper | undefined> {
         'read_tree_file',
         'list_tree_files',
         'grep_tree_files',
+        'compare_accepted_trees',
       ],
     });
     const helperCapability = await admitGitoxideHelperArtifactInternal({

@@ -222,6 +222,7 @@ export async function importAdmittedGitoxideRepositoryInternal(input: {
       'read_tree_file',
       'list_tree_files',
       'grep_tree_files',
+      'compare_accepted_trees',
     ],
   );
   const result = await importSourceHeadWithGitoxideHelperInternal({
@@ -307,6 +308,7 @@ export async function reopenGitoxideAcceptedRepositoryInternal(input: {
     'read_tree_file',
     'list_tree_files',
     'grep_tree_files',
+    'compare_accepted_trees',
   ]);
   const observed = await observeAcceptedRefWithGitoxideHelperInternal({
     invocationOwnerToken: input.invocationOwnerToken,

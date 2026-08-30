@@ -143,6 +143,7 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'invalid_tree_grep_pattern',
   'invalid_tree_query_limit',
   'tree_query_output_limit_exceeded',
+  'tree_diff_limit_exceeded',
   'unsupported_source_entry_kind',
   'unsupported_source_attributes',
   'unsupported_source_path',
@@ -325,6 +326,27 @@ export interface GitoxideTreeFilesGreppedV1 {
   readonly glob?: string;
   readonly matches: readonly string[];
   readonly truncated: boolean;
+  readonly managedTreePolicyVersion: 3;
+}
+
+export interface GitoxideAcceptedTreeChangeV1 {
+  readonly path: string;
+  readonly status: 'added' | 'modified' | 'deleted' | 'mode_changed';
+  readonly oldBlobOid?: string;
+  readonly newBlobOid?: string;
+  readonly oldExecutable?: boolean;
+  readonly newExecutable?: boolean;
+}
+
+export interface GitoxideAcceptedTreesComparedV1 {
+  readonly kind: 'accepted_trees_compared';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly baselineCommitOid: string;
+  readonly baselineTreeOid: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly changes: readonly GitoxideAcceptedTreeChangeV1[];
   readonly managedTreePolicyVersion: 3;
 }
 
@@ -992,6 +1014,50 @@ export async function grepTreeFilesWithGitoxideHelperInternal(input: {
     deadlineAt,
   });
   return decodeTreeFilesGreppedOutcome(outcome, input);
+}
+
+export async function compareAcceptedTreesWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly baselineCommitOid: string;
+  readonly acceptedCommitOid: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideAcceptedTreesComparedV1> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.acceptedTreeReadMs;
+  if (
+    !isAbsolute(input.repositoryPath) ||
+    !SHA1_OID_PATTERN.test(input.baselineCommitOid) ||
+    !SHA1_OID_PATTERN.test(input.acceptedCommitOid) ||
+    input.managedTreePolicyVersion !== 3
+  ) {
+    throw invocationInvalid('Gitoxide accepted-tree comparison request is invalid');
+  }
+  const prepared = await prepareAcceptedTreeInvocation({
+    ...input,
+    acceptedCommitOid: input.acceptedCommitOid,
+    deadlineAt,
+  });
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: prepared.artifact.protocolVersion,
+      operation: 'compare_accepted_trees',
+      repositoryPath: prepared.repositoryPath,
+      baselineCommitOid: input.baselineCommitOid,
+      acceptedCommitOid: input.acceptedCommitOid,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
+  const outcome = await invokeHelper({
+    executablePath: prepared.artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  return decodeAcceptedTreesComparedOutcome(outcome, input);
 }
 
 function assertTreeQueryInput(path: string, pattern: string, limit: number): void {
@@ -1706,6 +1772,33 @@ function decodeTreeFilesGreppedOutcome(
   throw protocolInvalid('Gitoxide accepted-tree grep response is invalid');
 }
 
+function decodeAcceptedTreesComparedOutcome(
+  outcome: HelperProcessOutcome,
+  expected: {
+    readonly baselineCommitOid: string;
+    readonly acceptedCommitOid: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): GitoxideAcceptedTreesComparedV1 {
+  const value = parseHelperOutcome(outcome);
+  if (
+    outcome.exitCode === 0 &&
+    isAcceptedTreesCompared(value) &&
+    value.baselineCommitOid === expected.baselineCommitOid &&
+    value.acceptedCommitOid === expected.acceptedCommitOid &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
+  ) {
+    return Object.freeze({
+      ...value,
+      changes: Object.freeze(value.changes.map((change) => Object.freeze({ ...change }))),
+    });
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('compare accepted trees', value.reason);
+  }
+  throw protocolInvalid('Gitoxide accepted-tree comparison response is invalid');
+}
+
 function gitBlobOid(content: Buffer): string {
   return createHash('sha1')
     .update(`blob ${content.length}\0`, 'utf8')
@@ -1863,6 +1956,95 @@ function isTreeFilesGrepped(value: unknown): value is GitoxideTreeFilesGreppedV1
     typeof candidate.truncated === 'boolean' &&
     candidate.managedTreePolicyVersion === 3
   );
+}
+
+function isAcceptedTreesCompared(value: unknown): value is GitoxideAcceptedTreesComparedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'baselineCommitOid',
+      'baselineTreeOid',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'changes',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'accepted_trees_compared' &&
+    value.objectFormat === 'sha1' &&
+    isSha1(value.baselineCommitOid) &&
+    isSha1(value.baselineTreeOid) &&
+    isSha1(value.acceptedCommitOid) &&
+    isSha1(value.acceptedTreeOid) &&
+    Array.isArray(value.changes) &&
+    value.changes.length <= 4096 &&
+    value.changes.every(isAcceptedTreeChange) &&
+    new Set(value.changes.map((change) => change.path)).size === value.changes.length &&
+    value.managedTreePolicyVersion === 3
+  );
+}
+
+function isAcceptedTreeChange(value: unknown): value is GitoxideAcceptedTreeChangeV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const change = value as Record<string, unknown>;
+  const allowed = new Set([
+    'path',
+    'status',
+    'oldBlobOid',
+    'newBlobOid',
+    'oldExecutable',
+    'newExecutable',
+  ]);
+  if (Object.keys(change).some((key) => !allowed.has(key))) return false;
+  if (
+    typeof change.path !== 'string' ||
+    !isBoundedPathTransport(change.path) ||
+    !['added', 'modified', 'deleted', 'mode_changed'].includes(String(change.status))
+  ) {
+    return false;
+  }
+  for (const key of ['oldBlobOid', 'newBlobOid'] as const) {
+    if (change[key] !== undefined && !isSha1(change[key])) return false;
+  }
+  for (const key of ['oldExecutable', 'newExecutable'] as const) {
+    if (change[key] !== undefined && typeof change[key] !== 'boolean') return false;
+  }
+  switch (change.status) {
+    case 'added':
+      return (
+        change.oldBlobOid === undefined &&
+        change.oldExecutable === undefined &&
+        isSha1(change.newBlobOid) &&
+        typeof change.newExecutable === 'boolean'
+      );
+    case 'deleted':
+      return (
+        isSha1(change.oldBlobOid) &&
+        typeof change.oldExecutable === 'boolean' &&
+        change.newBlobOid === undefined &&
+        change.newExecutable === undefined
+      );
+    case 'modified':
+      return (
+        isSha1(change.oldBlobOid) &&
+        isSha1(change.newBlobOid) &&
+        change.oldBlobOid !== change.newBlobOid &&
+        typeof change.oldExecutable === 'boolean' &&
+        change.oldExecutable === change.newExecutable
+      );
+    case 'mode_changed':
+      return (
+        isSha1(change.oldBlobOid) &&
+        change.oldBlobOid === change.newBlobOid &&
+        typeof change.oldExecutable === 'boolean' &&
+        typeof change.newExecutable === 'boolean' &&
+        change.oldExecutable !== change.newExecutable
+      );
+    default:
+      return false;
+  }
 }
 
 function isSha1(value: unknown): value is string {
