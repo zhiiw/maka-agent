@@ -640,6 +640,33 @@ Durable source binding 必须在第一个工具 T1 前冻结。`git_repository_v
 `filesystem_snapshot_v1` 与非 durable `attached_checkout` 是不可混淆的 typed profile；任何 admission
 失败都必须在创建 durable Run 前向用户解释，T1 后不得互相 fallback。
 
+当前 M3.1 foundation 已落实以下边界，但尚未宣称 Desktop 自动入口完成：
+
+- Runtime Host 先规范化 source root，再由 owner-issued capability 分类 source；调用者不能自报类型；
+- root 存在 `.git` marker 时永远进入 Git admission，即使 marker 损坏也不得降级为 filesystem
+  snapshot；
+- non-Git source 由短生命周期 Gitoxide helper 做两次有界观察，第一次只验证并计算 object identity，
+  通过后才 claim Maka-owned destination；第二次写入 object database，两个 tree identity 不一致即
+  fail closed；
+- snapshot 只接受 portable regular file/directory，拒绝 symlink、junction/reparse point、`.git`
+  控制路径和超出 file/tree/byte/depth 配额的输入；
+- `refs/maka/source-baseline` 冻结 source snapshot，`refs/maka/accepted` 独立承载后续 successor；
+  source 改变后重开必须与 frozen source baseline 冲突，而不是重新覆盖 accepted history；
+- source kind 已进入 session identity 与 materialization profile；显式、可直接读取的 durable source
+  binding fact 仍由 continuation capsule 切片补齐，在它落地前不能把该 foundation 描述成完整产品能力。
+
+M3.1 filesystem snapshot v1 的平台合同：
+
+| 平台 | 文件打开与链接策略 | mode 语义 | 当前证据 |
+| --- | --- | --- | --- |
+| Linux | `O_NOFOLLOW`，拒绝 symlink | 保留 executable bit | 真实 Rust helper import/retry/drift 测试 |
+| macOS | `O_NOFOLLOW`，拒绝 symlink | 保留 executable bit | 实现合同；发布前必须进入 macOS runner |
+| Windows | `OPEN_REPARSE_POINT`，拒绝 symlink/junction/reparse | 普通 blob，不伪造 POSIX executable | Rust/Host CI 待形成发布证据 |
+
+这张表只承诺进程级有界观察。filesystem snapshot 不是跨整个目录的原子文件系统快照；它承诺的是
+每个写入 accepted tree 的文件都经过 handle/path identity 重验，并且两次完整观察得到同一个 Git
+tree。需要真正目录级 snapshot 的平台可以以后增加新 importer capability，但不得静默扩大 v1 语义。
+
 ### M3.2 Accepted-tree Read / Glob / Grep
 
 这是 M3 的硬门槛。不允许 `Read -> user checkout` 而 `Write/Edit -> accepted Git tree`。

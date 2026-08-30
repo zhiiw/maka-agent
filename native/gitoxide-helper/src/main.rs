@@ -19,7 +19,7 @@
 
 use std::{
     collections::HashSet,
-    fs,
+    fs::{self, File, OpenOptions},
     io::{self, Read},
     path::{Path, PathBuf},
     process::ExitCode,
@@ -87,6 +87,7 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "commit_object_limit_exceeded",
     "baseline_commit_write_failed",
     "baseline_publish_failed",
+    "baseline_request_conflict",
     "baseline_ref_outside_maka_namespace",
     "base_commit_unavailable",
     "base_commit_identity_mismatch",
@@ -103,6 +104,7 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "import_destination_object_format_mismatch",
     "import_destination_parent_untrusted",
     "invalid_source_head_commit_oid",
+    "invalid_source_snapshot_root",
     "source_blob_copy_failed",
     "source_blob_identity_mismatch",
     "source_blob_invalid",
@@ -116,6 +118,7 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "source_head_commit_identity_mismatch",
     "source_head_commit_unavailable",
     "source_head_tree_unavailable",
+    "source_file_observation_mismatch",
     "source_path_collision",
     "source_path_byte_limit_exceeded",
     "source_path_length_exceeded",
@@ -131,6 +134,7 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "source_tree_observation_mismatch",
     "source_tree_unavailable",
     "source_tree_visit_limit_exceeded",
+    "source_snapshot_digest_mismatch",
     "successor_content_limit_exceeded",
     "successor_commit_identity_mismatch",
     "accepted_ref_not_direct",
@@ -189,6 +193,14 @@ enum Request {
         expected_source_head_commit_oid: String,
         destination_repository_path: PathBuf,
         baseline_ref: String,
+        managed_tree_policy_version: u8,
+    },
+    ImportFilesystemSnapshot {
+        protocol_version: u8,
+        source_root_path: PathBuf,
+        destination_repository_path: PathBuf,
+        baseline_ref: String,
+        accepted_ref: String,
         managed_tree_policy_version: u8,
     },
     CreateCandidate {
@@ -278,6 +290,19 @@ enum Response<'a> {
         baseline_commit_oid: String,
         baseline_tree_oid: String,
         baseline_ref: String,
+        managed_tree_policy_version: u8,
+        files_imported: u64,
+        bytes_imported: u64,
+    },
+    #[serde(rename_all = "camelCase")]
+    FilesystemSnapshotImported {
+        protocol_version: u8,
+        object_format: &'static str,
+        source_snapshot_digest_sha256: String,
+        baseline_commit_oid: String,
+        baseline_tree_oid: String,
+        baseline_ref: String,
+        accepted_ref: String,
         managed_tree_policy_version: u8,
         files_imported: u64,
         bytes_imported: u64,
@@ -442,6 +467,23 @@ fn run() -> Result<ExitCode, &'static str> {
                 expected_source_head_commit_oid,
                 destination_repository_path,
                 baseline_ref,
+                managed_tree_policy_version,
+            )
+        }
+        Request::ImportFilesystemSnapshot {
+            protocol_version,
+            source_root_path,
+            destination_repository_path,
+            baseline_ref,
+            accepted_ref,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            import_filesystem_snapshot(
+                source_root_path,
+                destination_repository_path,
+                baseline_ref,
+                accepted_ref,
                 managed_tree_policy_version,
             )
         }
@@ -948,6 +990,337 @@ fn import_source_head(
         bytes_imported: copy_stats.bytes,
     });
     Ok(ExitCode::SUCCESS)
+}
+
+fn import_filesystem_snapshot(
+    source_root_path: PathBuf,
+    destination_repository_path: PathBuf,
+    baseline_ref: String,
+    accepted_ref: String,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    use gix::bstr::ByteSlice;
+
+    if !baseline_ref.starts_with("refs/maka/") {
+        return Err("baseline_ref_outside_maka_namespace");
+    }
+    gix::refs::FullName::try_from(baseline_ref.as_str()).map_err(|_| "invalid_baseline_ref")?;
+    if !accepted_ref.starts_with("refs/maka/") || accepted_ref == baseline_ref {
+        return Err("target_ref_outside_maka_namespace");
+    }
+    gix::refs::FullName::try_from(accepted_ref.as_str())
+        .map_err(|_| "target_ref_outside_maka_namespace")?;
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    let source_metadata =
+        fs::symlink_metadata(&source_root_path).map_err(|_| "invalid_source_snapshot_root")?;
+    if !source_root_path.is_absolute()
+        || !source_metadata.is_dir()
+        || source_metadata.file_type().is_symlink()
+        || is_windows_reparse_point(&source_metadata)
+    {
+        return Err("invalid_source_snapshot_root");
+    }
+
+    let mut observed_stats = ManagedTreeStats::default();
+    let observed_tree = write_filesystem_snapshot_tree(
+        None,
+        &source_root_path,
+        "",
+        0,
+        MANAGED_TREE_POLICY_V3,
+        &mut observed_stats,
+    )?;
+    let source_after =
+        fs::symlink_metadata(&source_root_path).map_err(|_| "source_file_observation_mismatch")?;
+    if !same_source_identity(&source_metadata, &source_after) {
+        return Err("source_file_observation_mismatch");
+    }
+    assert_import_destination_parent(&destination_repository_path)?;
+    let destination = claim_or_reopen_import_destination(&destination_repository_path)?;
+    if destination.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("import_destination_object_format_mismatch");
+    }
+    let mut written_stats = ManagedTreeStats::default();
+    let baseline_tree = write_filesystem_snapshot_tree(
+        Some(&destination),
+        &source_root_path,
+        "",
+        0,
+        MANAGED_TREE_POLICY_V3,
+        &mut written_stats,
+    )?;
+    if baseline_tree != observed_tree
+        || written_stats.files != observed_stats.files
+        || written_stats.bytes != observed_stats.bytes
+    {
+        return Err("source_snapshot_digest_mismatch");
+    }
+    let source_snapshot_digest_sha256 = filesystem_snapshot_digest(baseline_tree);
+    let signature = gix::actor::SignatureRef {
+        name: b"Maka Workspace Service".as_bstr(),
+        email: b"workspace@maka.invalid".as_bstr(),
+        time: "946684800 +0000",
+    };
+    let message = format!(
+        "maka filesystem snapshot baseline v1\nsnapshot-sha256 {source_snapshot_digest_sha256}"
+    );
+    let baseline_commit = destination
+        .new_commit_as(
+            signature,
+            signature,
+            message,
+            baseline_tree,
+            std::iter::empty::<gix::hash::ObjectId>(),
+        )
+        .map_err(|_| "baseline_commit_write_failed")?
+        .id()
+        .detach();
+    let baseline_existed = destination
+        .try_find_reference(&baseline_ref)
+        .map_err(|_| "baseline_publish_failed")?
+        .is_some();
+    publish_exact_baseline_reference(&destination, &baseline_ref, baseline_commit)?;
+    ensure_initial_accepted_reference(
+        &destination,
+        &accepted_ref,
+        baseline_commit,
+        baseline_existed,
+    )?;
+
+    write_response(&Response::FilesystemSnapshotImported {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        source_snapshot_digest_sha256,
+        baseline_commit_oid: baseline_commit.to_string(),
+        baseline_tree_oid: baseline_tree.to_string(),
+        baseline_ref,
+        accepted_ref,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+        files_imported: written_stats.files,
+        bytes_imported: written_stats.bytes,
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+fn write_filesystem_snapshot_tree(
+    destination: Option<&gix::Repository>,
+    directory: &Path,
+    prefix: &str,
+    depth: u64,
+    policy: ManagedTreePolicy,
+    stats: &mut ManagedTreeStats,
+) -> Result<gix::hash::ObjectId, &'static str> {
+    let before = fs::symlink_metadata(directory).map_err(|_| "source_file_observation_mismatch")?;
+    if !before.is_dir() || before.file_type().is_symlink() || is_windows_reparse_point(&before) {
+        return Err("unsupported_source_entry_kind");
+    }
+    stats.enter_tree(depth, 0, policy)?;
+    let mut entries = fs::read_dir(directory)
+        .map_err(|_| "source_file_observation_mismatch")?
+        .map(|entry| entry.map_err(|_| "source_file_observation_mismatch"))
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    let mut tree_entries = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let component = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "unsupported_source_path")?;
+        if !is_supported_source_component(&component) {
+            return Err("unsupported_source_path");
+        }
+        let relative_path = if prefix.is_empty() {
+            component.clone()
+        } else {
+            format!("{prefix}/{component}")
+        };
+        stats.observe_entry(&relative_path, policy)?;
+        let entry_path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&entry_path).map_err(|_| "source_file_observation_mismatch")?;
+        if metadata.file_type().is_symlink() || is_windows_reparse_point(&metadata) {
+            return Err("unsupported_source_entry_kind");
+        }
+        let (kind, oid) = if metadata.is_dir() {
+            (
+                gix::objs::tree::EntryKind::Tree,
+                write_filesystem_snapshot_tree(
+                    destination,
+                    &entry_path,
+                    &relative_path,
+                    depth + 1,
+                    policy,
+                    stats,
+                )?,
+            )
+        } else if metadata.is_file() {
+            let bytes = read_bounded_source_file(&entry_path, &metadata, policy)?;
+            if component == ".gitattributes" {
+                if bytes.len() as u64 > MAX_ATTRIBUTES_FILE_BYTES {
+                    return Err("source_attributes_limit_exceeded");
+                }
+                validate_managed_attributes_v2(&bytes)?;
+            }
+            stats.observe_blob(bytes.len() as u64, policy)?;
+            let blob = match destination {
+                Some(destination) => destination
+                    .write_blob(&bytes)
+                    .map_err(|_| "source_blob_copy_failed")?
+                    .detach(),
+                None => {
+                    gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &bytes)
+                        .map_err(|_| "source_blob_identity_mismatch")?
+                }
+            };
+            (filesystem_entry_kind(&metadata), blob)
+        } else {
+            return Err("unsupported_source_entry_kind");
+        };
+        tree_entries.push(gix::objs::tree::Entry {
+            mode: kind.into(),
+            filename: component.as_bytes().into(),
+            oid,
+        });
+    }
+    tree_entries.sort();
+    let tree = gix::objs::Tree {
+        entries: tree_entries,
+    };
+    let tree_oid = match destination {
+        Some(destination) => destination
+            .write_object(tree)
+            .map_err(|_| "source_tree_copy_failed")?
+            .detach(),
+        None => {
+            let mut encoded = Vec::new();
+            gix::objs::WriteTo::write_to(&tree, &mut encoded).map_err(|_| "source_tree_invalid")?;
+            gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Tree, &encoded)
+                .map_err(|_| "source_tree_identity_mismatch")?
+        }
+    };
+    let after = fs::symlink_metadata(directory).map_err(|_| "source_file_observation_mismatch")?;
+    if !same_source_identity(&before, &after) {
+        return Err("source_file_observation_mismatch");
+    }
+    Ok(tree_oid)
+}
+
+fn read_bounded_source_file(
+    path: &Path,
+    before: &fs::Metadata,
+    policy: ManagedTreePolicy,
+) -> Result<Vec<u8>, &'static str> {
+    if before.len() > policy.max_file_bytes {
+        return Err("source_file_limit_exceeded");
+    }
+    let mut file = open_source_file_no_follow(path)?;
+    let opened = file
+        .metadata()
+        .map_err(|_| "source_file_observation_mismatch")?;
+    if !opened.is_file()
+        || is_windows_reparse_point(&opened)
+        || !same_source_identity(before, &opened)
+    {
+        return Err("source_file_observation_mismatch");
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(before.len()).unwrap_or(0));
+    file.by_ref()
+        .take(policy.max_file_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "source_file_observation_mismatch")?;
+    if bytes.len() as u64 > policy.max_file_bytes {
+        return Err("source_file_limit_exceeded");
+    }
+    let opened_after = file
+        .metadata()
+        .map_err(|_| "source_file_observation_mismatch")?;
+    let path_after = fs::symlink_metadata(path).map_err(|_| "source_file_observation_mismatch")?;
+    if !same_source_identity(before, &opened_after)
+        || !same_source_identity(before, &path_after)
+        || bytes.len() as u64 != before.len()
+    {
+        return Err("source_file_observation_mismatch");
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn open_source_file_no_follow(path: &Path) -> Result<File, &'static str> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| "source_file_observation_mismatch")
+}
+
+#[cfg(windows)]
+fn open_source_file_no_follow(path: &Path) -> Result<File, &'static str> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|_| "source_file_observation_mismatch")
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_source_file_no_follow(path: &Path) -> Result<File, &'static str> {
+    OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|_| "source_file_observation_mismatch")
+}
+
+#[cfg(unix)]
+fn same_source_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev()
+        && left.ino() == right.ino()
+        && left.len() == right.len()
+        && left.mtime() == right.mtime()
+        && left.mtime_nsec() == right.mtime_nsec()
+        && left.mode() == right.mode()
+}
+
+#[cfg(windows)]
+fn same_source_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    left.volume_serial_number() == right.volume_serial_number()
+        && left.file_index() == right.file_index()
+        && left.file_size() == right.file_size()
+        && left.last_write_time() == right.last_write_time()
+        && left.file_attributes() == right.file_attributes()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_source_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.len() == right.len() && left.modified().ok() == right.modified().ok()
+}
+
+#[cfg(unix)]
+fn filesystem_entry_kind(metadata: &fs::Metadata) -> gix::objs::tree::EntryKind {
+    use std::os::unix::fs::PermissionsExt;
+    if metadata.permissions().mode() & 0o111 != 0 {
+        gix::objs::tree::EntryKind::BlobExecutable
+    } else {
+        gix::objs::tree::EntryKind::Blob
+    }
+}
+
+#[cfg(not(unix))]
+fn filesystem_entry_kind(_metadata: &fs::Metadata) -> gix::objs::tree::EntryKind {
+    gix::objs::tree::EntryKind::Blob
+}
+
+fn filesystem_snapshot_digest(tree_oid: gix::hash::ObjectId) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"maka.filesystem-snapshot.v1\0");
+    hasher.update(tree_oid.to_string().as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 fn create_candidate(
@@ -2370,6 +2743,55 @@ fn publish_exact_baseline_reference(
                     concurrent,
                     "baseline_ref_not_direct",
                     "baseline_ref_target_invalid",
+                )?;
+                if concurrent != baseline_commit {
+                    return Err("baseline_request_conflict");
+                }
+                Ok(())
+            }
+        },
+    }
+}
+
+fn ensure_initial_accepted_reference(
+    repository: &gix::Repository,
+    accepted_ref: &str,
+    baseline_commit: gix::hash::ObjectId,
+    baseline_existed_before_request: bool,
+) -> Result<(), &'static str> {
+    match repository
+        .try_find_reference(accepted_ref)
+        .map_err(|_| "baseline_publish_failed")?
+    {
+        Some(reference) => {
+            let current = read_direct_commit_reference(
+                repository,
+                reference,
+                "accepted_ref_not_direct",
+                "accepted_ref_target_invalid",
+            )?;
+            if !baseline_existed_before_request && current != baseline_commit {
+                return Err("baseline_request_conflict");
+            }
+            Ok(())
+        }
+        None => match repository.reference(
+            accepted_ref,
+            baseline_commit,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "maka filesystem snapshot accepted baseline",
+        ) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let concurrent = repository
+                    .try_find_reference(accepted_ref)
+                    .map_err(|_| "baseline_publish_failed")?
+                    .ok_or("baseline_publish_failed")?;
+                let concurrent = read_direct_commit_reference(
+                    repository,
+                    concurrent,
+                    "accepted_ref_not_direct",
+                    "accepted_ref_target_invalid",
                 )?;
                 if concurrent != baseline_commit {
                     return Err("baseline_request_conflict");

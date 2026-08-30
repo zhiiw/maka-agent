@@ -37,6 +37,11 @@ import {
 import { runWithStorageRootLease, type StorageRootLease } from '@maka/storage/root-authority';
 import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
 import {
+  requireGitoxideHelperArtifactIdentityInternal,
+  requireGitoxideHelperOperationsInternal,
+} from './gitoxide-helper-artifact-authority-internal.js';
+import { importFilesystemSnapshotWithGitoxideHelperInternal } from './gitoxide-helper-invocation-internal.js';
+import {
   createGitoxideManagedWriteEditOwnerInternal,
   type GitoxideManagedWriteEditOwnerInternal,
 } from './gitoxide-managed-write-edit-owner-internal.js';
@@ -50,11 +55,18 @@ import {
   reopenGitoxideAcceptedRepositoryInternal,
   requireGitoxideRepositoryAdmissionInternal,
 } from './gitoxide-repository-admission-authority-internal.js';
+import {
+  admitResumableWorkspaceSourceInternal,
+  requireResumableWorkspaceSourceAdmissionInternal,
+  type ResumableWorkspaceSourceKindInternal,
+} from './resumable-workspace-source-admission-internal.js';
 
 const MANAGED_REPOSITORY_DIRECTORY = 'gitoxide-managed-repositories';
 const ACCEPTED_REF = 'refs/maka/accepted';
+const SOURCE_BASELINE_REF = 'refs/maka/source-baseline';
 
 export interface GitoxideManagedSessionOwnerInternal {
+  readonly sourceKind: ResumableWorkspaceSourceKindInternal;
   readonly repositoryPath: string;
   readonly repositoryId: string;
   readonly workspaceId: string;
@@ -84,7 +96,17 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
     runWithStorageRootLease(input.storageRootLease, 'interactive', 'write', async (root) => root),
     realpath(input.sourceRoot),
   ]);
-  const identity = deriveManagedSessionIdentity(sourceRoot, input.sessionId);
+  const sourceOwnerToken = {};
+  const sourceCapability = await admitResumableWorkspaceSourceInternal({
+    ownerToken: sourceOwnerToken,
+    sourceRoot,
+    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+  });
+  const sourceBinding = requireResumableWorkspaceSourceAdmissionInternal(
+    sourceOwnerToken,
+    sourceCapability,
+  );
+  const identity = deriveManagedSessionIdentity(sourceRoot, input.sessionId, sourceBinding.kind);
   const continuationOwnerToken = {};
   const capability = issueExecutionStoresWorkspaceContinuationAuthorityInternal({
     ownerToken: continuationOwnerToken,
@@ -110,34 +132,55 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
     throw new Error('Gitoxide managed continuation boundary conflicts with session identity');
   }
 
-  const sourceOwnerToken = {};
-  const sourceAdmission = await admitGitoxideRepositoryInternal({
-    invocationOwnerToken: input.invocationOwnerToken,
-    helperCapability: input.helperCapability,
-    admissionOwnerToken: sourceOwnerToken,
-    repositoryPath: sourceRoot,
-    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-  });
-  if (sourceAdmission.kind !== 'accepted') {
-    throw new Error(`Gitoxide managed continuation rejected source: ${sourceAdmission.reason}`);
-  }
-  const source = requireGitoxideRepositoryAdmissionInternal(
-    sourceOwnerToken,
-    sourceAdmission.capability,
-  );
-  if (
-    source.headCommitOid !== boundary.sourceCommitOid ||
-    source.headTreeOid !== boundary.sourceTreeOid
-  ) {
-    throw new Error('Gitoxide managed continuation source has drifted');
-  }
-
   const repositoryPath = join(
     storageRoot,
     MANAGED_REPOSITORY_DIRECTORY,
     identity.workspaceEpochId,
     'repository.git',
   );
+  if (sourceBinding.kind === 'git_repository_v1') {
+    const admissionOwnerToken = {};
+    const sourceAdmission = await admitGitoxideRepositoryInternal({
+      invocationOwnerToken: input.invocationOwnerToken,
+      helperCapability: input.helperCapability,
+      admissionOwnerToken,
+      repositoryPath: sourceRoot,
+      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+    });
+    if (sourceAdmission.kind !== 'accepted') {
+      throw new Error(`Gitoxide managed continuation rejected source: ${sourceAdmission.reason}`);
+    }
+    const source = requireGitoxideRepositoryAdmissionInternal(
+      admissionOwnerToken,
+      sourceAdmission.capability,
+    );
+    if (
+      source.headCommitOid !== boundary.sourceCommitOid ||
+      source.headTreeOid !== boundary.sourceTreeOid
+    ) {
+      throw new Error('Gitoxide managed continuation source has drifted');
+    }
+  } else {
+    requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.helperCapability, [
+      'import_filesystem_snapshot',
+    ]);
+    const snapshot = await importFilesystemSnapshotWithGitoxideHelperInternal({
+      invocationOwnerToken: input.invocationOwnerToken,
+      capability: input.helperCapability,
+      sourceRootPath: sourceRoot,
+      destinationRepositoryPath: repositoryPath,
+      baselineRef: SOURCE_BASELINE_REF,
+      acceptedRef: ACCEPTED_REF,
+      managedTreePolicyVersion: 3,
+      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+    });
+    if (
+      snapshot.baselineCommitOid !== boundary.sourceCommitOid ||
+      snapshot.baselineTreeOid !== boundary.sourceTreeOid
+    ) {
+      throw new Error('Gitoxide managed continuation source has drifted');
+    }
+  }
   await reopenGitoxideAcceptedRepositoryInternal({
     invocationOwnerToken: input.invocationOwnerToken,
     helperCapability: input.helperCapability,
@@ -168,7 +211,17 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     runWithStorageRootLease(input.storageRootLease, 'interactive', 'write', async (root) => root),
     realpath(input.sourceRoot),
   ]);
-  const identity = deriveManagedSessionIdentity(sourceRoot, input.sessionId);
+  const sourceOwnerToken = {};
+  const sourceCapability = await admitResumableWorkspaceSourceInternal({
+    ownerToken: sourceOwnerToken,
+    sourceRoot,
+    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+  });
+  const sourceBinding = requireResumableWorkspaceSourceAdmissionInternal(
+    sourceOwnerToken,
+    sourceCapability,
+  );
+  const identity = deriveManagedSessionIdentity(sourceRoot, input.sessionId, sourceBinding.kind);
   const repositoryPath = join(
     storageRoot,
     MANAGED_REPOSITORY_DIRECTORY,
@@ -177,23 +230,12 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
   );
   await mkdir(dirname(repositoryPath), { recursive: true });
 
-  const admissionOwnerToken = {};
-  const sourceAdmission = await admitGitoxideRepositoryInternal({
-    invocationOwnerToken: input.invocationOwnerToken,
-    helperCapability: input.helperCapability,
-    admissionOwnerToken,
-    repositoryPath: sourceRoot,
-    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-  });
-  if (sourceAdmission.kind !== 'accepted') {
-    throw new Error(`Gitoxide managed session rejected source: ${sourceAdmission.reason}`);
-  }
-  const source = requireGitoxideRepositoryAdmissionInternal(
-    admissionOwnerToken,
-    sourceAdmission.capability,
+  const helperIdentity = requireGitoxideHelperArtifactIdentityInternal(
+    input.invocationOwnerToken,
+    input.helperCapability,
   );
   const materializationProfileDigest = sha256(
-    `maka-gitoxide-materialization-v3\0${source.helperArtifactSha256}\0`,
+    `maka-gitoxide-materialization-v4\0${sourceBinding.kind}\0${helperIdentity.sha256}\0`,
   );
   const policyHash = workspaceMutationPolicyHashV1(
     materializationProfileDigest,
@@ -214,6 +256,70 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     baselineOwnerToken,
     baselineCapability,
   );
+  let sourceCommitOid: string;
+  let sourceTreeOid: string;
+  let importedBaseline:
+    | {
+        readonly proof: object;
+        readonly baselineCommitOid: string;
+        readonly baselineTreeOid: string;
+        readonly filesImported: number;
+      }
+    | undefined;
+  let gitAdmission:
+    | {
+        readonly ownerToken: object;
+        readonly capability: Awaited<ReturnType<typeof admitGitoxideRepositoryInternal>>;
+      }
+    | undefined;
+  if (sourceBinding.kind === 'git_repository_v1') {
+    const admissionOwnerToken = {};
+    const admission = await admitGitoxideRepositoryInternal({
+      invocationOwnerToken: input.invocationOwnerToken,
+      helperCapability: input.helperCapability,
+      admissionOwnerToken,
+      repositoryPath: sourceRoot,
+      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+    });
+    if (admission.kind !== 'accepted') {
+      throw new Error(`Gitoxide managed session rejected source: ${admission.reason}`);
+    }
+    const source = requireGitoxideRepositoryAdmissionInternal(
+      admissionOwnerToken,
+      admission.capability,
+    );
+    sourceCommitOid = source.headCommitOid;
+    sourceTreeOid = source.headTreeOid;
+    gitAdmission = { ownerToken: admissionOwnerToken, capability: admission };
+  } else {
+    requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.helperCapability, [
+      'import_filesystem_snapshot',
+      'create_candidate',
+      'promote_candidate',
+      'observe_accepted_ref',
+      'read_tree_file',
+      'list_tree_files',
+      'grep_tree_files',
+    ]);
+    const snapshot = await importFilesystemSnapshotWithGitoxideHelperInternal({
+      invocationOwnerToken: input.invocationOwnerToken,
+      capability: input.helperCapability,
+      sourceRootPath: sourceRoot,
+      destinationRepositoryPath: repositoryPath,
+      baselineRef: SOURCE_BASELINE_REF,
+      acceptedRef: ACCEPTED_REF,
+      managedTreePolicyVersion: 3,
+      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+    });
+    sourceCommitOid = snapshot.baselineCommitOid;
+    sourceTreeOid = snapshot.baselineTreeOid;
+    importedBaseline = {
+      proof: snapshot,
+      baselineCommitOid: snapshot.baselineCommitOid,
+      baselineTreeOid: snapshot.baselineTreeOid,
+      filesImported: snapshot.filesImported,
+    };
+  }
   const existingEpoch = await baselineAuthority.readEpoch(
     identity.workspaceId,
     identity.workspaceEpochId,
@@ -231,8 +337,8 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       !existingHead ||
       existingEpoch.repositoryId !== identity.repositoryId ||
       existingEpoch.workspaceInstanceId !== identity.workspaceInstanceId ||
-      existingEpoch.sourceCommitOid !== source.headCommitOid ||
-      existingEpoch.sourceTreeOid !== source.headTreeOid ||
+      existingEpoch.sourceCommitOid !== sourceCommitOid ||
+      existingEpoch.sourceTreeOid !== sourceTreeOid ||
       existingEpoch.objectFormat !== 'sha1' ||
       existingEpoch.materializationProfileDigest !== materializationProfileDigest ||
       existingEpoch.policyHash !== policyHash ||
@@ -247,14 +353,27 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       throw new Error('Gitoxide managed session source or durable epoch has drifted');
     }
   } else {
-    const acceptedRepositoryOwnerToken = {};
-    const imported = await importAdmittedGitoxideRepositoryInternal({
-      admissionOwnerToken,
-      repositoryCapability: sourceAdmission.capability,
-      acceptedRepositoryOwnerToken,
-      destinationRepositoryPath: repositoryPath,
-      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-    });
+    if (sourceBinding.kind === 'git_repository_v1') {
+      const admission = gitAdmission;
+      if (!admission || admission.capability.kind !== 'accepted') {
+        throw new Error('Gitoxide managed session source admission is unavailable');
+      }
+      const imported = await importAdmittedGitoxideRepositoryInternal({
+        admissionOwnerToken: admission.ownerToken,
+        repositoryCapability: admission.capability.capability,
+        acceptedRepositoryOwnerToken: {},
+        destinationRepositoryPath: repositoryPath,
+        ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+      });
+      importedBaseline = {
+        proof: imported,
+        baselineCommitOid: imported.baselineCommitOid,
+        baselineTreeOid: imported.baselineTreeOid,
+        filesImported: imported.filesImported,
+      };
+    }
+    const imported = importedBaseline;
+    if (!imported) throw new Error('Gitoxide managed session baseline import is unavailable');
     const baseline: WorkspaceBaselineAuthorityInput = Object.freeze({
       epochOpenedEventId: `workspace-epoch-${identity.digest}`,
       baselineAcceptedEventId: `workspace-baseline-${identity.digest}`,
@@ -266,8 +385,8 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
         workspaceInstanceId: identity.workspaceInstanceId,
         mode: 'managed_worktree' as const,
         objectFormat: 'sha1' as const,
-        sourceCommitOid: imported.sourceHeadCommitOid,
-        sourceTreeOid: imported.sourceTreeOid,
+        sourceCommitOid,
+        sourceTreeOid,
         materializationProfileDigest,
         materializationSemantics: WORKSPACE_MATERIALIZATION_SEMANTICS_V1,
         policyHash,
@@ -281,9 +400,9 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
         deletedFileCount: 0 as const,
       }),
     });
-    verifiedBaselines.set(imported, baseline);
+    verifiedBaselines.set(imported.proof, baseline);
     await input.failpoint?.('after_repository_import');
-    await baselineAuthority.commitBaseline(imported);
+    await baselineAuthority.commitBaseline(imported.proof);
   }
 
   const writeEdit = createGitoxideManagedWriteEditOwnerInternal({
@@ -334,6 +453,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
   });
   await writeEdit.reconcileAcceptedProjection(input.abortSignal);
   return Object.freeze({
+    sourceKind: sourceBinding.kind,
     repositoryPath,
     repositoryId: identity.repositoryId,
     workspaceId: identity.workspaceId,
@@ -343,10 +463,16 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
   });
 }
 
-function deriveManagedSessionIdentity(sourceRoot: string, sessionId: string) {
+function deriveManagedSessionIdentity(
+  sourceRoot: string,
+  sessionId: string,
+  sourceKind: ResumableWorkspaceSourceKindInternal,
+) {
   if (!sessionId.trim()) throw new Error('Gitoxide managed session identity is invalid');
   const digest = createHash('sha256')
-    .update('maka-gitoxide-managed-session-v1\0', 'utf8')
+    .update('maka-resumable-managed-session-v2\0', 'utf8')
+    .update(sourceKind, 'utf8')
+    .update('\0')
     .update(sourceRoot, 'utf8')
     .update('\0')
     .update(sessionId, 'utf8')

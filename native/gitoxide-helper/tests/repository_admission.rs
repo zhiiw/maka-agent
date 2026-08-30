@@ -543,6 +543,87 @@ fn imports_an_exact_source_head_into_a_fresh_managed_repository() {
 }
 
 #[test]
+fn imports_and_exactly_reopens_a_bounded_filesystem_snapshot() {
+    let fixture = tempfile::tempdir().unwrap();
+    let fixture_root = canonicalize_fixture_root(fixture.path().to_path_buf());
+    let source = fixture_root.join("source");
+    let destination = fixture_root.join("managed-snapshot.git");
+    fs::create_dir_all(source.join("docs")).unwrap();
+    fs::write(source.join("notes.txt"), b"snapshot baseline\n").unwrap();
+    fs::write(source.join("docs/guide.txt"), b"guide\n").unwrap();
+    let request = || {
+        serde_json::json!({
+            "protocolVersion": 1,
+            "operation": "import_filesystem_snapshot",
+            "sourceRootPath": source,
+            "destinationRepositoryPath": destination,
+            "baselineRef": "refs/maka/source-baseline",
+            "acceptedRef": "refs/maka/accepted",
+            "managedTreePolicyVersion": 3,
+        })
+    };
+
+    let first = invoke_request(request());
+    assert!(
+        first.status.success(),
+        "helper failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["kind"], "filesystem_snapshot_imported");
+    assert_eq!(first["filesImported"], 2);
+    assert_eq!(first["bytesImported"], 24);
+    assert!(
+        first["sourceSnapshotDigestSha256"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    let baseline = first["baselineCommitOid"].as_str().unwrap();
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/source-baseline"]),
+        baseline
+    );
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/accepted"]),
+        baseline
+    );
+
+    let retry = invoke_request(request());
+    assert!(retry.status.success());
+    let retry: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
+    assert_eq!(retry["baselineCommitOid"], first["baselineCommitOid"]);
+    assert_eq!(retry["baselineTreeOid"], first["baselineTreeOid"]);
+
+    fs::write(source.join("notes.txt"), b"source drift\n").unwrap();
+    assert_helper_error(&invoke_request(request()), "baseline_request_conflict");
+}
+
+#[test]
+fn rejects_snapshot_git_control_data_before_claiming_the_destination() {
+    let fixture = tempfile::tempdir().unwrap();
+    let fixture_root = canonicalize_fixture_root(fixture.path().to_path_buf());
+    let source = fixture_root.join("source");
+    let destination = fixture_root.join("rejected-snapshot.git");
+    fs::create_dir_all(source.join(".git")).unwrap();
+    fs::write(source.join(".git/HEAD"), b"malformed\n").unwrap();
+
+    let output = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "import_filesystem_snapshot",
+        "sourceRootPath": source,
+        "destinationRepositoryPath": destination,
+        "baselineRef": "refs/maka/source-baseline",
+        "acceptedRef": "refs/maka/accepted",
+        "managedTreePolicyVersion": 3,
+    }));
+
+    assert_helper_error(&output, "unsupported_source_path");
+    assert!(!destination.exists());
+}
+
+#[test]
 fn publishes_and_exactly_retries_an_operation_candidate_without_advancing_accepted() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let source_head = fixture.git_output(["rev-parse", "HEAD"]);
