@@ -38,6 +38,12 @@ describe('Session catalog protocol', () => {
     assert.deepEqual(decodeSessionCatalogItem(catalog), catalog);
   });
 
+  test('preserves the immutable managed coding profile in catalog projections', () => {
+    const catalog = projection({ toolProfile: 'managed-coding-v1' });
+
+    assert.deepEqual(decodeSessionCatalogItem(catalog), catalog);
+  });
+
   test('decodes versioned live run state without collapsing absent and known-empty', () => {
     const unknown = projection();
     const knownEmpty = {

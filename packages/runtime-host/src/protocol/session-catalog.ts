@@ -123,6 +123,7 @@ const PROJECTION_FIELDS = [
   'revisionOfTurnId',
   'revisionIndex',
   'revisionState',
+  'toolProfile',
   'thinkingLevel',
   'lastReadMessageId',
   'liveRunState',
@@ -240,6 +241,7 @@ export interface SessionCatalogProjection {
   readonly llmConnectionSlug: string;
   readonly connectionLocked: boolean;
   readonly model: string;
+  readonly toolProfile?: SessionToolProfile;
   readonly thinkingLevel?: ThinkingLevel;
   readonly permissionMode: PermissionMode;
   readonly collaborationMode: CollaborationMode;
@@ -771,6 +773,9 @@ export function decodeSessionCatalogProjection(value: unknown): SessionCatalogPr
     ),
     connectionLocked: boolean(record.connectionLocked, 'Session connection lock'),
     model: requireUtf8String(record.model, 'Session model', SESSION_CATALOG_MODEL_MAX_BYTES),
+    ...(Object.hasOwn(record, 'toolProfile')
+      ? { toolProfile: sessionToolProfile(record.toolProfile) }
+      : {}),
     ...optionalThinkingLevel(record),
     permissionMode: permissionMode(record.permissionMode),
     collaborationMode: collaborationMode(record.collaborationMode),

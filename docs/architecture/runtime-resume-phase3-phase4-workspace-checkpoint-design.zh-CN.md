@@ -553,6 +553,12 @@ Filesystem snapshot v1 只接受 portable regular files/directories，拒绝 sym
 `.git` 控制路径和超出 path/file/tree/byte/depth 配额的输入。它不宣称拥有跨整棵目录的原子物理快照；
 只承诺两次完整有界观察得到同一个 immutable Git tree，否则在 destination publication 前 fail closed。
 
+Desktop 普通 project/host-path coding task 默认请求 `managed-coding-v1`，不向用户暴露 Git/非 Git模式开关；
+source 类型只能由上述 admission owner 判定。Deep Research 等拥有独立执行合同的产品模式不自动转换。
+Session 创建后 UI 只能展示只读的 managed identity，不能在第一个 T1 之后关闭或切换 durable mode。
+显式 Resume 读取同一个持久化 tool profile 与 continuation evidence；feature flag 不能把已经创建的 managed
+task 静默降级成 attached task。
+
 ## 4. Gitoxide managed workspace 后续边界
 
 后续强模式必须从 Gitoxide data plane 建立新的 production composition，并分别证明：

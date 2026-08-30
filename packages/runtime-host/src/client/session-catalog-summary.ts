@@ -64,6 +64,7 @@ export function projectSessionCatalogSummary(
     llmConnectionSlug: session.llmConnectionSlug,
     connectionLocked: session.connectionLocked,
     model: session.model,
+    ...(session.toolProfile === undefined ? {} : { toolProfile: session.toolProfile }),
     ...(session.thinkingLevel === undefined ? {} : { thinkingLevel: session.thinkingLevel }),
     permissionMode: session.permissionMode,
     collaborationMode: session.collaborationMode,

@@ -125,6 +125,43 @@ describe('composer first-send cleanup', () => {
     assert.ok(!('permissionMode' in (createInput as Record<string, unknown>)));
   });
 
+  it('leaves automatic workspace admission to Desktop main', async () => {
+    let createInput: unknown;
+    const restoreWindow = installWindow({
+      newTasks: {
+        create: async (_target: unknown, input: unknown) => {
+          createInput = input;
+          return { id: 'session-managed' };
+        },
+      },
+      sessions: {
+        submitMessage: async () => ({
+          ok: true,
+          attachments: [],
+          skillInvocation: { loaded: [], failed: [] },
+        }),
+      },
+    });
+
+    try {
+      assert.equal(
+        await createAppShellChatActions(createActionsDeps()).send('inspect the repository'),
+        true,
+      );
+    } finally {
+      restoreWindow();
+    }
+
+    assert.equal(
+      Object.hasOwn(createInput as Record<string, unknown>, 'productIntent'),
+      false,
+    );
+    assert.equal(
+      Object.hasOwn(createInput as Record<string, unknown>, 'toolProfile'),
+      false,
+    );
+  });
+
   it('sends a composer permission choice once without writing it to the Host default', async () => {
     let createInput: unknown;
     let settingsUpdates = 0;

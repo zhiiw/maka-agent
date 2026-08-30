@@ -8,6 +8,9 @@ profile 的工具上限只有 Write/Edit。普通 Session 不进入该数据面�
 
 ## Owner 与权限
 
+- Desktop renderer 只提交 `productIntent: 'managed_coding'`，没有签发 `toolProfile` 的权限；Desktop main
+  是唯一把该产品意图映射为 `managed-coding-v1` 的 owner，并在 Session 创建前拒绝未知意图或与其它
+  start mode 混用；
 - product release owner 生成 helper binary、strict manifest 和锁定 Cargo graph 的第三方 notices；
 - packaged-resource resolver 只接受 `process.resourcesPath` 内的固定路径，并绑定 platform、arch、bytes、SHA-256、
   protocol version 与完整 operation allowlist；
@@ -27,6 +30,16 @@ profile 的工具上限只有 Write/Edit。普通 Session 不进入该数据面�
 4. T1 后只允许 managed mutation state machine 提交 terminal outcome，禁止 generic T2 fallback；
 5. Git candidate、SQLite successor 与 accepted ref projection 继续由下层 owner 按既有恢复协议收敛。
 
+Desktop 的创建入口位于新任务 Composer 的 `+` 菜单。普通 `New task` 仍创建普通 Session；用户显式打开
+`Managed workspace` 后，第一条消息的 Session create 才携带产品意图。创建完成后，Session Catalog 从 durable
+header 投影 immutable profile，Composer 以只读标记持续显示该任务属于 Managed 数据面，不能在已有 Session
+中切换或降级。
+
+Managed Session 的普通 Run 无条件采集 workspace identity；该采集不依赖
+`MAKA_RUNTIME_SAFE_BOUNDARY_RESUME`。边界 authority 缺失或检查失败时，Run 在 provider dispatch 前失败，
+不能创建一个表面是 Managed、实际没有 continuation evidence 的 Run。Desktop 手动 Resume 同样读取 durable
+profile 后开放；普通 Session 仍受原实验开关约束。
+
 package build 的边界是：锁定 Cargo build成功后，复制到 `.generated`、计算 manifest、生成 notices，最后才允许
 electron-builder 读取这些资源。最终包验证必须要求 binary、manifest 与 notices 同时存在。
 
@@ -38,6 +51,8 @@ electron-builder 读取这些资源。最终包验证必须要求 binary、manif
 | manifest 缺字段、operation list 漂移 | Host 不授予 capability |
 | helper bytes/path/platform/arch 不匹配 | fail closed；不从 PATH 替代 |
 | source admission/import 失败 | provider dispatch 前失败，不产生 managed T1 |
+| renderer 伪造 `toolProfile` 或提交冲突产品意图 | Desktop main 忽略裸 profile，并拒绝冲突意图；不创建 Session |
+| managed Run 无法取得 workspace boundary | provider dispatch 前失败；不静默退回普通 Run |
 | T1 后进程退出 | 下层 SQLite/Gitoxide owner 按 durable evidence 恢复，不重跑 Write/Edit |
 
 回滚本切片会删除 `managed-coding-v1` 产品入口和 packaged resource composition；现有普通 Session、SQLite 数据与
@@ -55,3 +70,8 @@ Linux、macOS、Windows 使用相同 manifest、artifact digest、operation allo
 - 不接入 npm dependency environment；纯 Write/Edit 不依赖 npm。
 - 不向 managed profile 暴露 Bash、Read、Glob、Grep 或 attached filesystem worker。
 - 不自动迁移普通 Session，也不把 managed capability 当作 resident Host 的隐式 fallback。
+
+## M3 范围说明
+
+本切片闭合的是 M3 的 Desktop 产品入口与手动 Resume 入口（M3.1/M3.5 的入口部分），不是宣称整个 M3
+已经完成。Accepted-tree Read/Glob/Grep、完整任务级呈现和后续 M4 workspace lifecycle 仍是独立交付。
