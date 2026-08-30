@@ -112,6 +112,7 @@ describe('createDesktopWorkbarServices', () => {
     const eventHandler = () => undefined;
 
     await services.review.read({ sessionId: 's', source: 'unstaged' });
+    await services.review.publish({ sessionId: 's', publishId: 'desktop-publish-1' });
     services.review.subscribeSessionEvents('s', eventHandler)();
 
     await services.terminal.start('s');
@@ -186,6 +187,7 @@ describe('createDesktopWorkbarServices', () => {
       calls.map((call) => call.name),
       [
         'gitReview.read',
+        'gitReview.publish',
         'sessions.subscribeEvents',
         'shellRuns.start',
         'shellRuns.stop',

@@ -29,6 +29,7 @@ import { Text } from '@astryxdesign/core/Text';
 import { redactSecrets as displayRedactSecrets } from '@maka/core/display-redaction';
 import { generalizedErrorMessage, generalizedErrorMessageChinese } from '@maka/core/redaction';
 import { type GitReviewReadResult } from '@maka/core/git-review';
+import type { ManagedWorkspacePublishResult } from '@maka/runtime-host/protocol';
 import { DiffCodePreview, useUiLocale } from '@maka/ui';
 import { ICON_SIZE, GitBranch } from '@maka/ui/icons';
 import { getDesktopConversationCopy } from '../../../../locales/conversation-copy';
@@ -60,7 +61,11 @@ export function SessionReviewPanel(props: {
   const [loading, setLoading] = useState(false);
   const [visibleFileCount, setVisibleFileCount] = useState(REVIEW_FILE_PAGE_SIZE);
   const [error, setError] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
+  const [published, setPublished] = useState<ManagedWorkspacePublishResult | null>(null);
   const revisionRef = useRef(0);
+  const publishIdRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     const revision = ++revisionRef.current;
@@ -137,7 +142,33 @@ export function SessionReviewPanel(props: {
   const empty = !loading && !error && !sourceError && gitFiles.length === 0;
   useEffect(() => {
     setVisibleFileCount(REVIEW_FILE_PAGE_SIZE);
+    setPublished(null);
+    setPublishError(null);
+    publishIdRef.current = null;
   }, [gitSnapshot?.revision]);
+
+  const publishSnapshot = useCallback(async () => {
+    if (!gitSnapshot || publishing || published) return;
+    const publishId = publishIdRef.current ?? `desktop-${crypto.randomUUID()}`;
+    publishIdRef.current = publishId;
+    setPublishing(true);
+    setPublishError(null);
+    try {
+      const result = await review.publish({
+        sessionId: props.sessionId,
+        publishId,
+      });
+      setPublished(result);
+    } catch (nextError) {
+      setPublishError(
+        locale === 'zh'
+          ? generalizedErrorMessageChinese(nextError, copy.publishFailed)
+          : generalizedErrorMessage(nextError, copy.publishFailed),
+      );
+    } finally {
+      setPublishing(false);
+    }
+  }, [copy.publishFailed, gitSnapshot, locale, props.sessionId, published, publishing, review]);
 
   return (
     <Section
@@ -183,6 +214,36 @@ export function SessionReviewPanel(props: {
               </Text>
             </HStack>
           </VStack>
+        ) : null}
+        {gitSnapshot ? (
+          <HStack gap={2} align="center" justify="end">
+            <Button
+              variant="secondary"
+              size="sm"
+              label={publishing ? copy.publishing : published ? copy.published : copy.publish}
+              isLoading={publishing}
+              isDisabled={publishing || published !== null}
+              onClick={() => void publishSnapshot()}
+            />
+          </HStack>
+        ) : null}
+        {published ? (
+          <Banner status="success" title={copy.publishedDetail(published.publishedRef)} />
+        ) : null}
+        {publishError ? (
+          <Banner
+            status="error"
+            title={publishError}
+            endContent={
+              <Button
+                variant="ghost"
+                size="sm"
+                label={copy.retryPublish}
+                isLoading={publishing}
+                onClick={() => void publishSnapshot()}
+              />
+            }
+          />
         ) : null}
         {error ? (
           <Banner

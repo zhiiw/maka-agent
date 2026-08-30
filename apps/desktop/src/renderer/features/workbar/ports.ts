@@ -44,7 +44,10 @@ import type { SessionTrace } from '@maka/core/session-trace';
 import type { Task, TaskLedgerChangedEvent } from '@maka/core/task-ledger';
 import type { UserQuestionResponse } from '@maka/core/user-question';
 import type { Result } from '@maka/core/result';
-import type { ContextDiagnosticsResult } from '@maka/runtime-host/protocol';
+import type {
+  ContextDiagnosticsResult,
+  ManagedWorkspacePublishResult,
+} from '@maka/runtime-host/protocol';
 import type { MergedUsageSummary } from '@maka/core/usage-ledger-merge';
 import type {
   ShellRunPtyDataEvent,
@@ -63,6 +66,10 @@ export interface WorkbarReviewService {
     source: GitReviewSource;
     baseBranch?: string;
   }): Promise<GitReviewReadResult>;
+  publish(input: {
+    sessionId: string;
+    publishId: string;
+  }): Promise<ManagedWorkspacePublishResult>;
   subscribeSessionEvents(
     sessionId: string,
     handler: (event: SessionEvent) => void,

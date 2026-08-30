@@ -894,6 +894,10 @@ export class DesktopRuntimeHostClient {
     return { ok: true, snapshot: result.snapshot };
   }
 
+  publishManagedWorkspaceSnapshot(sessionId: string, publishId: string) {
+    return this.request('managed-workspace.publish.mutate', { sessionId, publishId });
+  }
+
   async createSession(
     input: SessionCreateInput,
   ): Promise<SessionCatalogProjection> {

@@ -29,7 +29,8 @@ workspace content；materialized directory、Desktop UI 和缓存都只是可重
 | Write/Edit successor | 已实现 | 已实现 | managed tool profile 已接入 | candidate + Host kill/reopen 已建立 |
 | automatic continuation | 已实现 | 已实现 | quiet resume 已接入 | Git/非 Git indeterminate matrix 已建立 |
 | accepted-tree Review | 不写 durable state | 已实现 | 已接入 Desktop Review | helper exact-tree + IPC fail-closed test 已建立 |
-| isolated Restore / immutable Publish | artifact/ref protocol 已实现 | 已实现 | **缺失** | helper tests 已建立，Desktop crash proof 缺失 |
+| immutable Publish | artifact/ref protocol 已实现 | 已实现 | 已接入 Desktop Review | helper ref-CAS + IPC fail-closed test 已建立；packaged Desktop crash proof 缺失 |
+| isolated Restore | artifact protocol 已实现 | 已实现 | **缺失** | helper tests 已建立，Desktop crash proof 缺失 |
 | time travel | historical read/restore 已实现 | 已实现 | **缺失** | undo-as-successor 尚未实现 |
 | rebaseline / relocation | epoch identity 已实现 | 已实现 | **缺失** | Host cases 已建立，packaged evidence 待 CI |
 | GC | restore-orphan tombstone 已实现 | 已实现 | 无需直接 UI | candidate/ref/object roots 尚未纳入 |
@@ -74,6 +75,10 @@ immutable publish ref 与“应用到用户 checkout”必须分开：
 3. checkout 已漂移时只能选择新分支、显示冲突或取消，不能静默覆盖；
 4. apply receipt 持久化 source observation、accepted commit/tree、目标 ref 和最终验证结果；
 5. 崩溃后只 reconcile receipt/ref/worktree evidence，不重新计算 accepted mutation。
+
+当前 Desktop 已接入第 1 项：Review 面板签发稳定 `publishId`，Runtime Host 只允许
+`managed-coding-v1` session 创建 `refs/maka/published/<publishId>`。失败重试复用同一个 ID，ref 不存在或精确指向
+accepted commit 是仅有的两种可收敛状态。这个动作不接触 source checkout；Apply 仍由后续独立 owner 负责。
 
 ### M4.3 Restore / Undo / Time travel
 
@@ -144,7 +149,7 @@ Host 后，新的 Run 只采用 durable outcome/candidate/evidence；已完成�
 
 1. **M3 closure**：packaged Desktop Git/非 Git quiet-resume crash matrix；
 2. **M4 Desktop Review**：结构化 accepted diff 的 IPC 与 UI consumer（已实现，等待三平台 packaged 证据）；
-3. **M4 Apply/Publish**：immutable publish + drift-aware checkout apply receipt；
+3. **M4 Apply/Publish**：immutable publish Desktop consumer 已实现；下一步是 drift-aware checkout apply receipt；
 4. **M4 Restore/Undo**：isolated restore、historical successor 与 timeline；
 5. **M4 Lifecycle**：Desktop rebaseline/relocation、完整 durable-root GC；
 6. **M5 Toolchain/Sandbox**：能力证明与 hermetic command worker；

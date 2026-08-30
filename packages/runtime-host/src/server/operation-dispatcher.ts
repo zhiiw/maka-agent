@@ -169,7 +169,7 @@ export type ExecutionInspectOperationHandlerMap = Pick<
 >;
 export type ManagedWorkspaceReviewOperationHandlerMap = Pick<
   OperationHandlerMap,
-  'managed-workspace.review.query'
+  'managed-workspace.review.query' | 'managed-workspace.publish.mutate'
 >;
 export type HostedExecutionOperationHandlerMap = Pick<
   OperationHandlerMap,

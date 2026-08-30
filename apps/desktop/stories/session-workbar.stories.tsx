@@ -855,6 +855,14 @@ function bridge(options: {
         if (options.reviewFail) throw new Error('读取变更失败：无法运行 git diff');
         return options.review ?? { ok: true, snapshot: gitReviewSnapshot };
       },
+      publish: async ({ publishId }) => ({
+        kind: 'accepted_snapshot_published' as const,
+        publishId,
+        acceptedCommitOid: '1'.repeat(40),
+        acceptedTreeOid: '2'.repeat(40),
+        publishedRef: `refs/maka/published/${publishId}`,
+        replayed: false,
+      }),
       subscribeSessionEvents: unsubscribe,
     },
     terminal: {

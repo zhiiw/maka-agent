@@ -186,7 +186,10 @@ import {
 import {
   isSessionTrace,
 } from '@maka/core/session-trace';
-import type { ContextDiagnosticsResult } from '@maka/runtime-host/protocol';
+import type {
+  ContextDiagnosticsResult,
+  ManagedWorkspacePublishResult,
+} from '@maka/runtime-host/protocol';
 import {
   DAILY_REVIEW_RANGES,
   normalizeDailyReviewConfig,
@@ -2506,6 +2509,12 @@ const makaBridge = {
       baseBranch?: string;
     }): Promise<GitReviewReadResult> {
       return invokeSessionInput('git-review:read', input);
+    },
+    publish(input: {
+      sessionId: string;
+      publishId: string;
+    }): Promise<ManagedWorkspacePublishResult> {
+      return invokeSessionInput('managed-workspace:publish', input);
     },
   },
   goal: {

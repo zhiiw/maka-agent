@@ -28,7 +28,7 @@ import {
 
 type WorkspaceClient = Pick<
   DesktopRuntimeHostClient,
-  'getSession' | 'readManagedWorkspaceReview'
+  'getSession' | 'readManagedWorkspaceReview' | 'publishManagedWorkspaceSnapshot'
 >;
 
 export function registerRuntimeHostWorkspaceIpc(
@@ -55,6 +55,28 @@ export function registerRuntimeHostWorkspaceIpc(
     if (!cwd) return { ok: false as const, reason: 'workspace_unavailable' as const };
     return readGitReview(cwd, request.source, undefined, request.baseBranch);
   });
+
+  input.ipcMain.handle('managed-workspace:publish', async (_event, raw: unknown) => {
+    const request = publishRequest(raw);
+    const session = await input.client.getSession(request.sessionId);
+    if (!session) throw new Error(`No such Session: ${request.sessionId}`);
+    if (session.toolProfile !== 'managed-coding-v1') {
+      throw new Error('Session does not own a managed workspace');
+    }
+    return input.client.publishManagedWorkspaceSnapshot(request.sessionId, request.publishId);
+  });
+}
+
+function publishRequest(value: unknown): { sessionId: string; publishId: string } {
+  const record = requiredRecord(value, 'managed workspace publication');
+  const publishId = requiredString(record.publishId, 'Publication id');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(publishId)) {
+    throw new Error('Invalid Publication id');
+  }
+  return {
+    sessionId: requiredString(record.sessionId, 'Session id'),
+    publishId,
+  };
 }
 
 async function sessionWorkspace(hostCwd: string): Promise<string | null> {
