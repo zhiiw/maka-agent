@@ -375,6 +375,8 @@ export interface CreateManagedDependencySnapshotAuthorityInput {
     readonly arch: string;
   };
   readonly maxCacheBytes?: number;
+  readonly maxSnapshotBytes?: number;
+  readonly maxSnapshotEntries?: number;
   readonly failpoint?: (point: ManagedDependencySnapshotFailpoint) => void | Promise<void>;
 }
 
@@ -400,6 +402,14 @@ export interface ManagedDependencyEnvironmentAuthority {
 export async function createManagedDependencySnapshotAuthority(
   input: CreateManagedDependencySnapshotAuthorityInput,
 ): Promise<ManagedDependencySnapshotAuthority> {
+  const maxSnapshotBytes = input.maxSnapshotBytes ?? input.maxCacheBytes ?? 2 * 1024 * 1024 * 1024;
+  const maxSnapshotEntries = input.maxSnapshotEntries ?? 250_000;
+  if (!Number.isSafeInteger(maxSnapshotBytes) || maxSnapshotBytes < 0) {
+    throw new TypeError('Managed dependency snapshot byte budget must be non-negative');
+  }
+  if (!Number.isSafeInteger(maxSnapshotEntries) || maxSnapshotEntries < 1) {
+    throw new TypeError('Managed dependency snapshot entry budget must be positive');
+  }
   const runtimeIdentitySha256 = sha256(
     Buffer.from(MANAGED_DEPENDENCY_SNAPSHOT_RUNTIME_DOMAIN, 'utf8'),
   );
@@ -435,7 +445,11 @@ export async function createManagedDependencySnapshotAuthority(
           verbatimSymlinks: true,
         });
       }
-      const copied = await hashDependencyTree(request.outputRoot);
+      const copied = await hashDependencyTree(request.outputRoot, {
+        maxBytes: maxSnapshotBytes,
+        maxEntries: maxSnapshotEntries,
+        abortSignal: request.abortSignal,
+      });
       if (copied.sha256 !== source.contentTreeSha256) {
         throw new Error('Managed dependency source changed while it was imported');
       }
@@ -457,7 +471,11 @@ export async function createManagedDependencySnapshotAuthority(
       if (closed) throw new Error('Managed dependency snapshot authority is closed');
       request.abortSignal?.throwIfAborted();
       const sourceRoot = await requireDependencySnapshotSource(request.sourceDependencyRoot);
-      const observed = await hashDependencyTree(sourceRoot);
+      const observed = await hashDependencyTree(sourceRoot, {
+        maxBytes: maxSnapshotBytes,
+        maxEntries: maxSnapshotEntries,
+        abortSignal: request.abortSignal,
+      });
       await input.failpoint?.('after_source_observation');
       request.abortSignal?.throwIfAborted();
       const identity = computeManagedDependencyEnvironmentIdentity({
@@ -1232,7 +1250,12 @@ function assertCanonicalIdentity(
 
 async function hashDependencyTree(
   root: string,
-  options: { readonly durable?: boolean } = {},
+  options: {
+    readonly durable?: boolean;
+    readonly maxBytes?: number;
+    readonly maxEntries?: number;
+    readonly abortSignal?: AbortSignal;
+  } = {},
 ): Promise<{
   readonly sha256: `sha256:${string}`;
   readonly bytes: number;
@@ -1241,7 +1264,7 @@ async function hashDependencyTree(
   const hash = createHash('sha256');
   const counter = { bytes: 0, entries: 0 };
   hash.update(MANAGED_DEPENDENCY_TREE_DOMAIN);
-  await hashDirectory(root, '', hash, counter, options.durable === true);
+  await hashDirectory(root, '', hash, counter, options);
   if (process.platform === 'win32') await assertNoWindowsAlternateStreams(root);
   return Object.freeze({
     sha256: `sha256:${hash.digest('hex')}`,
@@ -1255,8 +1278,14 @@ async function hashDirectory(
   relativeRoot: string,
   hash: ReturnType<typeof createHash>,
   counter: { bytes: number; entries: number },
-  durable: boolean,
+  options: {
+    readonly durable?: boolean;
+    readonly maxBytes?: number;
+    readonly maxEntries?: number;
+    readonly abortSignal?: AbortSignal;
+  },
 ) {
+  options.abortSignal?.throwIfAborted();
   const directory = relativeRoot ? join(root, relativeRoot) : root;
   const entries = await readdir(directory, { withFileTypes: true });
   entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
@@ -1265,6 +1294,9 @@ async function hashDirectory(
       throw new Error('Managed dependency environment contains a non-portable path');
     }
     counter.entries += 1;
+    if (options.maxEntries !== undefined && counter.entries > options.maxEntries) {
+      throw new Error('Managed dependency snapshot entry budget was exceeded');
+    }
     const relativePath = relativeRoot ? join(relativeRoot, entry.name) : entry.name;
     const portablePath = relativePath.replaceAll('\\', '/');
     const absolutePath = join(root, relativePath);
@@ -1272,15 +1304,32 @@ async function hashDirectory(
     const mode = process.platform === 'win32' ? 0 : info.mode & 0o777;
     if (entry.isDirectory()) {
       hash.update(`d\0${portablePath}\0${mode}\0`);
-      await hashDirectory(root, relativePath, hash, counter, durable);
+      await hashDirectory(root, relativePath, hash, counter, options);
       continue;
     }
     if (entry.isFile()) {
       hash.update(`f\0${portablePath}\0${mode}\0${info.size}\0`);
+      if (options.maxBytes !== undefined && counter.bytes + info.size > options.maxBytes) {
+        throw new Error('Managed dependency snapshot byte budget was exceeded');
+      }
       counter.bytes += info.size;
-      for await (const chunk of createReadStream(absolutePath)) hash.update(chunk as Buffer);
+      let observedBytes = 0;
+      for await (const chunk of createReadStream(absolutePath)) {
+        options.abortSignal?.throwIfAborted();
+        observedBytes += (chunk as Buffer).byteLength;
+        if (
+          options.maxBytes !== undefined &&
+          counter.bytes - info.size + observedBytes > options.maxBytes
+        ) {
+          throw new Error('Managed dependency snapshot byte budget was exceeded');
+        }
+        hash.update(chunk as Buffer);
+      }
+      if (observedBytes !== info.size) {
+        throw new Error('Managed dependency file changed while it was observed');
+      }
       hash.update('\0');
-      if (durable) await syncRegularFile(absolutePath, info.mode);
+      if (options.durable === true) await syncRegularFile(absolutePath, info.mode);
       continue;
     }
     if (entry.isSymbolicLink()) {
@@ -1296,7 +1345,7 @@ async function hashDirectory(
     }
     throw new Error('Managed dependency environment contains an unsupported filesystem entry');
   }
-  if (durable) await syncDirectory(directory);
+  if (options.durable === true) await syncDirectory(directory);
 }
 
 /**

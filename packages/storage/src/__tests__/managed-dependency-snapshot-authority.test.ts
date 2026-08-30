@@ -115,6 +115,35 @@ test('does not reuse a logical environment for different dependency bytes', asyn
   );
 });
 
+test('enforces the source byte budget before publishing an artifact', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-dependency-snapshot-budget-'));
+  const sourceRoot = await createSourceDependencyTree(root, 'source', 'too-large\n');
+  await mkdir(join(root, 'storage'), { recursive: true });
+  const authority = await createManagedDependencySnapshotAuthority({
+    storageRoot: join(root, 'storage'),
+    nodeRuntime: {
+      version: process.versions.node,
+      abi: process.versions.modules,
+      platform: process.platform,
+      arch: process.arch,
+    },
+    maxSnapshotBytes: 4,
+  });
+  t.after(async () => {
+    await authority.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    authority.acquire({
+      sourceDependencyRoot: sourceRoot,
+      manifestBytes: PACKAGE_JSON,
+      lockfileBytes: PACKAGE_LOCK,
+    }),
+    /snapshot byte budget/u,
+  );
+});
+
 for (const failpoint of [
   'after_environment_publish',
   'after_environment_receipt_durable',
