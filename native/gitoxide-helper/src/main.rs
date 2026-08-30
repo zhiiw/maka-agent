@@ -4048,7 +4048,13 @@ fn claim_or_reopen_import_destination(path: &Path) -> Result<gix::Repository, &'
             Ok(repository)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(path).map_err(|_| "import_destination_create_failed")?;
+            match fs::create_dir(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    return Err("import_destination_not_fresh");
+                }
+                Err(_) => return Err("import_destination_create_failed"),
+            }
             let repository = gix::ThreadSafeRepository::init_opts(
                 path,
                 gix::create::Kind::Bare,
