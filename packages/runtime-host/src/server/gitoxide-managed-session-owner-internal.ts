@@ -58,6 +58,14 @@ import {
   type GitoxideManagedRestoreOwnerInternal,
 } from './gitoxide-managed-restore-owner-internal.js';
 import {
+  createGitoxideManagedPublishOwnerInternal,
+  type GitoxideManagedPublishOwnerInternal,
+} from './gitoxide-managed-publish-owner-internal.js';
+import {
+  createGitoxideManagedTimeTravelOwnerInternal,
+  type GitoxideManagedTimeTravelOwnerInternal,
+} from './gitoxide-managed-time-travel-owner-internal.js';
+import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
   reopenGitoxideAcceptedRepositoryInternal,
@@ -77,11 +85,14 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly sourceKind: ResumableWorkspaceSourceKindInternal;
   readonly repositoryPath: string;
   readonly repositoryId: string;
+  readonly baselineWorkspaceVersionId: string;
   readonly workspaceId: string;
   readonly workspaceEpochId: string;
   readonly inspection: GitoxideManagedInspectionOwnerInternal;
+  readonly publish: GitoxideManagedPublishOwnerInternal;
   readonly review: GitoxideManagedReviewOwnerInternal;
   readonly restore: GitoxideManagedRestoreOwnerInternal;
+  readonly timeTravel: GitoxideManagedTimeTravelOwnerInternal;
   readonly writeEdit: GitoxideManagedWriteEditOwnerInternal;
 }
 
@@ -546,16 +557,71 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       return Object.freeze({ commitOid: version.commitOid, treeOid: version.treeOid });
     },
   });
+  const publish = createGitoxideManagedPublishOwnerInternal({
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    repositoryPath,
+    async readAcceptedIdentity() {
+      const head = await baselineAuthority.readHead(
+        identity.workspaceId,
+        identity.workspaceEpochId,
+      );
+      if (
+        !head ||
+        head.repositoryId !== identity.repositoryId ||
+        head.workspaceId !== identity.workspaceId ||
+        head.workspaceEpochId !== identity.workspaceEpochId
+      ) {
+        throw new Error('Gitoxide managed publication durable workspace head is unavailable');
+      }
+      const version = await baselineAuthority.readVersion(head.workspaceVersionId);
+      if (
+        !version ||
+        version.repositoryId !== head.repositoryId ||
+        version.workspaceId !== head.workspaceId ||
+        version.workspaceEpochId !== head.workspaceEpochId ||
+        version.workspaceVersionId !== head.workspaceVersionId ||
+        version.acceptedEventId !== head.acceptedEventId ||
+        version.commitOid !== head.commitOid ||
+        version.treeOid !== head.treeOid
+      ) {
+        throw new Error('Gitoxide managed publication accepted workspace version is unavailable');
+      }
+      return Object.freeze({ commitOid: version.commitOid, treeOid: version.treeOid });
+    },
+  });
+  const timeTravel = createGitoxideManagedTimeTravelOwnerInternal({
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    repositoryPath,
+    storageRoot,
+    workspaceEpochId: identity.workspaceEpochId,
+    async readVersionIdentity(workspaceVersionId) {
+      const version = await baselineAuthority.readVersion(workspaceVersionId);
+      if (
+        !version ||
+        version.repositoryId !== identity.repositoryId ||
+        version.workspaceId !== identity.workspaceId ||
+        version.workspaceEpochId !== identity.workspaceEpochId
+      ) {
+        throw new Error('Gitoxide managed time-travel workspace version is unavailable');
+      }
+      return Object.freeze({ commitOid: version.commitOid, treeOid: version.treeOid });
+    },
+  });
   await writeEdit.reconcileAcceptedProjection(input.abortSignal);
   return Object.freeze({
     sourceKind: sourceBinding.kind,
     repositoryPath,
     repositoryId: identity.repositoryId,
+    baselineWorkspaceVersionId: identity.workspaceVersionId,
     workspaceId: identity.workspaceId,
     workspaceEpochId: identity.workspaceEpochId,
     inspection,
+    publish,
     review,
     restore,
+    timeTravel,
     writeEdit,
   });
 }

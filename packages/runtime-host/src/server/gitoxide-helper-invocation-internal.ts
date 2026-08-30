@@ -147,6 +147,7 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'restore_destination_conflict',
   'restore_destination_create_failed',
   'restore_file_write_failed',
+  'published_ref_conflict',
   'unsupported_source_entry_kind',
   'unsupported_source_attributes',
   'unsupported_source_path',
@@ -361,6 +362,17 @@ export interface GitoxideAcceptedTreeMaterializedV1 {
   readonly acceptedTreeOid: string;
   readonly filesMaterialized: number;
   readonly bytesMaterialized: number;
+  readonly managedTreePolicyVersion: 3;
+}
+
+export interface GitoxideAcceptedRefPublishedV1 {
+  readonly protocolVersion: 1;
+  readonly kind: 'accepted_ref_published';
+  readonly objectFormat: 'sha1';
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly publishedRef: string;
+  readonly replayed: boolean;
   readonly managedTreePolicyVersion: 3;
 }
 
@@ -1118,6 +1130,51 @@ export async function materializeAcceptedTreeWithGitoxideHelperInternal(input: {
     deadlineAt,
   });
   return decodeAcceptedTreeMaterializedOutcome(outcome, input);
+}
+
+export async function publishAcceptedRefWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly publishedRef: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideAcceptedRefPublishedV1> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.observeAcceptedRefMs;
+  if (
+    !MAKA_REF_PATTERN.test(input.publishedRef) ||
+    !input.publishedRef.startsWith('refs/maka/published/')
+  ) {
+    throw invocationInvalid('Gitoxide published ref is invalid');
+  }
+  const prepared = await prepareAcceptedTreeInvocation({
+    ...input,
+    deadlineAt,
+  });
+  if (!SHA1_OID_PATTERN.test(input.acceptedTreeOid)) {
+    throw invocationInvalid('Gitoxide published tree is invalid');
+  }
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: prepared.artifact.protocolVersion,
+      operation: 'publish_accepted_ref',
+      repositoryPath: prepared.repositoryPath,
+      acceptedCommitOid: input.acceptedCommitOid,
+      acceptedTreeOid: input.acceptedTreeOid,
+      publishedRef: input.publishedRef,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  const outcome = await invokeHelper({
+    executablePath: prepared.artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  return decodeAcceptedRefPublishedOutcome(outcome, input);
 }
 
 function assertTreeQueryInput(path: string, pattern: string, limit: number): void {
@@ -1881,6 +1938,32 @@ function decodeAcceptedTreeMaterializedOutcome(
   throw protocolInvalid('Gitoxide accepted-tree materialization response is invalid');
 }
 
+function decodeAcceptedRefPublishedOutcome(
+  outcome: HelperProcessOutcome,
+  expected: {
+    readonly acceptedCommitOid: string;
+    readonly acceptedTreeOid: string;
+    readonly publishedRef: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): GitoxideAcceptedRefPublishedV1 {
+  const value = parseHelperOutcome(outcome);
+  if (
+    outcome.exitCode === 0 &&
+    isAcceptedRefPublished(value) &&
+    value.acceptedCommitOid === expected.acceptedCommitOid &&
+    value.acceptedTreeOid === expected.acceptedTreeOid &&
+    value.publishedRef === expected.publishedRef &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
+  ) {
+    return Object.freeze(value);
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('publish accepted ref', value.reason);
+  }
+  throw protocolInvalid('Gitoxide accepted-ref publication response is invalid');
+}
+
 function gitBlobOid(content: Buffer): string {
   return createHash('sha1')
     .update(`blob ${content.length}\0`, 'utf8')
@@ -2089,6 +2172,31 @@ function isAcceptedTreeMaterialized(value: unknown): value is GitoxideAcceptedTr
     value.filesMaterialized <= 200_000 &&
     isNonNegativeSafeInteger(value.bytesMaterialized) &&
     value.bytesMaterialized <= 2 * 1024 * 1024 * 1024 &&
+    value.managedTreePolicyVersion === 3
+  );
+}
+
+function isAcceptedRefPublished(value: unknown): value is GitoxideAcceptedRefPublishedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'publishedRef',
+      'replayed',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'accepted_ref_published' &&
+    value.objectFormat === 'sha1' &&
+    isSha1(value.acceptedCommitOid) &&
+    isSha1(value.acceptedTreeOid) &&
+    typeof value.publishedRef === 'string' &&
+    MAKA_REF_PATTERN.test(value.publishedRef) &&
+    value.publishedRef.startsWith('refs/maka/published/') &&
+    typeof value.replayed === 'boolean' &&
     value.managedTreePolicyVersion === 3
   );
 }
