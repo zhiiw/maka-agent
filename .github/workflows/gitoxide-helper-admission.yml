@@ -36,6 +36,10 @@ on:
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-write-edit-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-session-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-continuation-crash.test.ts'
+      - 'packages/runtime-host/src/__tests__/managed-coding-v2-crash.test.ts'
+      - 'packages/runtime-host/src/server/current-process-managed-toolchain-internal.ts'
+      - 'packages/runtime-host/src/server/managed-command-*.ts'
+      - 'packages/runtime-host/src/server/managed-node-test-*.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/execution-host*.ts'
       - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
       - 'packages/runtime-host/src/__tests__/hosted-execution-tool-profile.test.ts'
@@ -68,6 +72,10 @@ on:
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-write-edit-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-session-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-continuation-crash.test.ts'
+      - 'packages/runtime-host/src/__tests__/managed-coding-v2-crash.test.ts'
+      - 'packages/runtime-host/src/server/current-process-managed-toolchain-internal.ts'
+      - 'packages/runtime-host/src/server/managed-command-*.ts'
+      - 'packages/runtime-host/src/server/managed-node-test-*.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/execution-host*.ts'
       - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
       - 'packages/runtime-host/src/__tests__/hosted-execution-tool-profile.test.ts'
@@ -116,6 +124,8 @@ jobs:
         run: cargo test --locked
       - name: Install JavaScript dependencies without packaging hooks
         run: npm ci --ignore-scripts
+      - name: Install the exact Electron runtime used by the packaged Host gate
+        run: node scripts/install-electron-with-retry.mjs
       - name: Build the helper invocation owner
         run: >-
           npm --workspace @maka/core run build &&
@@ -138,5 +148,9 @@ jobs:
         env:
           MAKA_GITOXIDE_HELPER_PATH: ${{ github.workspace }}/native/gitoxide-helper/target/debug/maka-gitoxide-helper${{ runner.os == 'Windows' && '.exe' || '' }}
         run: node --test packages/runtime-host/dist/__tests__/gitoxide-managed-continuation-crash.test.js
+      - name: Test packaged managed-coding-v2 Host crash convergence
+        env:
+          MAKA_GITOXIDE_HELPER_PATH: ${{ github.workspace }}/native/gitoxide-helper/target/debug/maka-gitoxide-helper${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: node --test packages/runtime-host/dist/__tests__/managed-coding-v2-crash.test.js
       - name: Test packaged helper preparation
         run: node --test scripts/prepare-gitoxide-helper.test.mjs

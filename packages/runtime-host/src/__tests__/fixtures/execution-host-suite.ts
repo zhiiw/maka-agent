@@ -18,7 +18,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { fork, type ChildProcess } from 'node:child_process';
+import { fork, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   appendFile,
@@ -36,6 +36,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { TOOL_BOUNDARY_PROTOCOL_V1 } from '@maka/core/runtime-event';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import type { AgentRunHeader } from '@maka/core/agent-run';
@@ -128,6 +129,7 @@ export interface ExecutionHostHandle {
 
 export interface ExecutionHostTestOptions {
   readonly packagedResourcesRoot?: string;
+  readonly runtimeExecutablePath?: string;
   readonly providerCallLogPath?: string;
   readonly continuationFailpoint?:
     | 'after_continuation_claim_committed'
@@ -1269,16 +1271,23 @@ export class ExecutionFixture {
     } else {
       delete env.MAKA_TEST_PROVIDER_FAILPOINT_AFTER_SEND;
     }
-    const child = fork(
-      new URL('./execution-host.js', import.meta.url),
-      [
-        this.root,
-        this.capability.rootId,
-        '60000',
-        ...(recoveryProbe ? [recoveryProbe.sessionId, recoveryProbe.runId] : []),
-      ],
-      { stdio: ['ignore', 'ignore', stderr, 'ipc'], env },
-    );
+    const childArgs = [
+      fileURLToPath(new URL('./execution-host.js', import.meta.url)),
+      this.root,
+      this.capability.rootId,
+      '60000',
+      ...(recoveryProbe ? [recoveryProbe.sessionId, recoveryProbe.runId] : []),
+    ];
+    const child = testOptions.runtimeExecutablePath
+      ? spawn(testOptions.runtimeExecutablePath, childArgs, {
+          stdio: ['ignore', 'ignore', stderr, 'ipc'],
+          env: { ...env, ELECTRON_RUN_AS_NODE: '1' },
+          windowsHide: true,
+        })
+      : fork(new URL('./execution-host.js', import.meta.url), childArgs.slice(1), {
+          stdio: ['ignore', 'ignore', stderr, 'ipc'],
+          env,
+        });
     this.#children.add(child);
     return child;
   }

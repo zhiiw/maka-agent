@@ -51,7 +51,20 @@ Read / Glob / Grep / Write / Edit / ManagedNodeTest
 本切片建立 Host 产品 composition，但不立即把 Desktop 默认创建策略从 v1 切到 v2。默认切换必须与 packaged
 Host/helper kill-reopen 和三平台 enforcing sandbox gate 同一交付完成，避免用户拿到未经证明的默认能力。
 
-## 5. 平台矩阵
+## 5. Production-shaped crash gate
+
+默认切换前的 crash gate 不使用同进程异常模拟：
+
+1. 使用仓库锁定的 Electron/Node 24 启动真实 Runtime Host；
+2. 使用真实 packaged Gitoxide helper、managed-command manifest 与平台 sandbox；
+3. provider 发出一次 `ManagedNodeTest`，并在看到 durable tool result 后挂起；
+4. 测试强杀整个 Host root process；
+5. 第二个 Host 从 SQLite、accepted Git tree 和 continuation facts 自动继续；
+6. provider 不得再次发出工具调用，RuntimeEvents 中只能有一对 `function_call/function_response`。
+
+测试由 Gitoxide 三平台 workflow 持有。没有真实 helper 的本地构建只能明确 skip，不能把 skip 计作 crash 证据。
+
+## 6. 平台矩阵
 
 | 平台 | composition 语义 | 默认启用前 gate |
 | --- | --- | --- |
