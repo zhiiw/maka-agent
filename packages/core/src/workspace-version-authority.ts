@@ -25,6 +25,7 @@ export const WORKSPACE_BASELINE_ACCEPTED_FACT_KIND = 'maka.workspace.baseline_ac
 export const WORKSPACE_VERSION_ACCEPTED_FACT_KIND = 'maka.workspace.version_accepted' as const;
 export const WORKSPACE_HISTORY_VERSION_ACCEPTED_FACT_KIND =
   'maka.workspace.history_version_accepted' as const;
+export const WORKSPACE_EPOCH_ACTIVATED_FACT_KIND = 'maka.workspace.epoch_activated' as const;
 export const WORKSPACE_FACT_VERSION = 1 as const;
 export const WORKSPACE_VERSION_AUTHORITY_CAPABILITY_V1 =
   'runtime_workspace_version_authority_v1' as const;
@@ -32,6 +33,7 @@ export const WORKSPACE_AUTHORITY_SESSION_ID = 'maka_workspace_authority' as cons
 export const WORKSPACE_MATERIALIZATION_SEMANTICS_V1 =
   'git_tree_materialized_with_fixed_config_v1' as const;
 const WORKSPACE_HISTORY_RESTORE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
+const WORKSPACE_REBASELINE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 
 export type WorkspaceGitObjectFormat = 'sha1' | 'sha256';
 
@@ -170,6 +172,15 @@ export interface WorkspaceHistoryVersionAcceptedV1 {
   executionProfileDigest: `sha256:${string}`;
 }
 
+export interface WorkspaceEpochActivatedV1 {
+  readonly protocol: 'workspace_epoch_activated_v1';
+  readonly repositoryId: string;
+  readonly workspaceId: string;
+  readonly previousWorkspaceEpochId: string | null;
+  readonly workspaceEpochId: string;
+  readonly rebaselineId: string | null;
+}
+
 export type WorkspaceAcceptedVersionV1 =
   | WorkspaceBaselineAcceptedV1
   | WorkspaceVersionAcceptedV1
@@ -195,6 +206,11 @@ export type RuntimeEventWorkspaceFactEnvelope =
       kind: typeof WORKSPACE_HISTORY_VERSION_ACCEPTED_FACT_KIND;
       version: typeof WORKSPACE_FACT_VERSION;
       payload: WorkspaceHistoryVersionAcceptedV1;
+    }
+  | {
+      kind: typeof WORKSPACE_EPOCH_ACTIVATED_FACT_KIND;
+      version: typeof WORKSPACE_FACT_VERSION;
+      payload: WorkspaceEpochActivatedV1;
     };
 
 export interface WorkspaceBaselineAuthorityInput {
@@ -217,6 +233,12 @@ export interface WorkspaceHistorySuccessorAuthorityInput {
   committedAt: number;
   successor: WorkspaceHistorySuccessorDescriptorV1;
   origin: WorkspaceHistoryRestoreOriginV1;
+}
+
+export interface WorkspaceEpochActivationAuthorityInput {
+  readonly activationEventId: string;
+  readonly committedAt: number;
+  readonly activation: Omit<WorkspaceEpochActivatedV1, 'protocol'>;
 }
 
 export interface WorkspaceAuthorityIdentity {
@@ -287,6 +309,22 @@ export interface WorkspaceProjectionRebuildResult {
   heads: number;
 }
 
+export interface WorkspaceActiveEpochRecordV1 {
+  readonly repositoryId: string;
+  readonly workspaceId: string;
+  readonly workspaceEpochId: string;
+  readonly rebaselineId: string | null;
+  readonly activationEventId: string;
+  readonly revision: number;
+  readonly committedAt: number;
+}
+
+export interface WorkspaceEpochActivationScanResult {
+  readonly activeEpochs: readonly WorkspaceActiveEpochRecordV1[];
+  readonly issues: readonly WorkspaceAuthorityIssue[];
+  readonly hasCorruption: boolean;
+}
+
 export type WorkspaceAuthorityIssueCode =
   | 'semantic_lane_conflict'
   | 'authority_stream_contamination'
@@ -299,6 +337,7 @@ export type WorkspaceAuthorityIssueCode =
   | 'event_order_conflict'
   | 'baseline_contract_conflict'
   | 'successor_contract_conflict'
+  | 'active_epoch_conflict'
   | 'workspace_head_conflict';
 
 export interface WorkspaceAuthorityIssue {
@@ -339,6 +378,21 @@ export function workspaceAuthorityIdentity(workspaceEpochId: string): WorkspaceA
     invocationId: `workspace_inv_${suffix}`,
     runId: `workspace_run_${suffix}`,
     turnId: `workspace_turn_${suffix}`,
+  };
+}
+
+export function workspaceActivationAuthorityIdentity(
+  workspaceId: string,
+): WorkspaceAuthorityIdentity {
+  if (!IDENTIFIER_PATTERNS.workspaceId.test(workspaceId)) {
+    throw new Error(`Invalid workspace id: ${workspaceId}`);
+  }
+  const suffix = workspaceId.slice('workspace_'.length);
+  return {
+    sessionId: WORKSPACE_AUTHORITY_SESSION_ID,
+    invocationId: `workspace_active_inv_${suffix}`,
+    runId: `workspace_active_run_${suffix}`,
+    turnId: `workspace_active_turn_${suffix}`,
   };
 }
 
@@ -490,6 +544,51 @@ export function buildWorkspaceHistorySuccessorAuthorityEvent(
   };
 }
 
+export function buildWorkspaceEpochActivationEvent(
+  input: WorkspaceEpochActivationAuthorityInput,
+): RuntimeEvent {
+  if (
+    !EVENT_ID_PATTERN.test(input.activationEventId) ||
+    !Number.isSafeInteger(input.committedAt) ||
+    input.committedAt < 0 ||
+    !isWorkspaceEpochActivatedV1({ protocol: 'workspace_epoch_activated_v1', ...input.activation })
+  ) {
+    throw new Error('Invalid workspace epoch activation authority input');
+  }
+  const identity = workspaceActivationAuthorityIdentity(input.activation.workspaceId);
+  return {
+    id: input.activationEventId,
+    ...identity,
+    ts: input.committedAt,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      workspaceFact: {
+        kind: WORKSPACE_EPOCH_ACTIVATED_FACT_KIND,
+        version: WORKSPACE_FACT_VERSION,
+        payload: { protocol: 'workspace_epoch_activated_v1', ...input.activation },
+      },
+    },
+  };
+}
+
+export function buildInitialWorkspaceEpochActivationEvent(
+  input: WorkspaceBaselineAuthorityInput,
+): RuntimeEvent {
+  return buildWorkspaceEpochActivationEvent({
+    activationEventId: `workspace-active-root-${input.epoch.workspaceId.slice('workspace_'.length)}`,
+    committedAt: input.committedAt,
+    activation: {
+      repositoryId: input.epoch.repositoryId,
+      workspaceId: input.epoch.workspaceId,
+      previousWorkspaceEpochId: null,
+      workspaceEpochId: input.epoch.workspaceEpochId,
+      rebaselineId: null,
+    },
+  });
+}
+
 export function isRuntimeEventWorkspaceFactEnvelope(
   value: unknown,
 ): value is RuntimeEventWorkspaceFactEnvelope {
@@ -506,6 +605,9 @@ export function isRuntimeEventWorkspaceFactEnvelope(
   if (value.kind === WORKSPACE_HISTORY_VERSION_ACCEPTED_FACT_KIND) {
     return isWorkspaceHistoryVersionAcceptedV1(value.payload);
   }
+  if (value.kind === WORKSPACE_EPOCH_ACTIVATED_FACT_KIND) {
+    return isWorkspaceEpochActivatedV1(value.payload);
+  }
   return false;
 }
 
@@ -517,7 +619,10 @@ export function validateWorkspaceFactEventLane(
   if (!fact) return { ok: false, code: 'semantic_lane_conflict', eventId: event.id };
   let identity: WorkspaceAuthorityIdentity;
   try {
-    identity = workspaceAuthorityIdentity(fact.payload.workspaceEpochId);
+    identity =
+      fact.kind === WORKSPACE_EPOCH_ACTIVATED_FACT_KIND
+        ? workspaceActivationAuthorityIdentity(fact.payload.workspaceId)
+        : workspaceAuthorityIdentity(fact.payload.workspaceEpochId);
   } catch {
     return { ok: false, code: 'semantic_lane_conflict', eventId: event.id };
   }
@@ -578,6 +683,7 @@ export function scanWorkspaceBaselineAuthority(
       epochRows.set(epochId, matches);
       continue;
     }
+    if (fact.kind === WORKSPACE_EPOCH_ACTIVATED_FACT_KIND) continue;
     const target =
       fact.kind === WORKSPACE_BASELINE_ACCEPTED_FACT_KIND ? baselineRows : successorRows;
     const matches = target.get(epochId) ?? [];
@@ -708,6 +814,90 @@ export function scanWorkspaceBaselineAuthority(
     baselines: issues.length === 0 ? baselines : [],
     successors: issues.length === 0 ? successors : [],
     heads: issues.length === 0 ? heads : [],
+    issues,
+    hasCorruption: issues.length > 0,
+  };
+}
+
+export function scanWorkspaceEpochActivations(
+  baselines: readonly ScannedWorkspaceBaselineAuthority[],
+  rows: readonly WorkspaceAuthorityLedgerRow[],
+): WorkspaceEpochActivationScanResult {
+  const issues: WorkspaceAuthorityIssue[] = [];
+  const epochs = new Map(baselines.map((baseline) => [baseline.epoch.workspaceEpochId, baseline]));
+  const activationRows = new Map<string, WorkspaceAuthorityLedgerRow[]>();
+  for (const row of rows) {
+    const fact = row.event.actions?.workspaceFact;
+    if (fact?.kind !== WORKSPACE_EPOCH_ACTIVATED_FACT_KIND) continue;
+    const lane = validateWorkspaceFactEventLane(row.event);
+    if (!lane.ok) {
+      issues.push(lane);
+      continue;
+    }
+    const matches = activationRows.get(fact.payload.workspaceId) ?? [];
+    matches.push(row);
+    activationRows.set(fact.payload.workspaceId, matches);
+  }
+
+  const activeEpochs: WorkspaceActiveEpochRecordV1[] = [];
+  for (const [workspaceId, workspaceRows] of [...activationRows.entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    const transitions = [...workspaceRows].sort(
+      (left, right) =>
+        left.eventSeq - right.eventSeq || left.event.id.localeCompare(right.event.id),
+    );
+    let active: WorkspaceActiveEpochRecordV1 | undefined;
+    for (let index = 0; index < transitions.length; index += 1) {
+      const row = transitions[index]!;
+      const payload = row.event.actions!.workspaceFact!.payload as WorkspaceEpochActivatedV1;
+      const target = epochs.get(payload.workspaceEpochId);
+      const isRoot = index === 0;
+      if (
+        row.eventSeq !== index + 1 ||
+        !target ||
+        target.epoch.workspaceId !== workspaceId ||
+        payload.workspaceId !== workspaceId ||
+        (isRoot
+          ? payload.previousWorkspaceEpochId !== null || payload.rebaselineId !== null
+          : !active ||
+            payload.previousWorkspaceEpochId !== active.workspaceEpochId ||
+            payload.rebaselineId === null) ||
+        (!isRoot && target.epoch.repositoryId !== active!.repositoryId) ||
+        target.epoch.workspaceId !== workspaceId ||
+        payload.repositoryId !== target.epoch.repositoryId ||
+        (!isRoot && payload.workspaceEpochId === active!.workspaceEpochId)
+      ) {
+        issues.push({
+          code: 'active_epoch_conflict',
+          eventId: row.event.id,
+          workspaceEpochId: payload.workspaceEpochId,
+        });
+        break;
+      }
+      active = {
+        repositoryId: target.epoch.repositoryId,
+        workspaceId,
+        workspaceEpochId: payload.workspaceEpochId,
+        rebaselineId: payload.rebaselineId,
+        activationEventId: row.event.id,
+        revision: index + 1,
+        committedAt: row.event.ts,
+      };
+    }
+    if (active) activeEpochs.push(active);
+  }
+  for (const baseline of baselines) {
+    if (!activationRows.has(baseline.epoch.workspaceId)) {
+      issues.push({
+        code: 'active_epoch_conflict',
+        eventId: baseline.epochOpenedEventId,
+        workspaceEpochId: baseline.epoch.workspaceEpochId,
+      });
+    }
+  }
+  return {
+    activeEpochs: issues.length === 0 ? activeEpochs : [],
     issues,
     hasCorruption: issues.length > 0,
   };
@@ -900,6 +1090,31 @@ function isWorkspaceEpochOpenedV1(value: unknown): value is WorkspaceEpochOpened
     value.protocol === 'workspace_epoch_opened_v1' &&
     isWorkspaceEpochDescriptor(value) &&
     isIdentifier(value.initialWorkspaceVersionId, 'workspaceVersionId')
+  );
+}
+
+function isWorkspaceEpochActivatedV1(value: unknown): value is WorkspaceEpochActivatedV1 {
+  return (
+    hasExactKeys(value, [
+      'protocol',
+      'repositoryId',
+      'workspaceId',
+      'previousWorkspaceEpochId',
+      'workspaceEpochId',
+      'rebaselineId',
+    ]) &&
+    value.protocol === 'workspace_epoch_activated_v1' &&
+    isIdentifier(value.repositoryId, 'repositoryId') &&
+    isIdentifier(value.workspaceId, 'workspaceId') &&
+    (value.previousWorkspaceEpochId === null ||
+      isIdentifier(value.previousWorkspaceEpochId, 'workspaceEpochId')) &&
+    isIdentifier(value.workspaceEpochId, 'workspaceEpochId') &&
+    value.previousWorkspaceEpochId !== value.workspaceEpochId &&
+    (value.rebaselineId === null ||
+      (typeof value.rebaselineId === 'string' &&
+        WORKSPACE_REBASELINE_ID_PATTERN.test(value.rebaselineId))) &&
+    ((value.previousWorkspaceEpochId === null && value.rebaselineId === null) ||
+      (value.previousWorkspaceEpochId !== null && value.rebaselineId !== null))
   );
 }
 

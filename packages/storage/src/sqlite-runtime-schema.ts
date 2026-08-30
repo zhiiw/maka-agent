@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_RUNTIME_SCHEMA_VERSION = 16;
+export const SQLITE_RUNTIME_SCHEMA_VERSION = 17;
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY = 'runtime_recovery_authority';
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY_VERSION = 1;
 export const RUNTIME_CONTINUATION_AUTHORITY_CAPABILITY = 'runtime_continuation_authority';
@@ -635,6 +635,44 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
     INSERT INTO runtime_workspace_heads SELECT * FROM runtime_workspace_heads_v15;
     DROP TABLE runtime_workspace_heads_v15;
     DROP TABLE runtime_workspace_versions_v15;
+    `,
+  ],
+  [
+    17,
+    `
+    CREATE TABLE runtime_workspace_active_epochs (
+      workspace_id TEXT PRIMARY KEY,
+      repository_id TEXT NOT NULL,
+      workspace_epoch_id TEXT NOT NULL UNIQUE,
+      rebaseline_id TEXT,
+      activation_event_id TEXT NOT NULL UNIQUE REFERENCES runtime_events(event_id),
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      committed_at INTEGER NOT NULL,
+      FOREIGN KEY (workspace_id, workspace_epoch_id)
+        REFERENCES runtime_workspace_epochs(workspace_id, workspace_epoch_id),
+      CHECK (
+        (revision = 1 AND rebaseline_id IS NULL) OR
+        (revision > 1 AND rebaseline_id IS NOT NULL)
+      )
+    );
+
+    INSERT INTO runtime_workspace_active_epochs (
+      workspace_id, repository_id, workspace_epoch_id, rebaseline_id,
+      activation_event_id, revision, committed_at
+    )
+    SELECT
+      json_extract(payload_json, '$.actions.workspaceFact.payload.workspaceId'),
+      json_extract(payload_json, '$.actions.workspaceFact.payload.repositoryId'),
+      json_extract(payload_json, '$.actions.workspaceFact.payload.workspaceEpochId'),
+      NULL,
+      event_id,
+      1,
+      json_extract(payload_json, '$.ts')
+    FROM runtime_events
+    WHERE session_id = 'maka_workspace_authority'
+      AND json_extract(payload_json, '$.actions.workspaceFact.kind') = 'maka.workspace.epoch_activated'
+      AND json_extract(payload_json, '$.actions.workspaceFact.payload.previousWorkspaceEpochId') IS NULL
+      AND json_extract(payload_json, '$.actions.workspaceFact.payload.rebaselineId') IS NULL;
     `,
   ],
 ]);

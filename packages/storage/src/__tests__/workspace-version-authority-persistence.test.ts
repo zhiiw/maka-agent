@@ -28,6 +28,7 @@ import {
   buildWorkspaceBaselineAuthorityEvents,
   workspaceAuthorityIdentity,
   type WorkspaceBaselineAuthorityInput,
+  type WorkspaceEpochActivationAuthorityInput,
   type WorkspaceHistorySuccessorAuthorityInput,
   type WorkspaceSuccessorAuthorityInput,
 } from '@maka/core/workspace-version-authority';
@@ -53,6 +54,10 @@ import {
   type ManagedMutationTerminalCommitInput,
   type WorkspaceSuccessorCommitInput,
 } from '../workspace-version-authority-internal.js';
+import {
+  commitWorkspaceActiveEpochInternal,
+  readWorkspaceActiveEpochInternal,
+} from '../workspace-active-epoch-authority-internal.js';
 
 const TEST_STORAGE_ROOT_ID = 'a'.repeat(64);
 const TEST_CANDIDATES = new WeakMap<object, WorkspaceSuccessorAuthorityInput>();
@@ -190,11 +195,76 @@ describe('workspace version persistence authority', () => {
         assert.equal(count(raw, 'runtime_workspace_heads'), 1);
         assert.equal(
           countWhere(raw, 'runtime_events', 'session_id = ?', WORKSPACE_AUTHORITY_SESSION_ID),
-          2,
+          3,
         );
       } finally {
         raw.close();
       }
+    });
+  });
+
+  it('keeps a new epoch dormant until one durable activation CAS commits', async () => {
+    await withDatabase(async ({ store }) => {
+      const first = baselineInput();
+      const second = baselineInput({
+        epochOpenedEventId: 'workspace-epoch-event-2',
+        baselineAcceptedEventId: 'workspace-version-event-2',
+        committedAt: first.committedAt + 10,
+        epoch: {
+          ...first.epoch,
+          workspaceEpochId: 'epoch_77777777777777777777777777777777',
+          workspaceInstanceId: 'instance_88888888888888888888888888888888',
+          sourceCommitOid: '7'.repeat(40),
+          sourceTreeOid: '8'.repeat(40),
+        },
+        baseline: {
+          ...first.baseline,
+          workspaceVersionId: 'version_99999999999999999999999999999999',
+          commitOid: '9'.repeat(40),
+          treeOid: '8'.repeat(40),
+        },
+      });
+      await commitWorkspaceBaselineInternal(store, first);
+      const initial = await readWorkspaceActiveEpochInternal(store, first.epoch.workspaceId);
+      assert.equal(initial?.workspaceEpochId, first.epoch.workspaceEpochId);
+      assert.equal(initial?.revision, 1);
+      assert.equal(initial?.rebaselineId, null);
+
+      await commitWorkspaceBaselineInternal(store, second);
+      assert.equal(
+        (await readWorkspaceActiveEpochInternal(store, first.epoch.workspaceId))?.workspaceEpochId,
+        first.epoch.workspaceEpochId,
+      );
+
+      const activation: WorkspaceEpochActivationAuthorityInput = {
+        activationEventId: 'workspace-activation-event-1',
+        committedAt: second.committedAt + 1,
+        activation: {
+          repositoryId: first.epoch.repositoryId,
+          workspaceId: first.epoch.workspaceId,
+          previousWorkspaceEpochId: first.epoch.workspaceEpochId,
+          workspaceEpochId: second.epoch.workspaceEpochId,
+          rebaselineId: 'desktop-rebaseline-1',
+        },
+      };
+      const committed = await commitWorkspaceActiveEpochInternal(
+        store,
+        activation,
+        TEST_STORAGE_ROOT_ID,
+      );
+      assert.equal(committed.created, true);
+      assert.equal(committed.activeEpoch.workspaceEpochId, second.epoch.workspaceEpochId);
+      assert.equal(committed.activeEpoch.revision, 2);
+      assert.deepEqual(
+        await commitWorkspaceActiveEpochInternal(store, activation, TEST_STORAGE_ROOT_ID),
+        { ...committed, created: false },
+      );
+
+      await store.rebuildWorkspaceVersionProjections();
+      assert.deepEqual(
+        await readWorkspaceActiveEpochInternal(store, first.epoch.workspaceId),
+        committed.activeEpoch,
+      );
     });
   });
 
@@ -433,7 +503,7 @@ describe('workspace version persistence authority', () => {
         );
         assert.equal(
           countWhere(raw, 'runtime_events', 'session_id = ?', WORKSPACE_AUTHORITY_SESSION_ID),
-          3,
+          4,
         );
       } finally {
         raw.close();
@@ -727,7 +797,7 @@ describe('workspace version persistence authority', () => {
       bindWorkspaceBaselineAuthorityStoreRootInternal(upgraded, TEST_STORAGE_ROOT_ID);
       registerWorkspaceSuccessorCandidateVerifierInternal(upgraded, verifyTestCandidate);
       try {
-        assert.equal(upgraded.schemaVersion(), 16);
+        assert.equal(upgraded.schemaVersion(), 17);
         assert.equal(
           (
             await upgraded.readWorkspaceHead(
@@ -799,6 +869,7 @@ describe('workspace version persistence authority', () => {
   for (const failpoint of [
     'after_workspace_epoch_event_insert',
     'after_workspace_version_event_insert',
+    'after_workspace_initial_activation_event_insert',
     'after_workspace_epoch_projection_insert',
     'after_workspace_version_projection_insert',
     'after_workspace_head_projection_insert',
@@ -839,6 +910,7 @@ describe('workspace version persistence authority', () => {
       const raw = new DatabaseSync(dbPath);
       try {
         raw.exec(`
+          DELETE FROM runtime_workspace_active_epochs;
           DELETE FROM runtime_workspace_heads;
           DELETE FROM runtime_workspace_versions;
           DELETE FROM runtime_workspace_epochs;
@@ -1412,6 +1484,7 @@ function recreateWorkspaceTablesAsSchema12(database: DatabaseSync): void {
     DROP TABLE runtime_workspace_heads_schema_13;
     DROP TABLE runtime_workspace_versions_schema_13;
     DROP TABLE runtime_managed_mutation_reservations;
+    DROP TABLE runtime_workspace_active_epochs;
     DELETE FROM runtime_capabilities
       WHERE capability = 'runtime_workspace_bound_continuation_authority';
     PRAGMA user_version = 12;

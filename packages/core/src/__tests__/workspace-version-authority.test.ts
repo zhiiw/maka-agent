@@ -22,12 +22,17 @@ import { describe, it } from 'node:test';
 import { decodeRuntimeEvent, type RuntimeEvent } from '../runtime-event.js';
 import {
   buildWorkspaceBaselineAuthorityEvents,
+  buildWorkspaceEpochActivationEvent,
+  buildInitialWorkspaceEpochActivationEvent,
   buildWorkspaceHistorySuccessorAuthorityEvent,
   buildWorkspaceSuccessorAuthorityEvent,
   scanWorkspaceBaselineAuthority,
+  scanWorkspaceEpochActivations,
   validateWorkspaceFactEventLane,
   workspaceAuthorityIdentity,
+  workspaceActivationAuthorityIdentity,
   type WorkspaceBaselineAuthorityInput,
+  type WorkspaceEpochActivationAuthorityInput,
   type WorkspaceHistorySuccessorAuthorityInput,
   type WorkspaceSuccessorAuthorityInput,
 } from '../workspace-version-authority.js';
@@ -193,6 +198,118 @@ describe('workspace version authority contract', () => {
     });
   });
 
+  it('advances one durable active epoch without mutating the previous epoch', () => {
+    const first = buildWorkspaceBaselineAuthorityEvents(baselineInput());
+    const root = buildInitialWorkspaceEpochActivationEvent(baselineInput());
+    const secondInput = secondBaselineInput();
+    const second = buildWorkspaceBaselineAuthorityEvents(secondInput);
+    const activation = buildWorkspaceEpochActivationEvent({
+      activationEventId: 'workspace-activation-event-1',
+      committedAt: secondInput.committedAt + 1,
+      activation: {
+        repositoryId: secondInput.epoch.repositoryId,
+        workspaceId: secondInput.epoch.workspaceId,
+        previousWorkspaceEpochId: baselineInput().epoch.workspaceEpochId,
+        workspaceEpochId: secondInput.epoch.workspaceEpochId,
+        rebaselineId: 'desktop-rebaseline-1',
+      },
+    });
+
+    assert.deepEqual(decodeRuntimeEvent(activation), activation);
+    assert.deepEqual(workspaceActivationAuthorityIdentity(secondInput.epoch.workspaceId), {
+      sessionId: 'maka_workspace_authority',
+      invocationId: 'workspace_active_inv_22222222222222222222222222222222',
+      runId: 'workspace_active_run_22222222222222222222222222222222',
+      turnId: 'workspace_active_turn_22222222222222222222222222222222',
+    });
+    const baselines = scanWorkspaceBaselineAuthority([
+      { event: first.epochOpenedEvent, eventSeq: 1 },
+      { event: first.baselineAcceptedEvent, eventSeq: 2 },
+      { event: second.epochOpenedEvent, eventSeq: 1 },
+      { event: second.baselineAcceptedEvent, eventSeq: 2 },
+    ]);
+    const active = scanWorkspaceEpochActivations(baselines.baselines, [
+      { event: root, eventSeq: 1 },
+      { event: activation, eventSeq: 2 },
+    ]);
+    assert.equal(active.hasCorruption, false);
+    assert.deepEqual(active.activeEpochs, [
+      {
+        repositoryId: secondInput.epoch.repositoryId,
+        workspaceId: secondInput.epoch.workspaceId,
+        workspaceEpochId: secondInput.epoch.workspaceEpochId,
+        rebaselineId: 'desktop-rebaseline-1',
+        activationEventId: activation.id,
+        revision: 2,
+        committedAt: activation.ts,
+      },
+    ]);
+  });
+
+  it('rejects two active-epoch transitions from the same previous epoch', () => {
+    const first = buildWorkspaceBaselineAuthorityEvents(baselineInput());
+    const root = buildInitialWorkspaceEpochActivationEvent(baselineInput());
+    const secondInput = secondBaselineInput();
+    const second = buildWorkspaceBaselineAuthorityEvents(secondInput);
+    const thirdInput = secondBaselineInput({
+      epochOpenedEventId: 'workspace-epoch-event-3',
+      baselineAcceptedEventId: 'workspace-version-event-3',
+      epoch: {
+        ...secondInput.epoch,
+        workspaceEpochId: 'epoch_dddddddddddddddddddddddddddddddd',
+        workspaceInstanceId: 'instance_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      },
+      baseline: {
+        ...secondInput.baseline,
+        workspaceVersionId: 'version_ffffffffffffffffffffffffffffffff',
+      },
+    });
+    const third = buildWorkspaceBaselineAuthorityEvents(thirdInput);
+    const transition = (input: WorkspaceEpochActivationAuthorityInput) =>
+      buildWorkspaceEpochActivationEvent(input);
+    const baselines = scanWorkspaceBaselineAuthority([
+      { event: first.epochOpenedEvent, eventSeq: 1 },
+      { event: first.baselineAcceptedEvent, eventSeq: 2 },
+      { event: second.epochOpenedEvent, eventSeq: 1 },
+      { event: second.baselineAcceptedEvent, eventSeq: 2 },
+      { event: third.epochOpenedEvent, eventSeq: 1 },
+      { event: third.baselineAcceptedEvent, eventSeq: 2 },
+    ]);
+    const active = scanWorkspaceEpochActivations(baselines.baselines, [
+      { event: root, eventSeq: 1 },
+      {
+        event: transition({
+          activationEventId: 'workspace-activation-event-1',
+          committedAt: secondInput.committedAt + 1,
+          activation: {
+            repositoryId: secondInput.epoch.repositoryId,
+            workspaceId: secondInput.epoch.workspaceId,
+            previousWorkspaceEpochId: baselineInput().epoch.workspaceEpochId,
+            workspaceEpochId: secondInput.epoch.workspaceEpochId,
+            rebaselineId: 'desktop-rebaseline-1',
+          },
+        }),
+        eventSeq: 2,
+      },
+      {
+        event: transition({
+          activationEventId: 'workspace-activation-event-2',
+          committedAt: thirdInput.committedAt + 1,
+          activation: {
+            repositoryId: thirdInput.epoch.repositoryId,
+            workspaceId: thirdInput.epoch.workspaceId,
+            previousWorkspaceEpochId: baselineInput().epoch.workspaceEpochId,
+            workspaceEpochId: thirdInput.epoch.workspaceEpochId,
+            rebaselineId: 'desktop-rebaseline-2',
+          },
+        }),
+        eventSeq: 3,
+      },
+    ]);
+    assert.equal(active.hasCorruption, true);
+    assert.equal(active.issues[0]?.code, 'active_epoch_conflict');
+  });
+
   it('reconstructs only complete, causal baseline pairs', () => {
     const first = buildWorkspaceBaselineAuthorityEvents(baselineInput());
     const second = buildWorkspaceBaselineAuthorityEvents(
@@ -330,6 +447,31 @@ function historySuccessorInput(): WorkspaceHistorySuccessorAuthorityInput {
       targetWorkspaceVersionId: baseline.baseline.workspaceVersionId,
     },
   };
+}
+
+function secondBaselineInput(
+  overrides: Partial<WorkspaceBaselineAuthorityInput> = {},
+): WorkspaceBaselineAuthorityInput {
+  const first = baselineInput();
+  return baselineInput({
+    epochOpenedEventId: 'workspace-epoch-event-2',
+    baselineAcceptedEventId: 'workspace-version-event-2',
+    committedAt: first.committedAt + 10,
+    epoch: {
+      ...first.epoch,
+      workspaceEpochId: 'epoch_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      workspaceInstanceId: 'instance_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      sourceCommitOid: 'a'.repeat(40),
+      sourceTreeOid: 'b'.repeat(40),
+    },
+    baseline: {
+      ...first.baseline,
+      workspaceVersionId: 'version_cccccccccccccccccccccccccccccccc',
+      commitOid: 'c'.repeat(40),
+      treeOid: 'b'.repeat(40),
+    },
+    ...overrides,
+  });
 }
 
 function successorInput(): WorkspaceSuccessorAuthorityInput {

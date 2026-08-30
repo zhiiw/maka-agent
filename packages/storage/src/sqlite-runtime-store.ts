@@ -25,9 +25,12 @@ import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import {
   buildWorkspaceBaselineAuthorityEvents,
+  buildWorkspaceEpochActivationEvent,
+  buildInitialWorkspaceEpochActivationEvent,
   buildWorkspaceHistorySuccessorAuthorityEvent,
   buildWorkspaceSuccessorAuthorityEvent,
   scanWorkspaceBaselineAuthority,
+  scanWorkspaceEpochActivations,
   workspaceMutationPolicyHashV1,
   WORKSPACE_AUTHORITY_SESSION_ID,
   WORKSPACE_VERSION_AUTHORITY_CAPABILITY_V1,
@@ -37,6 +40,8 @@ import {
   type WorkspaceBaselineAuthorityInput,
   type WorkspaceBaselineCommitResult,
   type WorkspaceEpochRecordV1,
+  type WorkspaceActiveEpochRecordV1,
+  type WorkspaceEpochActivationAuthorityInput,
   type WorkspaceHeadRecordV1,
   type WorkspaceHistorySuccessorAuthorityInput,
   type WorkspaceProjectionRebuildResult,
@@ -132,6 +137,10 @@ import {
 import type { OperationalStateDatabaseLease } from './operational-state-store.js';
 import { immutableSteeringMessageId, isRuntimeStorageSafeId } from './runtime-event-invariants.js';
 import { assertNoReservedWorkspaceAuthorityAppend } from './runtime-event-authority.js';
+import {
+  registerWorkspaceActiveEpochAuthorityInternal,
+  type WorkspaceActiveEpochCommitResult,
+} from './workspace-active-epoch-authority-internal.js';
 
 export { SQLITE_RUNTIME_SCHEMA_VERSION } from './sqlite-runtime-schema.js';
 
@@ -184,12 +193,15 @@ export type SqliteRuntimeStoreFailpoint =
   | 'after_continuation_start_insert'
   | 'after_workspace_epoch_event_insert'
   | 'after_workspace_version_event_insert'
+  | 'after_workspace_initial_activation_event_insert'
   | 'after_workspace_epoch_projection_insert'
   | 'after_workspace_version_projection_insert'
   | 'after_workspace_head_projection_insert'
   | 'after_workspace_successor_event_insert'
   | 'after_workspace_successor_projection_insert'
   | 'after_workspace_successor_head_update'
+  | 'after_workspace_active_epoch_event_insert'
+  | 'after_workspace_active_epoch_projection_update'
   | 'after_workspace_canonical_scan';
 
 export interface SqliteRuntimeStoreOptions {
@@ -1295,10 +1307,14 @@ export class SqliteRuntimeStore
     rootId: string,
   ): Promise<WorkspaceBaselineCommitResult> {
     const events = buildWorkspaceBaselineAuthorityEvents(input);
+    const initialActivationEvent = buildInitialWorkspaceEpochActivationEvent(input);
     return this.transaction(() => {
       this.#assertWorkspaceStorageRootBinding(rootId);
       const existingAuthority = this.readCanonicalWorkspaceAuthoritySync();
       const existingBaselines = existingAuthority.baselines;
+      const isInitialWorkspaceEpoch = !existingBaselines.some(
+        (candidate) => candidate.epoch.workspaceId === input.epoch.workspaceId,
+      );
       const existing = existingBaselines.find(
         (candidate) =>
           candidate.epoch.workspaceId === input.epoch.workspaceId &&
@@ -1347,6 +1363,18 @@ export class SqliteRuntimeStore
         throw new Error('Workspace baseline version fact must be authority sequence two');
       }
       this.options.failpoint?.('after_workspace_version_event_insert');
+      if (isInitialWorkspaceEpoch) {
+        this.assertWorkspaceAuthorityStreamIsEmpty(initialActivationEvent);
+        const activationEventSeq = this.insertRuntimeEvent(
+          initialActivationEvent,
+          input.committedAt,
+          false,
+        );
+        if (activationEventSeq !== 1) {
+          throw new Error('Initial workspace activation fact must be authority sequence one');
+        }
+        this.options.failpoint?.('after_workspace_initial_activation_event_insert');
+      }
 
       const scanned = this.readCanonicalWorkspaceAuthoritySync();
       const accepted = scanned.baselines.find(
@@ -1355,6 +1383,11 @@ export class SqliteRuntimeStore
       if (!accepted) throw new Error('Workspace baseline authority scan lost the committed epoch');
       this.insertWorkspaceEpochProjection(accepted, input.committedAt);
       this.options.failpoint?.('after_workspace_epoch_projection_insert');
+      const activeEpoch = scanned.activeEpochs.find(
+        (candidate) => candidate.workspaceId === input.epoch.workspaceId,
+      );
+      if (!activeEpoch) throw new Error('Workspace baseline authority scan lost its active epoch');
+      this.insertInitialWorkspaceActiveEpochProjection(activeEpoch);
       this.insertWorkspaceBaselineVersionProjection(accepted, input.committedAt);
       this.options.failpoint?.('after_workspace_version_projection_insert');
       const acceptedHead = scanned.heads.find(
@@ -1801,6 +1834,111 @@ export class SqliteRuntimeStore
           executionProfileDigest,
         ),
     );
+    registerWorkspaceActiveEpochAuthorityInternal(
+      this,
+      (input, rootId) => this.#commitWorkspaceActiveEpoch(input, rootId),
+      (workspaceId) => this.readWorkspaceActiveEpoch(workspaceId),
+    );
+  }
+
+  async #commitWorkspaceActiveEpoch(
+    input: WorkspaceEpochActivationAuthorityInput,
+    rootId: string,
+  ): Promise<WorkspaceActiveEpochCommitResult> {
+    const activationEvent = buildWorkspaceEpochActivationEvent(input);
+    if (
+      input.activation.previousWorkspaceEpochId === null ||
+      input.activation.rebaselineId === null
+    ) {
+      throw new Error(
+        'Workspace active-epoch transition requires a previous epoch and rebaseline id',
+      );
+    }
+    return this.transaction(() => {
+      this.#assertWorkspaceStorageRootBinding(rootId);
+      const before = this.readCanonicalWorkspaceAuthoritySync();
+      this.assertWorkspaceProjectionsMatchSync(before);
+      const current = before.activeEpochs.find(
+        (candidate) => candidate.workspaceId === input.activation.workspaceId,
+      );
+      if (!current) throw new Error('Workspace active epoch is unavailable');
+      const existingEvent = this.readRuntimeEventJson(input.activationEventId);
+      if (existingEvent) {
+        assertStoredRuntimeEventEquals(activationEvent, existingEvent);
+        const after = this.readCanonicalWorkspaceAuthoritySync();
+        this.assertWorkspaceProjectionsMatchSync(after);
+        const activeEpoch = after.activeEpochs.find(
+          (candidate) => candidate.workspaceId === input.activation.workspaceId,
+        );
+        if (
+          !activeEpoch ||
+          activeEpoch.workspaceEpochId !== input.activation.workspaceEpochId ||
+          activeEpoch.rebaselineId !== input.activation.rebaselineId
+        ) {
+          throw new Error('Workspace active-epoch exact retry conflicts with current authority');
+        }
+        return { created: false, activeEpoch };
+      }
+      if (
+        current.repositoryId !== input.activation.repositoryId ||
+        current.workspaceEpochId !== input.activation.previousWorkspaceEpochId
+      ) {
+        throw new Error('Workspace active-epoch compare-and-set conflict');
+      }
+      const target = before.baselines.find(
+        (candidate) =>
+          candidate.epoch.repositoryId === input.activation.repositoryId &&
+          candidate.epoch.workspaceId === input.activation.workspaceId &&
+          candidate.epoch.workspaceEpochId === input.activation.workspaceEpochId,
+      );
+      if (!target) throw new Error('Workspace active-epoch target is unavailable');
+      const eventSeq = this.insertRuntimeEvent(activationEvent, input.committedAt, false);
+      if (eventSeq !== current.revision + 1) {
+        throw new Error('Workspace active-epoch fact is not the next authority event');
+      }
+      this.options.failpoint?.('after_workspace_active_epoch_event_insert');
+      const after = this.readCanonicalWorkspaceAuthoritySync();
+      const activeEpoch = after.activeEpochs.find(
+        (candidate) => candidate.workspaceId === input.activation.workspaceId,
+      );
+      if (!activeEpoch || activeEpoch.workspaceEpochId !== input.activation.workspaceEpochId) {
+        throw new Error('Workspace active-epoch scan lost the committed transition');
+      }
+      const updated = this.db
+        .prepare(`
+          UPDATE runtime_workspace_active_epochs
+          SET repository_id = ?, workspace_epoch_id = ?, rebaseline_id = ?,
+              activation_event_id = ?, revision = ?, committed_at = ?
+          WHERE workspace_id = ? AND workspace_epoch_id = ? AND revision = ?
+        `)
+        .run(
+          activeEpoch.repositoryId,
+          activeEpoch.workspaceEpochId,
+          activeEpoch.rebaselineId,
+          activeEpoch.activationEventId,
+          activeEpoch.revision,
+          activeEpoch.committedAt,
+          current.workspaceId,
+          current.workspaceEpochId,
+          current.revision,
+        );
+      if (updated.changes !== 1) {
+        throw new Error('Workspace active-epoch projection compare-and-set failed');
+      }
+      this.options.failpoint?.('after_workspace_active_epoch_projection_update');
+      this.assertWorkspaceProjectionsMatchSync(after);
+      return { created: true, activeEpoch };
+    });
+  }
+
+  async readWorkspaceActiveEpoch(
+    workspaceId: string,
+  ): Promise<WorkspaceActiveEpochRecordV1 | undefined> {
+    return this.readTransaction(() => {
+      const authority = this.readCanonicalWorkspaceAuthoritySync();
+      this.assertWorkspaceProjectionsMatchSync(authority);
+      return authority.activeEpochs.find((candidate) => candidate.workspaceId === workspaceId);
+    });
   }
 
   async #readWorkspaceContinuationBoundary(
@@ -2019,6 +2157,7 @@ export class SqliteRuntimeStore
     return this.transaction(() => {
       const authority = this.readCanonicalWorkspaceAuthoritySync();
       this.db.prepare('DELETE FROM runtime_managed_mutation_reservations').run();
+      this.db.prepare('DELETE FROM runtime_workspace_active_epochs').run();
       this.db.prepare('DELETE FROM runtime_workspace_heads').run();
       this.db.prepare('DELETE FROM runtime_workspace_versions').run();
       this.db.prepare('DELETE FROM runtime_workspace_epochs').run();
@@ -2037,6 +2176,9 @@ export class SqliteRuntimeStore
         );
       }
       for (const head of authority.heads) this.insertWorkspaceHeadProjection(head);
+      for (const activeEpoch of authority.activeEpochs) {
+        this.insertInitialWorkspaceActiveEpochProjection(activeEpoch);
+      }
       for (const reservation of authority.activeManagedMutations) {
         this.insertManagedMutationReservationProjectionSync(reservation);
       }
@@ -2079,6 +2221,13 @@ export class SqliteRuntimeStore
       const issue = scan.issues[0]!;
       throw new Error(
         `Corrupt workspace RuntimeEvent authority: ${issue.code} at ${issue.eventId}`,
+      );
+    }
+    const activationScan = scanWorkspaceEpochActivations(scan.baselines, authorityRows);
+    if (activationScan.hasCorruption) {
+      const issue = activationScan.issues[0]!;
+      throw new Error(
+        `Corrupt workspace RuntimeEvent active-epoch authority: ${issue.code} at ${issue.eventId}`,
       );
     }
     const toolScan = scanToolLedger(events);
@@ -2153,7 +2302,7 @@ export class SqliteRuntimeStore
       scan,
     );
     this.options.failpoint?.('after_workspace_canonical_scan');
-    return { ...scan, activeManagedMutations };
+    return { ...scan, activeEpochs: activationScan.activeEpochs, activeManagedMutations };
   }
 
   private scanCanonicalManagedMutationReservationsSync(
@@ -2318,6 +2467,27 @@ export class SqliteRuntimeStore
         authority.turnId,
         baseline.epochOpenedEventId,
         committedAt,
+      );
+  }
+
+  private insertInitialWorkspaceActiveEpochProjection(
+    activeEpoch: WorkspaceActiveEpochRecordV1,
+  ): void {
+    this.db
+      .prepare(`
+        INSERT OR IGNORE INTO runtime_workspace_active_epochs (
+          workspace_id, repository_id, workspace_epoch_id, rebaseline_id,
+          activation_event_id, revision, committed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        activeEpoch.workspaceId,
+        activeEpoch.repositoryId,
+        activeEpoch.workspaceEpochId,
+        activeEpoch.rebaselineId,
+        activeEpoch.activationEventId,
+        activeEpoch.revision,
+        activeEpoch.committedAt,
       );
   }
 
@@ -2513,6 +2683,9 @@ export class SqliteRuntimeStore
     const expectedHeads = authority.heads
       .map(workspaceHeadProjectionRow)
       .sort(compareWorkspaceHeadRow);
+    const expectedActiveEpochs = authority.activeEpochs
+      .map(workspaceActiveEpochProjectionRow)
+      .sort(compareWorkspaceActiveEpochRow);
     const epochs = (
       this.db
         .prepare(`
@@ -2598,6 +2771,16 @@ export class SqliteRuntimeStore
     )
       .map((row) => ({ ...row }))
       .sort(compareWorkspaceHeadRow);
+    const activeEpochs = (
+      this.db
+        .prepare(`
+          SELECT workspace_id, repository_id, workspace_epoch_id, rebaseline_id,
+                 activation_event_id, revision, committed_at
+          FROM runtime_workspace_active_epochs
+          ORDER BY workspace_id ASC
+        `)
+        .all() as unknown as WorkspaceActiveEpochProjectionRow[]
+    ).map((row) => ({ ...row }));
     const activeManagedMutations = (
       this.db
         .prepare(`
@@ -2614,7 +2797,8 @@ export class SqliteRuntimeStore
     if (
       !isDeepStrictEqual(epochs, expectedEpochs) ||
       !isDeepStrictEqual(versions, expectedVersions) ||
-      !isDeepStrictEqual(heads, expectedHeads)
+      !isDeepStrictEqual(heads, expectedHeads) ||
+      !isDeepStrictEqual(activeEpochs, expectedActiveEpochs)
     ) {
       throw new Error('Workspace version projection is incomplete or inconsistent');
     }
@@ -2630,6 +2814,7 @@ export class SqliteRuntimeStore
           (SELECT COUNT(*) FROM runtime_workspace_epochs) +
           (SELECT COUNT(*) FROM runtime_workspace_versions) +
           (SELECT COUNT(*) FROM runtime_workspace_heads) +
+          (SELECT COUNT(*) FROM runtime_workspace_active_epochs) +
           (SELECT COUNT(*) FROM runtime_managed_mutation_reservations) AS count
       `)
       .get() as { count: number };
@@ -4624,8 +4809,19 @@ interface ManagedMutationReservationProjectionRow {
 }
 
 type CanonicalWorkspaceAuthority = ReturnType<typeof scanWorkspaceBaselineAuthority> & {
+  activeEpochs: readonly WorkspaceActiveEpochRecordV1[];
   activeManagedMutations: ManagedMutationReservationProjectionRow[];
 };
+
+interface WorkspaceActiveEpochProjectionRow {
+  workspace_id: string;
+  repository_id: string;
+  workspace_epoch_id: string;
+  rebaseline_id: string | null;
+  activation_event_id: string | null;
+  revision: number;
+  committed_at: number;
+}
 
 function assertWorkspaceVersionAuthorityCapability(db: DatabaseSync): void {
   const row = db
@@ -4923,6 +5119,20 @@ function workspaceHeadProjectionRow(record: WorkspaceHeadRecordV1): WorkspaceHea
   };
 }
 
+function workspaceActiveEpochProjectionRow(
+  record: WorkspaceActiveEpochRecordV1,
+): WorkspaceActiveEpochProjectionRow {
+  return {
+    workspace_id: record.workspaceId,
+    repository_id: record.repositoryId,
+    workspace_epoch_id: record.workspaceEpochId,
+    rebaseline_id: record.rebaselineId,
+    activation_event_id: record.activationEventId,
+    revision: record.revision,
+    committed_at: record.committedAt,
+  };
+}
+
 function compareWorkspaceEpochRow(
   left: WorkspaceEpochProjectionRow,
   right: WorkspaceEpochProjectionRow,
@@ -4948,6 +5158,13 @@ function compareWorkspaceHeadRow(
     left.workspace_id.localeCompare(right.workspace_id) ||
     left.workspace_epoch_id.localeCompare(right.workspace_epoch_id)
   );
+}
+
+function compareWorkspaceActiveEpochRow(
+  left: WorkspaceActiveEpochProjectionRow,
+  right: WorkspaceActiveEpochProjectionRow,
+): number {
+  return left.workspace_id.localeCompare(right.workspace_id);
 }
 
 interface RuntimeEventPrefixStorageRow extends RuntimeEventStorageRow {
