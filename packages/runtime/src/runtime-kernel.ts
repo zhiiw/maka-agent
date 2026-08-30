@@ -631,11 +631,19 @@ export class RuntimeKernel implements RuntimeKernelLike {
       await this.enterExecutionClaim(execution);
       const header = await this.deps.store.readHeader(sessionId);
       let workspaceIdentity: string | undefined;
-      if (this.deps.safeBoundaryResumeEnabled === true && this.deps.inspectContinuationSafety) {
+      const managedCoding = header.toolProfile === 'managed-coding-v1';
+      if (managedCoding && !this.deps.inspectContinuationSafety) {
+        throw new Error('Managed coding workspace boundary authority is unavailable');
+      }
+      if (
+        (this.deps.safeBoundaryResumeEnabled === true || managedCoding) &&
+        this.deps.inspectContinuationSafety
+      ) {
         try {
           workspaceIdentity = (await this.deps.inspectContinuationSafety(sessionId))
             .workspaceIdentity;
-        } catch {
+        } catch (error) {
+          if (managedCoding) throw error;
           // A new turn remains usable without continuation metadata. Actual
           // continuation claims inspect the same facts strictly below.
         }

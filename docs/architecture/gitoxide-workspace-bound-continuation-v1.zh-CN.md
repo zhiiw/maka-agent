@@ -69,5 +69,8 @@ RuntimeEvents + 可重建 workspace authority projection。
 
 ## 产品范围
 
-该能力只对显式 `managed-coding-v1` 生效。普通会话行为不变。当前 UI 是否开放该 profile 是独立
-产品决策；协议与 Host consumer 已真实接通，不依赖 Desktop 控件存在。
+该能力只对显式 `managed-coding-v1` 生效。普通会话行为不变。Desktop 新任务 Composer 已提供显式
+`Managed workspace` 产品意图；renderer 不能直接签发 profile，Desktop main 在 Session 创建前把该意图
+映射为 immutable `managed-coding-v1`。Catalog 会把 profile 投影回 Desktop，已有 Session 只显示状态、
+不能切换。Managed Run 与手动 Resume 不依赖普通 Session 使用的实验开关，但所有 safety observation 仍需
+fail closed。Accepted-tree Read/Glob/Grep 尚未接入，因此这只关闭产品入口，不代表完整 M3 已完成。

@@ -42,6 +42,7 @@ import type { CollaborationMode } from '@maka/core/collaboration';
 import type { OrchestrationMode } from '@maka/core/orchestration';
 
 import type { PermissionMode } from '@maka/core/permission';
+import type { SessionToolProfile } from '@maka/core/session';
 
 import type { SessionStartMode } from '@maka/core/deep-research';
 import { DEFAULT_SESSION_NAME } from '@maka/core/session-name';
@@ -53,6 +54,7 @@ import { isCollaborationMode } from '@maka/core/collaboration';
 import { isOrchestrationMode } from '@maka/core/orchestration';
 
 import { isSessionStartMode } from '@maka/core/deep-research';
+import type { WorkspaceTarget } from '@maka/runtime-host/protocol';
 
 /**
  * `unknown`, because this is an IPC boundary and the renderer's type is a
@@ -62,6 +64,7 @@ import { isSessionStartMode } from '@maka/core/deep-research';
  */
 export interface CreateSessionRequest {
   mode?: SessionStartMode;
+  productIntent?: 'managed_coding';
   permissionMode?: PermissionMode;
   collaborationMode?: CollaborationMode;
   orchestrationMode?: OrchestrationMode;
@@ -76,11 +79,19 @@ export interface ResolvedCreateSessionRequest {
   orchestrationMode: OrchestrationMode;
   name: string;
   labels: string[] | undefined;
+  toolProfile?: SessionToolProfile;
 }
 
 export function resolveCreateSessionRequest(
   input: CreateSessionRequest | undefined,
 ): ResolvedCreateSessionRequest {
+  const productIntent = input?.productIntent;
+  if (productIntent !== undefined && productIntent !== 'managed_coding') {
+    throw new TypeError('Invalid session product intent.');
+  }
+  if (productIntent === 'managed_coding' && input?.mode !== undefined) {
+    throw new TypeError('Managed coding cannot be combined with another session product mode.');
+  }
   const collaborationMode = input?.collaborationMode ?? 'agent';
   if (!isCollaborationMode(collaborationMode)) {
     throw new TypeError('Invalid collaboration mode.');
@@ -102,5 +113,31 @@ export function resolveCreateSessionRequest(
     orchestrationMode,
     name: input?.name ?? DEFAULT_SESSION_NAME,
     labels: input?.labels,
+    ...(productIntent === 'managed_coding' ? { toolProfile: 'managed-coding-v1' } : {}),
   };
+}
+
+/**
+ * Desktop coding tasks always have an owner-resolved workspace target.  That
+ * is the product boundary for resumability: the Host subsequently classifies
+ * the target as a Git repository or a bounded filesystem snapshot.  The
+ * renderer cannot opt this profile out, and it cannot mint the internal
+ * profile directly.
+ *
+ * Distinct product modes keep their own execution contract.  In particular,
+ * Deep Research is not silently converted into a managed coding task merely
+ * because it also has a cwd.
+ */
+export function resolveAutomaticWorkspaceToolProfile(
+  request: ResolvedCreateSessionRequest,
+  workspace: WorkspaceTarget,
+): SessionToolProfile | undefined {
+  if (request.toolProfile !== undefined) return request.toolProfile;
+  if (request.mode !== undefined) return undefined;
+
+  switch (workspace.kind) {
+    case 'project':
+    case 'host_path':
+      return 'managed-coding-v1';
+  }
 }

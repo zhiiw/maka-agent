@@ -88,6 +88,22 @@ test('projects only bounded execution boundary presentation facts', async () => 
   });
 });
 
+test('projects the immutable managed coding profile from the durable Session header', async () => {
+  const fixture = createFixture({ header: { toolProfile: 'managed-coding-v1' } });
+
+  const outcome = await fixture.coordinator.handlers['session.catalog.query'](
+    { kind: 'get', sessionId: fixture.sessionId },
+    context,
+  );
+
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok || outcome.result.kind !== 'session' || outcome.result.session === null) {
+    assert.fail('Catalog query did not return the managed Session');
+  }
+  if ('kind' in outcome.result.session) assert.fail('Managed Session was not representable');
+  assert.equal(outcome.result.session.toolProfile, 'managed-coding-v1');
+});
+
 test('reduces turn pages to their encoded wire budget without skipping contributions', async () => {
   const contributions: SessionTurnContribution[] = Array.from({ length: 128 }, (_, index) => ({
     turnId: `turn-${index}`,

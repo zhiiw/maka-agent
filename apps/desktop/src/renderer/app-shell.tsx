@@ -3063,6 +3063,11 @@ function AppShellContent({
                       : undefined
                   }
                   planModeActive={activePlanMode}
+                  managedTaskActive={
+                    activeId
+                      ? activeSessionForView?.toolProfile === 'managed-coding-v1'
+                      : false
+                  }
                   // No pending-keyed disable while a toggle commits: the
                   // pending registries already swallow re-entrant toggles, and
                   // a reason here would gray the row mid-click — the blink

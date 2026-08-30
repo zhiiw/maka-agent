@@ -38,6 +38,7 @@ import {
   ICON_SIZE,
   ArrowUp,
   FileText,
+  FolderGit2,
   ListTodo,
   Network,
   Pencil,
@@ -408,6 +409,9 @@ export const Composer = forwardRef<
     planModeActive?: boolean;
     planModeDisabledReason?: string;
     onPlanModeChange?(active: boolean): void | Promise<void>;
+    /** Existing-task read-only product identity. Desktop chooses the profile
+     * automatically before Session creation. */
+    managedTaskActive?: boolean;
     /**
      * The Session's standing orchestration default. Of the field's three
      * values only Swarm and Graph name a way to fan a turn out; `default` is
@@ -1447,6 +1451,10 @@ export const Composer = forwardRef<
   ];
   /** A host that passes no handler cannot be in a mode this control can leave. */
   const planModeActive = props.onPlanModeChange !== undefined && props.planModeActive === true;
+  // Unlike temporary collaboration modes, the managed product identity is
+  // immutable after Session creation. Existing Sessions therefore expose a
+  // read-only mark even though they deliberately have no change handler.
+  const managedTaskActive = props.managedTaskActive === true;
   // Deliberately NOT disabled while the host commits a toggle. The host
   // already drops re-entrant toggles itself, so a disable during its short
   // IPC round trip carries no protection — it only dims the row (and the
@@ -1483,6 +1491,16 @@ export const Composer = forwardRef<
     isDisabled: boolean;
     onDeactivate(): void;
   }> = [
+    ...(managedTaskActive
+      ? [{
+        id: 'managed-workspace',
+        icon: <FolderGit2 size={ICON_SIZE.control} aria-hidden="true" />,
+        label: copy.managedTaskLabel,
+        tooltip: copy.managedTaskLockedTitle,
+        isDisabled: true,
+        onDeactivate: () => undefined,
+      }]
+      : []),
     ...(planModeActive
       ? [{
         id: 'plan',
