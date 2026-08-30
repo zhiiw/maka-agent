@@ -44,6 +44,10 @@ const MAX_IMPORT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ATTRIBUTES_FILE_BYTES: u64 = 64 * 1024;
 const MAX_GIT_ATTRIBUTES_LINE_BYTES_V2: usize = 2048;
 const MAX_TREE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_TREE_QUERY_PATTERN_BYTES: usize = 4096;
+const MAX_TREE_QUERY_RESULTS: u16 = 200;
+const MAX_TREE_QUERY_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TREE_QUERY_REGEX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_IMPORT_FILES: u64 = 200_000;
 const MAX_COMMIT_OBJECT_BYTES: u64 = 1024 * 1024;
@@ -155,6 +159,11 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "tree_file_not_utf8",
     "tree_file_size_limit_exceeded",
     "tree_file_unavailable",
+    "invalid_tree_query_path",
+    "invalid_tree_glob_pattern",
+    "invalid_tree_grep_pattern",
+    "invalid_tree_query_limit",
+    "tree_query_output_limit_exceeded",
     "unsupported_source_entry_kind",
     "unsupported_source_attributes",
     "unsupported_source_path",
@@ -219,6 +228,26 @@ enum Request {
         repository_path: PathBuf,
         accepted_commit_oid: String,
         path: String,
+        managed_tree_policy_version: u8,
+    },
+    ListTreeFiles {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_commit_oid: String,
+        path: String,
+        pattern: String,
+        limit: u16,
+        managed_tree_policy_version: u8,
+    },
+    GrepTreeFiles {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_commit_oid: String,
+        path: String,
+        pattern: String,
+        glob: Option<String>,
+        max_count_per_file: u16,
+        limit: u16,
         managed_tree_policy_version: u8,
     },
 }
@@ -337,6 +366,31 @@ enum Response<'a> {
         path: String,
         content: String,
         bytes_read: u64,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    TreeFilesListed {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        path: String,
+        pattern: String,
+        files: Vec<String>,
+        truncated: bool,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    TreeFilesGrepped {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        path: String,
+        pattern: String,
+        glob: Option<String>,
+        matches: Vec<String>,
+        truncated: bool,
         managed_tree_policy_version: u8,
     },
     #[serde(rename_all = "camelCase")]
@@ -470,6 +524,48 @@ fn run() -> Result<ExitCode, &'static str> {
                 repository_path,
                 accepted_commit_oid,
                 path,
+                managed_tree_policy_version,
+            )
+        }
+        Request::ListTreeFiles {
+            protocol_version,
+            repository_path,
+            accepted_commit_oid,
+            path,
+            pattern,
+            limit,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            list_tree_files(
+                repository_path,
+                accepted_commit_oid,
+                path,
+                pattern,
+                limit,
+                managed_tree_policy_version,
+            )
+        }
+        Request::GrepTreeFiles {
+            protocol_version,
+            repository_path,
+            accepted_commit_oid,
+            path,
+            pattern,
+            glob,
+            max_count_per_file,
+            limit,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            grep_tree_files(
+                repository_path,
+                accepted_commit_oid,
+                path,
+                pattern,
+                glob,
+                max_count_per_file,
+                limit,
                 managed_tree_policy_version,
             )
         }
@@ -1929,6 +2025,304 @@ fn read_tree_file(
         managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
     });
     Ok(ExitCode::SUCCESS)
+}
+
+fn list_tree_files(
+    repository_path: PathBuf,
+    accepted_commit_oid: String,
+    path: String,
+    pattern: String,
+    limit: u16,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    use gix::bstr::ByteSlice;
+    use gix_glob::{Pattern, pattern::Case, wildmatch};
+
+    assert_tree_query_input(&path, &pattern, limit)?;
+    let glob = Pattern::from_bytes_without_negation(pattern.as_bytes())
+        .filter(|pattern| {
+            !pattern.mode.intersects(
+                gix_glob::pattern::Mode::NEGATIVE | gix_glob::pattern::Mode::MUST_BE_DIR,
+            )
+        })
+        .ok_or("invalid_tree_glob_pattern")?;
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    let repository = open_repository(repository_path)?;
+    let (accepted_commit, accepted_tree) =
+        accepted_commit_identity(&repository, &accepted_commit_oid)?;
+    let mut files = Vec::new();
+    let mut truncated = false;
+    let mut stats = ManagedTreeStats::default();
+    walk_accepted_tree_files(
+        &repository,
+        accepted_tree,
+        "",
+        0,
+        &mut stats,
+        &mut |relative_path, _blob_oid| {
+            let Some(scoped_path) = tree_query_scoped_path(&path, relative_path) else {
+                return Ok(true);
+            };
+            if !glob.matches_repo_relative_path(
+                scoped_path.as_bytes().as_bstr(),
+                scoped_path.rfind('/').map(|index| index + 1),
+                Some(false),
+                Case::Fold,
+                wildmatch::Mode::NO_MATCH_SLASH_LITERAL,
+            ) {
+                return Ok(true);
+            }
+            if files.len() >= usize::from(limit) {
+                truncated = true;
+                return Ok(false);
+            }
+            files.push(relative_path.to_owned());
+            Ok(true)
+        },
+    )?;
+    write_response(&Response::TreeFilesListed {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        accepted_commit_oid: accepted_commit.to_string(),
+        accepted_tree_oid: accepted_tree.to_string(),
+        path,
+        pattern,
+        files,
+        truncated,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+fn grep_tree_files(
+    repository_path: PathBuf,
+    accepted_commit_oid: String,
+    path: String,
+    pattern: String,
+    glob: Option<String>,
+    max_count_per_file: u16,
+    limit: u16,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    use gix::bstr::ByteSlice;
+    use gix_glob::{Pattern, pattern::Case, wildmatch};
+
+    assert_tree_query_input(&path, &pattern, limit)?;
+    if max_count_per_file == 0 || max_count_per_file > MAX_TREE_QUERY_RESULTS {
+        return Err("invalid_tree_query_limit");
+    }
+    let matcher = regex::RegexBuilder::new(&pattern)
+        .size_limit(MAX_TREE_QUERY_REGEX_BYTES)
+        .dfa_size_limit(MAX_TREE_QUERY_REGEX_BYTES)
+        .build()
+        .map_err(|_| "invalid_tree_grep_pattern")?;
+    let glob_matcher = glob
+        .as_deref()
+        .map(|value| {
+            if value.is_empty()
+                || value.len() > MAX_TREE_QUERY_PATTERN_BYTES
+                || value.contains('\0')
+            {
+                return Err("invalid_tree_glob_pattern");
+            }
+            Pattern::from_bytes_without_negation(value.as_bytes())
+                .filter(|pattern| {
+                    !pattern.mode.intersects(
+                        gix_glob::pattern::Mode::NEGATIVE | gix_glob::pattern::Mode::MUST_BE_DIR,
+                    )
+                })
+                .ok_or("invalid_tree_glob_pattern")
+        })
+        .transpose()?;
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    let repository = open_repository(repository_path)?;
+    let (accepted_commit, accepted_tree) =
+        accepted_commit_identity(&repository, &accepted_commit_oid)?;
+    let mut matches = Vec::new();
+    let mut output_bytes = 0usize;
+    let mut scanned_files = 0u64;
+    let mut scanned_bytes = 0u64;
+    let mut truncated = false;
+    let mut stats = ManagedTreeStats::default();
+    walk_accepted_tree_files(
+        &repository,
+        accepted_tree,
+        "",
+        0,
+        &mut stats,
+        &mut |relative_path, blob_oid| {
+            let Some(scoped_path) = tree_query_scoped_path(&path, relative_path) else {
+                return Ok(true);
+            };
+            if glob_matcher.as_ref().is_some_and(|glob| {
+                !glob.matches_repo_relative_path(
+                    scoped_path.as_bytes().as_bstr(),
+                    scoped_path.rfind('/').map(|index| index + 1),
+                    Some(false),
+                    Case::Fold,
+                    wildmatch::Mode::NO_MATCH_SLASH_LITERAL,
+                )
+            }) {
+                return Ok(true);
+            }
+            let blob = load_verified_object(
+                &repository,
+                blob_oid,
+                gix::objs::Kind::Blob,
+                MAX_TREE_FILE_BYTES,
+                "tree_file_unavailable",
+                "tree_file_invalid",
+                "tree_file_size_limit_exceeded",
+                "tree_file_identity_mismatch",
+            )?
+            .try_into_blob()
+            .map_err(|_| "tree_file_invalid")?;
+            scanned_files = scanned_files
+                .checked_add(1)
+                .filter(|files| *files <= MANAGED_TREE_POLICY_V3.max_files)
+                .ok_or("source_file_limit_exceeded")?;
+            scanned_bytes = scanned_bytes
+                .checked_add(blob.data.len() as u64)
+                .filter(|bytes| *bytes <= MANAGED_TREE_POLICY_V3.max_bytes)
+                .ok_or("source_byte_limit_exceeded")?;
+            let Ok(content) = std::str::from_utf8(&blob.data) else {
+                return Ok(true);
+            };
+            let mut file_matches = 0u16;
+            for (line_index, line) in content.lines().enumerate() {
+                if !matcher.is_match(line) || file_matches >= max_count_per_file {
+                    continue;
+                }
+                if matches.len() >= usize::from(limit) {
+                    truncated = true;
+                    return Ok(false);
+                }
+                let matched = format!("{relative_path}:{}:{line}", line_index + 1);
+                output_bytes = output_bytes
+                    .checked_add(matched.len())
+                    .ok_or("tree_query_output_limit_exceeded")?;
+                if output_bytes > MAX_TREE_QUERY_OUTPUT_BYTES {
+                    return Err("tree_query_output_limit_exceeded");
+                }
+                matches.push(matched);
+                file_matches += 1;
+            }
+            Ok(true)
+        },
+    )?;
+    write_response(&Response::TreeFilesGrepped {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        accepted_commit_oid: accepted_commit.to_string(),
+        accepted_tree_oid: accepted_tree.to_string(),
+        path,
+        pattern,
+        glob,
+        matches,
+        truncated,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+fn assert_tree_query_input(path: &str, pattern: &str, limit: u16) -> Result<(), &'static str> {
+    if path != "." && !is_canonical_successor_path_v3(path) {
+        return Err("invalid_tree_query_path");
+    }
+    if pattern.is_empty() || pattern.len() > MAX_TREE_QUERY_PATTERN_BYTES || pattern.contains('\0')
+    {
+        return Err("invalid_tree_glob_pattern");
+    }
+    if limit == 0 || limit > MAX_TREE_QUERY_RESULTS {
+        return Err("invalid_tree_query_limit");
+    }
+    Ok(())
+}
+
+fn tree_query_scoped_path<'a>(scope: &str, relative_path: &'a str) -> Option<&'a str> {
+    if scope == "." {
+        return Some(relative_path);
+    }
+    relative_path
+        .strip_prefix(scope)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+}
+
+fn walk_accepted_tree_files<F>(
+    repository: &gix::Repository,
+    tree_oid: gix::hash::ObjectId,
+    prefix: &str,
+    depth: u64,
+    stats: &mut ManagedTreeStats,
+    visitor: &mut F,
+) -> Result<bool, &'static str>
+where
+    F: FnMut(&str, gix::hash::ObjectId) -> Result<bool, &'static str>,
+{
+    let tree = load_verified_object(
+        repository,
+        tree_oid,
+        gix::objs::Kind::Tree,
+        MANAGED_TREE_POLICY_V3.max_single_tree_object_bytes,
+        "accepted_tree_unavailable",
+        "tree_file_invalid",
+        "source_tree_object_limit_exceeded",
+        "source_tree_identity_mismatch",
+    )?
+    .try_into_tree()
+    .map_err(|_| "tree_file_invalid")?;
+    stats.enter_tree(depth, tree.data.len() as u64, MANAGED_TREE_POLICY_V3)?;
+    assert_canonical_tree_modes(&tree.data)?;
+    let mut previous_entry: Option<(Vec<u8>, bool)> = None;
+    for entry in tree.iter() {
+        let entry = entry.map_err(|_| "tree_file_invalid")?;
+        let component =
+            std::str::from_utf8(entry.filename()).map_err(|_| "unsupported_source_path")?;
+        if !is_supported_source_component(component)
+            || component.len() as u64 > MANAGED_TREE_POLICY_V3.max_component_bytes
+        {
+            return Err("unsupported_source_path");
+        }
+        let is_tree = matches!(entry.mode().kind(), gix::objs::tree::EntryKind::Tree);
+        if previous_entry.as_ref().is_some_and(|(name, tree)| {
+            compare_git_tree_entry_names(name, *tree, entry.filename(), is_tree)
+                != std::cmp::Ordering::Less
+        }) {
+            return Err("source_tree_not_sorted");
+        }
+        previous_entry = Some((entry.filename().to_vec(), is_tree));
+        let relative_path = if prefix.is_empty() {
+            component.to_owned()
+        } else {
+            format!("{prefix}/{component}")
+        };
+        stats.observe_entry(&relative_path, MANAGED_TREE_POLICY_V3)?;
+        match entry.mode().kind() {
+            gix::objs::tree::EntryKind::Tree => {
+                if !walk_accepted_tree_files(
+                    repository,
+                    entry.object_id(),
+                    &relative_path,
+                    depth.checked_add(1).ok_or("source_tree_depth_exceeded")?,
+                    stats,
+                    visitor,
+                )? {
+                    return Ok(false);
+                }
+            }
+            gix::objs::tree::EntryKind::Blob | gix::objs::tree::EntryKind::BlobExecutable => {
+                if !visitor(&relative_path, entry.object_id())? {
+                    return Ok(false);
+                }
+            }
+            _ => return Err("unsupported_source_entry_kind"),
+        }
+    }
+    Ok(true)
 }
 
 fn accepted_commit_identity(

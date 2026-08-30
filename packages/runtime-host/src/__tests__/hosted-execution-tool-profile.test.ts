@@ -147,15 +147,15 @@ test('the WorkHub coordination profile has conversational authority but zero too
   assert.deepEqual(projectHostedExecutionTools([productTool], 'workhub-coordination-v1'), []);
 });
 
-test('the managed coding profile exposes only owner-settled Write and Edit', () => {
+test('the managed coding profile reads and mutates only the accepted Git tree', () => {
   const profile = hostedExecutionRunProfile('managed-coding-v1');
   assert.ok(profile);
-  assert.deepEqual(profile.toolNames, ['Write', 'Edit']);
+  assert.deepEqual(profile.toolNames, ['Read', 'Glob', 'Grep', 'Write', 'Edit']);
   assert.equal(profile.memoryExtraction, false);
   assert.match(profile.systemPrompt, /managed Git workspace/u);
-  assert.match(profile.systemPrompt, /Write and Edit/u);
+  assert.match(profile.systemPrompt, /Read, Glob, and Grep/u);
 
-  const tools = ['Read', 'Write', 'Edit', 'Bash'].map(
+  const tools = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash'].map(
     (name): MakaTool => ({
       name,
       description: name,
@@ -166,9 +166,13 @@ test('the managed coding profile exposes only owner-settled Write and Edit', () 
   const selected = projectHostedExecutionTools(tools, 'managed-coding-v1');
   assert.deepEqual(
     selected.map(({ name }) => name),
-    ['Write', 'Edit'],
+    ['Read', 'Glob', 'Grep', 'Write', 'Edit'],
   );
-  for (const tool of selected) {
+  for (const tool of selected.slice(0, 3)) {
+    assert.equal(tool.recoveryMode, 'replay_safe');
+    assert.equal(tool.durableExecutionProfile, undefined);
+  }
+  for (const tool of selected.slice(3)) {
     assert.equal(tool.recoveryMode, 'reconcile');
     assert.equal(tool.durableExecutionProfile, 'managed_mutation_v1');
   }
