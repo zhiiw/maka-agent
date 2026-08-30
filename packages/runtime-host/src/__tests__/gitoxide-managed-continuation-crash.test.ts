@@ -38,6 +38,7 @@ import { test } from 'node:test';
 import { createSqliteRuntimeStore } from '@maka/storage/sqlite-runtime-store';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
+import { resolveWorkspaceIdentity } from '@maka/storage/workspace-identity';
 import {
   admitGitoxideHelperArtifactInternal,
   GITOXIDE_HELPER_OPERATIONS_INTERNAL,
@@ -399,6 +400,7 @@ async function withManagedContinuationFixture(
       'baseline',
     ]);
   }
+  await resolveWorkspaceIdentity({ path: sourceRoot });
 
   const resourcesRoot = await preparePackagedResources(base, helperInputPath);
   const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });

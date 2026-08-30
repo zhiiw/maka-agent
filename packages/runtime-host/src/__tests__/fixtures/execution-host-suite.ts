@@ -1192,7 +1192,12 @@ export class ExecutionFixture {
   }
 
   async readAdmissionChain() {
-    const owner = await tryAcquireInteractiveRootOwner(this.capability);
+    const deadline = Date.now() + PROCESS_TIMEOUT_MS;
+    let owner = await tryAcquireInteractiveRootOwner(this.capability);
+    while (!owner && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      owner = await tryAcquireInteractiveRootOwner(this.capability);
+    }
     assert.ok(owner);
     if (!owner) throw new Error('Unable to acquire execution root for admission inspection');
     let stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>> | undefined;
