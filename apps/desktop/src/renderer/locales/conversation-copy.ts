@@ -179,6 +179,15 @@ export interface DesktopConversationCopy {
     restoredDetail(path: string, files: number, bytes: number): string;
     restoreFailed: string;
     retryRestore: string;
+    historyTitle: string;
+    historyCurrent: string;
+    historyBaseline: string;
+    historyMutation(files: number): string;
+    historyRestore: string;
+    historyLoadFailed: string;
+    historyRestoreFailed: string;
+    historyRestoredDetail(path: string, files: number): string;
+    historyTruncated: string;
   };
   terminalPanel: {
     ariaLabel: string;
@@ -554,6 +563,15 @@ const COPY = {
         `已在 ${path} 恢复 ${files} 个文件（${bytes} 字节）`,
       restoreFailed: '无法恢复 accepted 快照',
       retryRestore: '重试恢复',
+      historyTitle: 'Accepted 历史',
+      historyCurrent: '当前 accepted 版本',
+      historyBaseline: '初始基线',
+      historyMutation: (files) => `修改了 ${files} 个文件`,
+      historyRestore: '恢复这个版本',
+      historyLoadFailed: '无法读取 accepted 历史',
+      historyRestoreFailed: '无法恢复历史版本',
+      historyRestoredDetail: (path, files) => `已在 ${path} 恢复历史版本（${files} 个文件）`,
+      historyTruncated: '仅显示最近 50 个 accepted 版本',
     },
     terminalPanel: {
       ariaLabel: '任务终端',
@@ -798,6 +816,16 @@ const COPY = {
         `Restored ${files} file${files === 1 ? '' : 's'} (${bytes} bytes) to ${path}`,
       restoreFailed: 'Could not restore the accepted snapshot',
       retryRestore: 'Retry restore',
+      historyTitle: 'Accepted history',
+      historyCurrent: 'Current accepted version',
+      historyBaseline: 'Initial baseline',
+      historyMutation: (files) => `${files} changed file${files === 1 ? '' : 's'}`,
+      historyRestore: 'Restore this version',
+      historyLoadFailed: 'Could not read accepted history',
+      historyRestoreFailed: 'Could not restore the historical version',
+      historyRestoredDetail: (path, files) =>
+        `Restored the historical version (${files} file${files === 1 ? '' : 's'}) to ${path}`,
+      historyTruncated: 'Showing the 50 most recent accepted versions',
     },
     terminalPanel: {
       ariaLabel: 'Task terminal',

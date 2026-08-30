@@ -66,6 +66,10 @@ import {
   type GitoxideManagedTimeTravelOwnerInternal,
 } from './gitoxide-managed-time-travel-owner-internal.js';
 import {
+  createGitoxideManagedHistoryOwnerInternal,
+  type GitoxideManagedHistoryOwnerInternal,
+} from './gitoxide-managed-history-owner-internal.js';
+import {
   createGitoxideManagedGcOwnerInternal,
   type GitoxideManagedGcOwnerInternal,
 } from './gitoxide-managed-gc-owner-internal.js';
@@ -91,6 +95,7 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly repositoryId: string;
   readonly baselineWorkspaceVersionId: string;
   readonly gc: GitoxideManagedGcOwnerInternal;
+  readonly history: GitoxideManagedHistoryOwnerInternal;
   readonly workspaceId: string;
   readonly workspaceEpochId: string;
   readonly inspection: GitoxideManagedInspectionOwnerInternal;
@@ -628,6 +633,13 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       return Object.freeze({ commitOid: version.commitOid, treeOid: version.treeOid });
     },
   });
+  const history = createGitoxideManagedHistoryOwnerInternal({
+    repositoryId: identity.repositoryId,
+    workspaceId: identity.workspaceId,
+    workspaceEpochId: identity.workspaceEpochId,
+    readHead: () => baselineAuthority.readHead(identity.workspaceId, identity.workspaceEpochId),
+    readVersion: (workspaceVersionId) => baselineAuthority.readVersion(workspaceVersionId),
+  });
   const gc = createGitoxideManagedGcOwnerInternal({
     storageRoot,
     workspaceEpochId: identity.workspaceEpochId,
@@ -652,6 +664,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     repositoryId: identity.repositoryId,
     baselineWorkspaceVersionId: identity.workspaceVersionId,
     gc,
+    history,
     workspaceId: identity.workspaceId,
     workspaceEpochId: identity.workspaceEpochId,
     inspection,

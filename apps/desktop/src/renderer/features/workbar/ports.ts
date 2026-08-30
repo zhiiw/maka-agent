@@ -46,6 +46,8 @@ import type { UserQuestionResponse } from '@maka/core/user-question';
 import type { Result } from '@maka/core/result';
 import type {
   ContextDiagnosticsResult,
+  ManagedWorkspaceHistoricalRestoreResult,
+  ManagedWorkspaceHistoryResult,
   ManagedWorkspacePublishResult,
   ManagedWorkspaceRestoreResult,
 } from '@maka/runtime-host/protocol';
@@ -75,6 +77,15 @@ export interface WorkbarReviewService {
     sessionId: string;
     restoreId: string;
   }): Promise<ManagedWorkspaceRestoreResult>;
+  history(input: {
+    sessionId: string;
+    limit: number;
+  }): Promise<ManagedWorkspaceHistoryResult>;
+  restoreVersion(input: {
+    sessionId: string;
+    workspaceVersionId: string;
+    restoreId: string;
+  }): Promise<ManagedWorkspaceHistoricalRestoreResult>;
   subscribeSessionEvents(
     sessionId: string,
     handler: (event: SessionEvent) => void,

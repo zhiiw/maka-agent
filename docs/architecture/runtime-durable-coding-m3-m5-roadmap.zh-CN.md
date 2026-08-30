@@ -31,7 +31,7 @@ workspace content；materialized directory、Desktop UI 和缓存都只是可重
 | accepted-tree Review | 不写 durable state | 已实现 | 已接入 Desktop Review | helper exact-tree + IPC fail-closed test 已建立 |
 | immutable Publish | artifact/ref protocol 已实现 | 已实现 | 已接入 Desktop Review | helper ref-CAS + IPC fail-closed test 已建立；packaged Desktop crash proof 缺失 |
 | isolated Restore | artifact protocol 已实现 | 已实现 | 已接入 Desktop Review | helper materialization + IPC fail-closed test 已建立；packaged Desktop crash proof 缺失 |
-| time travel | historical read/restore 已实现 | 已实现 | **缺失** | undo-as-successor 尚未实现 |
+| time travel | historical read/restore 已实现 | 已实现 | 最近 50 个版本与隔离恢复已接入 Desktop | lineage tests 已建立；undo-as-successor 尚未实现 |
 | rebaseline / relocation | epoch identity 已实现 | 已实现 | **缺失** | Host cases 已建立，packaged evidence 待 CI |
 | GC | restore-orphan tombstone 已实现 | 已实现 | 无需直接 UI | candidate/ref/object roots 尚未纳入 |
 | Bash / dependency / tests | 仅有旧 storage authority 与通用 shell 基础 | **缺失** | **缺失** | **缺失** |
@@ -89,8 +89,12 @@ accepted commit 是仅有的两种可收敛状态。这个动作不接触 source
 
 当前 Desktop 已接入 isolated restore：Review 面板签发稳定 `restoreId`，Runtime Host 只从 managed session 的
 durable accepted identity 物化到 Maka-owned restore root。响应丢失后复用同一 ID；已有 staging/workspace 会先转成
-orphan，再从 accepted tree 重建。它不读取或覆盖 source checkout。历史版本选择、Undo-as-successor 与 timeline
-仍属于后续能力。
+orphan，再从 accepted tree 重建。它不读取或覆盖 source checkout。Undo-as-successor 与可分页完整 timeline 仍属于
+后续能力。
+
+Desktop 也已接入 bounded accepted history：Host 从一次 captured head 沿 immutable parent records 反向读取，最多
+返回 50 个版本；任一 repository/workspace/epoch mismatch、断链或循环都 fail closed。用户可以选择旧版本恢复到
+隔离目录，但该操作不 rewind accepted head。Undo-as-successor 与可分页完整 timeline 仍属于后续能力。
 
 ### M4.4 Epoch lifecycle
 
@@ -155,7 +159,7 @@ Host 后，新的 Run 只采用 durable outcome/candidate/evidence；已完成�
 1. **M3 closure**：packaged Desktop Git/非 Git quiet-resume crash matrix；
 2. **M4 Desktop Review**：结构化 accepted diff 的 IPC 与 UI consumer（已实现，等待三平台 packaged 证据）；
 3. **M4 Apply/Publish**：immutable publish Desktop consumer 已实现；下一步是 drift-aware checkout apply receipt；
-4. **M4 Restore/Undo**：isolated restore Desktop consumer 已实现；下一步是 historical successor 与 timeline；
+4. **M4 Restore/Undo**：isolated restore 与 bounded history Desktop consumer 已实现；下一步是 Undo-as-successor 与可分页 timeline；
 5. **M4 Lifecycle**：Desktop rebaseline/relocation、完整 durable-root GC；
 6. **M5 Toolchain/Sandbox**：能力证明与 hermetic command worker；
 7. **M5 Dependencies/Tests**：受权 dependency artifact 与 durable test outcome；

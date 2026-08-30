@@ -66,6 +66,12 @@ export function createFakeWorkbarServices(
       restore: async () => {
         throw new Error('Fake review.restore is not configured');
       },
+      history: async () => {
+        throw new Error('Fake review.history is not configured');
+      },
+      restoreVersion: async () => {
+        throw new Error('Fake review.restoreVersion is not configured');
+      },
       subscribeSessionEvents: noopSubscription,
     },
     terminal: {

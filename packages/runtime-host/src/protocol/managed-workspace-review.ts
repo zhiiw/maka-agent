@@ -28,6 +28,7 @@ const REVISION_PATTERN = /^[0-9a-f]{64}$/u;
 const SHA1_PATTERN = /^[0-9a-f]{40}$/u;
 const PUBLISH_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const RESTORE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
+const VERSION_ID_PATTERN = /^version_[a-z0-9_-]{1,96}$/u;
 
 export interface ManagedWorkspaceReviewQueryInput {
   readonly sessionId: string;
@@ -65,6 +66,39 @@ export interface ManagedWorkspaceRestoreResult {
   readonly acceptedTreeOid: string;
   readonly filesMaterialized: number;
   readonly bytesMaterialized: number;
+}
+
+export interface ManagedWorkspaceHistoryInput {
+  readonly sessionId: string;
+  readonly limit: number;
+}
+
+export interface ManagedWorkspaceHistoryEntry {
+  readonly workspaceVersionId: string;
+  readonly parentWorkspaceVersionId: string | null;
+  readonly commitOid: string;
+  readonly treeOid: string;
+  readonly acceptedEventId: string;
+  readonly committedAt: number;
+  readonly kind: 'baseline' | 'tool_mutation';
+  readonly changedFileCount: number;
+}
+
+export interface ManagedWorkspaceHistoryResult {
+  readonly kind: 'accepted_history';
+  readonly headWorkspaceVersionId: string;
+  readonly versions: readonly ManagedWorkspaceHistoryEntry[];
+  readonly hasMore: boolean;
+}
+
+export interface ManagedWorkspaceHistoricalRestoreInput {
+  readonly sessionId: string;
+  readonly workspaceVersionId: string;
+  readonly restoreId: string;
+}
+
+export interface ManagedWorkspaceHistoricalRestoreResult extends ManagedWorkspaceRestoreResult {
+  readonly workspaceVersionId: string;
 }
 
 const QUERY_ERRORS = [
@@ -153,6 +187,76 @@ export const MANAGED_WORKSPACE_REVIEW_OPERATION_SPECS = {
       }
     },
   }),
+  'managed-workspace.history.query': defineOperation<
+    ManagedWorkspaceHistoryInput,
+    ManagedWorkspaceHistoryResult,
+    (typeof QUERY_ERRORS)[number]
+  >({
+    mode: 'query',
+    availability: 'ready',
+    errors: QUERY_ERRORS,
+    decodeInput(value) {
+      const record = requireExactRecord(value, 'managed workspace history query', [
+        'sessionId',
+        'limit',
+      ]);
+      if (
+        !Number.isSafeInteger(record.limit) ||
+        (record.limit as number) < 1 ||
+        (record.limit as number) > 100
+      ) {
+        throw invalidProtocolFrame('Invalid managed history limit');
+      }
+      return {
+        sessionId: requireEntityId(record.sessionId, 'managed history Session id'),
+        limit: record.limit as number,
+      };
+    },
+    decodeOutput: decodeManagedWorkspaceHistoryResult,
+    assertOutputForInput(input, output) {
+      if (output.versions.length > input.limit) {
+        throw invalidProtocolFrame('Managed workspace history exceeds its requested limit');
+      }
+    },
+  }),
+  'managed-workspace.history.restore.mutate': defineOperation<
+    ManagedWorkspaceHistoricalRestoreInput,
+    ManagedWorkspaceHistoricalRestoreResult,
+    (typeof QUERY_ERRORS)[number]
+  >({
+    mode: 'command',
+    availability: 'ready',
+    errors: QUERY_ERRORS,
+    decodeInput(value) {
+      const record = requireExactRecord(value, 'managed workspace historical restore', [
+        'sessionId',
+        'workspaceVersionId',
+        'restoreId',
+      ]);
+      const workspaceVersionId = requireEntityId(
+        record.workspaceVersionId,
+        'managed history workspace version id',
+      );
+      const restoreId = requireEntityId(record.restoreId, 'managed historical restore id');
+      if (!VERSION_ID_PATTERN.test(workspaceVersionId) || !RESTORE_ID_PATTERN.test(restoreId)) {
+        throw invalidProtocolFrame('Invalid managed historical restore identity');
+      }
+      return {
+        sessionId: requireEntityId(record.sessionId, 'managed historical restore Session id'),
+        workspaceVersionId,
+        restoreId,
+      };
+    },
+    decodeOutput: decodeManagedWorkspaceHistoricalRestoreResult,
+    assertOutputForInput(input, output) {
+      if (
+        output.restoreId !== input.restoreId ||
+        output.workspaceVersionId !== input.workspaceVersionId
+      ) {
+        throw invalidProtocolFrame('Managed historical restore conflicts with its request');
+      }
+    },
+  }),
 } as const;
 
 export function decodeManagedWorkspacePublishResult(value: unknown): ManagedWorkspacePublishResult {
@@ -223,6 +327,124 @@ export function decodeManagedWorkspaceRestoreResult(value: unknown): ManagedWork
     acceptedTreeOid: record.acceptedTreeOid,
     filesMaterialized: record.filesMaterialized,
     bytesMaterialized: record.bytesMaterialized,
+  };
+}
+
+export function decodeManagedWorkspaceHistoricalRestoreResult(
+  value: unknown,
+): ManagedWorkspaceHistoricalRestoreResult {
+  const record = requireExactRecord(value, 'managed workspace historical restore result', [
+    'kind',
+    'restoreId',
+    'workspaceVersionId',
+    'destinationPath',
+    'acceptedCommitOid',
+    'acceptedTreeOid',
+    'filesMaterialized',
+    'bytesMaterialized',
+  ]);
+  const restored = decodeManagedWorkspaceRestoreResult({
+    kind: record.kind,
+    restoreId: record.restoreId,
+    destinationPath: record.destinationPath,
+    acceptedCommitOid: record.acceptedCommitOid,
+    acceptedTreeOid: record.acceptedTreeOid,
+    filesMaterialized: record.filesMaterialized,
+    bytesMaterialized: record.bytesMaterialized,
+  });
+  if (
+    typeof record.workspaceVersionId !== 'string' ||
+    !VERSION_ID_PATTERN.test(record.workspaceVersionId)
+  ) {
+    throw invalidProtocolFrame('Invalid managed historical restore result');
+  }
+  return { ...restored, workspaceVersionId: record.workspaceVersionId };
+}
+
+export function decodeManagedWorkspaceHistoryResult(value: unknown): ManagedWorkspaceHistoryResult {
+  const record = requireExactRecord(value, 'managed workspace history result', [
+    'kind',
+    'headWorkspaceVersionId',
+    'versions',
+    'hasMore',
+  ]);
+  if (
+    record.kind !== 'accepted_history' ||
+    typeof record.headWorkspaceVersionId !== 'string' ||
+    !VERSION_ID_PATTERN.test(record.headWorkspaceVersionId) ||
+    !Array.isArray(record.versions) ||
+    record.versions.length < 1 ||
+    record.versions.length > 100 ||
+    typeof record.hasMore !== 'boolean'
+  ) {
+    throw invalidProtocolFrame('Invalid managed workspace history result');
+  }
+  const versions = record.versions.map(decodeHistoryEntry);
+  if (versions[0]?.workspaceVersionId !== record.headWorkspaceVersionId) {
+    throw invalidProtocolFrame('Managed workspace history does not start at its head');
+  }
+  for (let index = 0; index < versions.length - 1; index += 1) {
+    if (versions[index]?.parentWorkspaceVersionId !== versions[index + 1]?.workspaceVersionId) {
+      throw invalidProtocolFrame('Managed workspace history lineage is discontinuous');
+    }
+  }
+  const tail = versions.at(-1);
+  if (
+    !tail ||
+    (record.hasMore
+      ? tail.parentWorkspaceVersionId === null
+      : tail.parentWorkspaceVersionId !== null)
+  ) {
+    throw invalidProtocolFrame('Managed workspace history pagination is inconsistent');
+  }
+  return {
+    kind: 'accepted_history',
+    headWorkspaceVersionId: record.headWorkspaceVersionId,
+    versions,
+    hasMore: record.hasMore,
+  };
+}
+
+function decodeHistoryEntry(value: unknown): ManagedWorkspaceHistoryEntry {
+  const record = requireExactRecord(value, 'managed workspace history entry', [
+    'workspaceVersionId',
+    'parentWorkspaceVersionId',
+    'commitOid',
+    'treeOid',
+    'acceptedEventId',
+    'committedAt',
+    'kind',
+    'changedFileCount',
+  ]);
+  if (
+    typeof record.workspaceVersionId !== 'string' ||
+    !VERSION_ID_PATTERN.test(record.workspaceVersionId) ||
+    (record.parentWorkspaceVersionId !== null &&
+      (typeof record.parentWorkspaceVersionId !== 'string' ||
+        !VERSION_ID_PATTERN.test(record.parentWorkspaceVersionId))) ||
+    typeof record.commitOid !== 'string' ||
+    !SHA1_PATTERN.test(record.commitOid) ||
+    typeof record.treeOid !== 'string' ||
+    !SHA1_PATTERN.test(record.treeOid) ||
+    typeof record.acceptedEventId !== 'string' ||
+    record.acceptedEventId.length < 1 ||
+    record.acceptedEventId.length > 256 ||
+    !isCount(record.committedAt) ||
+    (record.kind !== 'baseline' && record.kind !== 'tool_mutation') ||
+    !isCount(record.changedFileCount) ||
+    (record.kind === 'baseline') !== (record.parentWorkspaceVersionId === null)
+  ) {
+    throw invalidProtocolFrame('Invalid managed workspace history entry');
+  }
+  return {
+    workspaceVersionId: record.workspaceVersionId,
+    parentWorkspaceVersionId: record.parentWorkspaceVersionId,
+    commitOid: record.commitOid,
+    treeOid: record.treeOid,
+    acceptedEventId: record.acceptedEventId,
+    committedAt: record.committedAt,
+    kind: record.kind,
+    changedFileCount: record.changedFileCount,
   };
 }
 

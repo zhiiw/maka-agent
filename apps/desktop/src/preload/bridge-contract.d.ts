@@ -54,6 +54,8 @@ import type { UserQuestionResponse } from '@maka/core/user-question';
 import type { RuntimeHostProfileKind } from '@maka/runtime-host/profile-kind';
 import type {
   ManagedWorkspacePublishResult,
+  ManagedWorkspaceHistoricalRestoreResult,
+  ManagedWorkspaceHistoryResult,
   ManagedWorkspaceRestoreResult,
 } from '@maka/runtime-host/protocol';
 import type { PermissionMode } from '@maka/core/permission';
@@ -1290,6 +1292,15 @@ export interface MakaBridge {
       sessionId: string;
       restoreId: string;
     }): Promise<ManagedWorkspaceRestoreResult>;
+    history(input: {
+      sessionId: string;
+      limit: number;
+    }): Promise<ManagedWorkspaceHistoryResult>;
+    restoreVersion(input: {
+      sessionId: string;
+      workspaceVersionId: string;
+      restoreId: string;
+    }): Promise<ManagedWorkspaceHistoricalRestoreResult>;
   };
   goal: {
     /** The session's current goal (null when none is set). */

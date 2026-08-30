@@ -22,6 +22,8 @@ import { isSessionNotFoundError } from '@maka/storage/execution-stores';
 import type { StorageRootLease } from '@maka/storage/root-authority';
 import type {
   ManagedWorkspacePublishInput,
+  ManagedWorkspaceHistoricalRestoreInput,
+  ManagedWorkspaceHistoryInput,
   ManagedWorkspaceReviewQueryInput,
   ManagedWorkspaceRestoreInput,
   OperationOutcome,
@@ -35,6 +37,8 @@ export class HostManagedWorkspaceReviewCoordinator {
     'managed-workspace.review.query': (input) => this.#query(input),
     'managed-workspace.publish.mutate': (input) => this.#publish(input),
     'managed-workspace.restore.mutate': (input) => this.#restore(input),
+    'managed-workspace.history.query': (input) => this.#history(input),
+    'managed-workspace.history.restore.mutate': (input) => this.#restoreHistory(input),
   };
 
   constructor(
@@ -156,6 +160,82 @@ export class HostManagedWorkspaceReviewCoordinator {
         return failure('not_found', 'Session was not found');
       }
       return failure('persistence_failed', 'Managed workspace Restore is unavailable');
+    }
+  }
+
+  async #history(
+    input: ManagedWorkspaceHistoryInput,
+  ): Promise<OperationOutcome<'managed-workspace.history.query'>> {
+    if (!this.input.helperCapability) {
+      return failure('operation_unavailable', 'Managed workspace History is unavailable');
+    }
+    try {
+      const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
+      if (header.toolProfile !== 'managed-coding-v1') {
+        return failure('invalid_request', 'Session does not own a managed workspace');
+      }
+      const session = await openGitoxideManagedSessionOwnerInternal({
+        storageRootLease: this.input.storageRootLease,
+        stores: this.input.stores,
+        invocationOwnerToken: this.input.invocationOwnerToken,
+        helperCapability: this.input.helperCapability,
+        sourceRoot: header.cwd,
+        sessionId: input.sessionId,
+      });
+      const history = await session.history.list(input.limit);
+      return { ok: true, result: { kind: 'accepted_history', ...history } };
+    } catch (error) {
+      if (isSessionNotFoundError(error)) {
+        return failure('not_found', 'Session was not found');
+      }
+      return failure('persistence_failed', 'Managed workspace History is unavailable');
+    }
+  }
+
+  async #restoreHistory(
+    input: ManagedWorkspaceHistoricalRestoreInput,
+  ): Promise<OperationOutcome<'managed-workspace.history.restore.mutate'>> {
+    if (!this.input.helperCapability) {
+      return failure(
+        'operation_unavailable',
+        'Managed workspace historical Restore is unavailable',
+      );
+    }
+    try {
+      const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
+      if (header.toolProfile !== 'managed-coding-v1') {
+        return failure('invalid_request', 'Session does not own a managed workspace');
+      }
+      const session = await openGitoxideManagedSessionOwnerInternal({
+        storageRootLease: this.input.storageRootLease,
+        stores: this.input.stores,
+        invocationOwnerToken: this.input.invocationOwnerToken,
+        helperCapability: this.input.helperCapability,
+        sourceRoot: header.cwd,
+        sessionId: input.sessionId,
+      });
+      const restored = await session.timeTravel.restoreVersion(
+        input.workspaceVersionId,
+        input.restoreId,
+      );
+      return {
+        ok: true,
+        result: {
+          kind: 'accepted_snapshot_restored',
+          restoreId: input.restoreId,
+          workspaceVersionId: input.workspaceVersionId,
+          destinationPath: restored.destinationPath,
+          acceptedCommitOid: restored.acceptedCommitOid,
+          acceptedTreeOid: restored.acceptedTreeOid,
+          filesMaterialized: restored.filesMaterialized,
+          bytesMaterialized: restored.bytesMaterialized,
+        },
+      };
+    } catch (error) {
+      if (isSessionNotFoundError(error)) {
+        return failure('not_found', 'Session was not found');
+      }
+      return failure('persistence_failed', 'Managed workspace historical Restore is unavailable');
     }
   }
 }

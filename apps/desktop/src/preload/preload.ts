@@ -188,6 +188,8 @@ import {
 } from '@maka/core/session-trace';
 import type {
   ContextDiagnosticsResult,
+  ManagedWorkspaceHistoricalRestoreResult,
+  ManagedWorkspaceHistoryResult,
   ManagedWorkspacePublishResult,
   ManagedWorkspaceRestoreResult,
 } from '@maka/runtime-host/protocol';
@@ -2522,6 +2524,19 @@ const makaBridge = {
       restoreId: string;
     }): Promise<ManagedWorkspaceRestoreResult> {
       return invokeSessionInput('managed-workspace:restore', input);
+    },
+    history(input: {
+      sessionId: string;
+      limit: number;
+    }): Promise<ManagedWorkspaceHistoryResult> {
+      return invokeSessionInput('managed-workspace:history', input);
+    },
+    restoreVersion(input: {
+      sessionId: string;
+      workspaceVersionId: string;
+      restoreId: string;
+    }): Promise<ManagedWorkspaceHistoricalRestoreResult> {
+      return invokeSessionInput('managed-workspace:restore-version', input);
     },
   },
   goal: {
