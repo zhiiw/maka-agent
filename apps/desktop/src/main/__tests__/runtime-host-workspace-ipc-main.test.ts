@@ -98,6 +98,12 @@ test('ordinary Review keeps reading the attached checkout', async (t) => {
       async restoreManagedWorkspaceSnapshot() {
         throw new Error('not used');
       },
+      async readManagedWorkspaceHistory() {
+        throw new Error('not used');
+      },
+      async restoreManagedWorkspaceVersion() {
+        throw new Error('not used');
+      },
     },
   });
 
@@ -126,6 +132,12 @@ test('managed Review fails closed instead of reading the attached checkout', asy
         throw new Error('not used');
       },
       async restoreManagedWorkspaceSnapshot() {
+        throw new Error('not used');
+      },
+      async readManagedWorkspaceHistory() {
+        throw new Error('not used');
+      },
+      async restoreManagedWorkspaceVersion() {
         throw new Error('not used');
       },
     },
@@ -240,6 +252,12 @@ test('managed workspace Restore delegates one isolated accepted snapshot to Runt
           bytesMaterialized: 4096,
         };
       },
+      async readManagedWorkspaceHistory() {
+        throw new Error('not used');
+      },
+      async restoreManagedWorkspaceVersion() {
+        throw new Error('not used');
+      },
     },
   });
 
@@ -276,6 +294,12 @@ test('ordinary workspace cannot enter managed isolated Restore', async () => {
       async restoreManagedWorkspaceSnapshot() {
         throw new Error('must not restore an ordinary workspace');
       },
+      async readManagedWorkspaceHistory() {
+        throw new Error('not used');
+      },
+      async restoreManagedWorkspaceVersion() {
+        throw new Error('not used');
+      },
     },
   });
 
@@ -286,6 +310,71 @@ test('ordinary workspace cannot enter managed isolated Restore', async () => {
     }),
     /does not own a managed workspace/u,
   );
+});
+
+test('managed workspace History and historical Restore stay bound to the same session', async () => {
+  const ipc = ipcHarness();
+  const workspaceVersionId = `version_${'1'.repeat(32)}`;
+  registerRuntimeHostWorkspaceIpc({
+    ipcMain: ipc as never,
+    client: {
+      async getSession() {
+        return sessionProjection('managed-coding-v1');
+      },
+      async readManagedWorkspaceHistory(sessionId: string, limit: number) {
+        assert.equal(sessionId, 'session-managed');
+        assert.equal(limit, 50);
+        return {
+          kind: 'accepted_history' as const,
+          headWorkspaceVersionId: workspaceVersionId,
+          versions: [
+            {
+              workspaceVersionId,
+              parentWorkspaceVersionId: null,
+              commitOid: '1'.repeat(40),
+              treeOid: '1'.repeat(40),
+              acceptedEventId: 'accepted-1',
+              committedAt: 1,
+              kind: 'baseline' as const,
+              changedFileCount: 1,
+            },
+          ],
+          hasMore: false,
+        };
+      },
+      async restoreManagedWorkspaceVersion(
+        sessionId: string,
+        selectedVersionId: string,
+        restoreId: string,
+      ) {
+        assert.equal(sessionId, 'session-managed');
+        assert.equal(selectedVersionId, workspaceVersionId);
+        assert.equal(restoreId, 'desktop-history-1');
+        return {
+          kind: 'accepted_snapshot_restored' as const,
+          workspaceVersionId: selectedVersionId,
+          restoreId,
+          destinationPath: 'C:\\maka\\restores\\history-desktop-history-1\\workspace',
+          acceptedCommitOid: '1'.repeat(40),
+          acceptedTreeOid: '1'.repeat(40),
+          filesMaterialized: 1,
+          bytesMaterialized: 12,
+        };
+      },
+    } as never,
+  });
+
+  const history = await ipc.invoke('managed-workspace:history', {
+    sessionId: 'session-managed',
+    limit: 50,
+  });
+  assert.equal((history as { headWorkspaceVersionId: string }).headWorkspaceVersionId, workspaceVersionId);
+  const restored = await ipc.invoke('managed-workspace:restore-version', {
+    sessionId: 'session-managed',
+    workspaceVersionId,
+    restoreId: 'desktop-history-1',
+  });
+  assert.equal((restored as { workspaceVersionId: string }).workspaceVersionId, workspaceVersionId);
 });
 
 function sessionProjection(

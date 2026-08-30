@@ -902,6 +902,22 @@ export class DesktopRuntimeHostClient {
     return this.request('managed-workspace.restore.mutate', { sessionId, restoreId });
   }
 
+  readManagedWorkspaceHistory(sessionId: string, limit = 50) {
+    return this.request('managed-workspace.history.query', { sessionId, limit });
+  }
+
+  restoreManagedWorkspaceVersion(
+    sessionId: string,
+    workspaceVersionId: string,
+    restoreId: string,
+  ) {
+    return this.request('managed-workspace.history.restore.mutate', {
+      sessionId,
+      workspaceVersionId,
+      restoreId,
+    });
+  }
+
   async createSession(
     input: SessionCreateInput,
   ): Promise<SessionCatalogProjection> {

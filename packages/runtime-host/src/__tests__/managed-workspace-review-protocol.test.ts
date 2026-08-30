@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   decodeManagedWorkspacePublishResult,
+  decodeManagedWorkspaceHistoryResult,
   decodeManagedWorkspaceReviewQueryResult,
   decodeManagedWorkspaceRestoreResult,
 } from '../protocol/managed-workspace-review.js';
@@ -119,5 +120,70 @@ test('managed Restore protocol rejects unbounded materialization counters', () =
         bytesMaterialized: 4096,
       }),
     /restore result/u,
+  );
+});
+
+test('managed History protocol accepts one contiguous newest-first lineage', () => {
+  const result = {
+    kind: 'accepted_history',
+    headWorkspaceVersionId: `version_${'3'.repeat(32)}`,
+    versions: [
+      {
+        workspaceVersionId: `version_${'3'.repeat(32)}`,
+        parentWorkspaceVersionId: `version_${'2'.repeat(32)}`,
+        commitOid: '3'.repeat(40),
+        treeOid: '3'.repeat(40),
+        acceptedEventId: 'accepted-3',
+        committedAt: 3,
+        kind: 'tool_mutation',
+        changedFileCount: 1,
+      },
+      {
+        workspaceVersionId: `version_${'2'.repeat(32)}`,
+        parentWorkspaceVersionId: null,
+        commitOid: '2'.repeat(40),
+        treeOid: '2'.repeat(40),
+        acceptedEventId: 'accepted-2',
+        committedAt: 2,
+        kind: 'baseline',
+        changedFileCount: 1,
+      },
+    ],
+    hasMore: false,
+  } as const;
+  assert.deepEqual(decodeManagedWorkspaceHistoryResult(result), result);
+});
+
+test('managed History protocol rejects a discontinuous lineage', () => {
+  assert.throws(
+    () =>
+      decodeManagedWorkspaceHistoryResult({
+        kind: 'accepted_history',
+        headWorkspaceVersionId: `version_${'3'.repeat(32)}`,
+        versions: [
+          {
+            workspaceVersionId: `version_${'3'.repeat(32)}`,
+            parentWorkspaceVersionId: `version_${'1'.repeat(32)}`,
+            commitOid: '3'.repeat(40),
+            treeOid: '3'.repeat(40),
+            acceptedEventId: 'accepted-3',
+            committedAt: 3,
+            kind: 'tool_mutation',
+            changedFileCount: 1,
+          },
+          {
+            workspaceVersionId: `version_${'2'.repeat(32)}`,
+            parentWorkspaceVersionId: null,
+            commitOid: '2'.repeat(40),
+            treeOid: '2'.repeat(40),
+            acceptedEventId: 'accepted-2',
+            committedAt: 2,
+            kind: 'baseline',
+            changedFileCount: 1,
+          },
+        ],
+        hasMore: false,
+      }),
+    /discontinuous/u,
   );
 });

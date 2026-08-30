@@ -31,6 +31,8 @@ import { generalizedErrorMessage, generalizedErrorMessageChinese } from '@maka/c
 import { type GitReviewReadResult } from '@maka/core/git-review';
 import type {
   ManagedWorkspacePublishResult,
+  ManagedWorkspaceHistoricalRestoreResult,
+  ManagedWorkspaceHistoryResult,
   ManagedWorkspaceRestoreResult,
 } from '@maka/runtime-host/protocol';
 import { DiffCodePreview, useUiLocale } from '@maka/ui';
@@ -70,9 +72,16 @@ export function SessionReviewPanel(props: {
   const [restoring, setRestoring] = useState(false);
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [restored, setRestored] = useState<ManagedWorkspaceRestoreResult | null>(null);
+  const [history, setHistory] = useState<ManagedWorkspaceHistoryResult | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyRestoringVersion, setHistoryRestoringVersion] = useState<string | null>(null);
+  const [historyRestoreError, setHistoryRestoreError] = useState<string | null>(null);
+  const [historicalRestore, setHistoricalRestore] =
+    useState<ManagedWorkspaceHistoricalRestoreResult | null>(null);
   const revisionRef = useRef(0);
   const publishIdRef = useRef<string | null>(null);
   const restoreIdRef = useRef<string | null>(null);
+  const historyRestoreIdsRef = useRef(new Map<string, string>());
 
   const load = useCallback(async () => {
     const revision = ++revisionRef.current;
@@ -85,6 +94,25 @@ export function SessionReviewPanel(props: {
       });
       if (revision !== revisionRef.current) return;
       setGitResult(nextGit);
+      if (nextGit.ok && nextGit.snapshot.repositoryRoot.startsWith('maka-managed://')) {
+        try {
+          const nextHistory = await review.history({ sessionId: props.sessionId, limit: 50 });
+          if (revision !== revisionRef.current) return;
+          setHistory(nextHistory);
+          setHistoryError(null);
+        } catch (nextError) {
+          if (revision !== revisionRef.current) return;
+          setHistory(null);
+          setHistoryError(
+            locale === 'zh'
+              ? generalizedErrorMessageChinese(nextError, copy.historyLoadFailed)
+              : generalizedErrorMessage(nextError, copy.historyLoadFailed),
+          );
+        }
+      } else {
+        setHistory(null);
+        setHistoryError(null);
+      }
     } catch (nextError) {
       if (revision === revisionRef.current) {
         setError(
@@ -96,7 +124,7 @@ export function SessionReviewPanel(props: {
     } finally {
       if (revision === revisionRef.current) setLoading(false);
     }
-  }, [copy.loadFailed, locale, props.sessionId, review]);
+  }, [copy.historyLoadFailed, copy.loadFailed, locale, props.sessionId, review]);
 
   useEffect(() => {
     if (!props.active) return;
@@ -155,6 +183,9 @@ export function SessionReviewPanel(props: {
     setRestoreError(null);
     publishIdRef.current = null;
     restoreIdRef.current = null;
+    setHistoricalRestore(null);
+    setHistoryRestoreError(null);
+    historyRestoreIdsRef.current.clear();
   }, [gitSnapshot?.revision]);
 
   const publishSnapshot = useCallback(async () => {
@@ -202,6 +233,35 @@ export function SessionReviewPanel(props: {
       setRestoring(false);
     }
   }, [copy.restoreFailed, gitSnapshot, locale, props.sessionId, restored, restoring, review]);
+
+  const restoreHistoricalVersion = useCallback(
+    async (workspaceVersionId: string) => {
+      if (historyRestoringVersion !== null) return;
+      const restoreId =
+        historyRestoreIdsRef.current.get(workspaceVersionId) ?? `desktop-${crypto.randomUUID()}`;
+      historyRestoreIdsRef.current.set(workspaceVersionId, restoreId);
+      setHistoryRestoringVersion(workspaceVersionId);
+      setHistoryRestoreError(null);
+      try {
+        setHistoricalRestore(
+          await review.restoreVersion({
+            sessionId: props.sessionId,
+            workspaceVersionId,
+            restoreId,
+          }),
+        );
+      } catch (nextError) {
+        setHistoryRestoreError(
+          locale === 'zh'
+            ? generalizedErrorMessageChinese(nextError, copy.historyRestoreFailed)
+            : generalizedErrorMessage(nextError, copy.historyRestoreFailed),
+        );
+      } finally {
+        setHistoryRestoringVersion(null);
+      }
+    },
+    [copy.historyRestoreFailed, historyRestoringVersion, locale, props.sessionId, review],
+  );
 
   return (
     <Section
@@ -296,6 +356,17 @@ export function SessionReviewPanel(props: {
             }
           />
         ) : null}
+        {historyError ? <Banner status="error" title={historyError} /> : null}
+        {historicalRestore ? (
+          <Banner
+            status="success"
+            title={copy.historyRestoredDetail(
+              historicalRestore.destinationPath,
+              historicalRestore.filesMaterialized,
+            )}
+          />
+        ) : null}
+        {historyRestoreError ? <Banner status="error" title={historyRestoreError} /> : null}
         {publishError ? (
           <Banner
             status="error"
@@ -440,6 +511,54 @@ export function SessionReviewPanel(props: {
               </div>
             ) : null}
           </div>
+        ) : null}
+        {history ? (
+          <VStack gap={2} align="stretch" className="maka-session-review-history">
+            <Text type="label">{copy.historyTitle}</Text>
+            {history.versions.map((version) => {
+              const isHead = version.workspaceVersionId === history.headWorkspaceVersionId;
+              const isRestoring = historyRestoringVersion === version.workspaceVersionId;
+              return (
+                <HStack
+                  key={version.workspaceVersionId}
+                  gap={2}
+                  align="center"
+                  justify="between"
+                  width="100%"
+                >
+                  <VStack gap={0} align="start">
+                    <Text type="supporting">
+                      {isHead
+                        ? copy.historyCurrent
+                        : version.kind === 'baseline'
+                          ? copy.historyBaseline
+                          : copy.historyMutation(version.changedFileCount)}
+                    </Text>
+                    <Text type="supporting" color="secondary">
+                      {new Date(version.committedAt).toLocaleString(
+                        locale === 'zh' ? 'zh-CN' : 'en-US',
+                      )}
+                    </Text>
+                  </VStack>
+                  {!isHead ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      label={isRestoring ? copy.restoring : copy.historyRestore}
+                      isLoading={isRestoring}
+                      isDisabled={historyRestoringVersion !== null}
+                      onClick={() => void restoreHistoricalVersion(version.workspaceVersionId)}
+                    />
+                  ) : null}
+                </HStack>
+              );
+            })}
+            {history.hasMore ? (
+              <Text type="supporting" color="secondary">
+                {copy.historyTruncated}
+              </Text>
+            ) : null}
+          </VStack>
         ) : null}
       </VStack>
     </Section>

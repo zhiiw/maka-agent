@@ -172,6 +172,8 @@ export type ManagedWorkspaceReviewOperationHandlerMap = Pick<
   | 'managed-workspace.review.query'
   | 'managed-workspace.publish.mutate'
   | 'managed-workspace.restore.mutate'
+  | 'managed-workspace.history.query'
+  | 'managed-workspace.history.restore.mutate'
 >;
 export type HostedExecutionOperationHandlerMap = Pick<
   OperationHandlerMap,
