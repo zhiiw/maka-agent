@@ -25,6 +25,12 @@
 > 只保留为历史论证，不得作为新代码的实现依据。
 > 已保留的 baseline authority 合同见
 > [Workspace Version Authority v1](./runtime-workspace-version-authority-v1.zh-CN.md)。
+>
+> 路线补充（2026-08-30）：durable coding 只维护一个 Gitoxide-backed workspace kernel。
+> Git repository 从 immutable HEAD 导入 baseline；非 Git directory 从有界 filesystem snapshot
+> 生成 synthetic baseline。两者进入 accepted tree 后共享同一套读取、mutation、acceptance、
+> continuation 与 lifecycle 协议。旧 per-file checkpoint 不再作为第三种 durable mode；attached
+> task 可以继续存在，但不承诺 durable resume。
 
 - 状态：Implementation tracked
 - 更新日期：2026-08-30
@@ -444,6 +450,11 @@ authority、同一 ledger transaction domain。lease 要携带 epoch/fencing tok
 
 ### PR C — File evidence + finalize-only recovery
 
+> 历史切片说明：本节记录 #1346 时期为 attached checkout 研究过的安全收缩边界，不再进入
+> M2–M6 production 路线。尤其不得把 `matches_prior_state` 重新解释为可自动 redo，也不得为非 Git
+> 项目重建独立的 per-file durable kernel。非 Git durable task 改走 filesystem snapshot importer，
+> 并在 Maka-owned Gitoxide workspace 内获得 workspace-level continuity。
+
 不变量：
 
 > T1 选择 `reconcile` 时必须已持久化可信文件 evidence；恢复只能在 current 明确匹配
@@ -519,11 +530,12 @@ generic repair 必须识别 claim-owned target 并 defer，不能用普通 `app_
 identity。当前 PR B 交付 authority-capable SessionManager 与 SQLite 协议；在 PR D 把该 authority
 接入 runtime-host 生产组合并完成 owner/ordering 测试前，不得宣称 hosted auto-resume 已启用。
 
-## 3. Native、attached 与 managed 的能力边界
+## 3. Source adapter、attached 与 durable workspace 的能力边界
 
 ### Native / attached checkout
 
-Attached 模式继续服务现有用户目录与兼容场景，但不冒充强 workspace continuity：
+Attached 模式继续服务现有会话与明确要求直接操作用户目录的兼容场景，但它不是第三种 durable
+mode，也不冒充强 workspace continuity：
 
 - RuntimeEvent history、continuation authority 与已落地的工具恢复事实继续有效；
 - 不能证明 workspace 内容对应某个 Runtime boundary 时 park；
@@ -532,7 +544,29 @@ Attached 模式继续服务现有用户目录与兼容场景，但不冒充强 w
 - 旧的 generic checkpoint provider、per-file carrier 与 observe-only user-repository Git 路线只保留为
   attached/legacy research，不再是 `managed_worktree` 的实现前置。
 
-### Gitoxide managed workspace
+### 两种 source adapter，一个 Gitoxide durable workspace
+
+Durable task 在 admission 时只区分 baseline 来源：
+
+| source kind | baseline importer | durable source identity |
+|---|---|---|
+| `git_repository_v1` | 从经过 policy 验证的 immutable source HEAD 导入 | repository identity + object format + source HEAD |
+| `filesystem_snapshot_v1` | 从有界、逐文件验证的 filesystem observation 生成 synthetic commit | source root identity + snapshot manifest digest |
+
+两种 importer 的输出都是 immutable accepted commit/tree。进入 accepted baseline 后，Read、Glob、
+Grep、Write、Edit、candidate、SQLite acceptance、continuation、Diff、Undo 和 Restore 不得再按 source
+kind 分叉。换句话说，这里是“两个 admission adapter，共用一个 durable kernel”，不是两套恢复系统。
+
+Filesystem snapshot v1 必须在签发 baseline 前冻结并持久化：最大深度、entry 数、单文件大小、总字节、
+允许的 node kind、symlink/junction 策略、portable path 规则、mode/metadata 语义和 policy digest。普通文件
+系统不能提供跨整棵目录的原子瞬时快照，因此 v1 只承诺每个导入字节经过有界验证并形成一个明确、
+可审查的 immutable baseline；不得宣称该 baseline 对应外部目录的某个单一物理时刻。
+
+发现 `.git` 但 repository 不满足当前 Gitoxide policy 时必须明确拒绝，不能把它静默当成普通目录走
+`filesystem_snapshot_v1`，否则会丢失用户原有 repository 语义。无法安全导入的普通目录同样在 T1
+前 fail closed，不得降级到 per-file checkpoint。
+
+### Gitoxide managed workspace foundation
 
 旧 Git executable-backed managed workspace 从未获得生产 baseline/profile 调用方，其 service、owner、
 receipt、worktree materialization 与 Runtime Host admission path 已删除。schema 9 RuntimeEvents、workspace
@@ -545,7 +579,7 @@ M2  Mutation durability
     一次 Write/Edit 可证明、可恢复
         ↓
 M3  Task continuity
-    整个 Managed Task 在同一个代码世界里安全继续
+    Git 与非 Git task 都在同一个 accepted code world 里安全继续
         ↓
 M4  Workspace lifecycle
     审查、恢复、发布、撤销、迁移与回收
@@ -595,11 +629,16 @@ M3 的唯一产品目标是：
 > causal boundary。Desktop 重启后从该边界创建新 Run 继续，绝不恢复旧内存现场，
 > 也不重放已完成 Write/Edit。
 
-### M3.1 Managed Task identity
+### M3.1 Resumable Task identity
 
-Desktop 提供显式 `New Managed Task` 入口。创建流程固定为 repository admission、source HEAD
-import、workspace epoch、accepted baseline 和 Runtime Run。`attached_checkout` 与
-`managed_workspace` 必须是不可混淆的 typed profile，T1 后不得互相 fallback。
+Desktop 的目标入口是单一 `New Resumable Task`，而不是要求用户理解 `Managed workspace` 开关。
+创建 Session 前由 source admission 自动选择 `git_repository_v1` 或
+`filesystem_snapshot_v1`，建立 workspace epoch、accepted baseline 和 Runtime Run。当前显式
+`Managed workspace` 入口只是 Git-only product wiring 的过渡形态，不是最终 UX。
+
+Durable source binding 必须在第一个工具 T1 前冻结。`git_repository_v1`、
+`filesystem_snapshot_v1` 与非 durable `attached_checkout` 是不可混淆的 typed profile；任何 admission
+失败都必须在创建 durable Run 前向用户解释，T1 后不得互相 fallback。
 
 ### M3.2 Accepted-tree Read / Glob / Grep
 
@@ -613,7 +652,9 @@ commit/tree。Projection 可以加速读取，但漂移时只能回到 Gitoxide 
 Continuation boundary 同时绑定：
 
 - immutable RuntimeEvent high-water 与 digest；
-- repository identity 与 object format；
+- source binding kind 与 source identity digest；
+- Git source 的 repository identity、object format 与 imported source HEAD，或 non-Git source 的
+  snapshot manifest digest；
 - workspace epoch；
 - accepted commit/tree；
 - execution profile hash 与 workspace policy hash。
@@ -629,14 +670,40 @@ claim，创建新 Run。不恢复旧 Promise、provider stream 或 JavaScript �
 
 ### M3.5 Desktop Resume
 
-手动 Resume 默认可用；自动续跑是单独设置且默认关闭。Desktop 必须展示最后 accepted
-workspace、已完成 operation、安全继续的证据或稳定 machine-readable park reason。
+当前产品仍以显式 Resume 和可见恢复状态为主；M3 的目标体验则是 evidence-complete 时无感继续。
+Desktop 启动后应自动完成 committed-prefix repair、managed settlement reconciliation、accepted-head
+revalidation 与 continuation claim。只有全部条件通过时才创建新 Run；这条确定性路径不需要用户先理解
+T1/T2、candidate 或 checkpoint，也不需要额外点击 Resume。
+
+自动 continuation 不是跳过安全检查。下列任一条件存在时必须停止并展示稳定、可操作的 park reason：
+
+- 未结算且无法证明 effect 的 T1；
+- accepted artifact 缺失、损坏或 identity 不匹配；
+- workspace epoch、source binding、execution profile 或 policy 漂移；
+- 外部副作用缺少 acceptance evidence；
+- Publish/Apply 会覆盖源目录的新内容；
+- continuation claim 已被其他 owner 持有。
+
+UI 可以把自动 repair/reconcile/continue 压缩为轻量状态提示，但不得隐藏 park、冲突或需要用户授权的
+Publish。所谓“无感 resume”是隐藏确定性的恢复仪式，不是把不确定性静默猜成成功。
 
 ### M3.6 Production-shaped crash proof
 
 真实 Host/worker crash matrix 覆盖 T1、transform、candidate durability、SQLite acceptance、provider
 response、continuation claim 和 new Run start 之间的每个边界。Linux、macOS、Windows 分别声明
 实际证明的能力，不得用单元测试代替进程崩溃证据。
+
+### M3.7 无感 Resume 的产品完成标准
+
+M3 只有同时满足下列条件，才能对用户宣称 seamless/transparent resume：
+
+1. 用户只创建“可恢复任务”，无需手选 Git/non-Git durable mode；
+2. crash/restart 后自动 repair、reconcile、claim 并启动新 Run；
+3. 新 Run 精确读取上一个 accepted head，不重放已完成 Write/Edit；
+4. 普通成功路径不弹恢复确认框，只在任务时间线上保留审计记录；
+5. 无法证明时稳定 park，且 UI 能说明需要重新选择目录、处理冲突、恢复 artifact 或重新授权；
+6. 真实 Host/worker crash test 分别覆盖 Git source 与 filesystem snapshot source；
+7. 用户观察到的结果是“任务继续了”，而不是“旧进程从断点继续执行”。
 
 ## 7. M4 — Workspace lifecycle
 
@@ -652,8 +719,16 @@ Projection 缺失、损坏或漂移时，从 SQLite accepted fact、accepted ref
 
 ### M4.3 Publish / Apply
 
-优先支持导出 patch 和 publish 到新 branch；apply 到用户 checkout 前必须重新观察 baseline/drift、
-构造 merge/apply candidate、获得用户确认、执行后验证并写 publish receipt。
+Publish 按 source adapter 分两条明确边界，但共享 accepted tree 事实源：
+
+- Git source：优先导出 patch 或 publish 到新 branch；apply 到用户 checkout 前重新观察 source
+  HEAD/worktree drift，构造 merge/apply candidate，获得用户确认，执行后验证并写 publish receipt；
+- filesystem snapshot source：优先支持 View Diff、Export to New Directory 与 Generate Patch；只有当前
+  source observation 与 baseline manifest 兼容时才构造文件级 apply plan。同路径漂移、metadata 无法保留或
+  证据不足时拒绝覆盖，不能回退到旧 checkpoint redo。
+
+运行期间的 workspace resume 与向外部 source 发布是两个不同原子性边界。内部 accepted history 可以
+无感恢复；对用户目录的覆盖、冲突选择和权限提升仍然需要显式授权。
 
 ### M4.4 Undo / Time travel
 
@@ -691,17 +766,19 @@ Replication、cross-device 和 multi-agent merge 独立为 M6。它们会引入 
 ## 10. 依赖顺序
 
 ```text
-Gitoxide repository admission/import (merged foundation)
-└─> M2 durable mutation kernel (#34–#39 为提取来源)
-    └─> M3.1 Managed Task
-        └─> M3.2 accepted Read / Glob / Grep
-            └─> M3.3 continuation boundary
-                └─> M3.4 resume planner
-                    └─> M3.5 Desktop Resume
-                        └─> M3.6 crash proof
-                            └─> M4.1–M4.7 workspace lifecycle
-                                └─> M5 durable coding loop
-                                    └─> M6 distributed workspace
+Gitoxide durable workspace kernel
+├─> Git repository HEAD importer
+└─> bounded filesystem snapshot importer
+    └─> M2 durable mutation kernel (#34–#39 为提取来源)
+        └─> M3.1 Resumable Task admission
+            └─> M3.2 accepted Read / Glob / Grep
+                └─> M3.3 continuation boundary
+                    └─> M3.4 resume planner
+                        └─> M3.5 automatic Desktop Resume
+                            └─> M3.6/M3.7 crash + seamless proof
+                                └─> M4.1–M4.7 workspace lifecycle and source-specific publish
+                                    └─> M5 durable coding loop
+                                        └─> M6 distributed workspace
 ```
 
 ## 11. 工程门槛
@@ -742,6 +819,9 @@ Gitoxide repository admission/import (merged foundation)
 - M3 不恢复 Bash、npm、build、test 或任意外部副作用；
 - M4 不宣称已支持 replication 或 multi-agent merge；
 - attached checkout 不提供 managed 级 workspace continuity；
+- 非 Git durable task 不使用 per-file checkpoint；它通过 filesystem snapshot importer 进入同一
+  Gitoxide workspace kernel；
+- “无感”不意味着自动覆盖 source drift、自动批准 Publish 或猜测无法证明的 external effect；
 - Maka-owned Git artifact 不覆盖用户当前 checkout；
 - 无法证明的 Bash/远程 API 副作用不自动重试；
 - process-crash transaction atomicity 不等于断电级 durability。
