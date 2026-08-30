@@ -597,7 +597,10 @@ fn imports_and_exactly_reopens_a_bounded_filesystem_snapshot() {
     assert_eq!(retry["baselineTreeOid"], first["baselineTreeOid"]);
 
     fs::write(source.join("notes.txt"), b"source drift\n").unwrap();
-    assert_helper_error(&invoke_request(request()), "baseline_request_conflict");
+    assert_helper_error(
+        &invoke_request(request()),
+        "import_destination_not_fresh",
+    );
 }
 
 #[test]
