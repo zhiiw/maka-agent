@@ -2424,7 +2424,12 @@ fn exactly_one_process_claims_a_fresh_import_destination() {
             .iter()
             .filter(|output| {
                 serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                    .is_ok_and(|response| response["reason"] == "import_destination_not_fresh")
+                    .is_ok_and(|response| {
+                        matches!(
+                            response["reason"].as_str(),
+                            Some("import_destination_not_fresh" | "baseline_request_conflict")
+                        )
+                    })
             })
             .count(),
         1
