@@ -57,6 +57,10 @@ const API_KEY = 'managed-v2-fixture-key';
 test('packaged managed-coding-v2 resumes after Host death without replaying a completed Node test', {
   timeout: 90_000,
 }, async (t) => {
+  process.env.MAKA_TEST_MANAGED_OBSERVATION_TRACE = '1';
+  t.after(() => {
+    delete process.env.MAKA_TEST_MANAGED_OBSERVATION_TRACE;
+  });
   const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
   if (!helperPath) {
     t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the packaged v2 crash gate');
