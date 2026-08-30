@@ -92,6 +92,9 @@ test('ordinary Review keeps reading the attached checkout', async (t) => {
         managedReads += 1;
         throw new Error('not used');
       },
+      async publishManagedWorkspaceSourceBranch() {
+        throw new Error('not used');
+      },
       async publishManagedWorkspaceSnapshot() {
         throw new Error('not used');
       },
@@ -133,6 +136,9 @@ test('managed Review fails closed instead of reading the attached checkout', asy
       },
       async readManagedWorkspaceReview() {
         throw new Error('accepted review unavailable');
+      },
+      async publishManagedWorkspaceSourceBranch() {
+        throw new Error('not used');
       },
       async publishManagedWorkspaceSnapshot() {
         throw new Error('not used');
@@ -176,6 +182,9 @@ test('managed workspace Publish delegates one immutable accepted snapshot to Run
       async readManagedWorkspaceReview() {
         throw new Error('not used');
       },
+      async publishManagedWorkspaceSourceBranch() {
+        throw new Error('not used');
+      },
       async publishManagedWorkspaceSnapshot(sessionId: string, publishId: string) {
         publishCalls += 1;
         assert.equal(sessionId, 'session-managed');
@@ -209,6 +218,60 @@ test('managed workspace Publish delegates one immutable accepted snapshot to Run
   assert.equal(publishCalls, 1);
 });
 
+test('managed workspace source branch Publish delegates one exact branch request', async () => {
+  const ipc = ipcHarness();
+  let publishCalls = 0;
+  registerRuntimeHostWorkspaceIpc({
+    ipcMain: ipc as never,
+    client: {
+      async getSession() {
+        return sessionProjection('managed-coding-v1');
+      },
+      async readManagedWorkspaceReview() {
+        throw new Error('not used');
+      },
+      async publishManagedWorkspaceSourceBranch(sessionId: string, publishId: string) {
+        publishCalls += 1;
+        assert.equal(sessionId, 'session-managed');
+        assert.equal(publishId, 'desktop-branch-123');
+        return {
+          kind: 'accepted_source_branch_published' as const,
+          publishId,
+          sourceBaseCommitOid: 'a'.repeat(40),
+          sourceBaseTreeOid: 'b'.repeat(40),
+          acceptedCommitOid: 'c'.repeat(40),
+          acceptedTreeOid: 'd'.repeat(40),
+          publishedCommitOid: 'e'.repeat(40),
+          publishedRef: `refs/heads/maka/${publishId}`,
+          replayed: false,
+        };
+      },
+      async publishManagedWorkspaceSnapshot() {
+        throw new Error('not used');
+      },
+    } as never,
+  });
+
+  assert.deepEqual(
+    await ipc.invoke('managed-workspace:publish-source-branch', {
+      sessionId: 'session-managed',
+      publishId: 'desktop-branch-123',
+    }),
+    {
+      kind: 'accepted_source_branch_published',
+      publishId: 'desktop-branch-123',
+      sourceBaseCommitOid: 'a'.repeat(40),
+      sourceBaseTreeOid: 'b'.repeat(40),
+      acceptedCommitOid: 'c'.repeat(40),
+      acceptedTreeOid: 'd'.repeat(40),
+      publishedCommitOid: 'e'.repeat(40),
+      publishedRef: 'refs/heads/maka/desktop-branch-123',
+      replayed: false,
+    },
+  );
+  assert.equal(publishCalls, 1);
+});
+
 test('ordinary workspace cannot enter managed immutable Publish', async () => {
   const ipc = ipcHarness();
   registerRuntimeHostWorkspaceIpc({
@@ -218,6 +281,9 @@ test('ordinary workspace cannot enter managed immutable Publish', async () => {
         return sessionProjection(undefined);
       },
       async readManagedWorkspaceReview() {
+        throw new Error('not used');
+      },
+      async publishManagedWorkspaceSourceBranch() {
         throw new Error('not used');
       },
       async publishManagedWorkspaceSnapshot() {
@@ -245,6 +311,9 @@ test('managed workspace Restore delegates one isolated accepted snapshot to Runt
         return sessionProjection('managed-coding-v1');
       },
       async readManagedWorkspaceReview() {
+        throw new Error('not used');
+      },
+      async publishManagedWorkspaceSourceBranch() {
         throw new Error('not used');
       },
       async publishManagedWorkspaceSnapshot() {
@@ -304,6 +373,9 @@ test('ordinary workspace cannot enter managed isolated Restore', async () => {
         return sessionProjection(undefined);
       },
       async readManagedWorkspaceReview() {
+        throw new Error('not used');
+      },
+      async publishManagedWorkspaceSourceBranch() {
         throw new Error('not used');
       },
       async publishManagedWorkspaceSnapshot() {

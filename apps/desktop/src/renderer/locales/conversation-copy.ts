@@ -173,6 +173,12 @@ export interface DesktopConversationCopy {
     publishedDetail(ref: string): string;
     publishFailed: string;
     retryPublish: string;
+    sourceBranchPublish: string;
+    sourceBranchPublishing: string;
+    sourceBranchPublished: string;
+    sourceBranchPublishedDetail(ref: string): string;
+    sourceBranchPublishFailed: string;
+    retrySourceBranchPublish: string;
     restore: string;
     restoring: string;
     restored: string;
@@ -564,6 +570,12 @@ const COPY = {
       publishedDetail: (ref) => `已将 accepted 快照发布到 ${ref}`,
       publishFailed: '无法发布 accepted 快照',
       retryPublish: '重试发布',
+      sourceBranchPublish: '发布到新分支',
+      sourceBranchPublishing: '正在创建分支',
+      sourceBranchPublished: '分支已创建',
+      sourceBranchPublishedDetail: (ref) => `已在源仓库创建 ${ref}，当前 checkout 未被修改`,
+      sourceBranchPublishFailed: '无法在源仓库创建发布分支',
+      retrySourceBranchPublish: '重试创建分支',
       restore: '恢复隔离副本',
       restoring: '正在恢复',
       restored: '已恢复',
@@ -825,6 +837,13 @@ const COPY = {
       publishedDetail: (ref) => `Published the accepted snapshot to ${ref}`,
       publishFailed: 'Could not publish the accepted snapshot',
       retryPublish: 'Retry publish',
+      sourceBranchPublish: 'Publish to new branch',
+      sourceBranchPublishing: 'Creating branch',
+      sourceBranchPublished: 'Branch created',
+      sourceBranchPublishedDetail: (ref) =>
+        `Created ${ref} in the source repository without changing its checkout`,
+      sourceBranchPublishFailed: 'Could not create the source repository branch',
+      retrySourceBranchPublish: 'Retry branch publish',
       restore: 'Restore isolated copy',
       restoring: 'Restoring',
       restored: 'Restored',

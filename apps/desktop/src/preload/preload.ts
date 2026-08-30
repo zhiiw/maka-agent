@@ -192,6 +192,7 @@ import type {
   ManagedWorkspaceHistoryResult,
   ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspacePublishResult,
+  ManagedWorkspaceSourceBranchPublishResult,
   ManagedWorkspaceRestoreResult,
   ManagedWorkspaceRebaselineResult,
 } from '@maka/runtime-host/protocol';
@@ -2520,6 +2521,12 @@ const makaBridge = {
       publishId: string;
     }): Promise<ManagedWorkspacePublishResult> {
       return invokeSessionInput('managed-workspace:publish', input);
+    },
+    publishSourceBranch(input: {
+      sessionId: string;
+      publishId: string;
+    }): Promise<ManagedWorkspaceSourceBranchPublishResult> {
+      return invokeSessionInput('managed-workspace:publish-source-branch', input);
     },
     restore(input: {
       sessionId: string;

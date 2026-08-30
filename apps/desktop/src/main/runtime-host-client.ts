@@ -891,11 +891,18 @@ export class DesktopRuntimeHostClient {
 
   async readManagedWorkspaceReview(sessionId: string): Promise<GitReviewReadResult> {
     const result = await this.request("managed-workspace.review.query", { sessionId });
-    return { ok: true, snapshot: result.snapshot };
+    return { ok: true, snapshot: result.snapshot, managedSourceKind: result.sourceKind };
   }
 
   publishManagedWorkspaceSnapshot(sessionId: string, publishId: string) {
     return this.request('managed-workspace.publish.mutate', { sessionId, publishId });
+  }
+
+  publishManagedWorkspaceSourceBranch(sessionId: string, publishId: string) {
+    return this.request('managed-workspace.source-branch.publish.mutate', {
+      sessionId,
+      publishId,
+    });
   }
 
   restoreManagedWorkspaceSnapshot(sessionId: string, restoreId: string) {

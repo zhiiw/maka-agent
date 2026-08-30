@@ -36,6 +36,7 @@ export interface ManagedWorkspaceReviewQueryInput {
 
 export interface ManagedWorkspaceReviewQueryResult {
   readonly kind: 'accepted_review';
+  readonly sourceKind: 'git_repository_v1' | 'filesystem_snapshot_v1';
   readonly snapshot: GitReviewSnapshot;
 }
 
@@ -49,6 +50,23 @@ export interface ManagedWorkspacePublishResult {
   readonly publishId: string;
   readonly acceptedCommitOid: string;
   readonly acceptedTreeOid: string;
+  readonly publishedRef: string;
+  readonly replayed: boolean;
+}
+
+export interface ManagedWorkspaceSourceBranchPublishInput {
+  readonly sessionId: string;
+  readonly publishId: string;
+}
+
+export interface ManagedWorkspaceSourceBranchPublishResult {
+  readonly kind: 'accepted_source_branch_published';
+  readonly publishId: string;
+  readonly sourceBaseCommitOid: string;
+  readonly sourceBaseTreeOid: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly publishedCommitOid: string;
   readonly publishedRef: string;
   readonly replayed: boolean;
 }
@@ -186,6 +204,43 @@ export const MANAGED_WORKSPACE_REVIEW_OPERATION_SPECS = {
         output.publishedRef !== `refs/maka/published/${input.publishId}`
       ) {
         throw invalidProtocolFrame('Managed workspace publication conflicts with its request');
+      }
+    },
+  }),
+  'managed-workspace.source-branch.publish.mutate': defineOperation<
+    ManagedWorkspaceSourceBranchPublishInput,
+    ManagedWorkspaceSourceBranchPublishResult,
+    (typeof QUERY_ERRORS)[number]
+  >({
+    mode: 'command',
+    availability: 'ready',
+    errors: QUERY_ERRORS,
+    decodeInput(value) {
+      const record = requireExactRecord(value, 'managed workspace source branch publication', [
+        'sessionId',
+        'publishId',
+      ]);
+      const publishId = requireEntityId(record.publishId, 'managed source branch publication id');
+      if (!PUBLISH_ID_PATTERN.test(publishId)) {
+        throw invalidProtocolFrame('Invalid managed source branch publication id');
+      }
+      return {
+        sessionId: requireEntityId(
+          record.sessionId,
+          'managed source branch publication Session id',
+        ),
+        publishId,
+      };
+    },
+    decodeOutput: decodeManagedWorkspaceSourceBranchPublishResult,
+    assertOutputForInput(input, output) {
+      if (
+        output.publishId !== input.publishId ||
+        output.publishedRef !== `refs/heads/maka/${input.publishId}`
+      ) {
+        throw invalidProtocolFrame(
+          'Managed workspace source branch publication conflicts with its request',
+        );
       }
     },
   }),
@@ -418,6 +473,43 @@ export function decodeManagedWorkspacePublishResult(value: unknown): ManagedWork
   };
 }
 
+export function decodeManagedWorkspaceSourceBranchPublishResult(
+  value: unknown,
+): ManagedWorkspaceSourceBranchPublishResult {
+  const record = requireExactRecord(value, 'managed workspace source branch publication result', [
+    'kind',
+    'publishId',
+    'sourceBaseCommitOid',
+    'sourceBaseTreeOid',
+    'acceptedCommitOid',
+    'acceptedTreeOid',
+    'publishedCommitOid',
+    'publishedRef',
+    'replayed',
+  ]);
+  if (
+    record.kind !== 'accepted_source_branch_published' ||
+    typeof record.publishId !== 'string' ||
+    !PUBLISH_ID_PATTERN.test(record.publishId) ||
+    typeof record.sourceBaseCommitOid !== 'string' ||
+    !SHA1_PATTERN.test(record.sourceBaseCommitOid) ||
+    typeof record.sourceBaseTreeOid !== 'string' ||
+    !SHA1_PATTERN.test(record.sourceBaseTreeOid) ||
+    typeof record.acceptedCommitOid !== 'string' ||
+    !SHA1_PATTERN.test(record.acceptedCommitOid) ||
+    typeof record.acceptedTreeOid !== 'string' ||
+    !SHA1_PATTERN.test(record.acceptedTreeOid) ||
+    typeof record.publishedCommitOid !== 'string' ||
+    !SHA1_PATTERN.test(record.publishedCommitOid) ||
+    typeof record.publishedRef !== 'string' ||
+    record.publishedRef !== `refs/heads/maka/${record.publishId}` ||
+    typeof record.replayed !== 'boolean'
+  ) {
+    throw invalidProtocolFrame('Invalid managed workspace source branch published ref');
+  }
+  return record as unknown as ManagedWorkspaceSourceBranchPublishResult;
+}
+
 export function decodeManagedWorkspaceRestoreResult(value: unknown): ManagedWorkspaceRestoreResult {
   const record = requireExactRecord(value, 'managed workspace restore result', [
     'kind',
@@ -624,11 +716,22 @@ export function decodeManagedWorkspaceReviewQueryResult(
   value: unknown,
 ): ManagedWorkspaceReviewQueryResult {
   requireEncodedByteLimit(value, 'managed workspace review result', RESULT_MAX_BYTES);
-  const record = requireExactRecord(value, 'managed workspace review result', ['kind', 'snapshot']);
-  if (record.kind !== 'accepted_review') {
+  const record = requireExactRecord(value, 'managed workspace review result', [
+    'kind',
+    'sourceKind',
+    'snapshot',
+  ]);
+  if (
+    record.kind !== 'accepted_review' ||
+    (record.sourceKind !== 'git_repository_v1' && record.sourceKind !== 'filesystem_snapshot_v1')
+  ) {
     throw invalidProtocolFrame('Invalid managed workspace review result kind');
   }
-  return { kind: 'accepted_review', snapshot: decodeSnapshot(record.snapshot) };
+  return {
+    kind: 'accepted_review',
+    sourceKind: record.sourceKind,
+    snapshot: decodeSnapshot(record.snapshot),
+  };
 }
 
 function decodeSnapshot(value: unknown): GitReviewSnapshot {

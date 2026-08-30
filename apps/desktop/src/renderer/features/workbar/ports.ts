@@ -50,6 +50,7 @@ import type {
   ManagedWorkspaceHistoryResult,
   ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspacePublishResult,
+  ManagedWorkspaceSourceBranchPublishResult,
   ManagedWorkspaceRestoreResult,
   ManagedWorkspaceRebaselineResult,
 } from '@maka/runtime-host/protocol';
@@ -75,6 +76,10 @@ export interface WorkbarReviewService {
     sessionId: string;
     publishId: string;
   }): Promise<ManagedWorkspacePublishResult>;
+  publishSourceBranch(input: {
+    sessionId: string;
+    publishId: string;
+  }): Promise<ManagedWorkspaceSourceBranchPublishResult>;
   restore(input: {
     sessionId: string;
     restoreId: string;

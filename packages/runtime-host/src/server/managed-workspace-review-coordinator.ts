@@ -22,6 +22,7 @@ import { isSessionNotFoundError } from '@maka/storage/execution-stores';
 import type { StorageRootLease } from '@maka/storage/root-authority';
 import type {
   ManagedWorkspacePublishInput,
+  ManagedWorkspaceSourceBranchPublishInput,
   ManagedWorkspaceHistoricalRestoreInput,
   ManagedWorkspaceHistoryInput,
   ManagedWorkspaceHistoryUndoInput,
@@ -38,6 +39,7 @@ export class HostManagedWorkspaceReviewCoordinator {
   readonly handlers: ManagedWorkspaceReviewOperationHandlerMap = {
     'managed-workspace.review.query': (input) => this.#query(input),
     'managed-workspace.publish.mutate': (input) => this.#publish(input),
+    'managed-workspace.source-branch.publish.mutate': (input) => this.#publishSourceBranch(input),
     'managed-workspace.restore.mutate': (input) => this.#restore(input),
     'managed-workspace.history.query': (input) => this.#history(input),
     'managed-workspace.history.restore.mutate': (input) => this.#restoreHistory(input),
@@ -77,6 +79,7 @@ export class HostManagedWorkspaceReviewCoordinator {
         ok: true,
         result: {
           kind: 'accepted_review',
+          sourceKind: session.sourceKind,
           snapshot: await session.review.read(input.sessionId),
         },
       };
@@ -124,6 +127,60 @@ export class HostManagedWorkspaceReviewCoordinator {
         return failure('not_found', 'Session was not found');
       }
       return failure('persistence_failed', 'Managed workspace Publish is unavailable');
+    }
+  }
+
+  async #publishSourceBranch(
+    input: ManagedWorkspaceSourceBranchPublishInput,
+  ): Promise<OperationOutcome<'managed-workspace.source-branch.publish.mutate'>> {
+    if (!this.input.helperCapability) {
+      return failure(
+        'operation_unavailable',
+        'Managed workspace source branch Publish is unavailable',
+      );
+    }
+    try {
+      const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
+      if (header.toolProfile !== 'managed-coding-v1') {
+        return failure('invalid_request', 'Session does not own a managed workspace');
+      }
+      const session = await openGitoxideManagedSessionOwnerInternal({
+        storageRootLease: this.input.storageRootLease,
+        stores: this.input.stores,
+        invocationOwnerToken: this.input.invocationOwnerToken,
+        helperCapability: this.input.helperCapability,
+        sourceRoot: header.cwd,
+        sessionId: input.sessionId,
+      });
+      if (!session.sourceBranchPublish) {
+        return failure(
+          'operation_unavailable',
+          'Source branch publication is available only for Git-backed managed workspaces',
+        );
+      }
+      const published = await session.sourceBranchPublish.publish(input.publishId);
+      return {
+        ok: true,
+        result: {
+          kind: 'accepted_source_branch_published',
+          publishId: input.publishId,
+          sourceBaseCommitOid: published.sourceBaseCommitOid,
+          sourceBaseTreeOid: published.sourceBaseTreeOid,
+          acceptedCommitOid: published.acceptedCommitOid,
+          acceptedTreeOid: published.acceptedTreeOid,
+          publishedCommitOid: published.publishedCommitOid,
+          publishedRef: published.publishedRef,
+          replayed: published.replayed,
+        },
+      };
+    } catch (error) {
+      if (isSessionNotFoundError(error)) {
+        return failure('not_found', 'Session was not found');
+      }
+      return failure(
+        'persistence_failed',
+        'Managed workspace source branch Publish is unavailable',
+      );
     }
   }
 

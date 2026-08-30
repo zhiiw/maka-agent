@@ -863,6 +863,17 @@ function bridge(options: {
         publishedRef: `refs/maka/published/${publishId}`,
         replayed: false,
       }),
+      publishSourceBranch: async ({ publishId }) => ({
+        kind: 'accepted_source_branch_published' as const,
+        publishId,
+        sourceBaseCommitOid: '1'.repeat(40),
+        sourceBaseTreeOid: '2'.repeat(40),
+        acceptedCommitOid: '3'.repeat(40),
+        acceptedTreeOid: '4'.repeat(40),
+        publishedCommitOid: '5'.repeat(40),
+        publishedRef: `refs/heads/maka/${publishId}`,
+        replayed: false,
+      }),
       restore: async ({ restoreId }) => ({
         kind: 'accepted_snapshot_restored' as const,
         restoreId,
