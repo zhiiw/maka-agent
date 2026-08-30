@@ -36,6 +36,7 @@ import { GOAL_OPERATION_SPECS } from './goal.js';
 import { INTERACTION_OPERATION_SPECS } from './interaction.js';
 import { MESSAGE_OPERATION_SPECS } from './message.js';
 import { MEMORY_OPERATION_SPECS } from './memory.js';
+import { MANAGED_WORKSPACE_REVIEW_OPERATION_SPECS } from './managed-workspace-review.js';
 import { NETWORK_PROXY_OPERATION_SPECS } from './network-proxy.js';
 import { OAUTH_OPERATION_SPECS } from './oauth.js';
 import { PLAN_OPERATION_SPECS } from './plan.js';
@@ -159,6 +160,7 @@ export * from './execution-inspect.js';
 export * from './client-capability.js';
 export * from './goal.js';
 export * from './memory.js';
+export * from './managed-workspace-review.js';
 export * from './network-proxy.js';
 export * from './oauth.js';
 export * from './plan.js';
@@ -212,6 +214,7 @@ export const HOST_OPERATION_SPECS = composeOperationSpecMaps(
   SKILL_CATALOG_OPERATION_SPECS,
   USAGE_PRICING_OPERATION_SPECS,
   MEMORY_OPERATION_SPECS,
+  MANAGED_WORKSPACE_REVIEW_OPERATION_SPECS,
   OAUTH_OPERATION_SPECS,
   CLIENT_CAPABILITY_OPERATION_SPECS,
   WEB_SEARCH_OPERATION_SPECS,

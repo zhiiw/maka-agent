@@ -167,6 +167,10 @@ export type ExecutionInspectOperationHandlerMap = Pick<
   OperationHandlerMap,
   ExecutionInspectOperationKey
 >;
+export type ManagedWorkspaceReviewOperationHandlerMap = Pick<
+  OperationHandlerMap,
+  'managed-workspace.review.query'
+>;
 export type HostedExecutionOperationHandlerMap = Pick<
   OperationHandlerMap,
   HostedExecutionOperationKey

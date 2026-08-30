@@ -147,6 +147,7 @@ import { ensureBootstrapRuntimePolicy } from './bootstrap-runtime-policy.js';
 import { hostedExecutionRunProfile } from './hosted-execution-tool-profile.js';
 import { HostMemoryCoordinator } from './memory-coordinator.js';
 import { HostMemoryExtractionCoordinator } from './memory-extraction-coordinator.js';
+import { HostManagedWorkspaceReviewCoordinator } from './managed-workspace-review-coordinator.js';
 import { MemoryExtractionSessionLane } from './memory-extraction-session-lane.js';
 import { type HostMessageRootPort, HostMessageCoordinator } from './message-coordinator.js';
 import { HostNetworkProxyCoordinator } from './network-proxy-coordinator.js';
@@ -1541,6 +1542,12 @@ export async function createExecutionRuntimeHostComposition(
       root: coordinator,
     });
     const executionInspect = new HostExecutionInspectCoordinator(stores);
+    const managedWorkspaceReview = new HostManagedWorkspaceReviewCoordinator({
+      storageRootLease: context.owner.lease,
+      stores,
+      invocationOwnerToken: gitoxideInvocationOwnerToken,
+      ...(gitoxideHelperCapability ? { helperCapability: gitoxideHelperCapability } : {}),
+    });
     const sessionRevisions = new HostSessionRevisionCoordinator({
       stores,
       artifacts: openedArtifactStore,
@@ -1761,6 +1768,7 @@ export async function createExecutionRuntimeHostComposition(
         id: 'execution',
         handlers: [
           executionInspect.handlers,
+          managedWorkspaceReview.handlers,
           messages.handlers,
           interactions.handlers,
           sessionEffectCoordinator.handlers,

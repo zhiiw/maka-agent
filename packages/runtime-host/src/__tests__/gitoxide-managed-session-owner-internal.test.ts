@@ -206,6 +206,10 @@ test('Review compares the durable baseline with the accepted tree, not the attac
   assert.equal(review.baselineCommitOid, review.acceptedCommitOid);
   assert.equal(review.baselineTreeOid, review.acceptedTreeOid);
   assert.deepEqual(review.changes, []);
+  assert.equal(review.truncated, false);
+  const snapshot = await session.review.read('session-accepted-review');
+  assert.equal(snapshot.repositoryRoot, 'maka-managed://session-accepted-review');
+  assert.deepEqual(snapshot.files, []);
 });
 
 test('Restore materializes an accepted tree without touching the attached checkout', async (t) => {

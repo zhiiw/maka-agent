@@ -26,7 +26,10 @@ import {
   type ReconnectableReadIpcMain,
 } from './ipc-reconnect-policy.js';
 
-type WorkspaceClient = Pick<DesktopRuntimeHostClient, 'getSession'>;
+type WorkspaceClient = Pick<
+  DesktopRuntimeHostClient,
+  'getSession' | 'readManagedWorkspaceReview'
+>;
 
 export function registerRuntimeHostWorkspaceIpc(
   input: {
@@ -36,21 +39,27 @@ export function registerRuntimeHostWorkspaceIpc(
   },
 ): void {
   handleReconnectableRead(input.ipcMain, 'git-review:read', async (_event, raw: unknown) => {
+    const request = readRequest(raw);
+    const session = await input.client.getSession(request.sessionId);
+    if (!session) throw new Error(`No such Session: ${request.sessionId}`);
+    if (session.toolProfile === 'managed-coding-v1') {
+      if (request.source !== 'branch' || request.baseBranch !== undefined) {
+        throw new Error('Managed workspace Review only supports its accepted history');
+      }
+      return input.client.readManagedWorkspaceReview(request.sessionId);
+    }
     if (input.allowLocalWorkspace === false) {
       return { ok: false as const, reason: 'workspace_unavailable' as const };
     }
-    const request = readRequest(raw);
-    const cwd = await sessionWorkspace(input.client, request.sessionId);
+    const cwd = await sessionWorkspace(session.workspace.hostCwd);
     if (!cwd) return { ok: false as const, reason: 'workspace_unavailable' as const };
     return readGitReview(cwd, request.source, undefined, request.baseBranch);
   });
 }
 
-async function sessionWorkspace(client: WorkspaceClient, sessionId: string): Promise<string | null> {
-  const session = await client.getSession(sessionId);
-  if (!session) throw new Error(`No such Session: ${sessionId}`);
-  const workspace = await stat(session.workspace.hostCwd).catch(() => null);
-  return workspace?.isDirectory() ? session.workspace.hostCwd : null;
+async function sessionWorkspace(hostCwd: string): Promise<string | null> {
+  const workspace = await stat(hostCwd).catch(() => null);
+  return workspace?.isDirectory() ? hostCwd : null;
 }
 
 function readRequest(value: unknown): {

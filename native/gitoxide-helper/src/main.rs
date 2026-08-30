@@ -48,7 +48,9 @@ const MAX_TREE_QUERY_PATTERN_BYTES: usize = 4096;
 const MAX_TREE_QUERY_RESULTS: u16 = 200;
 const MAX_TREE_QUERY_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TREE_QUERY_REGEX_BYTES: usize = 2 * 1024 * 1024;
-const MAX_TREE_DIFF_ENTRIES: usize = 4096;
+const MAX_TREE_DIFF_ENTRIES: usize = 200;
+const MAX_TREE_DIFF_SOURCE_BYTES: u64 = 32 * 1024;
+const MAX_TREE_DIFF_CONTENT_BYTES: usize = 384 * 1024;
 const MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_IMPORT_FILES: u64 = 200_000;
 const MAX_COMMIT_OBJECT_BYTES: u64 = 1024 * 1024;
@@ -297,10 +299,19 @@ enum Request {
 struct TreeDiffEntry {
     path: String,
     status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     old_blob_oid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     new_blob_oid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     old_executable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     new_executable: Option<bool>,
+    diffable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -466,6 +477,7 @@ enum Response<'a> {
         accepted_commit_oid: String,
         accepted_tree_oid: String,
         changes: Vec<TreeDiffEntry>,
+        truncated: bool,
         managed_tree_policy_version: u8,
     },
     #[serde(rename_all = "camelCase")]
@@ -2737,6 +2749,8 @@ fn compare_accepted_trees(
     let accepted_files = collect_accepted_tree_files(&repository, accepted_tree)?;
     let paths: BTreeSet<&String> = baseline_files.keys().chain(accepted_files.keys()).collect();
     let mut changes = Vec::new();
+    let mut content_bytes = 0usize;
+    let mut truncated = false;
     for path in paths {
         let old = baseline_files.get(path);
         let new = accepted_files.get(path);
@@ -2744,7 +2758,8 @@ fn compare_accepted_trees(
             continue;
         }
         if changes.len() >= MAX_TREE_DIFF_ENTRIES {
-            return Err("tree_diff_limit_exceeded");
+            truncated = true;
+            break;
         }
         let status = match (old, new) {
             (None, Some(_)) => "added",
@@ -2753,6 +2768,29 @@ fn compare_accepted_trees(
             (Some(_), Some(_)) => "modified",
             (None, None) => unreachable!(),
         };
+        let old_content = old
+            .map(|(oid, _)| read_tree_diff_content(&repository, oid))
+            .transpose()?
+            .flatten();
+        let new_content = new
+            .map(|(oid, _)| read_tree_diff_content(&repository, oid))
+            .transpose()?
+            .flatten();
+        let contents_are_text = match (old, new) {
+            (None, Some(_)) => new_content.is_some(),
+            (Some(_), None) => old_content.is_some(),
+            (Some(_), Some(_)) => old_content.is_some() && new_content.is_some(),
+            (None, None) => false,
+        };
+        let next_content_bytes = old_content.as_ref().map_or(0, String::len)
+            + new_content.as_ref().map_or(0, String::len);
+        let within_budget = content_bytes
+            .checked_add(next_content_bytes)
+            .is_some_and(|bytes| bytes <= MAX_TREE_DIFF_CONTENT_BYTES);
+        let diffable = contents_are_text && within_budget;
+        if diffable {
+            content_bytes += next_content_bytes;
+        }
         changes.push(TreeDiffEntry {
             path: path.clone(),
             status,
@@ -2760,6 +2798,9 @@ fn compare_accepted_trees(
             new_blob_oid: new.map(|(oid, _)| oid.clone()),
             old_executable: old.map(|(_, executable)| *executable),
             new_executable: new.map(|(_, executable)| *executable),
+            diffable,
+            old_content: diffable.then_some(old_content).flatten(),
+            new_content: diffable.then_some(new_content).flatten(),
         });
     }
     write_response(&Response::AcceptedTreesCompared {
@@ -2770,9 +2811,42 @@ fn compare_accepted_trees(
         accepted_commit_oid: accepted_commit.to_string(),
         accepted_tree_oid: accepted_tree.to_string(),
         changes,
+        truncated,
         managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
     });
     Ok(ExitCode::SUCCESS)
+}
+
+fn read_tree_diff_content(
+    repository: &gix::Repository,
+    blob_oid: &str,
+) -> Result<Option<String>, &'static str> {
+    let object_id =
+        gix::hash::ObjectId::from_hex(blob_oid.as_bytes()).map_err(|_| "tree_file_invalid")?;
+    let header = repository
+        .find_header(object_id)
+        .map_err(|_| "tree_file_unavailable")?;
+    if header.kind() != gix::objs::Kind::Blob {
+        return Err("tree_file_invalid");
+    }
+    if header.size() > MAX_TREE_DIFF_SOURCE_BYTES {
+        return Ok(None);
+    }
+    let object = load_verified_object(
+        repository,
+        object_id,
+        gix::objs::Kind::Blob,
+        MAX_TREE_DIFF_SOURCE_BYTES,
+        "tree_file_unavailable",
+        "tree_file_invalid",
+        "tree_file_size_limit_exceeded",
+        "tree_file_identity_mismatch",
+    )?;
+    let content = match std::str::from_utf8(&object.data) {
+        Ok(content) if !content.contains('\0') => content.to_owned(),
+        _ => return Ok(None),
+    };
+    Ok(Some(content))
 }
 
 fn materialize_accepted_tree(

@@ -1,0 +1,84 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+import type { InteractiveExecutionStoresWriter } from '@maka/storage/execution-stores';
+import { isSessionNotFoundError } from '@maka/storage/execution-stores';
+import type { StorageRootLease } from '@maka/storage/root-authority';
+import type { ManagedWorkspaceReviewQueryInput, OperationOutcome } from '../protocol/index.js';
+import type { ManagedWorkspaceReviewOperationHandlerMap } from './operation-dispatcher.js';
+import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
+import { openGitoxideManagedSessionOwnerInternal } from './gitoxide-managed-session-owner-internal.js';
+
+export class HostManagedWorkspaceReviewCoordinator {
+  readonly handlers: ManagedWorkspaceReviewOperationHandlerMap = {
+    'managed-workspace.review.query': (input) => this.#query(input),
+  };
+
+  constructor(
+    private readonly input: {
+      readonly storageRootLease: StorageRootLease<'interactive', 'write'>;
+      readonly stores: InteractiveExecutionStoresWriter;
+      readonly invocationOwnerToken: object;
+      readonly helperCapability?: GitoxideHelperInvocationCapability;
+    },
+  ) {}
+
+  async #query(
+    input: ManagedWorkspaceReviewQueryInput,
+  ): Promise<OperationOutcome<'managed-workspace.review.query'>> {
+    if (!this.input.helperCapability) {
+      return failure('operation_unavailable', 'Managed workspace Review is unavailable');
+    }
+    try {
+      const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
+      if (header.toolProfile !== 'managed-coding-v1') {
+        return failure('invalid_request', 'Session does not own a managed workspace');
+      }
+      const session = await openGitoxideManagedSessionOwnerInternal({
+        storageRootLease: this.input.storageRootLease,
+        stores: this.input.stores,
+        invocationOwnerToken: this.input.invocationOwnerToken,
+        helperCapability: this.input.helperCapability,
+        sourceRoot: header.cwd,
+        sessionId: input.sessionId,
+      });
+      return {
+        ok: true,
+        result: {
+          kind: 'accepted_review',
+          snapshot: await session.review.read(input.sessionId),
+        },
+      };
+    } catch (error) {
+      if (isSessionNotFoundError(error)) {
+        return failure('not_found', 'Session was not found');
+      }
+      return failure('persistence_failed', 'Managed workspace Review is unavailable');
+    }
+  }
+}
+
+function failure<
+  C extends 'operation_unavailable' | 'not_found' | 'invalid_request' | 'persistence_failed',
+>(
+  code: C,
+  message: string,
+): { readonly ok: false; readonly error: { readonly code: C; readonly message: string } } {
+  return { ok: false, error: { code, message } };
+}

@@ -1,0 +1,177 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import type { GitReviewReadResult } from '@maka/core/git-review';
+import type { SessionCatalogProjection } from '@maka/runtime-host/protocol';
+import { registerRuntimeHostWorkspaceIpc } from '../runtime-host-workspace-ipc-main.js';
+
+test('managed Review reads the accepted tree from Runtime Host', async () => {
+  const expected: GitReviewReadResult = {
+    ok: true,
+    snapshot: {
+      source: 'branch',
+      repositoryRoot: 'maka-managed://session-managed',
+      currentBranch: null,
+      baseBranch: null,
+      baseBranchOptions: [],
+      revision: 'a'.repeat(64),
+      files: [
+        {
+          path: 'src/example.ts',
+          status: 'modified',
+          diff: '--- a/src/example.ts\n+++ b/src/example.ts\n@@ -1 +1 @@\n-old\n+new\n',
+          additions: 1,
+          deletions: 1,
+        },
+      ],
+      additions: 1,
+      deletions: 1,
+      truncated: false,
+    },
+  };
+  let managedReads = 0;
+  const ipc = ipcHarness();
+  registerRuntimeHostWorkspaceIpc({
+    ipcMain: ipc as never,
+    allowLocalWorkspace: false,
+    client: {
+      async getSession() {
+        return sessionProjection('managed-coding-v1');
+      },
+      async readManagedWorkspaceReview(sessionId: string) {
+        managedReads += 1;
+        assert.equal(sessionId, 'session-managed');
+        return expected;
+      },
+    } as never,
+  });
+
+  assert.deepEqual(
+    await ipc.invoke('git-review:read', {
+      sessionId: 'session-managed',
+      source: 'branch',
+    }),
+    expected,
+  );
+  assert.equal(managedReads, 1);
+});
+
+test('ordinary Review keeps reading the attached checkout', async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), 'maka-review-ordinary-'));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  let managedReads = 0;
+  const ipc = ipcHarness();
+  registerRuntimeHostWorkspaceIpc({
+    ipcMain: ipc as never,
+    client: {
+      async getSession() {
+        return sessionProjection(undefined, workspace);
+      },
+      async readManagedWorkspaceReview() {
+        managedReads += 1;
+        throw new Error('not used');
+      },
+    },
+  });
+
+  assert.deepEqual(
+    await ipc.invoke('git-review:read', {
+      sessionId: 'session-managed',
+      source: 'branch',
+    }),
+    { ok: false, reason: 'not_git_repository' },
+  );
+  assert.equal(managedReads, 0);
+});
+
+test('managed Review fails closed instead of reading the attached checkout', async () => {
+  const ipc = ipcHarness();
+  registerRuntimeHostWorkspaceIpc({
+    ipcMain: ipc as never,
+    client: {
+      async getSession() {
+        return sessionProjection('managed-coding-v1');
+      },
+      async readManagedWorkspaceReview() {
+        throw new Error('accepted review unavailable');
+      },
+    },
+  });
+
+  await assert.rejects(
+    ipc.invoke('git-review:read', {
+      sessionId: 'session-managed',
+      source: 'branch',
+    }),
+    /accepted review unavailable/u,
+  );
+});
+
+function sessionProjection(
+  toolProfile?: 'managed-coding-v1',
+  hostCwd = process.cwd(),
+): SessionCatalogProjection {
+  return {
+    id: 'session-managed',
+    revision: 1,
+    workspace: { hostCwd },
+    createdAt: 1,
+    activityAt: 1,
+    name: 'Managed task',
+    isFlagged: false,
+    isArchived: false,
+    labels: [],
+    labelsTruncated: false,
+    hasUnread: false,
+    status: 'idle',
+    backend: 'sdk',
+    llmConnectionId: null,
+    llmConnectionSlug: 'default',
+    connectionLocked: false,
+    model: 'model',
+    permissionMode: 'default',
+    collaborationMode: 'default',
+    orchestrationMode: 'default',
+    ...(toolProfile ? { toolProfile } : {}),
+  } as unknown as SessionCatalogProjection;
+}
+
+type IpcHandler = (...args: unknown[]) => unknown;
+
+function ipcHarness() {
+  const handlers = new Map<string, IpcHandler>();
+  return {
+    handle(channel: string, handler: IpcHandler) {
+      handlers.set(channel, handler);
+    },
+    handleReconnectableRead(channel: string, handler: IpcHandler) {
+      handlers.set(channel, handler);
+    },
+    async invoke(channel: string, ...args: unknown[]) {
+      const handler = handlers.get(channel);
+      assert.ok(handler, `missing handler: ${channel}`);
+      return handler({}, ...args);
+    },
+  };
+}

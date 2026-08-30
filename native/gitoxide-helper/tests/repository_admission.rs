@@ -1646,6 +1646,10 @@ fn compares_one_baseline_and_accepted_tree_without_a_projection() {
     );
     assert_eq!(response["changes"][0]["path"], "hello.txt");
     assert_eq!(response["changes"][0]["status"], "modified");
+    assert_eq!(response["changes"][0]["diffable"], true);
+    assert_eq!(response["changes"][0]["oldContent"], "hello from sha1\n");
+    assert_eq!(response["changes"][0]["newContent"], "updated\n");
+    assert_eq!(response["truncated"], false);
 }
 
 #[test]
