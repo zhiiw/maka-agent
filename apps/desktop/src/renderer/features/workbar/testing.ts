@@ -75,6 +75,9 @@ export function createFakeWorkbarServices(
       undoVersion: async () => {
         throw new Error('Fake review.undoVersion is not configured');
       },
+      rebaseline: async () => {
+        throw new Error('Fake review.rebaseline is not configured');
+      },
       subscribeSessionEvents: noopSubscription,
     },
     terminal: {

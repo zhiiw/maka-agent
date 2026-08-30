@@ -930,6 +930,10 @@ export class DesktopRuntimeHostClient {
     });
   }
 
+  rebaselineManagedWorkspace(sessionId: string, rebaselineId: string) {
+    return this.request('managed-workspace.rebaseline.mutate', { sessionId, rebaselineId });
+  }
+
   async createSession(
     input: SessionCreateInput,
   ): Promise<SessionCatalogProjection> {

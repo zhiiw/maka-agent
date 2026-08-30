@@ -26,6 +26,7 @@ import type {
   ManagedWorkspaceHistoryInput,
   ManagedWorkspaceHistoryUndoInput,
   ManagedWorkspaceReviewQueryInput,
+  ManagedWorkspaceRebaselineInput,
   ManagedWorkspaceRestoreInput,
   OperationOutcome,
 } from '../protocol/index.js';
@@ -41,6 +42,7 @@ export class HostManagedWorkspaceReviewCoordinator {
     'managed-workspace.history.query': (input) => this.#history(input),
     'managed-workspace.history.restore.mutate': (input) => this.#restoreHistory(input),
     'managed-workspace.history.undo.mutate': (input) => this.#undoHistory(input),
+    'managed-workspace.rebaseline.mutate': (input) => this.#rebaseline(input),
   };
 
   constructor(
@@ -282,6 +284,45 @@ export class HostManagedWorkspaceReviewCoordinator {
         return failure('not_found', 'Session was not found');
       }
       return failure('persistence_failed', 'Managed workspace Undo is unavailable');
+    }
+  }
+
+  async #rebaseline(
+    input: ManagedWorkspaceRebaselineInput,
+  ): Promise<OperationOutcome<'managed-workspace.rebaseline.mutate'>> {
+    if (!this.input.helperCapability) {
+      return failure('operation_unavailable', 'Managed workspace Rebaseline is unavailable');
+    }
+    try {
+      const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
+      if (header.toolProfile !== 'managed-coding-v1') {
+        return failure('invalid_request', 'Session does not own a managed workspace');
+      }
+      const session = await openGitoxideManagedSessionOwnerInternal({
+        storageRootLease: this.input.storageRootLease,
+        stores: this.input.stores,
+        invocationOwnerToken: this.input.invocationOwnerToken,
+        helperCapability: this.input.helperCapability,
+        sourceRoot: header.cwd,
+        sessionId: input.sessionId,
+      });
+      const rebased = await session.rebaseline(input.rebaselineId);
+      return {
+        ok: true,
+        result: {
+          kind: 'managed_workspace_rebaselined',
+          rebaselineId: input.rebaselineId,
+          workspaceId: rebased.workspaceId,
+          workspaceEpochId: rebased.workspaceEpochId,
+          baselineWorkspaceVersionId: rebased.baselineWorkspaceVersionId,
+          sourceKind: rebased.sourceKind,
+        },
+      };
+    } catch (error) {
+      if (isSessionNotFoundError(error)) {
+        return failure('not_found', 'Session was not found');
+      }
+      return failure('persistence_failed', 'Managed workspace Rebaseline is unavailable');
     }
   }
 }

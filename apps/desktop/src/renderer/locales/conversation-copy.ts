@@ -188,6 +188,10 @@ export interface DesktopConversationCopy {
     historyUndoing: string;
     historyUndoFailed: string;
     historyUndone: string;
+    rebaseline: string;
+    rebaselining: string;
+    rebaselineFailed: string;
+    rebaselined: string;
     historyLoadFailed: string;
     historyRestoreFailed: string;
     historyRestoredDetail(path: string, files: number): string;
@@ -576,6 +580,10 @@ const COPY = {
       historyUndoing: '正在创建新版本',
       historyUndoFailed: '无法从这个历史版本创建新版本',
       historyUndone: '已创建新的 accepted 版本；原历史仍然保留',
+      rebaseline: '从最新源代码创建新基线',
+      rebaselining: '正在创建新基线…',
+      rebaselineFailed: '无法从最新源代码创建新基线',
+      rebaselined: '已切换到新的 workspace epoch；旧历史仍然保留',
       historyLoadFailed: '无法读取 accepted 历史',
       historyRestoreFailed: '无法恢复历史版本',
       historyRestoredDetail: (path, files) => `已在 ${path} 恢复历史版本（${files} 个文件）`,
@@ -833,6 +841,10 @@ const COPY = {
       historyUndoing: 'Creating new version',
       historyUndoFailed: 'Could not create a new version from this history entry',
       historyUndone: 'Created a new accepted version; the original history is preserved',
+      rebaseline: 'Create a new baseline from latest source',
+      rebaselining: 'Creating a new baseline…',
+      rebaselineFailed: 'Could not create a new baseline from the latest source',
+      rebaselined: 'Switched to a new workspace epoch; prior history is preserved',
       historyLoadFailed: 'Could not read accepted history',
       historyRestoreFailed: 'Could not restore the historical version',
       historyRestoredDetail: (path, files) =>

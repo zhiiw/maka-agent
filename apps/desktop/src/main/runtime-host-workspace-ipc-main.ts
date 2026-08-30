@@ -35,6 +35,7 @@ type WorkspaceClient = Pick<
   | 'readManagedWorkspaceHistory'
   | 'restoreManagedWorkspaceVersion'
   | 'undoManagedWorkspaceVersion'
+  | 'rebaselineManagedWorkspace'
 >;
 
 export function registerRuntimeHostWorkspaceIpc(
@@ -107,6 +108,12 @@ export function registerRuntimeHostWorkspaceIpc(
       request.restoreId,
     );
   });
+
+  input.ipcMain.handle('managed-workspace:rebaseline', async (_event, raw: unknown) => {
+    const request = rebaselineRequest(raw);
+    await requireManagedSession(input.client, request.sessionId);
+    return input.client.rebaselineManagedWorkspace(request.sessionId, request.rebaselineId);
+  });
 }
 
 function publishRequest(value: unknown): { sessionId: string; publishId: string } {
@@ -118,6 +125,18 @@ function publishRequest(value: unknown): { sessionId: string; publishId: string 
   return {
     sessionId: requiredString(record.sessionId, 'Session id'),
     publishId,
+  };
+}
+
+function rebaselineRequest(value: unknown): { sessionId: string; rebaselineId: string } {
+  const record = requiredRecord(value, 'managed workspace rebaseline');
+  const rebaselineId = requiredString(record.rebaselineId, 'Rebaseline id');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(rebaselineId)) {
+    throw new Error('Invalid Rebaseline id');
+  }
+  return {
+    sessionId: requiredString(record.sessionId, 'Session id'),
+    rebaselineId,
   };
 }
 

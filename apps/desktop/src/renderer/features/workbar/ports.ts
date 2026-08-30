@@ -51,6 +51,7 @@ import type {
   ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspacePublishResult,
   ManagedWorkspaceRestoreResult,
+  ManagedWorkspaceRebaselineResult,
 } from '@maka/runtime-host/protocol';
 import type { MergedUsageSummary } from '@maka/core/usage-ledger-merge';
 import type {
@@ -92,6 +93,10 @@ export interface WorkbarReviewService {
     workspaceVersionId: string;
     restoreId: string;
   }): Promise<ManagedWorkspaceHistoryUndoResult>;
+  rebaseline(input: {
+    sessionId: string;
+    rebaselineId: string;
+  }): Promise<ManagedWorkspaceRebaselineResult>;
   subscribeSessionEvents(
     sessionId: string,
     handler: (event: SessionEvent) => void,

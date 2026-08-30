@@ -463,6 +463,86 @@ test('reopens the same managed session after its source checkout moves', async (
   });
 });
 
+test('reopens the activated epoch after the rebaseline response process exits', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the rebaseline crash test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'epoch one\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'epoch one');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-rebaseline-crash-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const initialCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const initialRootOwner = await tryAcquireInteractiveRootOwner(initialCapability);
+  assert.ok(initialRootOwner);
+  const initialStores = await openInteractiveExecutionStoresForWrite(initialRootOwner.lease);
+  await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: initialRootOwner.lease,
+    stores: initialStores,
+    invocationOwnerToken: helper.invocationOwnerToken,
+    helperCapability: helper.helperCapability,
+    sourceRoot,
+    sessionId: 'session-rebaseline-crash',
+  });
+  await initialStores.sessionStore.close?.();
+  await initialRootOwner.close();
+
+  await writeFile(join(sourceRoot, 'notes.txt'), 'epoch two\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'epoch two');
+  const fixturePath = join(root, 'managed-rebaseline-crash-fixture.json');
+  await writeFile(
+    fixturePath,
+    `${JSON.stringify({
+      storageRoot: root,
+      sourceRoot,
+      sessionId: 'session-rebaseline-crash',
+      helperPath: helper.helperPath,
+      mode: 'after_active_epoch_commit',
+      rebaselineId: 'source-head-2',
+    })}\n`,
+    'utf8',
+  );
+  const child = spawn(
+    process.execPath,
+    [
+      join(import.meta.dirname, 'fixtures', 'gitoxide-managed-session-owner-crash-child.js'),
+      fixturePath,
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  const stderr: Buffer[] = [];
+  child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+  const [exitCode] = (await once(child, 'exit')) as [number | null];
+  assert.equal(exitCode, 75, Buffer.concat(stderr).toString('utf8'));
+
+  const recoveredCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const recoveredRootOwner = await tryAcquireInteractiveRootOwner(recoveredCapability);
+  assert.ok(recoveredRootOwner);
+  t.after(() => recoveredRootOwner.close());
+  const recoveredStores = await openInteractiveExecutionStoresForWrite(recoveredRootOwner.lease);
+  t.after(() => recoveredStores.sessionStore.close?.());
+  const recovered = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: recoveredRootOwner.lease,
+    stores: recoveredStores,
+    invocationOwnerToken: helper.invocationOwnerToken,
+    helperCapability: helper.helperCapability,
+    sourceRoot,
+    sessionId: 'session-rebaseline-crash',
+  });
+  assert.deepEqual(await recovered.inspection.execute({ kind: 'read', path: 'notes.txt' }), {
+    kind: 'read',
+    content: 'epoch two\n',
+  });
+  assert.equal(
+    (await recovered.rebaseline('source-head-2')).workspaceEpochId,
+    recovered.workspaceEpochId,
+  );
+});
+
 test('issues a continuation boundary only for the exact source and accepted Gitoxide head', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {

@@ -193,6 +193,7 @@ import type {
   ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspacePublishResult,
   ManagedWorkspaceRestoreResult,
+  ManagedWorkspaceRebaselineResult,
 } from '@maka/runtime-host/protocol';
 import {
   DAILY_REVIEW_RANGES,
@@ -2545,6 +2546,12 @@ const makaBridge = {
       restoreId: string;
     }): Promise<ManagedWorkspaceHistoryUndoResult> {
       return invokeSessionInput('managed-workspace:undo-version', input);
+    },
+    rebaseline(input: {
+      sessionId: string;
+      rebaselineId: string;
+    }): Promise<ManagedWorkspaceRebaselineResult> {
+      return invokeSessionInput('managed-workspace:rebaseline', input);
     },
   },
   goal: {
