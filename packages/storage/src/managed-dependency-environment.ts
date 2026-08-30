@@ -37,6 +37,7 @@ import {
   utimes,
 } from 'node:fs/promises';
 import {
+  basename,
   dirname,
   isAbsolute,
   join,
@@ -64,6 +65,19 @@ const MANAGED_DEPENDENCY_PRODUCER_POLICY_V1 = Object.freeze({
   secrets: 'none' as const,
   childProcess: 'verified_runtime_only' as const,
   lifecycleScripts: 'disabled' as const,
+});
+const MANAGED_DEPENDENCY_SNAPSHOT_POLICY_DOMAIN =
+  'maka.managed_dependency_environment.snapshot_policy.v1\0';
+const MANAGED_DEPENDENCY_SNAPSHOT_RUNTIME_DOMAIN =
+  'maka.managed_dependency_environment.snapshot_runtime.v1\0';
+const MANAGED_DEPENDENCY_SNAPSHOT_POLICY_V1 = Object.freeze({
+  protocolVersion: 1 as const,
+  kind: 'preprovisioned_dependency_snapshot_import_v1' as const,
+  network: 'none' as const,
+  filesystem: 'read_only_source_to_maka_staging' as const,
+  secrets: 'none' as const,
+  childProcess: 'none' as const,
+  lifecycleScripts: 'not_executed' as const,
 });
 const activeAuthorityOwners = new Map<string, object>();
 // Each query spawns a fresh powershell.exe that JIT-compiles the C# helper
@@ -233,7 +247,7 @@ export interface ManagedDependencyEnvironmentIdentityV1 {
   readonly policyVersion: 'managed_dependency_environment_v1';
 }
 
-export interface ManagedDependencyEnvironmentProducerCapabilityV1 {
+export interface ManagedDependencyEnvironmentBuilderCapabilityV1 {
   readonly protocolVersion: 1;
   readonly kind: 'hermetic_dependency_builder_v1';
   readonly runtimeIdentitySha256: `sha256:${string}`;
@@ -244,6 +258,22 @@ export interface ManagedDependencyEnvironmentProducerCapabilityV1 {
   readonly childProcess: 'verified_runtime_only';
   readonly lifecycleScripts: 'disabled';
 }
+
+export interface ManagedDependencySnapshotProducerCapabilityV1 {
+  readonly protocolVersion: 1;
+  readonly kind: 'preprovisioned_dependency_snapshot_import_v1';
+  readonly runtimeIdentitySha256: `sha256:${string}`;
+  readonly policyIdentitySha256: `sha256:${string}`;
+  readonly network: 'none';
+  readonly filesystem: 'read_only_source_to_maka_staging';
+  readonly secrets: 'none';
+  readonly childProcess: 'none';
+  readonly lifecycleScripts: 'not_executed';
+}
+
+export type ManagedDependencyEnvironmentProducerCapabilityV1 =
+  | ManagedDependencyEnvironmentBuilderCapabilityV1
+  | ManagedDependencySnapshotProducerCapabilityV1;
 
 export interface ManagedDependencyEnvironmentProducerInput {
   readonly identity: ManagedDependencyEnvironmentIdentityV1;
@@ -269,7 +299,7 @@ export interface ManagedDependencyEnvironmentProducer {
 
 export function createManagedDependencyEnvironmentProducerCapability(
   runtimeIdentitySha256: `sha256:${string}`,
-): ManagedDependencyEnvironmentProducerCapabilityV1 {
+): ManagedDependencyEnvironmentBuilderCapabilityV1 {
   if (!SHA256_PATTERN.test(runtimeIdentitySha256)) {
     throw new TypeError('Managed dependency producer runtime identity must be a SHA-256 digest');
   }
@@ -277,6 +307,24 @@ export function createManagedDependencyEnvironmentProducerCapability(
     ...MANAGED_DEPENDENCY_PRODUCER_POLICY_V1,
     runtimeIdentitySha256,
     policyIdentitySha256: managedDependencyProducerPolicyIdentity(),
+  });
+}
+
+function createManagedDependencySnapshotProducerCapability(
+  runtimeIdentitySha256: `sha256:${string}`,
+): ManagedDependencySnapshotProducerCapabilityV1 {
+  if (!SHA256_PATTERN.test(runtimeIdentitySha256)) {
+    throw new TypeError('Managed dependency snapshot runtime identity must be a SHA-256 digest');
+  }
+  return Object.freeze({
+    ...MANAGED_DEPENDENCY_SNAPSHOT_POLICY_V1,
+    runtimeIdentitySha256,
+    policyIdentitySha256: sha256(
+      Buffer.concat([
+        Buffer.from(MANAGED_DEPENDENCY_SNAPSHOT_POLICY_DOMAIN, 'utf8'),
+        Buffer.from(JSON.stringify(MANAGED_DEPENDENCY_SNAPSHOT_POLICY_V1), 'utf8'),
+      ]),
+    ),
   });
 }
 
@@ -302,8 +350,37 @@ export interface AcquireManagedDependencyEnvironmentInput {
 export interface ManagedDependencyEnvironmentLease {
   readonly environmentId: `sha256:${string}`;
   readonly dependencyRoot: string;
+  readonly contentTreeSha256: `sha256:${string}`;
   release(): Promise<void>;
 }
+
+export interface ManagedDependencySnapshotAcquireInput {
+  readonly sourceDependencyRoot: string;
+  readonly manifestBytes: Uint8Array;
+  readonly lockfileBytes: Uint8Array;
+  readonly abortSignal?: AbortSignal;
+}
+
+export interface ManagedDependencySnapshotAuthority {
+  acquire(input: ManagedDependencySnapshotAcquireInput): Promise<ManagedDependencyEnvironmentLease>;
+  close(): Promise<void>;
+}
+
+export interface CreateManagedDependencySnapshotAuthorityInput {
+  readonly storageRoot: string;
+  readonly nodeRuntime: {
+    readonly version: string;
+    readonly abi: string;
+    readonly platform: NodeJS.Platform;
+    readonly arch: string;
+  };
+  readonly maxCacheBytes?: number;
+  readonly failpoint?: (point: ManagedDependencySnapshotFailpoint) => void | Promise<void>;
+}
+
+export type ManagedDependencySnapshotFailpoint =
+  | 'after_source_observation'
+  | ManagedDependencyEnvironmentFailpoint;
 
 export interface ManagedDependencyEnvironmentAuthority {
   acquire(
@@ -311,6 +388,130 @@ export interface ManagedDependencyEnvironmentAuthority {
     input: AcquireManagedDependencyEnvironmentInput,
   ): Promise<ManagedDependencyEnvironmentLease>;
   close(): Promise<void>;
+}
+
+/**
+ * Import an explicitly selected, already-provisioned npm dependency tree.
+ *
+ * This owner never starts a package manager, performs network I/O, or reads
+ * PATH. The source tree is observed, copied into producer staging, and observed
+ * again before the existing durable artifact authority can publish it.
+ */
+export async function createManagedDependencySnapshotAuthority(
+  input: CreateManagedDependencySnapshotAuthorityInput,
+): Promise<ManagedDependencySnapshotAuthority> {
+  const runtimeIdentitySha256 = sha256(
+    Buffer.from(MANAGED_DEPENDENCY_SNAPSHOT_RUNTIME_DOMAIN, 'utf8'),
+  );
+  const capability = createManagedDependencySnapshotProducerCapability(runtimeIdentitySha256);
+  const pendingSources = new Map<
+    string,
+    {
+      readonly sourceRoot: string;
+      readonly contentTreeSha256: `sha256:${string}`;
+      users: number;
+    }
+  >();
+  const producer: ManagedDependencyEnvironmentProducer = Object.freeze({
+    capability,
+    packageManagerName: 'npm' as const,
+    packageManagerVersion: 'preprovisioned-snapshot-v1',
+    nodeRuntime: Object.freeze({ ...input.nodeRuntime }),
+    async provision(request: ManagedDependencyEnvironmentProducerInput) {
+      request.abortSignal?.throwIfAborted();
+      const source = pendingSources.get(request.identity.environmentId);
+      if (!source) {
+        throw new Error('Managed dependency snapshot source authority is unavailable');
+      }
+      const entries = await readdir(source.sourceRoot, { withFileTypes: true });
+      entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+      for (const entry of entries) {
+        request.abortSignal?.throwIfAborted();
+        await cp(join(source.sourceRoot, entry.name), join(request.outputRoot, entry.name), {
+          recursive: true,
+          dereference: false,
+          errorOnExist: true,
+          force: false,
+          verbatimSymlinks: true,
+        });
+      }
+      const copied = await hashDependencyTree(request.outputRoot);
+      if (copied.sha256 !== source.contentTreeSha256) {
+        throw new Error('Managed dependency source changed while it was imported');
+      }
+    },
+  });
+  const authority = await createManagedDependencyEnvironmentAuthority({
+    storageRoot: input.storageRoot,
+    producer,
+    ...(input.maxCacheBytes === undefined ? {} : { maxCacheBytes: input.maxCacheBytes }),
+    ...(input.failpoint
+      ? {
+          failpoint: (point: ManagedDependencyEnvironmentFailpoint) => input.failpoint?.(point),
+        }
+      : {}),
+  });
+  let closed = false;
+  return Object.freeze({
+    async acquire(request: ManagedDependencySnapshotAcquireInput) {
+      if (closed) throw new Error('Managed dependency snapshot authority is closed');
+      request.abortSignal?.throwIfAborted();
+      const sourceRoot = await requireDependencySnapshotSource(request.sourceDependencyRoot);
+      const observed = await hashDependencyTree(sourceRoot);
+      await input.failpoint?.('after_source_observation');
+      request.abortSignal?.throwIfAborted();
+      const identity = computeManagedDependencyEnvironmentIdentity({
+        manifestPath: 'package.json',
+        manifestBytes: request.manifestBytes,
+        lockfilePath: 'package-lock.json',
+        lockfileBytes: request.lockfileBytes,
+        packageManagerName: producer.packageManagerName,
+        packageManagerVersion: producer.packageManagerVersion,
+        nodeVersion: producer.nodeRuntime.version,
+        nodeAbi: producer.nodeRuntime.abi,
+        platform: producer.nodeRuntime.platform,
+        arch: producer.nodeRuntime.arch,
+        producerRuntimeIdentitySha256: capability.runtimeIdentitySha256,
+        producerPolicyIdentitySha256: capability.policyIdentitySha256,
+        policyVersion: 'managed_dependency_environment_v1',
+      });
+      const existing = pendingSources.get(identity.environmentId);
+      if (existing && existing.contentTreeSha256 !== observed.sha256) {
+        throw new Error('Concurrent dependency snapshots disagree for the same environment');
+      }
+      const source = existing ?? {
+        sourceRoot,
+        contentTreeSha256: observed.sha256,
+        users: 0,
+      };
+      source.users += 1;
+      pendingSources.set(identity.environmentId, source);
+      try {
+        const lease = await authority.acquire(identity, {
+          manifestBytes: request.manifestBytes,
+          lockfileBytes: request.lockfileBytes,
+          ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
+        });
+        if (lease.contentTreeSha256 !== observed.sha256) {
+          await lease.release();
+          throw new Error(
+            'Managed dependency artifact does not match the imported source snapshot',
+          );
+        }
+        return lease;
+      } finally {
+        source.users -= 1;
+        if (source.users === 0 && pendingSources.get(identity.environmentId) === source) {
+          pendingSources.delete(identity.environmentId);
+        }
+      }
+    },
+    async close() {
+      if (closed) return;
+      await authority.close();
+      closed = true;
+    },
+  });
 }
 
 interface ManagedDependencyEnvironmentReceiptV1 extends ManagedDependencyEnvironmentIdentityV1 {
@@ -650,6 +851,7 @@ async function createManagedDependencyEnvironmentAuthorityForOwner(
         return Object.freeze({
           environmentId: identity.environmentId,
           dependencyRoot: artifact.dependencyRoot,
+          contentTreeSha256: artifact.receipt.contentTreeSha256,
           async release() {
             if (released) return;
             released = true;
@@ -1457,16 +1659,32 @@ function managedDependencyProducerPolicyIdentity(): `sha256:${string}` {
 function assertProducerCapability(
   capability: ManagedDependencyEnvironmentProducerCapabilityV1,
 ): void {
-  const expected = createManagedDependencyEnvironmentProducerCapability(
-    capability.runtimeIdentitySha256,
-  );
+  const expected =
+    capability.kind === 'preprovisioned_dependency_snapshot_import_v1'
+      ? createManagedDependencySnapshotProducerCapability(capability.runtimeIdentitySha256)
+      : createManagedDependencyEnvironmentProducerCapability(capability.runtimeIdentitySha256);
   if (
     Object.keys(capability).sort().join('\0') !== Object.keys(expected).sort().join('\0') ||
     Object.entries(expected).some(
-      ([key, value]) =>
-        capability[key as keyof ManagedDependencyEnvironmentProducerCapabilityV1] !== value,
+      ([key, value]) => (capability as unknown as Record<string, unknown>)[key] !== value,
     )
   ) {
     throw new Error('Managed dependency producer capability is invalid');
   }
+}
+
+async function requireDependencySnapshotSource(path: string): Promise<string> {
+  const sourceInfo = await lstat(path);
+  if (!sourceInfo.isDirectory() || sourceInfo.isSymbolicLink()) {
+    throw new Error('Managed dependency snapshot source must be an owned directory');
+  }
+  const canonical = await realpath(path);
+  const expectedName =
+    process.platform === 'win32' ? DEPENDENCY_ROOT_NAME.toLowerCase() : DEPENDENCY_ROOT_NAME;
+  const actualName =
+    process.platform === 'win32' ? basename(canonical).toLowerCase() : basename(canonical);
+  if (actualName !== expectedName) {
+    throw new Error('Managed dependency snapshot source must be a node_modules directory');
+  }
+  return canonical;
 }
