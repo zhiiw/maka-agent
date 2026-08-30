@@ -65,7 +65,9 @@ test('a started workspace-bound continuation survives Host death without provide
   await withManagedContinuationFixture(
     helperPath,
     async ({ fixture, resourcesRoot, callLog, boundary }) => {
-      const source = await fixture.seedSafeBoundaryContinuationSource();
+      const source = await fixture.seedSafeBoundaryContinuationSource(undefined, {
+        failureClass: 'test_manual_resume',
+      });
       const crashHost = await fixture.startHost(undefined, true, {
         packagedResourcesRoot: resourcesRoot,
         providerCallLogPath: callLog,
@@ -178,7 +180,9 @@ test('an accepted-head continuation never calls the provider twice after Host de
     helperPath,
     async ({ fixture, resourcesRoot, callLog, boundary }) => {
       assert.equal(boundary.revision, 1);
-      const source = await fixture.seedSafeBoundaryContinuationSource();
+      const source = await fixture.seedSafeBoundaryContinuationSource(undefined, {
+        failureClass: 'test_manual_resume',
+      });
       const crashHost = await fixture.startHost(undefined, true, {
         packagedResourcesRoot: resourcesRoot,
         providerCallLogPath: callLog,

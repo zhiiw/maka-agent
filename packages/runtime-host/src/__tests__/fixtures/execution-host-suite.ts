@@ -178,7 +178,10 @@ export class ExecutionFixture {
     }
   }
 
-  async seedSafeBoundaryContinuationSource(requiredToolName?: string): Promise<{
+  async seedSafeBoundaryContinuationSource(
+    requiredToolName?: string,
+    options: { readonly failureClass?: string } = {},
+  ): Promise<{
     sourceInvocationId: string;
     sourceRunId: string;
     sourceTurnId: string;
@@ -261,12 +264,13 @@ export class ExecutionFixture {
         });
       }
       const terminalAt = createdAt + (requiredToolName ? 3 : 1);
+      const failureClass = options.failureClass ?? 'app_restarted';
       const terminal = buildRecoveredTerminalRuntimeEvent({
         id: randomUUID(),
         run: sourceRun,
         status: 'failed',
         ts: terminalAt,
-        failureClass: 'app_restarted',
+        failureClass,
         recoveryReason: 'test_safe_boundary_source',
       });
       await commitTerminalRunWithRuntimeFact({
@@ -279,7 +283,7 @@ export class ExecutionFixture {
         status: 'failed',
         ts: terminalAt,
         terminalEvent: terminal,
-        failureClass: 'app_restarted',
+        failureClass,
       });
       return {
         sourceInvocationId,
