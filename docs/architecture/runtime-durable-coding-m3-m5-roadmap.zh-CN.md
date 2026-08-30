@@ -146,9 +146,12 @@ exit status、test summary 与 artifact digest。缓存是 projection；test out
    的 `node_modules`；它证明 test runner、sandbox 与有界结构化 observation；
 2. durable protocol boundary 已在 T1 前绑定 accepted head、workspace epoch、测试文件 identity、
    toolchain/profile 和 effect class；Runtime 以线性 operation capability 和单一 immutable result snapshot 写入
-   T2。下一步由 Host admission 只从 accepted-world/toolchain opaque capability 签发这一 envelope，并补真实
-   kill/reopen；
-3. 需要外部包的项目在 M5.3 capability 可用前明确 unavailable，禁止静默降级。
+   T2；
+3. Host admission owner 已只从 Gitoxide accepted-world 与 toolchain opaque capability 签发 envelope，并用一次性
+   input/scratch roots 执行显式 Node tests；它尚未改变现有 `managed-coding-v1` 产品 profile；
+4. 下一步定义版本化 Desktop product profile，并在暴露工具以前补真实 Host/helper kill/reopen 与三平台 enforcing
+   sandbox smoke；
+5. 需要外部包的项目在 M5.3 capability 可用前明确 unavailable，禁止静默降级。
 
 ### M5.5 External-effect fencing
 

@@ -43,7 +43,10 @@ import {
   requireGitoxideHelperArtifactIdentityInternal,
   requireGitoxideHelperOperationsInternal,
 } from './gitoxide-helper-artifact-authority-internal.js';
-import { importFilesystemSnapshotWithGitoxideHelperInternal } from './gitoxide-helper-invocation-internal.js';
+import {
+  importFilesystemSnapshotWithGitoxideHelperInternal,
+  materializeAcceptedTreeWithGitoxideHelperInternal,
+} from './gitoxide-helper-invocation-internal.js';
 import {
   createGitoxideManagedWriteEditOwnerInternal,
   type GitoxideManagedWriteEditOwnerInternal,
@@ -95,6 +98,10 @@ import {
   requireResumableWorkspaceSourceAdmissionInternal,
   type ResumableWorkspaceSourceKindInternal,
 } from './resumable-workspace-source-admission-internal.js';
+import type {
+  ManagedNodeTestAcceptedBoundaryInternal,
+  ManagedNodeTestSourceOwnerInternal,
+} from './managed-node-test-admission-owner-internal.js';
 
 const MANAGED_REPOSITORY_DIRECTORY = 'gitoxide-managed-repositories';
 const ACCEPTED_REF = 'refs/maka/accepted';
@@ -111,6 +118,7 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly workspaceId: string;
   readonly workspaceEpochId: string;
   readonly inspection: GitoxideManagedInspectionOwnerInternal;
+  readonly nodeTestSource: ManagedNodeTestSourceOwnerInternal;
   readonly publish: GitoxideManagedPublishOwnerInternal;
   readonly sourceBranchPublish: GitoxideManagedSourceBranchPublishOwnerInternal | undefined;
   readonly review: GitoxideManagedReviewOwnerInternal;
@@ -581,6 +589,88 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       return Object.freeze({ commitOid: head.commitOid, treeOid: head.treeOid });
     },
   });
+  const readNodeTestAcceptedBoundary = async (
+    abortSignal?: AbortSignal,
+  ): Promise<ManagedNodeTestAcceptedBoundaryInternal> => {
+    abortSignal?.throwIfAborted();
+    const [epoch, head] = await Promise.all([
+      baselineAuthority.readEpoch(identity.workspaceId, identity.workspaceEpochId),
+      baselineAuthority.readHead(identity.workspaceId, identity.workspaceEpochId),
+    ]);
+    if (
+      !epoch ||
+      !head ||
+      epoch.repositoryId !== identity.repositoryId ||
+      epoch.workspaceId !== identity.workspaceId ||
+      epoch.workspaceEpochId !== identity.workspaceEpochId ||
+      epoch.workspaceInstanceId !== identity.workspaceInstanceId ||
+      head.repositoryId !== identity.repositoryId ||
+      head.workspaceId !== identity.workspaceId ||
+      head.workspaceEpochId !== identity.workspaceEpochId
+    ) {
+      throw new Error('Gitoxide managed Node test durable workspace head is unavailable');
+    }
+    const version = await baselineAuthority.readVersion(head.workspaceVersionId);
+    if (
+      !version ||
+      version.repositoryId !== head.repositoryId ||
+      version.workspaceId !== head.workspaceId ||
+      version.workspaceEpochId !== head.workspaceEpochId ||
+      version.workspaceVersionId !== head.workspaceVersionId ||
+      version.acceptedEventId !== head.acceptedEventId ||
+      version.commitOid !== head.commitOid ||
+      version.treeOid !== head.treeOid
+    ) {
+      throw new Error('Gitoxide managed Node test accepted workspace version is unavailable');
+    }
+    abortSignal?.throwIfAborted();
+    return Object.freeze({
+      repositoryId: identity.repositoryId,
+      workspaceId: identity.workspaceId,
+      workspaceEpochId: identity.workspaceEpochId,
+      workspaceInstanceId: identity.workspaceInstanceId,
+      acceptedWorkspaceVersionId: version.workspaceVersionId,
+      acceptedEventId: version.acceptedEventId,
+      acceptedHeadRevision: head.revision,
+      acceptedCommitOid: version.commitOid,
+      acceptedTreeOid: version.treeOid,
+    });
+  };
+  const nodeTestSource: ManagedNodeTestSourceOwnerInternal = Object.freeze({
+    readAcceptedBoundary: readNodeTestAcceptedBoundary,
+    async materializeAcceptedTree(
+      request: Parameters<ManagedNodeTestSourceOwnerInternal['materializeAcceptedTree']>[0],
+    ) {
+      const current = await readNodeTestAcceptedBoundary(request.abortSignal);
+      if (
+        request.acceptedCommitOid !== current.acceptedCommitOid ||
+        request.acceptedTreeOid !== current.acceptedTreeOid
+      ) {
+        throw new Error(
+          'Gitoxide managed Node test accepted boundary changed before materialization',
+        );
+      }
+      const materialized = await materializeAcceptedTreeWithGitoxideHelperInternal({
+        invocationOwnerToken: input.invocationOwnerToken,
+        capability: input.helperCapability,
+        repositoryPath,
+        acceptedCommitOid: current.acceptedCommitOid,
+        destinationPath: request.destinationPath,
+        managedTreePolicyVersion: 3,
+        ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
+      });
+      if (
+        materialized.acceptedCommitOid !== current.acceptedCommitOid ||
+        materialized.acceptedTreeOid !== current.acceptedTreeOid
+      ) {
+        throw new Error('Gitoxide managed Node test materialization identity is invalid');
+      }
+      return Object.freeze({
+        acceptedCommitOid: materialized.acceptedCommitOid,
+        acceptedTreeOid: materialized.acceptedTreeOid,
+      });
+    },
+  });
   const review = createGitoxideManagedReviewOwnerInternal({
     invocationOwnerToken: input.invocationOwnerToken,
     helperCapability: input.helperCapability,
@@ -846,6 +936,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     workspaceId: identity.workspaceId,
     workspaceEpochId: identity.workspaceEpochId,
     inspection,
+    nodeTestSource,
     publish,
     sourceBranchPublish,
     review,

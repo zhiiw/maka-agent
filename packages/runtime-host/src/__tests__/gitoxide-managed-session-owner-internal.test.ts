@@ -72,6 +72,22 @@ test('opens one durable Gitoxide baseline and reuses it for the same session', a
   });
   assert.equal(retry.repositoryPath, first.repositoryPath);
   assert.equal(retry.workspaceEpochId, first.workspaceEpochId);
+  const acceptedBoundary = await retry.nodeTestSource.readAcceptedBoundary();
+  assert.deepEqual(acceptedBoundary, await first.nodeTestSource.readAcceptedBoundary());
+  const materializationRoot = await realpath(
+    await mkdtemp(join(tmpdir(), 'maka-gitoxide-node-test-source-')),
+  );
+  t.after(() => rm(materializationRoot, { recursive: true, force: true }));
+  const materialized = await retry.nodeTestSource.materializeAcceptedTree({
+    destinationPath: join(materializationRoot, 'input'),
+    acceptedCommitOid: acceptedBoundary.acceptedCommitOid,
+    acceptedTreeOid: acceptedBoundary.acceptedTreeOid,
+  });
+  assert.deepEqual(materialized, {
+    acceptedCommitOid: acceptedBoundary.acceptedCommitOid,
+    acceptedTreeOid: acceptedBoundary.acceptedTreeOid,
+  });
+  assert.equal(await readFile(join(materializationRoot, 'input', 'notes.txt'), 'utf8'), 'before\n');
   const admission = await retry.writeEdit.admitManagedMutation({
     operationId: 'operation-session-read',
     toolName: 'Write',
