@@ -96,6 +96,7 @@ export async function packageMacosArm64({
   await run('npm', ['run', 'build:runtime-host-peer']);
   await run('npm', ['run', 'build:gitoxide-helper']);
   await run('npm', ['run', 'prepare:gitoxide-helper']);
+  await run('npm', ['run', 'prepare:managed-command-toolchain']);
   await run('npm', ['run', 'generate:gitoxide-helper-notices']);
   await run('npm', ['run', 'check:runtime-host-peer-notices']);
   await run('npm', ['run', 'check:release']);

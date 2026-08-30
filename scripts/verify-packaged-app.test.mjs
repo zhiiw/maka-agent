@@ -70,6 +70,7 @@ test('legacy packaged resources require the historical bundled Git contract', as
   ]) {
     assert.equal(required.includes(path), true);
   }
+  assert.equal(required.includes(join('resources', 'managed-command-toolchain.json')), false);
   for (const path of [
     join('resources', 'git'),
     join('resources', 'bundled-git.json'),
