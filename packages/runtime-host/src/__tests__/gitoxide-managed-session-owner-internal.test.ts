@@ -81,6 +81,64 @@ test('opens one durable Gitoxide baseline and reuses it for the same session', a
   assert.deepEqual(admission.immutableBase, { content: 'before\n' });
 });
 
+test('Read, Glob, and Grep observe only the accepted managed tree', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the accepted inspection test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'durable accepted line\n', 'utf8');
+  await writeFile(join(sourceRoot, 'worker.ts'), 'export const durableWorker = true;\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt', 'worker.ts']);
+  commit(sourceRoot, 'accepted inspection baseline');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-inspection-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+  const session = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-accepted-inspection',
+  });
+
+  await writeFile(join(sourceRoot, 'notes.txt'), 'attached checkout drift\n', 'utf8');
+  await writeFile(join(sourceRoot, 'untracked.ts'), 'durable but not accepted\n', 'utf8');
+
+  assert.deepEqual(await session.inspection.execute({ kind: 'read', path: 'notes.txt' }), {
+    kind: 'read',
+    content: 'durable accepted line\n',
+  });
+  assert.deepEqual(
+    await session.inspection.execute({ kind: 'glob', path: '.', pattern: '**/*.ts', limit: 200 }),
+    { kind: 'glob', files: ['worker.ts'] },
+  );
+  assert.deepEqual(
+    await session.inspection.execute({
+      kind: 'grep',
+      path: '.',
+      pattern: 'durable(?:Worker)?',
+      glob: '**/*',
+      maxCountPerFile: 10,
+      limit: 200,
+      timeoutMs: 10_000,
+    }),
+    {
+      kind: 'grep',
+      matches: [
+        'notes.txt:1:durable accepted line',
+        'worker.ts:1:export const durableWorker = true;',
+      ],
+    },
+  );
+});
+
 test('fails closed when the source advances after its managed epoch opens', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {
@@ -247,6 +305,8 @@ async function admittedHelper(): Promise<
       'promote_candidate',
       'observe_accepted_ref',
       'read_tree_file',
+      'list_tree_files',
+      'grep_tree_files',
     ],
   });
   return {

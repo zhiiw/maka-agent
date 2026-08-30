@@ -156,6 +156,7 @@ import { HostPlanCoordinator } from './plan-coordinator.js';
 import {
   inspectGitoxideManagedContinuationBoundaryInternal,
   openGitoxideManagedSessionOwnerInternal,
+  type GitoxideManagedSessionOwnerInternal,
 } from './gitoxide-managed-session-owner-internal.js';
 import {
   PackagedGitoxideHelperError,
@@ -730,6 +731,12 @@ export async function createExecutionRuntimeHostComposition(
                   });
                 })()
               : undefined;
+          const runBuiltinTools = managedSession
+            ? {
+                ...builtinTools,
+                filesystemWorker: adaptManagedInspectionFilesystemWorker(managedSession),
+              }
+            : builtinTools;
           return createHostAiSdkBackend({
             context: backendContext,
             runtimePolicy: runtimePolicyStores,
@@ -748,7 +755,7 @@ export async function createExecutionRuntimeHostComposition(
                 backendContext.sessionId,
               ),
               goalTools: requireGoal(goal).tools,
-              builtinTools,
+              builtinTools: runBuiltinTools,
               hostTools,
               resolveRootTools: (sessionId) =>
                 requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId),
@@ -1986,6 +1993,35 @@ function adaptWorkspaceFilesystemWorker(
             'workspace_operation_denied',
             `Read-only filesystem worker returned mutating result ${result.kind}`,
           );
+      }
+    },
+  };
+}
+
+function adaptManagedInspectionFilesystemWorker(
+  session: GitoxideManagedSessionOwnerInternal,
+): Pick<FilesystemWorkerClient, 'execute'> {
+  return {
+    async execute(input) {
+      const operation = input.operation;
+      if (
+        operation.kind !== 'read' &&
+        operation.kind !== 'glob' &&
+        operation.kind !== 'grep'
+      ) {
+        throw new RuntimeHostWorkspaceExecutionError(
+          'workspace_operation_denied',
+          'Managed coding filesystem execution permits only accepted-tree inspection',
+        );
+      }
+      const result = await session.inspection.execute(operation, input.abortSignal);
+      switch (result.kind) {
+        case 'read':
+          return result;
+        case 'glob':
+          return { kind: 'glob' as const, files: [...result.files] };
+        case 'grep':
+          return { kind: 'grep' as const, matches: [...result.matches] };
       }
     },
   };

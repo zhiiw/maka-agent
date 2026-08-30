@@ -1399,6 +1399,127 @@ fn reads_one_exact_utf8_file_from_an_accepted_policy_v3_tree() {
 }
 
 #[test]
+fn lists_glob_matches_from_one_exact_accepted_tree() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    fs::create_dir_all(fixture.root.join("src/nested")).unwrap();
+    fs::write(
+        fixture.root.join("src/lib.ts"),
+        b"export const lib = true;\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("src/nested/worker.ts"),
+        b"export const worker = true;\n",
+    )
+    .unwrap();
+    fs::write(fixture.root.join("src/notes.md"), b"notes\n").unwrap();
+    fixture.git(["add", "src"]);
+    fixture.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "accepted glob fixture",
+    ]);
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("accepted-glob.git");
+    let imported = invoke_import(&fixture.root, &source_head, &destination);
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let accepted = imported["baselineCommitOid"].as_str().unwrap();
+    let accepted_tree = imported["baselineTreeOid"].as_str().unwrap();
+
+    let output = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "list_tree_files",
+        "repositoryPath": destination,
+        "acceptedCommitOid": accepted,
+        "path": "src",
+        "pattern": "**/*.ts",
+        "limit": 200,
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(
+        output.status.success(),
+        "helper failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "tree_files_listed");
+    assert_eq!(response["acceptedTreeOid"], accepted_tree);
+    assert_eq!(
+        response["files"],
+        serde_json::json!(["src/lib.ts", "src/nested/worker.ts"])
+    );
+    assert_eq!(response["truncated"], false);
+}
+
+#[test]
+fn greps_regex_matches_from_one_exact_accepted_tree() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    fs::create_dir_all(fixture.root.join("src")).unwrap();
+    fs::write(
+        fixture.root.join("src/lib.ts"),
+        b"const durable = true;\nconst ignored = false;\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("src/worker.ts"),
+        b"export const durableWorker = true;\n",
+    )
+    .unwrap();
+    fs::write(fixture.root.join("src/notes.md"), b"durable prose\n").unwrap();
+    fixture.git(["add", "src"]);
+    fixture.git([
+        "-c",
+        "user.name=Maka Test",
+        "-c",
+        "user.email=maka@example.invalid",
+        "commit",
+        "-m",
+        "accepted grep fixture",
+    ]);
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("accepted-grep.git");
+    let imported = invoke_import(&fixture.root, &source_head, &destination);
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let accepted = imported["baselineCommitOid"].as_str().unwrap();
+    let accepted_tree = imported["baselineTreeOid"].as_str().unwrap();
+
+    let output = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "grep_tree_files",
+        "repositoryPath": destination,
+        "acceptedCommitOid": accepted,
+        "path": "src",
+        "pattern": "durable(?:Worker)?",
+        "glob": "**/*.ts",
+        "maxCountPerFile": 10,
+        "limit": 200,
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(
+        output.status.success(),
+        "helper failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "tree_files_grepped");
+    assert_eq!(response["acceptedTreeOid"], accepted_tree);
+    assert_eq!(
+        response["matches"],
+        serde_json::json!([
+            "src/lib.ts:1:const durable = true;",
+            "src/worker.ts:1:export const durableWorker = true;"
+        ])
+    );
+    assert_eq!(response["truncated"], false);
+}
+
+#[test]
 fn refuses_to_read_a_tree_file_from_an_unavailable_commit_identity() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let output = invoke_request(serde_json::json!({

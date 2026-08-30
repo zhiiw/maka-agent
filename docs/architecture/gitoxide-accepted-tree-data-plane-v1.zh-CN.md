@@ -37,7 +37,8 @@ accepted capability。
 
 本切片只证明：
 
-> owner-bound accepted-repository capability 只能读取被冻结的 exact accepted SHA-1 commit/tree，或
+> owner-bound accepted-repository capability 只能读取、枚举和搜索被冻结的 exact accepted SHA-1
+> commit/tree，或
 > 从该 exact base 生成 operation-bound immutable candidate proof。candidate 不能推进 accepted ref，
 > 也不能签发新的 accepted capability。
 
@@ -59,8 +60,9 @@ SQLite accepted head 仍由后续 mutation authority 拥有。本切片不提供
   annotated tag 不得通过 peel 后的语义相等冒充 receipt identity；
 - candidate outcome 私下绑定 exact accepted capability identity、repository/ref、helper artifact、policy、
   request digest、result SHA-256 与 Git identities；验证时必须同时出示原 accepted capability；
-- direct read 沿 accepted tree 的 exact path 加载并重验 tree/blob object identity，只返回最多 8 MiB 的
-  UTF-8 内容；它不读取 projection filesystem；
+- accepted-world inspection 只能消费 owner-bound accepted capability：Read 沿 exact path 加载并重验
+  tree/blob object identity；Glob 从同一 accepted tree 枚举 canonical paths；Grep 只在该枚举结果对应的
+  UTF-8 blobs 上执行 bounded regex search。三者都不读取 source checkout 或 projection filesystem；
 - 每个公开入口都复用 admission 时捕获的 helper capability，并在短生命周期 helper 启动前重新验证
   artifact identity，同时要求 release claim 明确 attest 本次实际调用的 operation；
 - candidate fresh self-check 与 exact retry 都必须实际加载 result blob，在 64 MiB 上限内验证 kind 与
@@ -81,7 +83,7 @@ SQLite accepted head 仍由后续 mutation authority 拥有。本切片不提供
 | existing receipt 的 tree 不是 exact base 单路径转换结果 | 返回 `candidate_ref_target_invalid`，不签发 capability |
 | result 与 base tree 相同 | 写入 same-tree receipt commit 并 CAS operation ref，返回 `candidate_no_change` outcome capability |
 | 同一 operation 后续给出不同 path/content/disposition | deterministic commit 不同，稳定 conflict |
-| direct read 路径、类型、大小、UTF-8 或 object identity 不合法 | fail closed，不读取 filesystem |
+| Read/Glob/Grep 的路径、pattern、类型、大小、UTF-8 或 object identity 不合法 | fail closed，不读取 filesystem |
 | helper 超时、中断或输出不匹配 | 不签发新 capability；由调用者重试 exact operation 或 park |
 
 candidate outcome 的线性化点是 operation-specific direct candidate ref 的 `MustNotExist` CAS。任何 object
@@ -93,7 +95,8 @@ publication 状态时返回 `candidate_publication_indeterminate`。
 accepted ref 在本切片中只读，并与 `refs/maka/candidates/<operation-hash>` namespace 不重叠。第二次 accepted
 ref 检查与 candidate CAS 不是一个跨 ref transaction：二者之间的 accepted drift 可能留下绑定旧 base 的
 stale candidate evidence，但不能推进 accepted truth。后续 SQLite acceptance 必须重新验证 canonical head 并
-拒绝 stale candidate。direct read 是 observation，不发布持久事实。
+拒绝 stale candidate。Read/Glob/Grep 都是 observation，不发布持久事实；每次调用在 helper 内绑定一个
+request 携带的 exact commit/tree，因此 source checkout 的并发漂移不会混入结果。
 
 ## 4. 平台与资源边界
 
@@ -102,7 +105,8 @@ stale candidate evidence，但不能推进 accepted truth。后续 SQLite accept
   判定；TypeScript 只负责 transport byte bound，避免复制一份会漂移的 path policy；
 - candidate 和 direct read 的绝对 deadline 为 10 分钟；
 - candidate content 通过 bounded Base64 field 传输，64 MiB 业务上限与 JSON escaping 无关；
-- direct read 单文件最多 8 MiB，helper stdout 以 JSON worst-case escaping 设置固定上限。
+- Read 单文件最多 8 MiB；Glob 最多返回调用方显式给出的 bounded path 数量；Grep 同时限制候选文件数、
+  每文件命中数、总命中数和 deadline。helper stdout 按 JSON worst-case escaping 设置固定上限。
 
 ## 5. 后续依赖
 
