@@ -41,7 +41,10 @@ import type { ChatDefaultPermissionMode } from '@maka/core/settings';
 import type { SlashCommandIdForSurface } from '@maka/core/slash-command-catalog';
 import type { UiLocale, UiLocalePreference } from '@maka/core/ui-locale';
 import { collapseSessionRevisions } from '@maka/core/session-revisions';
-import { isLinkedSubagentSession } from '@maka/core/session';
+import {
+  isLinkedSubagentSession,
+  isManagedCodingSessionToolProfile,
+} from '@maka/core/session';
 import { resolveUiLocale } from '@maka/core/ui-locale';
 import { slashCommandsForSurface } from '@maka/core/slash-command-catalog';
 import { hasSettledInitialOnboarding } from '@maka/core/onboarding-milestone';
@@ -812,7 +815,7 @@ function AppShellContent({
     resumeInterruptedSession,
   } = useShellResume({
     activeId: ownerActiveId,
-    managed: activeCatalogSession?.toolProfile === 'managed-coding-v1',
+    managed: isManagedCodingSessionToolProfile(activeCatalogSession?.toolProfile),
     toastApi,
     shellCopy,
     uiLocale,
@@ -3071,7 +3074,7 @@ function AppShellContent({
                   planModeActive={activePlanMode}
                   managedTaskActive={
                     activeId
-                      ? activeSessionForView?.toolProfile === 'managed-coding-v1'
+                      ? isManagedCodingSessionToolProfile(activeSessionForView?.toolProfile)
                       : false
                   }
                   // No pending-keyed disable while a toggle commits: the

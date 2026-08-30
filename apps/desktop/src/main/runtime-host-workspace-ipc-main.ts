@@ -19,6 +19,7 @@
 
 import { stat } from 'node:fs/promises';
 import type { GitReviewSource } from '@maka/core/git-review';
+import { isManagedCodingSessionToolProfile } from '@maka/core/session';
 import type { DesktopRuntimeHostClient } from './runtime-host-client.js';
 import { readGitReview } from './git-review-main.js';
 import {
@@ -51,7 +52,7 @@ export function registerRuntimeHostWorkspaceIpc(
     const request = readRequest(raw);
     const session = await input.client.getSession(request.sessionId);
     if (!session) throw new Error(`No such Session: ${request.sessionId}`);
-    if (session.toolProfile === 'managed-coding-v1') {
+    if (isManagedCodingSessionToolProfile(session.toolProfile)) {
       if (request.source !== 'branch' || request.baseBranch !== undefined) {
         throw new Error('Managed workspace Review only supports its accepted history');
       }
@@ -69,7 +70,7 @@ export function registerRuntimeHostWorkspaceIpc(
     const request = publishRequest(raw);
     const session = await input.client.getSession(request.sessionId);
     if (!session) throw new Error(`No such Session: ${request.sessionId}`);
-    if (session.toolProfile !== 'managed-coding-v1') {
+    if (!isManagedCodingSessionToolProfile(session.toolProfile)) {
       throw new Error('Session does not own a managed workspace');
     }
     return input.client.publishManagedWorkspaceSnapshot(request.sessionId, request.publishId);
@@ -85,7 +86,7 @@ export function registerRuntimeHostWorkspaceIpc(
     const request = restoreRequest(raw);
     const session = await input.client.getSession(request.sessionId);
     if (!session) throw new Error(`No such Session: ${request.sessionId}`);
-    if (session.toolProfile !== 'managed-coding-v1') {
+    if (!isManagedCodingSessionToolProfile(session.toolProfile)) {
       throw new Error('Session does not own a managed workspace');
     }
     return input.client.restoreManagedWorkspaceSnapshot(request.sessionId, request.restoreId);
@@ -206,7 +207,7 @@ function historicalRestoreRequest(value: unknown): {
 async function requireManagedSession(client: WorkspaceClient, sessionId: string): Promise<void> {
   const session = await client.getSession(sessionId);
   if (!session) throw new Error(`No such Session: ${sessionId}`);
-  if (session.toolProfile !== 'managed-coding-v1') {
+  if (!isManagedCodingSessionToolProfile(session.toolProfile)) {
     throw new Error('Session does not own a managed workspace');
   }
 }

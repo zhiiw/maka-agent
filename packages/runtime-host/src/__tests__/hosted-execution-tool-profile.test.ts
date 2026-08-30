@@ -50,6 +50,13 @@ test('hosted execution tool profiles are durable Session creation inputs', () =>
     }).session.toolProfile,
     'managed-coding-v1',
   );
+  assert.equal(
+    decodeHostedExecutionStartInput({
+      ...decoded,
+      session: { ...decoded.session, toolProfile: 'managed-coding-v2' },
+    }).session.toolProfile,
+    'managed-coding-v2',
+  );
   assert.throws(
     () =>
       decodeHostedExecutionStartInput({
@@ -176,4 +183,27 @@ test('the managed coding profile reads and mutates only the accepted Git tree', 
     assert.equal(tool.recoveryMode, 'reconcile');
     assert.equal(tool.durableExecutionProfile, 'managed_mutation_v1');
   }
+});
+
+test('managed coding v2 adds only the durable accepted-world Node test', () => {
+  const profile = hostedExecutionRunProfile('managed-coding-v2');
+  assert.ok(profile);
+  assert.deepEqual(profile.toolNames, ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ManagedNodeTest']);
+  assert.match(profile.systemPrompt, /explicit dependency-free Node tests/u);
+
+  const tools = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ManagedNodeTest', 'Bash'].map(
+    (name): MakaTool => ({
+      name,
+      description: name,
+      parameters: z.object({}),
+      impl: async () => 'not used',
+    }),
+  );
+  const selected = projectHostedExecutionTools(tools, 'managed-coding-v2');
+  assert.deepEqual(
+    selected.map(({ name }) => name),
+    ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ManagedNodeTest'],
+  );
+  assert.equal(selected.at(-1)?.recoveryMode, 'replay_safe');
+  assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_observation_v1');
 });
