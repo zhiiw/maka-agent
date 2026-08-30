@@ -123,8 +123,8 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
         () => undefined,
       );
     const completedToolResult = await provider.waitForCompletedToolResult();
-    assert.match(completedToolResult, /\"passed\":1/u);
-    assert.match(completedToolResult, /\"failed\":0/u);
+    assert.match(completedToolResult, /"passed":1/u);
+    assert.match(completedToolResult, /"failed":0/u);
     await fixture.killHost(firstHost);
     await withTimeout(start, PROCESS_TIMEOUT_MS, 'crashed hosted execution did not close');
     await firstClient.close().catch(() => undefined);
