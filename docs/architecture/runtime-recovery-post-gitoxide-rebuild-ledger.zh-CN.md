@@ -131,4 +131,7 @@ Gitoxide helper 与 npm producer 分别保留自己的 trust root。packaged Hos
   helper workflow。
 - R3：accepted-ref projection 已实现为 accepted truth 的派生 CAS；filesystem checkout projection 仍保持
   独立延期，不参与 canonical Write/Edit read/write。
-- R4、R5：尚未在新基线上重建。
+- R4：session owner 已完成 source admission/import、durable baseline、helper identity/source drift 校验和
+  import 后进程退出的 exact retry；packaged resource 与 Host 产品入口仍待接线。npm producer 不再作为纯
+  Write/Edit 恢复链的前置。
+- R5：尚未在新基线上重建。

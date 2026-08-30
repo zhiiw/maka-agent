@@ -1,6 +1,7 @@
 # Playwright E2E run artifacts: traces, videos, screenshots, last-run state.
 test-results/
 resources/workers/
+.generated/
 .maka-dev/
 .maka-dev.staging/
 # Written by the pre-opt-in dev launcher, which ran unconditionally on macOS.
