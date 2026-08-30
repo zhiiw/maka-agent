@@ -39,6 +39,7 @@ const MAX_STDERR_BYTES = 16 * 1024;
 export const GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL = Object.freeze({
   inspectRepositoryMs: 5_000,
   importSourceHeadMs: 10 * 60_000,
+  importFilesystemSnapshotMs: 10 * 60_000,
   createCandidateMs: 10 * 60_000,
   promoteCandidateMs: 10 * 60_000,
   observeAcceptedRefMs: 10 * 60_000,
@@ -61,6 +62,7 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'commit_object_limit_exceeded',
   'baseline_commit_write_failed',
   'baseline_publish_failed',
+  'baseline_request_conflict',
   'baseline_ref_outside_maka_namespace',
   'base_commit_unavailable',
   'base_commit_identity_mismatch',
@@ -77,6 +79,7 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'import_destination_object_format_mismatch',
   'import_destination_parent_untrusted',
   'invalid_source_head_commit_oid',
+  'invalid_source_snapshot_root',
   'source_blob_copy_failed',
   'source_blob_identity_mismatch',
   'source_blob_invalid',
@@ -90,6 +93,7 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'source_head_commit_identity_mismatch',
   'source_head_commit_unavailable',
   'source_head_tree_unavailable',
+  'source_file_observation_mismatch',
   'source_path_collision',
   'source_path_byte_limit_exceeded',
   'source_path_length_exceeded',
@@ -105,6 +109,7 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'source_tree_observation_mismatch',
   'source_tree_unavailable',
   'source_tree_visit_limit_exceeded',
+  'source_snapshot_digest_mismatch',
   'successor_content_limit_exceeded',
   'successor_commit_identity_mismatch',
   'accepted_ref_not_direct',
@@ -175,6 +180,20 @@ export interface GitoxideSourceImportObservationV1 {
   readonly baselineCommitOid: string;
   readonly baselineTreeOid: string;
   readonly baselineRef: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly filesImported: number;
+  readonly bytesImported: number;
+}
+
+export interface GitoxideFilesystemSnapshotImportObservationV1 {
+  readonly kind: 'filesystem_snapshot_imported';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly sourceSnapshotDigestSha256: `sha256:${string}`;
+  readonly baselineCommitOid: string;
+  readonly baselineTreeOid: string;
+  readonly baselineRef: string;
+  readonly acceptedRef: string;
   readonly managedTreePolicyVersion: 3;
   readonly filesImported: number;
   readonly bytesImported: number;
@@ -530,6 +549,80 @@ export async function importSourceHeadWithGitoxideHelperInternal(input: {
   return decodeSourceImportOutcome(outcome, {
     expectedSourceHeadCommitOid: input.expectedSourceHeadCommitOid,
     baselineRef: input.baselineRef,
+    managedTreePolicyVersion: input.managedTreePolicyVersion,
+  });
+}
+
+export async function importFilesystemSnapshotWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly sourceRootPath: string;
+  readonly destinationRepositoryPath: string;
+  readonly baselineRef: string;
+  readonly acceptedRef: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideFilesystemSnapshotImportObservationV1> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.importFilesystemSnapshotMs;
+  const { artifact, sourceRootPath } = await runGitoxideOperationWithinDeadlineInternal({
+    deadlineAt,
+    abortSignal: input.abortSignal,
+    operation: async () => {
+      if (
+        !isAbsolute(input.sourceRootPath) ||
+        !isAbsolute(input.destinationRepositoryPath) ||
+        !MAKA_REF_PATTERN.test(input.baselineRef) ||
+        !MAKA_REF_PATTERN.test(input.acceptedRef) ||
+        input.acceptedRef === input.baselineRef ||
+        input.managedTreePolicyVersion !== 3
+      ) {
+        throw new GitoxideHelperInvocationError(
+          'gitoxide_helper_invocation_invalid',
+          'Gitoxide filesystem snapshot import request is invalid',
+        );
+      }
+      const [artifact, sourceRootPath] = await Promise.all([
+        verifyGitoxideHelperArtifactForInvocationInternal(
+          input.invocationOwnerToken,
+          input.capability,
+        ),
+        realpath(input.sourceRootPath).catch((error) => {
+          throw new GitoxideHelperInvocationError(
+            'gitoxide_helper_invocation_invalid',
+            `Filesystem snapshot source root could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ]);
+      return { artifact, sourceRootPath };
+    },
+  });
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: artifact.protocolVersion,
+      operation: 'import_filesystem_snapshot',
+      sourceRootPath,
+      destinationRepositoryPath: input.destinationRepositoryPath,
+      baselineRef: input.baselineRef,
+      acceptedRef: input.acceptedRef,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) {
+    throw new GitoxideHelperInvocationError(
+      'gitoxide_helper_invocation_invalid',
+      'Gitoxide helper request exceeds its byte limit',
+    );
+  }
+  const outcome = await invokeHelper({
+    executablePath: artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  return decodeFilesystemSnapshotImportOutcome(outcome, {
+    baselineRef: input.baselineRef,
+    acceptedRef: input.acceptedRef,
     managedTreePolicyVersion: input.managedTreePolicyVersion,
   });
 }
@@ -1202,6 +1295,24 @@ function decodeSourceImportOutcome(
   );
 }
 
+function decodeFilesystemSnapshotImportOutcome(
+  outcome: HelperProcessOutcome,
+  expected: {
+    readonly baselineRef: string;
+    readonly acceptedRef: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): GitoxideFilesystemSnapshotImportObservationV1 {
+  const value = parseHelperOutcome(outcome);
+  if (outcome.exitCode === 0 && isFilesystemSnapshotImportObservation(value, expected)) {
+    return Object.freeze(value);
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('import the filesystem snapshot', value.reason);
+  }
+  throw protocolInvalid('Gitoxide filesystem snapshot import response is invalid');
+}
+
 function decodeCandidateOutcome(
   outcome: HelperProcessOutcome,
   expected: {
@@ -1805,6 +1916,43 @@ function isSourceImportObservation(
     (value.filesImported as number) >= 0 &&
     Number.isSafeInteger(value.bytesImported) &&
     (value.bytesImported as number) >= 0
+  );
+}
+
+function isFilesystemSnapshotImportObservation(
+  value: unknown,
+  expected: {
+    readonly baselineRef: string;
+    readonly acceptedRef: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): value is GitoxideFilesystemSnapshotImportObservationV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'sourceSnapshotDigestSha256',
+      'baselineCommitOid',
+      'baselineTreeOid',
+      'baselineRef',
+      'acceptedRef',
+      'managedTreePolicyVersion',
+      'filesImported',
+      'bytesImported',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'filesystem_snapshot_imported' &&
+    value.objectFormat === 'sha1' &&
+    typeof value.sourceSnapshotDigestSha256 === 'string' &&
+    /^sha256:[0-9a-f]{64}$/.test(value.sourceSnapshotDigestSha256) &&
+    isSha1(value.baselineCommitOid) &&
+    isSha1(value.baselineTreeOid) &&
+    value.baselineRef === expected.baselineRef &&
+    value.acceptedRef === expected.acceptedRef &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion &&
+    isNonNegativeSafeInteger(value.filesImported) &&
+    isNonNegativeSafeInteger(value.bytesImported)
   );
 }
 
