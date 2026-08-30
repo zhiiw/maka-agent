@@ -66,10 +66,12 @@ import type { ToolInvocationRecord } from '@maka/core/usage-stats/types';
 import { redactSecrets } from '@maka/core/redaction';
 import {
   decodeRuntimeEvent,
+  MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
   MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC,
   TOOL_BOUNDARY_PROTOCOL_V1,
   type RuntimeEvent,
+  type RuntimeEventManagedWorkspaceObservationV1,
   type RuntimeEventManagedWorkspaceMutationV2,
 } from '@maka/core/runtime-event';
 import { isDeepStrictEqual } from 'node:util';
@@ -174,12 +176,18 @@ export interface MakaTool<P = any, R = unknown> {
   /** Crash-recovery contract used by the durable tool boundary. */
   recoveryMode?: ToolRecoveryMode;
   /** Durable execution profile selected by the Host before T1. */
-  durableExecutionProfile?: 'managed_mutation_v1';
+  durableExecutionProfile?: 'managed_mutation_v1' | 'managed_observation_v1';
   /**
    * Pure Write/Edit transform for managed mutation mode. It receives only the
    * frozen arguments and must not read or mutate the live workspace.
    */
   managedMutationTransform?: (args: P) => Promise<R> | R;
+  /** Accepted-world observation implementation; roots are issued by its admission owner. */
+  managedObservationImpl?: (
+    args: P,
+    ctx: MakaToolContext,
+    execution: RuntimeManagedObservationExecution,
+  ) => Promise<R> | R;
   /** Step-level admission contract. Exclusive tools cannot share an assistant step. */
   executionSemantics?: 'parallel' | 'exclusive_step';
   /** Nested CodeMode admission. Ordinary tools are nestable by default. */
@@ -397,6 +405,27 @@ export interface ToolRuntimeInput {
     readonly persistedArgs: unknown;
     readonly abortSignal: AbortSignal;
   }) => Promise<RuntimeManagedMutationAdmission>;
+  /** Host-owned accepted-world observation admission, frozen before T1. */
+  admitManagedObservation?: (input: {
+    readonly operationId: string;
+    readonly toolName: string;
+    readonly persistedArgs: unknown;
+    readonly abortSignal: AbortSignal;
+  }) => Promise<RuntimeManagedObservationAdmission>;
+}
+
+export interface RuntimeManagedObservationExecution {
+  readonly inputRoot: string;
+  readonly scratchRoot: string;
+}
+
+export interface RuntimeManagedObservationAdmission {
+  readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceObservationV1>;
+  execute(
+    operation: (execution: RuntimeManagedObservationExecution) => Promise<void>,
+  ): Promise<void>;
+  /** Idempotent for an unused, failed-T1, completed, or failed observation. */
+  dispose(): Promise<void>;
 }
 
 interface RuntimeManagedMutationOperationValue<T> {
@@ -1381,6 +1410,7 @@ export class ToolRuntime {
     }
 
     let managedMutationAdmission: RuntimeManagedMutationAdmission | undefined;
+    let managedObservationAdmission: RuntimeManagedObservationAdmission | undefined;
     if (tool.durableExecutionProfile === 'managed_mutation_v1') {
       if (
         (tool.name !== 'Write' && tool.name !== 'Edit') ||
@@ -1419,10 +1449,40 @@ export class ToolRuntime {
         return this.errorReturn(reason);
       }
     }
+    if (tool.durableExecutionProfile === 'managed_observation_v1') {
+      if (
+        tool.name !== 'ManagedNodeTest' ||
+        tool.recoveryMode !== 'replay_safe' ||
+        !tool.managedObservationImpl ||
+        !dispatchOperationId ||
+        !this.input.runtimeCommitSink ||
+        !this.input.admitManagedObservation
+      ) {
+        const reason = 'Managed observation admission is unavailable before T1';
+        await refuseBeforeDispatch(reason);
+        this.recordLoopGateOutcome(callSignature, true);
+        return this.errorReturn(reason);
+      }
+      try {
+        managedObservationAdmission = await this.input.admitManagedObservation({
+          operationId: dispatchOperationId,
+          toolName: tool.name,
+          persistedArgs: structuredClone(persistedArgs),
+          abortSignal: ctx.abortSignal,
+        });
+      } catch (error) {
+        await disposeManagedObservationAdmission(managedObservationAdmission);
+        const reason = `Managed observation admission failed: ${formatSyntheticToolErrorText(error)}`;
+        await refuseBeforeDispatch(reason);
+        this.recordLoopGateOutcome(callSignature, true);
+        return this.errorReturn(reason);
+      }
+    }
 
     const reservedSubagentSlot = this.reserveSubagentSlot(tool);
     if (!reservedSubagentSlot) {
       await disposeManagedMutationAdmission(managedMutationAdmission);
+      await disposeManagedObservationAdmission(managedObservationAdmission);
       trace?.emit('tool', 'tool_failed', 'Tool execution rejected by runtime limit', {
         toolUseId,
         toolName: tool.name,
@@ -1445,12 +1505,16 @@ export class ToolRuntime {
         ...(managedMutationAdmission
           ? { managedMutation: managedMutationAdmission.durableDispatch }
           : {}),
+        ...(managedObservationAdmission
+          ? { managedObservation: managedObservationAdmission.durableDispatch }
+          : {}),
         ...(invocationId ? { invocationId } : {}),
         ...(runId ? { runId } : {}),
       });
     } catch (error) {
       if (reservedSubagentSlot) this.releaseSubagentSlot(tool);
       await disposeManagedMutationAdmission(managedMutationAdmission);
+      await disposeManagedObservationAdmission(managedObservationAdmission);
       throw error;
     }
     if (durableAttempt) {
@@ -1487,82 +1551,88 @@ export class ToolRuntime {
       try {
         const runId = this.input.runId;
         const executionBoundary = clientCapabilityBoundary ?? (await this.readExecutionBoundary());
-        const invokeTool = () =>
-          tool.impl(structuredClone(executionArgs) as never, {
-            sessionId: this.input.sessionId,
-            turnId,
-            ...(runId ? { runId } : {}),
-            ...(this.input.orchestrationMode
-              ? { orchestrationMode: this.input.orchestrationMode }
-              : {}),
-            cwd: this.input.header.cwd,
-            executionBoundary,
-            permissionMode: this.input.header.permissionMode,
-            toolCallId: toolUseId,
-            // The id the call event actually carries, not the candidate: by here
-            // `prepareDurableToolAttempt` has pushed it on the dispatch lane.
-            ...(pushedCallEvent?.operationId ? { operationId: pushedCallEvent.operationId } : {}),
-            abortSignal: ctx.abortSignal,
-            emitOutput: output.emit,
-            emitProgress: (current, total) => {
-              const chunk = encodeToolStepProgress({ current, total });
-              if (!chunk) return;
-              queue.push({
-                type: 'tool_progress',
-                id: this.input.newId(),
-                turnId,
-                ts: this.input.now(),
-                toolUseId,
-                chunk,
-                ...activityIdentity,
-              });
-            },
-            ...(trace
-              ? {
-                  emitRunTrace: (
-                    type:
-                      | 'tool_started'
-                      | 'tool_searched'
-                      | 'tool_completed'
-                      | 'tool_failed'
-                      | 'skill_searched'
-                      | 'skill_loaded'
-                      | 'skill_load_failed',
-                    message: string,
-                    data?: Record<string, unknown>,
-                  ) =>
-                    trace.emit(type.startsWith('skill_') ? 'skill' : 'tool', type, message, {
-                      toolUseId,
-                      toolName: tool.name,
-                      ...(data ?? {}),
-                    }),
-                }
-              : {}),
-            ...(this.input.listChildAgents ? { listChildAgents: this.input.listChildAgents } : {}),
-            ...(this.input.readChildAgentOutput
-              ? { readChildAgentOutput: this.input.readChildAgentOutput }
-              : {}),
-            ...this.buildChildAgentContext({
+        const toolContext: MakaToolContext = {
+          sessionId: this.input.sessionId,
+          turnId,
+          ...(runId ? { runId } : {}),
+          ...(this.input.orchestrationMode
+            ? { orchestrationMode: this.input.orchestrationMode }
+            : {}),
+          cwd: this.input.header.cwd,
+          executionBoundary,
+          permissionMode: this.input.header.permissionMode,
+          toolCallId: toolUseId,
+          // The id the call event actually carries, not the candidate: by here
+          // `prepareDurableToolAttempt` has pushed it on the dispatch lane.
+          ...(pushedCallEvent?.operationId ? { operationId: pushedCallEvent.operationId } : {}),
+          abortSignal: ctx.abortSignal,
+          emitOutput: output.emit,
+          emitProgress: (current, total) => {
+            const chunk = encodeToolStepProgress({ current, total });
+            if (!chunk) return;
+            queue.push({
+              type: 'tool_progress',
+              id: this.input.newId(),
               turnId,
-              abortSignal: ctx.abortSignal,
-              trace,
+              ts: this.input.now(),
               toolUseId,
-              toolName: tool.name,
+              chunk,
+              ...activityIdentity,
+            });
+          },
+          ...(trace
+            ? {
+                emitRunTrace: (
+                  type:
+                    | 'tool_started'
+                    | 'tool_searched'
+                    | 'tool_completed'
+                    | 'tool_failed'
+                    | 'skill_searched'
+                    | 'skill_loaded'
+                    | 'skill_load_failed',
+                  message: string,
+                  data?: Record<string, unknown>,
+                ) =>
+                  trace.emit(type.startsWith('skill_') ? 'skill' : 'tool', type, message, {
+                    toolUseId,
+                    toolName: tool.name,
+                    ...(data ?? {}),
+                  }),
+              }
+            : {}),
+          ...(this.input.listChildAgents ? { listChildAgents: this.input.listChildAgents } : {}),
+          ...(this.input.readChildAgentOutput
+            ? { readChildAgentOutput: this.input.readChildAgentOutput }
+            : {}),
+          ...this.buildChildAgentContext({
+            turnId,
+            abortSignal: ctx.abortSignal,
+            trace,
+            toolUseId,
+            toolName: tool.name,
+            queue,
+            activityIdentity,
+          }),
+          askUserQuestion: (questions) =>
+            this.askUserQuestion(turnId, toolUseId, questions, ctx.abortSignal, queue),
+          requestSandboxBoundary: (expansion, justification) =>
+            this.requestSandboxBoundary(
+              turnId,
+              toolUseId,
+              expansion,
+              justification,
+              ctx.abortSignal,
               queue,
-              activityIdentity,
-            }),
-            askUserQuestion: (questions) =>
-              this.askUserQuestion(turnId, toolUseId, questions, ctx.abortSignal, queue),
-            requestSandboxBoundary: (expansion, justification) =>
-              this.requestSandboxBoundary(
-                turnId,
-                toolUseId,
-                expansion,
-                justification,
-                ctx.abortSignal,
-                queue,
-              ),
-          });
+            ),
+        };
+        const invokeTool = () => tool.impl(structuredClone(executionArgs) as never, toolContext);
+        const invokeManagedObservation = (execution: RuntimeManagedObservationExecution) =>
+          tool.managedObservationImpl!(
+            structuredClone(executionArgs) as never,
+            toolContext,
+            execution,
+          );
         const prepareOperationValue = async (
           immutableSnapshot = false,
         ): Promise<RuntimeManagedMutationOperationValue<unknown>> => {
@@ -1751,6 +1821,72 @@ export class ToolRuntime {
                   : 'operation_failed_no_effect',
             };
           }
+        } else if (managedObservationAdmission) {
+          const lifecycle: { state: 'open' | 'running' | 'settled' | 'closed' } = {
+            state: 'open',
+          };
+          let operationPromise: Promise<void> | undefined;
+          let runtimeOwnedValue: RuntimeManagedMutationOperationValue<unknown> | undefined;
+          const executeManagedObservationOperation = (
+            execution: RuntimeManagedObservationExecution,
+          ): Promise<void> => {
+            if (lifecycle.state !== 'open') {
+              return Promise.reject(
+                new Error(
+                  lifecycle.state === 'closed'
+                    ? 'Managed observation operation capability is closed'
+                    : 'Managed observation owner invoked the operation more than once',
+                ),
+              );
+            }
+            lifecycle.state = 'running';
+            operationPromise = (async () => {
+              try {
+                const rawResult = await invokeManagedObservation(execution);
+                const result = snapshotManagedToolResult(
+                  rawResult,
+                  Math.min(ctx.maxResultBytes ?? 65_536, 65_536),
+                );
+                const content = Object.freeze(coerceResultContent(result));
+                runtimeOwnedValue = Object.freeze({
+                  result,
+                  outcome: Object.freeze({
+                    content,
+                    isError: deriveToolResultStatus(content, result) !== 'success',
+                    durationMs: this.input.now() - startedAt,
+                  }),
+                });
+              } finally {
+                if (lifecycle.state === 'running') lifecycle.state = 'settled';
+              }
+            })();
+            void operationPromise.catch(() => undefined);
+            return operationPromise;
+          };
+          let ownerError: unknown;
+          try {
+            await managedObservationAdmission.execute(executeManagedObservationOperation);
+          } catch (error) {
+            ownerError = error;
+          }
+          if (lifecycle.state === 'running') {
+            try {
+              await operationPromise;
+            } catch {
+              // Join the short-lived observation before publishing any terminal.
+            } finally {
+              lifecycle.state = 'closed';
+            }
+            throw new Error('Managed observation owner settled before the operation completed', {
+              ...(ownerError !== undefined ? { cause: ownerError } : {}),
+            });
+          }
+          lifecycle.state = 'closed';
+          if (ownerError !== undefined) throw ownerError;
+          if (!runtimeOwnedValue) {
+            throw new Error('Managed observation owner settled without executing the operation');
+          }
+          settledExecution = { kind: 'generic', value: runtimeOwnedValue };
         } else {
           settledExecution = { kind: 'generic', value: await prepareOperationValue() };
         }
@@ -2052,6 +2188,7 @@ export class ToolRuntime {
       );
       if (reservedSubagentSlot) this.releaseSubagentSlot(tool);
       await disposeManagedMutationAdmission(managedMutationAdmission);
+      await disposeManagedObservationAdmission(managedObservationAdmission);
     }
   }
 
@@ -2063,6 +2200,7 @@ export class ToolRuntime {
     modelFacingArgs: unknown;
     abortSignal: AbortSignal;
     managedMutation?: Readonly<RuntimeEventManagedWorkspaceMutationV2>;
+    managedObservation?: Readonly<RuntimeEventManagedWorkspaceObservationV1>;
     invocationId?: string;
     runId?: string;
   }): Promise<DurableToolAttempt | undefined> {
@@ -2148,6 +2286,7 @@ export class ToolRuntime {
           canonicalArgsHash,
           recoveryMode,
           ...(input.managedMutation ? { managedMutation: input.managedMutation } : {}),
+          ...(input.managedObservation ? { managedObservation: input.managedObservation } : {}),
         },
       },
       refs: {
@@ -2179,6 +2318,32 @@ export class ToolRuntime {
             MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST
         ) {
           throw new Error('Managed mutation admission does not match the durable tool call');
+        }
+      }
+      if (input.managedObservation) {
+        const persistedRelativePaths =
+          input.persistedArgs &&
+          typeof input.persistedArgs === 'object' &&
+          !Array.isArray(input.persistedArgs) &&
+          Array.isArray((input.persistedArgs as { relativePaths?: unknown }).relativePaths)
+            ? (input.persistedArgs as { relativePaths: unknown[] }).relativePaths
+            : undefined;
+        const frozenPaths = input.managedObservation.files.map((file) => file.relativePath);
+        if (
+          input.tool.name !== 'ManagedNodeTest' ||
+          input.tool.recoveryMode !== 'replay_safe' ||
+          input.tool.durableExecutionProfile !== 'managed_observation_v1' ||
+          input.managedObservation.operationKind !== 'node_test_v1' ||
+          input.managedObservation.effectClass !== 'hermetic_observation_v1' ||
+          input.managedObservation.executionProfileDigest !==
+            MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST ||
+          !persistedRelativePaths ||
+          persistedRelativePaths.length !== frozenPaths.length ||
+          !persistedRelativePaths.every(
+            (path, index) => typeof path === 'string' && path === frozenPaths[index],
+          )
+        ) {
+          throw new Error('Managed observation admission does not match the durable tool call');
         }
       }
       this.assertDurableDispatchNotAborted(input.tool.name, input.abortSignal);
@@ -3804,6 +3969,16 @@ async function disposeManagedMutationAdmission(
   } catch {
     // Cleanup is best-effort. It must never rewrite a durable terminal outcome,
     // nor obscure the primary pre-T1 or execution failure.
+  }
+}
+
+async function disposeManagedObservationAdmission(
+  admission: RuntimeManagedObservationAdmission | undefined,
+): Promise<void> {
+  try {
+    await admission?.dispose();
+  } catch {
+    // Cleanup is best-effort and must not obscure the durable tool result.
   }
 }
 

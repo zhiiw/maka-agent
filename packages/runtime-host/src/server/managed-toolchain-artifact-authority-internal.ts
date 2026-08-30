@@ -62,6 +62,7 @@ export interface VerifiedManagedToolchainInternal {
   readonly nodeVersion: string;
   readonly profileVersion: 1;
   readonly allowedEffectClasses: readonly ManagedToolchainEffectClassInternal[];
+  readonly identityDigest: `sha256:${string}`;
 }
 
 type ManagedToolchainArtifactAuthorityErrorCode =
@@ -105,7 +106,7 @@ export function issueManagedToolchainReleaseClaimInternal(
     claim,
     Object.freeze({
       ...state,
-      allowedEffectClasses: Object.freeze([...state.allowedEffectClasses]),
+      allowedEffectClasses: Object.freeze([...state.allowedEffectClasses].sort()),
       releaseOwnerToken,
     }),
   );
@@ -203,7 +204,26 @@ export async function verifyManagedToolchainForInvocationInternal(
     nodeVersion: record.release.nodeVersion,
     profileVersion: 1 as const,
     allowedEffectClasses: record.release.allowedEffectClasses,
+    identityDigest: managedToolchainIdentityDigest(record.release),
   });
+}
+
+function managedToolchainIdentityDigest(
+  release: ManagedToolchainReleaseStateInternal,
+): `sha256:${string}` {
+  const canonical = JSON.stringify({
+    protocol: 'managed_toolchain_identity_v1',
+    executableSha256: release.executableSha256,
+    executableBytes: release.executableBytes,
+    entrypointSha256: release.entrypointSha256,
+    entrypointBytes: release.entrypointBytes,
+    nodeVersion: release.nodeVersion,
+    platform: release.platform,
+    arch: release.arch,
+    profileVersion: release.profileVersion,
+    allowedEffectClasses: [...release.allowedEffectClasses].sort(),
+  });
+  return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
 }
 
 function assertReleaseState(state: ManagedToolchainReleaseStateInternal): void {

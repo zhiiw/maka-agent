@@ -256,6 +256,65 @@ export interface RuntimeEventToolDispatch {
   recoveryMode: ToolRecoveryMode;
   /** T1-frozen managed workspace mutation identity. */
   managedMutation?: RuntimeEventManagedWorkspaceMutationV2;
+  /** T1-frozen immutable accepted-world observation identity. */
+  managedObservation?: RuntimeEventManagedWorkspaceObservationV1;
+}
+
+export const MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_SPEC = Object.freeze({
+  protocol: 'managed_observation_execution_profile_v1',
+  operationKind: 'node_test_v1',
+  effectClass: 'hermetic_observation_v1',
+  objectFormat: 'sha1',
+  acceptedInput: 'read_only_accepted_tree_v1',
+  testRunner: Object.freeze({
+    runtime: 'node_24',
+    api: 'node_test_run_v1',
+    isolation: 'none',
+    concurrency: false,
+    maxFiles: 64,
+    maxFileBytes: 16_777_216,
+  }),
+  sandbox: Object.freeze({
+    required: true,
+    network: 'restricted',
+    scratch: 'disposable_write_v1',
+    childProcess: 'forbidden',
+  }),
+  result: Object.freeze({
+    format: 'strict_json_v1',
+    maxBytes: 65_536,
+    nondeterministicFields: 'forbidden',
+  }),
+  replay: 'same_accepted_tree_replay_safe_v1',
+  executionFallback: 'forbidden',
+} as const);
+
+export const MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST =
+  'sha256:816111c078084a460fad2d6d78a545d127b158d8089237e3a238878936d86e6e' as const;
+
+export interface RuntimeEventManagedObservationFileV1 {
+  readonly relativePath: string;
+  readonly bytes: number;
+  readonly sha256: `sha256:${string}`;
+}
+
+export interface RuntimeEventManagedWorkspaceObservationV1 {
+  readonly protocol: 'managed_observation_v1';
+  readonly repositoryId: string;
+  readonly workspaceId: string;
+  readonly workspaceEpochId: string;
+  readonly workspaceInstanceId: string;
+  readonly objectFormat: 'sha1';
+  readonly acceptedWorkspaceVersionId: string;
+  readonly acceptedEventId: string;
+  readonly acceptedHeadRevision: number;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly operationKind: 'node_test_v1';
+  readonly effectClass: 'hermetic_observation_v1';
+  readonly executionProfileDigest: typeof MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST;
+  readonly toolchainIdentityDigest: `sha256:${string}`;
+  readonly files: readonly RuntimeEventManagedObservationFileV1[];
 }
 
 /**
@@ -601,8 +660,35 @@ const RUNTIME_TOOL_DISPATCH_SHAPE = defineObjectShape<RuntimeEventToolDispatch>(
     'canonicalArgsHash',
     'recoveryMode',
   ],
-  ['managedMutation'],
+  ['managedMutation', 'managedObservation'],
 );
+const RUNTIME_MANAGED_WORKSPACE_OBSERVATION_SHAPE =
+  defineObjectShape<RuntimeEventManagedWorkspaceObservationV1>()(
+    [
+      'protocol',
+      'repositoryId',
+      'workspaceId',
+      'workspaceEpochId',
+      'workspaceInstanceId',
+      'objectFormat',
+      'acceptedWorkspaceVersionId',
+      'acceptedEventId',
+      'acceptedHeadRevision',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'operationKind',
+      'effectClass',
+      'executionProfileDigest',
+      'toolchainIdentityDigest',
+      'files',
+    ],
+    [],
+  );
+const RUNTIME_MANAGED_OBSERVATION_FILE_SHAPE =
+  defineObjectShape<RuntimeEventManagedObservationFileV1>()(
+    ['relativePath', 'bytes', 'sha256'],
+    [],
+  );
 const RUNTIME_MANAGED_WORKSPACE_MUTATION_SHAPE =
   defineObjectShape<RuntimeEventManagedWorkspaceMutationV2>()(
     [
@@ -907,8 +993,69 @@ function isRuntimeToolDispatch(value: unknown): value is RuntimeEventToolDispatc
       value.recoveryMode === 'outcome_unknown' ||
       value.recoveryMode === 'never_auto_retry') &&
     (value.managedMutation === undefined ||
-      isRuntimeManagedWorkspaceMutation(value.managedMutation))
+      isRuntimeManagedWorkspaceMutation(value.managedMutation)) &&
+    (value.managedObservation === undefined ||
+      isRuntimeManagedWorkspaceObservation(value.managedObservation)) &&
+    !(value.managedMutation !== undefined && value.managedObservation !== undefined) &&
+    (value.managedObservation === undefined ||
+      (value.toolName === 'ManagedNodeTest' && value.recoveryMode === 'replay_safe'))
   );
+}
+
+function isRuntimeManagedWorkspaceObservation(
+  value: unknown,
+): value is RuntimeEventManagedWorkspaceObservationV1 {
+  if (
+    !isRecord(value) ||
+    !hasExactShape(value, RUNTIME_MANAGED_WORKSPACE_OBSERVATION_SHAPE) ||
+    value.protocol !== 'managed_observation_v1' ||
+    typeof value.repositoryId !== 'string' ||
+    !/^repository_[0-9a-f]{32}$/u.test(value.repositoryId) ||
+    typeof value.workspaceId !== 'string' ||
+    !/^workspace_[0-9a-f]{32}$/u.test(value.workspaceId) ||
+    typeof value.workspaceEpochId !== 'string' ||
+    !/^epoch_[0-9a-f]{32}$/u.test(value.workspaceEpochId) ||
+    typeof value.workspaceInstanceId !== 'string' ||
+    !/^instance_[0-9a-f]{32}$/u.test(value.workspaceInstanceId) ||
+    value.objectFormat !== 'sha1' ||
+    typeof value.acceptedWorkspaceVersionId !== 'string' ||
+    !/^version_[0-9a-f]{32}$/u.test(value.acceptedWorkspaceVersionId) ||
+    typeof value.acceptedEventId !== 'string' ||
+    !/^[A-Za-z0-9_-]{1,128}$/u.test(value.acceptedEventId) ||
+    !Number.isSafeInteger(value.acceptedHeadRevision) ||
+    (value.acceptedHeadRevision as number) < 1 ||
+    typeof value.acceptedCommitOid !== 'string' ||
+    !/^[0-9a-f]{40}$/u.test(value.acceptedCommitOid) ||
+    typeof value.acceptedTreeOid !== 'string' ||
+    !/^[0-9a-f]{40}$/u.test(value.acceptedTreeOid) ||
+    value.operationKind !== 'node_test_v1' ||
+    value.effectClass !== 'hermetic_observation_v1' ||
+    value.executionProfileDigest !== MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST ||
+    !isSha256Digest(value.toolchainIdentityDigest) ||
+    !Array.isArray(value.files) ||
+    value.files.length === 0 ||
+    value.files.length > 64
+  ) {
+    return false;
+  }
+  let previousPath: string | undefined;
+  for (const file of value.files) {
+    if (
+      !isRecord(file) ||
+      !hasExactShape(file, RUNTIME_MANAGED_OBSERVATION_FILE_SHAPE) ||
+      !isCanonicalManagedMutationPathV1(file.relativePath) ||
+      !/\.(?:cjs|mjs|js)$/u.test(file.relativePath as string) ||
+      !Number.isSafeInteger(file.bytes) ||
+      (file.bytes as number) < 0 ||
+      (file.bytes as number) > 16_777_216 ||
+      !isSha256Digest(file.sha256) ||
+      (previousPath !== undefined && (file.relativePath as string) <= previousPath)
+    ) {
+      return false;
+    }
+    previousPath = file.relativePath as string;
+  }
+  return true;
 }
 
 function isRuntimeManagedWorkspaceMutation(

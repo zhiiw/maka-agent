@@ -32,12 +32,116 @@ import type {
 import {
   ToolRuntime,
   type MakaTool,
+  type RuntimeManagedObservationAdmission,
   type RuntimeManagedMutationAdmission,
   type RuntimeManagedMutationSettlement,
   type ToolRuntimeInput,
 } from '../tool-runtime.js';
 
 describe('ToolRuntime durable boundary', () => {
+  it('freezes one managed observation before T1 and commits its result through generic T2', async () => {
+    const order: string[] = [];
+    const prepared: ToolPreparedCommit[] = [];
+    const outcomes: ToolOutcomeCommit[] = [];
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async (input) => {
+          prepared.push(input);
+          order.push('t1');
+          return { created: true, runtimeEventSeq: 1 };
+        },
+        commitToolOutcome: async (input) => {
+          outcomes.push(input);
+          order.push('t2');
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      order,
+      'run-1',
+      {
+        admitManagedObservation: async () => {
+          order.push('admit');
+          return managedObservationAdmission(async (operation) => {
+            order.push('observation-enter');
+            return await operation({ inputRoot: '/accepted', scratchRoot: '/scratch' });
+          }, order);
+        },
+      },
+    );
+    const managedTest = tool(() => {
+      throw new Error('ordinary implementation must not execute');
+    });
+    managedTest.name = 'ManagedNodeTest';
+    managedTest.durableExecutionProfile = 'managed_observation_v1';
+    managedTest.managedObservationImpl = async (_args, _ctx, execution) => {
+      order.push('observe');
+      assert.deepEqual(execution, { inputRoot: '/accepted', scratchRoot: '/scratch' });
+      return { passed: 1, failed: 0 };
+    };
+
+    assert.deepEqual(
+      await harness.executeWithInput(managedTest, { relativePaths: ['src/a.test.mjs'] }),
+      { passed: 1, failed: 0 },
+    );
+    assert.deepEqual(order, [
+      'admit',
+      't1',
+      'observation-enter',
+      'observe',
+      't2',
+      'published-result',
+      'dispose-observation',
+    ]);
+    assert.deepEqual(
+      prepared[0]?.dispatchRuntimeEvent.actions?.toolDispatch?.managedObservation,
+      managedObservationDispatch(),
+    );
+    assert.equal(outcomes.length, 1);
+  });
+
+  it('revokes a retained managed observation operation after durable settlement', async () => {
+    let retained:
+      | ((execution: { inputRoot: string; scratchRoot: string }) => Promise<void>)
+      | undefined;
+    let observations = 0;
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => ({ created: true, runtimeEventSeq: 2 }),
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedObservation: async () => ({
+          durableDispatch: managedObservationDispatch(),
+          execute: async (operation) => {
+            retained = operation;
+            await operation({ inputRoot: '/accepted', scratchRoot: '/scratch' });
+          },
+          dispose: async () => undefined,
+        }),
+      },
+    );
+    const managedTest = tool(() => {
+      throw new Error('ordinary implementation must not execute');
+    });
+    managedTest.name = 'ManagedNodeTest';
+    managedTest.durableExecutionProfile = 'managed_observation_v1';
+    managedTest.managedObservationImpl = async () => {
+      observations += 1;
+      return { passed: 1, failed: 0 };
+    };
+
+    await harness.executeWithInput(managedTest, { relativePaths: ['src/a.test.mjs'] });
+    assert.equal(observations, 1);
+    assert.ok(retained);
+    await assert.rejects(
+      retained({ inputRoot: '/accepted', scratchRoot: '/scratch' }),
+      /capability is closed/u,
+    );
+    assert.equal(observations, 1);
+  });
+
   it('does not invoke the tool or publish a result when T1 fails', async () => {
     let implementationCalls = 0;
     const harness = makeHarness({
@@ -1640,9 +1744,13 @@ function makeHarness(
           input,
           abortSignal: new AbortController().signal,
           eventSink: {
-            push: (event) => events.push(event),
+            push: (event) => {
+              events.push(event);
+              if (event.type === 'tool_result') order?.push('published-result');
+            },
             pushAndWaitUntilConsumed: async (event) => {
               events.push(event);
+              if (event.type === 'tool_result') order?.push('published-result');
             },
           },
         })
@@ -1679,6 +1787,19 @@ function managedAdmission(
     execute,
     dispose: async () => {
       order?.push('dispose');
+    },
+  };
+}
+
+function managedObservationAdmission(
+  execute: RuntimeManagedObservationAdmission['execute'],
+  order?: string[],
+): RuntimeManagedObservationAdmission {
+  return {
+    durableDispatch: managedObservationDispatch(),
+    execute,
+    dispose: async () => {
+      order?.push('dispose-observation');
     },
   };
 }
@@ -1757,6 +1878,34 @@ function managedMutationDispatch(expectedPath = 'notes.txt') {
     pathPolicyVersion: 3 as const,
     executionProfileDigest:
       'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825' as const,
+  };
+}
+
+function managedObservationDispatch() {
+  return {
+    protocol: 'managed_observation_v1' as const,
+    repositoryId: 'repository_11111111111111111111111111111111',
+    workspaceId: 'workspace_22222222222222222222222222222222',
+    workspaceEpochId: 'epoch_33333333333333333333333333333333',
+    workspaceInstanceId: 'instance_44444444444444444444444444444444',
+    objectFormat: 'sha1' as const,
+    acceptedWorkspaceVersionId: 'version_55555555555555555555555555555555',
+    acceptedEventId: 'accepted-event-1',
+    acceptedHeadRevision: 2,
+    acceptedCommitOid: '1'.repeat(40),
+    acceptedTreeOid: '2'.repeat(40),
+    operationKind: 'node_test_v1' as const,
+    effectClass: 'hermetic_observation_v1' as const,
+    executionProfileDigest:
+      'sha256:816111c078084a460fad2d6d78a545d127b158d8089237e3a238878936d86e6e' as const,
+    toolchainIdentityDigest: `sha256:${'3'.repeat(64)}` as const,
+    files: [
+      {
+        relativePath: 'src/a.test.mjs',
+        bytes: 123,
+        sha256: `sha256:${'4'.repeat(64)}` as const,
+      },
+    ],
   };
 }
 
