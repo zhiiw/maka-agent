@@ -909,6 +909,10 @@ export class DesktopRuntimeHostClient {
     return this.request('managed-workspace.restore.mutate', { sessionId, restoreId });
   }
 
+  maintainManagedWorkspace(sessionId: string) {
+    return this.request('managed-workspace.maintenance.mutate', { sessionId });
+  }
+
   readManagedWorkspaceHistory(sessionId: string, limit = 50) {
     return this.request('managed-workspace.history.query', { sessionId, limit });
   }

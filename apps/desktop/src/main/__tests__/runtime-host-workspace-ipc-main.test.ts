@@ -98,6 +98,9 @@ test('ordinary Review keeps reading the attached checkout', async (t) => {
       async publishManagedWorkspaceSnapshot() {
         throw new Error('not used');
       },
+      async maintainManagedWorkspace() {
+        throw new Error('not used');
+      },
       async restoreManagedWorkspaceSnapshot() {
         throw new Error('not used');
       },
@@ -141,6 +144,9 @@ test('managed Review fails closed instead of reading the attached checkout', asy
         throw new Error('not used');
       },
       async publishManagedWorkspaceSnapshot() {
+        throw new Error('not used');
+      },
+      async maintainManagedWorkspace() {
         throw new Error('not used');
       },
       async restoreManagedWorkspaceSnapshot() {
@@ -319,6 +325,9 @@ test('managed workspace Restore delegates one isolated accepted snapshot to Runt
       async publishManagedWorkspaceSnapshot() {
         throw new Error('not used');
       },
+      async maintainManagedWorkspace() {
+        throw new Error('not used');
+      },
       async restoreManagedWorkspaceSnapshot(sessionId, restoreId) {
         restoreCalls += 1;
         assert.equal(sessionId, 'session-1');
@@ -381,6 +390,9 @@ test('ordinary workspace cannot enter managed isolated Restore', async () => {
       async publishManagedWorkspaceSnapshot() {
         throw new Error('not used');
       },
+      async maintainManagedWorkspace() {
+        throw new Error('not used');
+      },
       async restoreManagedWorkspaceSnapshot() {
         throw new Error('must not restore an ordinary workspace');
       },
@@ -406,6 +418,40 @@ test('ordinary workspace cannot enter managed isolated Restore', async () => {
     }),
     /does not own a managed workspace/u,
   );
+});
+
+test('managed workspace maintenance delegates one bounded quiet cleanup', async () => {
+  const ipc = ipcHarness();
+  let calls = 0;
+  registerRuntimeHostWorkspaceIpc({
+    ipcMain: ipc as never,
+    client: {
+      async getSession() {
+        return sessionProjection('managed-coding-v1');
+      },
+      async maintainManagedWorkspace(sessionId: string) {
+        calls += 1;
+        assert.equal(sessionId, 'session-managed');
+        return {
+          kind: 'managed_workspace_maintenance_completed' as const,
+          scope: 'restore_orphans_v1' as const,
+          collected: 2,
+          retained: 1,
+        };
+      },
+    } as never,
+  });
+
+  assert.deepEqual(
+    await ipc.invoke('managed-workspace:maintain', { sessionId: 'session-managed' }),
+    {
+      kind: 'managed_workspace_maintenance_completed',
+      scope: 'restore_orphans_v1',
+      collected: 2,
+      retained: 1,
+    },
+  );
+  assert.equal(calls, 1);
 });
 
 test('managed workspace lifecycle commands stay bound to the same session', async () => {

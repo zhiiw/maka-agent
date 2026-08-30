@@ -71,6 +71,17 @@ export interface ManagedWorkspaceSourceBranchPublishResult {
   readonly replayed: boolean;
 }
 
+export interface ManagedWorkspaceMaintenanceInput {
+  readonly sessionId: string;
+}
+
+export interface ManagedWorkspaceMaintenanceResult {
+  readonly kind: 'managed_workspace_maintenance_completed';
+  readonly scope: 'restore_orphans_v1';
+  readonly collected: number;
+  readonly retained: number;
+}
+
 export interface ManagedWorkspaceRestoreInput {
   readonly sessionId: string;
   readonly restoreId: string;
@@ -272,6 +283,22 @@ export const MANAGED_WORKSPACE_REVIEW_OPERATION_SPECS = {
         throw invalidProtocolFrame('Managed workspace restore conflicts with its request');
       }
     },
+  }),
+  'managed-workspace.maintenance.mutate': defineOperation<
+    ManagedWorkspaceMaintenanceInput,
+    ManagedWorkspaceMaintenanceResult,
+    (typeof QUERY_ERRORS)[number]
+  >({
+    mode: 'command',
+    availability: 'ready',
+    errors: QUERY_ERRORS,
+    decodeInput(value) {
+      const record = requireExactRecord(value, 'managed workspace maintenance', ['sessionId']);
+      return {
+        sessionId: requireEntityId(record.sessionId, 'managed maintenance Session id'),
+      };
+    },
+    decodeOutput: decodeManagedWorkspaceMaintenanceResult,
   }),
   'managed-workspace.history.query': defineOperation<
     ManagedWorkspaceHistoryInput,
@@ -546,6 +573,30 @@ export function decodeManagedWorkspaceRestoreResult(value: unknown): ManagedWork
     filesMaterialized: record.filesMaterialized,
     bytesMaterialized: record.bytesMaterialized,
   };
+}
+
+export function decodeManagedWorkspaceMaintenanceResult(
+  value: unknown,
+): ManagedWorkspaceMaintenanceResult {
+  const record = requireExactRecord(value, 'managed workspace maintenance result', [
+    'kind',
+    'scope',
+    'collected',
+    'retained',
+  ]);
+  if (
+    record.kind !== 'managed_workspace_maintenance_completed' ||
+    record.scope !== 'restore_orphans_v1' ||
+    !Number.isSafeInteger(record.collected) ||
+    (record.collected as number) < 0 ||
+    (record.collected as number) > 256 ||
+    !Number.isSafeInteger(record.retained) ||
+    (record.retained as number) < 0 ||
+    (record.retained as number) > 4096
+  ) {
+    throw invalidProtocolFrame('Invalid managed workspace maintenance result');
+  }
+  return record as unknown as ManagedWorkspaceMaintenanceResult;
 }
 
 export function decodeManagedWorkspaceHistoricalRestoreResult(

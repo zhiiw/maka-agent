@@ -98,6 +98,11 @@ export function SessionReviewPanel(props: {
   const historyRestoreIdsRef = useRef(new Map<string, string>());
   const historyUndoIdsRef = useRef(new Map<string, string>());
   const rebaselineIdRef = useRef<string | null>(null);
+  const maintenanceRevisionRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    maintenanceRevisionRef.current = null;
+  }, [props.sessionId]);
 
   const load = useCallback(async () => {
     const revision = ++revisionRef.current;
@@ -111,6 +116,15 @@ export function SessionReviewPanel(props: {
       if (revision !== revisionRef.current) return;
       setGitResult(nextGit);
       if (nextGit.ok && nextGit.snapshot.repositoryRoot.startsWith('maka-managed://')) {
+        if (maintenanceRevisionRef.current !== nextGit.snapshot.revision) {
+          const maintenanceRevision = nextGit.snapshot.revision;
+          maintenanceRevisionRef.current = maintenanceRevision;
+          void review.maintain({ sessionId: props.sessionId }).catch(() => {
+            if (maintenanceRevisionRef.current === maintenanceRevision) {
+              maintenanceRevisionRef.current = null;
+            }
+          });
+        }
         try {
           const nextHistory = await review.history({ sessionId: props.sessionId, limit: 50 });
           if (revision !== revisionRef.current) return;

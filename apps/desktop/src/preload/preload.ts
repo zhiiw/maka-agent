@@ -192,6 +192,7 @@ import type {
   ManagedWorkspaceHistoryResult,
   ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspacePublishResult,
+  ManagedWorkspaceMaintenanceResult,
   ManagedWorkspaceSourceBranchPublishResult,
   ManagedWorkspaceRestoreResult,
   ManagedWorkspaceRebaselineResult,
@@ -2527,6 +2528,9 @@ const makaBridge = {
       publishId: string;
     }): Promise<ManagedWorkspaceSourceBranchPublishResult> {
       return invokeSessionInput('managed-workspace:publish-source-branch', input);
+    },
+    maintain(input: { sessionId: string }): Promise<ManagedWorkspaceMaintenanceResult> {
+      return invokeSessionInput('managed-workspace:maintain', input);
     },
     restore(input: {
       sessionId: string;

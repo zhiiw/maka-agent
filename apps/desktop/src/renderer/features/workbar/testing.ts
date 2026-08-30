@@ -66,6 +66,9 @@ export function createFakeWorkbarServices(
       publishSourceBranch: async () => {
         throw new Error('Fake review.publishSourceBranch is not configured');
       },
+      maintain: async () => {
+        throw new Error('Fake review.maintain is not configured');
+      },
       restore: async () => {
         throw new Error('Fake review.restore is not configured');
       },
