@@ -34,7 +34,8 @@ milestone: M5.3
 Owner 是 `ManagedDependencySnapshotAuthority`。底层 artifact publication、receipt、lease、跨进程 storage-root
 lock 与 GC 继续由 `ManagedDependencyEnvironmentAuthority` 唯一拥有；snapshot adapter 只拥有 source observation
 和一次 acquisition 的 source-to-staging copy。调用者拿不到 producer capability、canonical artifact path 或 receipt
-writer。
+writer。`@maka/storage` 只导出 `managed-dependency-snapshot-authority` 这一条窄入口；generic producer factory、
+receipt authority 和 artifact publication 实现不属于 package exports。
 
 这一步刻意不引入 bundled npm，也不承诺安装缺失依赖。source 中没有可接受的 `node_modules` 时，依赖能力明确
 unavailable；后续若增加 installer，必须作为另一种受权 producer 单独证明。
