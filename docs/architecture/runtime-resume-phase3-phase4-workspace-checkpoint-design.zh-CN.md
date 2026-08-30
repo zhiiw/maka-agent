@@ -640,7 +640,7 @@ Durable source binding 必须在第一个工具 T1 前冻结。`git_repository_v
 `filesystem_snapshot_v1` 与非 durable `attached_checkout` 是不可混淆的 typed profile；任何 admission
 失败都必须在创建 durable Run 前向用户解释，T1 后不得互相 fallback。
 
-当前 M3.1 foundation 已落实以下边界，但尚未宣称 Desktop 自动入口完成：
+当前 M3.1 已落实 source foundation 与 Desktop 自动入口：
 
 - Runtime Host 先规范化 source root，再由 owner-issued capability 分类 source；调用者不能自报类型；
 - root 存在 `.git` marker 时永远进入 Git admission，即使 marker 损坏也不得降级为 filesystem
@@ -654,6 +654,16 @@ Durable source binding 必须在第一个工具 T1 前冻结。`git_repository_v
   source 改变后重开必须与 frozen source baseline 冲突，而不是重新覆盖 accepted history；
 - source kind 已进入 session identity 与 materialization profile；显式、可直接读取的 durable source
   binding fact 仍由 continuation capsule 切片补齐，在它落地前不能把该 foundation 描述成完整产品能力。
+- 普通 Desktop workspace task 在 Main 的 `sessions:create` authority 内自动获得
+  `managed-coding-v1`；renderer 不再发送 `productIntent`，Composer 也不再允许用户关闭 resumable
+  workspace。Deep Research 等独立产品模式保持自己的 execution contract，不会仅因有 cwd 被改写成
+  managed coding；
+- Main 只决定“这是 workspace coding task”，Runtime Host 再用 owner-issued capability 区分 Git 与
+  filesystem snapshot。两层都在第一个工具 T1 以前完成，任何 helper/source admission 失败均 fail
+  closed，不允许回落 attached checkout；
+- 正式 Desktop 包通过 release manifest 提供 Gitoxide helper authority。源码开发态若没有准备并注入同一
+  verified helper artifact，会明确得到 `managed_workspace_profile_unavailable`；不得为了让 dev 启动方便而
+  从 `PATH` 搜索 Git/helper，开发态 artifact 接线需作为单独的非发布 authority 补齐。
 
 M3.1 filesystem snapshot v1 的平台合同：
 

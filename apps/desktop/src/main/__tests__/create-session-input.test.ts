@@ -36,6 +36,7 @@ import { DEFAULT_SESSION_NAME } from '@maka/core/session-name';
 
 import {
   type CreateSessionRequest,
+  resolveAutomaticWorkspaceToolProfile,
   resolveCreateSessionRequest,
 } from '../create-session-input.js';
 
@@ -76,6 +77,35 @@ describe('resolveCreateSessionRequest', () => {
       labels: undefined,
       toolProfile: 'managed-coding-v1',
     });
+  });
+
+  it('automatically grants the resumable profile to ordinary workspace tasks', () => {
+    const ordinary = resolve({});
+
+    assert.equal(
+      resolveAutomaticWorkspaceToolProfile(ordinary, {
+        kind: 'project',
+        projectId: 'project-1',
+      }),
+      'managed-coding-v1',
+    );
+    assert.equal(
+      resolveAutomaticWorkspaceToolProfile(ordinary, {
+        kind: 'host_path',
+        path: '/workspace/non-git',
+      }),
+      'managed-coding-v1',
+    );
+  });
+
+  it('does not reinterpret a distinct product mode as managed coding', () => {
+    assert.equal(
+      resolveAutomaticWorkspaceToolProfile(
+        resolve({ mode: 'deep_research' }),
+        { kind: 'project', projectId: 'project-1' },
+      ),
+      undefined,
+    );
   });
 
   it('does not let the renderer mint an internal tool profile', () => {

@@ -31,7 +31,10 @@ import type {
   WorkspaceTarget,
   SessionModelTarget,
 } from '@maka/runtime-host/protocol';
-import { resolveCreateSessionRequest } from './create-session-input.js';
+import {
+  resolveAutomaticWorkspaceToolProfile,
+  resolveCreateSessionRequest,
+} from './create-session-input.js';
 import type {
   DesktopRuntimeHostClient,
   DesktopSessionConfigurationPatch,
@@ -121,13 +124,14 @@ export function registerRuntimeHostSessionCatalogIpc(
       ...(input?.cwd === undefined ? {} : { cwd: input.cwd }),
       ...(input?.projectId === undefined ? {} : { projectId: input.projectId }),
     });
+    const toolProfile = resolveAutomaticWorkspaceToolProfile(request, workspace);
     const session = await deps.client.createSession({
       sessionId: newId(),
       workspace,
       ...(request.mode === undefined ? {} : { mode: request.mode }),
       ...(request.mode === undefined ? { name: request.name } : {}),
       ...(request.labels === undefined ? {} : { labels: request.labels }),
-      ...(request.toolProfile === undefined ? {} : { toolProfile: request.toolProfile }),
+      ...(toolProfile === undefined ? {} : { toolProfile }),
       modelTarget: normalizeModelTarget(input),
       ...normalizeCreateThinkingLevel(input?.thinkingLevel),
       ...(request.mode !== undefined || request.permissionMode === undefined

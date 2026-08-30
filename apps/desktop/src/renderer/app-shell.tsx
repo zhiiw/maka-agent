@@ -424,9 +424,6 @@ function AppShellContent({
   // Plan toggle and one orchestration value, not one fused choice.
   const [newChatPlanModeActive, setNewChatPlanModeActive] = useState(false);
   const [newChatOrchestrationMode, setNewChatOrchestrationMode] = useState<OrchestrationMode>('default');
-  const [newTaskProductIntent, setNewTaskProductIntent] = useState<
-    'managed_coding' | undefined
-  >();
   const [newTaskPermissionChoice, setNewTaskPermissionChoice, clearNewTaskPermissionChoice] =
     useNewTaskChoice<ChatDefaultPermissionMode>(currentNewTaskDraftKey);
   const [historyLoadPendingSessionId, setHistoryLoadPendingSessionId] = useState<string>();
@@ -1568,7 +1565,6 @@ function AppShellContent({
     // Only Plan resets: a new task starts out of Plan, in whatever
     // orchestration the last one was set to.
     setNewChatPlanModeActive(false);
-    setNewTaskProductIntent(undefined);
     setNavSelection({ section: 'sessions' });
     setSearchScrollTarget(null);
     // New-task affordances reset to the empty-state composer; move focus
@@ -1839,7 +1835,6 @@ function AppShellContent({
     clearNewChatPermissionChoice: clearNewTaskPermissionChoice,
     newChatCollaborationMode: newChatPlanModeActive ? 'plan' : 'agent',
     newChatOrchestrationMode: newChatOrchestrationMode,
-    newTaskProductIntent,
     newTaskTarget: taskEntry.selectors.target,
   });
 
@@ -3033,14 +3028,7 @@ function AppShellContent({
                   managedTaskActive={
                     activeId
                       ? activeSessionForView?.toolProfile === 'managed-coding-v1'
-                      : newTaskProductIntent === 'managed_coding'
-                  }
-                  onManagedTaskChange={
-                    activeId
-                      ? undefined
-                      : (active) => setNewTaskProductIntent(
-                          active ? 'managed_coding' : undefined,
-                        )
+                      : false
                   }
                   // No pending-keyed disable while a toggle commits: the
                   // pending registries already swallow re-entrant toggles, and

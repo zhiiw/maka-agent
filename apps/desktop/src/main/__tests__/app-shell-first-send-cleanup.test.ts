@@ -125,7 +125,7 @@ describe('composer first-send cleanup', () => {
     assert.ok(!('permissionMode' in (createInput as Record<string, unknown>)));
   });
 
-  it('carries the managed task product intent on the first session create', async () => {
+  it('leaves automatic workspace admission to Desktop main', async () => {
     let createInput: unknown;
     const restoreWindow = installWindow({
       newTasks: {
@@ -144,18 +144,17 @@ describe('composer first-send cleanup', () => {
     });
 
     try {
-      const deps = {
-        ...createActionsDeps(),
-        newTaskProductIntent: 'managed_coding' as const,
-      } as unknown as Parameters<typeof createAppShellChatActions>[0];
-      assert.equal(await createAppShellChatActions(deps).send('inspect the repository'), true);
+      assert.equal(
+        await createAppShellChatActions(createActionsDeps()).send('inspect the repository'),
+        true,
+      );
     } finally {
       restoreWindow();
     }
 
     assert.equal(
-      (createInput as { productIntent?: unknown }).productIntent,
-      'managed_coding',
+      Object.hasOwn(createInput as Record<string, unknown>, 'productIntent'),
+      false,
     );
     assert.equal(
       Object.hasOwn(createInput as Record<string, unknown>, 'toolProfile'),
