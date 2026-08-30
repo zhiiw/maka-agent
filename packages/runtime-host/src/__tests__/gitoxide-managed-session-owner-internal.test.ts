@@ -208,6 +208,123 @@ test('Review compares the durable baseline with the accepted tree, not the attac
   assert.deepEqual(review.changes, []);
 });
 
+test('Restore materializes an accepted tree without touching the attached checkout', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the isolated restore test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'accepted restore content\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'accepted restore baseline');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-restore-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+  const session = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-isolated-restore',
+  });
+  await writeFile(join(sourceRoot, 'notes.txt'), 'attached checkout drift\n', 'utf8');
+
+  const restored = await session.restore.restore('manual-restore');
+  assert.equal(
+    await readFile(join(restored.destinationPath, 'notes.txt'), 'utf8'),
+    'accepted restore content\n',
+  );
+  assert.equal(await readFile(join(sourceRoot, 'notes.txt'), 'utf8'), 'attached checkout drift\n');
+  const replayed = await session.restore.restore('manual-restore');
+  assert.equal(replayed.destinationPath, restored.destinationPath);
+  assert.equal(
+    await readFile(join(replayed.destinationPath, 'notes.txt'), 'utf8'),
+    'accepted restore content\n',
+  );
+});
+
+test('Publish pins the exact durable accepted head without modifying the source repository', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the accepted publication test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'published content\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'publication baseline');
+  const sourceHead = git(sourceRoot, ['rev-parse', 'HEAD']);
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-publish-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+  const session = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-accepted-publication',
+  });
+
+  const first = await session.publish.publish('manual-review');
+  assert.equal(first.replayed, false);
+  assert.equal(
+    git(session.repositoryPath, ['rev-parse', first.publishedRef]),
+    first.acceptedCommitOid,
+  );
+  const replay = await session.publish.publish('manual-review');
+  assert.equal(replay.replayed, true);
+  assert.equal(git(sourceRoot, ['rev-parse', 'HEAD']), sourceHead);
+});
+
+test('Time travel restores a historical accepted version without rewinding the current head', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the time-travel restore test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'historical baseline\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'time travel baseline');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-time-travel-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+  const session = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-time-travel',
+  });
+  const acceptedHead = git(session.repositoryPath, ['rev-parse', 'refs/maka/accepted']);
+
+  const restored = await session.timeTravel.restoreVersion(
+    session.baselineWorkspaceVersionId,
+    'baseline',
+  );
+  assert.equal(
+    await readFile(join(restored.destinationPath, 'notes.txt'), 'utf8'),
+    'historical baseline\n',
+  );
+  assert.equal(git(session.repositoryPath, ['rev-parse', 'refs/maka/accepted']), acceptedHead);
+});
+
 test('fails closed when the source advances after its managed epoch opens', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {
@@ -377,6 +494,8 @@ async function admittedHelper(): Promise<
       'list_tree_files',
       'grep_tree_files',
       'compare_accepted_trees',
+      'materialize_accepted_tree',
+      'publish_accepted_ref',
     ],
   });
   return {

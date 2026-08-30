@@ -76,6 +76,8 @@ const claim = issueGitoxideHelperReleaseArtifactClaimInternal(releaseOwnerToken,
     'list_tree_files',
     'grep_tree_files',
     'compare_accepted_trees',
+    'materialize_accepted_tree',
+    'publish_accepted_ref',
   ],
 });
 const helperCapability = await admitGitoxideHelperArtifactInternal({
