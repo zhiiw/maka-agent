@@ -147,8 +147,12 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
         { cause: error },
       );
     });
-    assert.match(completedToolResult, /"passed":1/u);
-    assert.match(completedToolResult, /"failed":0/u);
+    assert.deepEqual(readManagedNodeTestResult(completedToolResult), {
+      protocolVersion: 1,
+      kind: 'node_test_observation',
+      passed: 1,
+      failed: 0,
+    });
     await fixture.killHost(firstHost);
     await withTimeout(start, PROCESS_TIMEOUT_MS, 'crashed hosted execution did not close');
     await firstClient.close().catch(() => undefined);
@@ -301,14 +305,14 @@ async function configureProvider(
 async function startManagedNodeTestProvider(): Promise<{
   readonly baseUrl: string;
   readonly requests: readonly unknown[];
-  waitForCompletedToolResult(): Promise<string>;
+  waitForCompletedToolResult(): Promise<unknown>;
   waitForResumedCompletion(): Promise<void>;
   close(): Promise<void>;
 }> {
   const requests: unknown[] = [];
-  let completedToolResult!: (request: string) => void;
+  let completedToolResult!: (request: unknown) => void;
   let resumedCompletion!: () => void;
-  const completedToolResultReached = new Promise<string>((resolve) => {
+  const completedToolResultReached = new Promise<unknown>((resolve) => {
     completedToolResult = resolve;
   });
   const resumedCompletionReached = new Promise<void>((resolve) => {
@@ -330,7 +334,7 @@ async function startManagedNodeTestProvider(): Promise<{
         return;
       }
       if (requests.length === 2) {
-        completedToolResult(JSON.stringify(body));
+        completedToolResult(body);
         return;
       }
       respondText(response, 'Managed Node test passed after recovery.');
@@ -364,6 +368,30 @@ async function startManagedNodeTestProvider(): Promise<{
       await closeServer(server);
     },
   };
+}
+
+function readManagedNodeTestResult(request: unknown): Readonly<Record<string, unknown>> {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new Error('Provider request is invalid');
+  }
+  const messages = (request as { readonly messages?: unknown }).messages;
+  if (!Array.isArray(messages)) throw new Error('Provider request has no messages');
+  const toolMessage = messages.find(
+    (message): message is { readonly role: 'tool'; readonly content: string } =>
+      !!message &&
+      typeof message === 'object' &&
+      !Array.isArray(message) &&
+      (message as { readonly role?: unknown }).role === 'tool' &&
+      typeof (message as { readonly content?: unknown }).content === 'string',
+  );
+  if (!toolMessage) throw new Error('Provider request has no tool result');
+  const value = JSON.parse(toolMessage.content) as Record<string, unknown>;
+  return Object.freeze({
+    protocolVersion: value.protocolVersion,
+    kind: value.kind,
+    passed: value.passed,
+    failed: value.failed,
+  });
 }
 
 async function preparePackagedResources(
