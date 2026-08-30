@@ -52,6 +52,7 @@ import type {
   TurnRecord,
   TurnStateMessage,
 } from '@maka/core/session';
+import { isManagedCodingSessionToolProfile } from '@maka/core/session';
 import { isDeepStrictEqual } from 'node:util';
 import type { UserMessageInput } from '@maka/core/runtime-inputs';
 import type { SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
@@ -631,7 +632,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
       await this.enterExecutionClaim(execution);
       const header = await this.deps.store.readHeader(sessionId);
       let workspaceIdentity: string | undefined;
-      const managedCoding = header.toolProfile === 'managed-coding-v1';
+      const managedCoding = isManagedCodingSessionToolProfile(header.toolProfile);
       if (managedCoding && !this.deps.inspectContinuationSafety) {
         throw new Error('Managed coding workspace boundary authority is unavailable');
       }

@@ -30,7 +30,11 @@ import {
   type MessageContent,
   type SessionEvent,
 } from '@maka/core/events';
-import { isWorkHubCoordinationSessionId, type SessionHeader } from '@maka/core/session';
+import {
+  isManagedCodingSessionToolProfile,
+  isWorkHubCoordinationSessionId,
+  type SessionHeader,
+} from '@maka/core/session';
 import { resolveEffectiveOrchestration } from '@maka/core/orchestration';
 import {
   decodeSkillInvocationResult,
@@ -455,7 +459,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
    */
   async resumeManagedContinuationsAfterRecovery(sessions: readonly SessionHeader[]): Promise<void> {
     for (const session of [...sessions].sort((left, right) => left.id.localeCompare(right.id))) {
-      if (session.isArchived || session.toolProfile !== 'managed-coding-v1') continue;
+      if (session.isArchived || !isManagedCodingSessionToolProfile(session.toolProfile)) continue;
       await this.resumeManagedContinuationAfterRecovery(session.id);
     }
   }
@@ -471,7 +475,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
           const header = await this.stores.sessionStore.readHeaderSnapshot(sessionId);
           if (
             header.isArchived ||
-            header.toolProfile !== 'managed-coding-v1' ||
+            !isManagedCodingSessionToolProfile(header.toolProfile) ||
             runtimeHostSafeBoundaryContinuationUnavailableReason(header) ||
             this.#executions.has(sessionId)
           ) {

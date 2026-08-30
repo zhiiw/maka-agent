@@ -31,6 +31,7 @@ import { emptyPlanSessionState } from '@maka/core/plan';
 import type { PermissionMode } from '@maka/core/permission';
 import {
   isDeepResearchSession,
+  isManagedCodingSessionToolProfile,
   type SessionHeader,
   WORKHUB_COORDINATION_SESSION_ID,
 } from '@maka/core/session';
@@ -163,6 +164,15 @@ import {
   PackagedGitoxideHelperError,
   resolvePackagedGitoxideHelperInternal,
 } from './packaged-gitoxide-helper-internal.js';
+import {
+  CurrentProcessManagedToolchainError,
+  resolveCurrentProcessManagedToolchainInternal,
+} from './current-process-managed-toolchain-internal.js';
+import { createManagedCommandSandboxOwnerInternal } from './managed-command-sandbox-owner-internal.js';
+import {
+  createManagedNodeTestAdmissionOwnerInternal,
+  createManagedNodeTestExecutionRootOwnerInternal,
+} from './managed-node-test-admission-owner-internal.js';
 import {
   HostProjectDirectoryAuthority,
   type PublishedProjectDirectoryRoot,
@@ -298,6 +308,18 @@ export async function createExecutionRuntimeHostComposition(
     }
     throw error;
   });
+  const managedToolchainInvocationOwnerToken = {};
+  const managedToolchainCapability = await resolveCurrentProcessManagedToolchainInternal({
+    invocationOwnerToken: managedToolchainInvocationOwnerToken,
+  }).catch((error: unknown) => {
+    if (
+      error instanceof CurrentProcessManagedToolchainError &&
+      error.code === 'current_process_managed_toolchain_unavailable'
+    ) {
+      return undefined;
+    }
+    throw error;
+  });
   let graphControlStore: ReturnType<typeof createAgentGraphControlStore> | undefined;
   let graphClient: HostAgentGraphCoordinator | undefined;
   let sessionEffects: HostSessionEffectCoordinator | undefined;
@@ -371,6 +393,17 @@ export async function createExecutionRuntimeHostComposition(
       },
     });
     const sandboxManager = createBuiltinSandboxManager();
+    const managedCommandOwner =
+      sandboxManager && managedToolchainCapability
+        ? createManagedCommandSandboxOwnerInternal({
+            invocationOwnerToken: managedToolchainInvocationOwnerToken,
+            toolchainCapability: managedToolchainCapability,
+            sandboxManager,
+          })
+        : undefined;
+    const managedNodeTestExecutionRootOwner = createManagedNodeTestExecutionRootOwnerInternal({
+      storageRootLease: context.owner.lease,
+    });
     const filesystemWorkerLaunchSpecProvider =
       sandboxManager && isBuiltinFilesystemWorkerSandboxAvailable()
         ? createFilesystemWorkerLaunchSpecProvider({
@@ -713,22 +746,38 @@ export async function createExecutionRuntimeHostComposition(
       'ai-sdk',
       dependencies.primaryBackendFactory ??
         (async (backendContext) => {
-          const managedSession =
-            backendContext.header.toolProfile === 'managed-coding-v1'
-              ? await (async () => {
-                  if (!gitoxideHelperCapability) {
+          const managedSession = isManagedCodingSessionToolProfile(
+            backendContext.header.toolProfile,
+          )
+            ? await (async () => {
+                if (!gitoxideHelperCapability) {
+                  throw new Error(
+                    'managed_workspace_profile_unavailable: packaged Gitoxide helper authority is unavailable',
+                  );
+                }
+                return openGitoxideManagedSessionOwnerInternal({
+                  storageRootLease: context.owner.lease,
+                  stores,
+                  invocationOwnerToken: gitoxideInvocationOwnerToken,
+                  helperCapability: gitoxideHelperCapability,
+                  sourceRoot: backendContext.header.cwd,
+                  sessionId: backendContext.sessionId,
+                  abortSignal: backendContext.abortSignal,
+                });
+              })()
+            : undefined;
+          const managedNodeTestAdmission =
+            backendContext.header.toolProfile === 'managed-coding-v2'
+              ? (() => {
+                  if (!managedCommandOwner || !managedSession) {
                     throw new Error(
-                      'managed_workspace_profile_unavailable: packaged Gitoxide helper authority is unavailable',
+                      'managed_workspace_profile_unavailable: hermetic Node test authority is unavailable',
                     );
                   }
-                  return openGitoxideManagedSessionOwnerInternal({
-                    storageRootLease: context.owner.lease,
-                    stores,
-                    invocationOwnerToken: gitoxideInvocationOwnerToken,
-                    helperCapability: gitoxideHelperCapability,
-                    sourceRoot: backendContext.header.cwd,
-                    sessionId: backendContext.sessionId,
-                    abortSignal: backendContext.abortSignal,
+                  return createManagedNodeTestAdmissionOwnerInternal({
+                    executionRootOwner: managedNodeTestExecutionRootOwner,
+                    sourceOwner: managedSession.nodeTestSource,
+                    commandOwner: managedCommandOwner,
                   });
                 })()
               : undefined;
@@ -757,7 +806,9 @@ export async function createExecutionRuntimeHostComposition(
               ),
               goalTools: requireGoal(goal).tools,
               builtinTools: runBuiltinTools,
-              hostTools,
+              hostTools: managedNodeTestAdmission
+                ? [...hostTools, managedNodeTestAdmission.tool]
+                : hostTools,
               resolveRootTools: (sessionId) =>
                 requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId),
               parentAgentTools: childAgentTools.parentTools,
@@ -780,6 +831,9 @@ export async function createExecutionRuntimeHostComposition(
             runtimeCommitSink: stores.runtimeEventStore,
             ...(managedSession
               ? { admitManagedMutation: managedSession.writeEdit.admitManagedMutation }
+              : {}),
+            ...(managedNodeTestAdmission
+              ? { admitManagedObservation: managedNodeTestAdmission.admit }
               : {}),
             requestDrain: context.requestDrain,
           });
@@ -1058,7 +1112,7 @@ export async function createExecutionRuntimeHostComposition(
         },
         readManagedWorkspaceBoundary: async (sessionId) => {
           const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
-          if (header.toolProfile !== 'managed-coding-v1') return undefined;
+          if (!isManagedCodingSessionToolProfile(header.toolProfile)) return undefined;
           if (!gitoxideHelperCapability) {
             throw new Error(
               'managed_workspace_profile_unavailable: packaged Gitoxide helper authority is unavailable',

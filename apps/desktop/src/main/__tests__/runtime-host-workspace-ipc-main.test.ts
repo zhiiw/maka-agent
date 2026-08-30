@@ -77,6 +77,33 @@ test('managed Review reads the accepted tree from Runtime Host', async () => {
   assert.equal(managedReads, 1);
 });
 
+test('managed coding v2 keeps Desktop Review on the accepted tree', async () => {
+  const ipc = ipcHarness();
+  let managedReads = 0;
+  registerRuntimeHostWorkspaceIpc({
+    ipcMain: ipc as never,
+    allowLocalWorkspace: false,
+    client: {
+      async getSession() {
+        return sessionProjection('managed-coding-v2');
+      },
+      async readManagedWorkspaceReview() {
+        managedReads += 1;
+        return { ok: false, reason: 'not_a_repository' };
+      },
+    } as never,
+  });
+
+  assert.deepEqual(
+    await ipc.invoke('git-review:read', {
+      sessionId: 'session-managed',
+      source: 'branch',
+    }),
+    { ok: false, reason: 'not_a_repository' },
+  );
+  assert.equal(managedReads, 1);
+});
+
 test('ordinary Review keeps reading the attached checkout', async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), 'maka-review-ordinary-'));
   t.after(() => rm(workspace, { recursive: true, force: true }));
@@ -562,7 +589,7 @@ test('managed workspace lifecycle commands stay bound to the same session', asyn
 });
 
 function sessionProjection(
-  toolProfile?: 'managed-coding-v1',
+  toolProfile?: 'managed-coding-v1' | 'managed-coding-v2',
   hostCwd = process.cwd(),
 ): SessionCatalogProjection {
   return {

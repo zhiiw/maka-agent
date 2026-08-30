@@ -18,6 +18,7 @@
  */
 
 import type { InteractiveExecutionStoresWriter } from '@maka/storage/execution-stores';
+import { isManagedCodingSessionToolProfile } from '@maka/core/session';
 import { isSessionNotFoundError } from '@maka/storage/execution-stores';
 import type { StorageRootLease } from '@maka/storage/root-authority';
 import type {
@@ -66,7 +67,7 @@ export class HostManagedWorkspaceReviewCoordinator {
     }
     try {
       const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
-      if (header.toolProfile !== 'managed-coding-v1') {
+      if (!isManagedCodingSessionToolProfile(header.toolProfile)) {
         return failure('invalid_request', 'Session does not own a managed workspace');
       }
       const session = await openGitoxideManagedSessionOwnerInternal({
@@ -101,7 +102,7 @@ export class HostManagedWorkspaceReviewCoordinator {
     }
     try {
       const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
-      if (header.toolProfile !== 'managed-coding-v1') {
+      if (!isManagedCodingSessionToolProfile(header.toolProfile)) {
         return failure('invalid_request', 'Session does not own a managed workspace');
       }
       const session = await openGitoxideManagedSessionOwnerInternal({
@@ -143,7 +144,7 @@ export class HostManagedWorkspaceReviewCoordinator {
     }
     try {
       const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
-      if (header.toolProfile !== 'managed-coding-v1') {
+      if (!isManagedCodingSessionToolProfile(header.toolProfile)) {
         return failure('invalid_request', 'Session does not own a managed workspace');
       }
       const session = await openGitoxideManagedSessionOwnerInternal({
@@ -194,7 +195,7 @@ export class HostManagedWorkspaceReviewCoordinator {
     }
     try {
       const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
-      if (header.toolProfile !== 'managed-coding-v1') {
+      if (!isManagedCodingSessionToolProfile(header.toolProfile)) {
         return failure('invalid_request', 'Session does not own a managed workspace');
       }
       const session = await openGitoxideManagedSessionOwnerInternal({
@@ -234,7 +235,7 @@ export class HostManagedWorkspaceReviewCoordinator {
     }
     try {
       const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
-      if (header.toolProfile !== 'managed-coding-v1') {
+      if (!isManagedCodingSessionToolProfile(header.toolProfile)) {
         return failure('invalid_request', 'Session does not own a managed workspace');
       }
       const session = await openGitoxideManagedSessionOwnerInternal({
@@ -274,7 +275,7 @@ export class HostManagedWorkspaceReviewCoordinator {
     }
     try {
       const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
-      if (header.toolProfile !== 'managed-coding-v1') {
+      if (!isManagedCodingSessionToolProfile(header.toolProfile)) {
         return failure('invalid_request', 'Session does not own a managed workspace');
       }
       const session = await openGitoxideManagedSessionOwnerInternal({
@@ -306,7 +307,7 @@ export class HostManagedWorkspaceReviewCoordinator {
     }
     try {
       const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
-      if (header.toolProfile !== 'managed-coding-v1') {
+      if (!isManagedCodingSessionToolProfile(header.toolProfile)) {
         return failure('invalid_request', 'Session does not own a managed workspace');
       }
       const session = await openGitoxideManagedSessionOwnerInternal({
@@ -350,7 +351,7 @@ export class HostManagedWorkspaceReviewCoordinator {
     }
     try {
       const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
-      if (header.toolProfile !== 'managed-coding-v1') {
+      if (!isManagedCodingSessionToolProfile(header.toolProfile)) {
         return failure('invalid_request', 'Session does not own a managed workspace');
       }
       const session = await openGitoxideManagedSessionOwnerInternal({
@@ -394,7 +395,7 @@ export class HostManagedWorkspaceReviewCoordinator {
     }
     try {
       const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
-      if (header.toolProfile !== 'managed-coding-v1') {
+      if (!isManagedCodingSessionToolProfile(header.toolProfile)) {
         return failure('invalid_request', 'Session does not own a managed workspace');
       }
       const session = await openGitoxideManagedSessionOwnerInternal({

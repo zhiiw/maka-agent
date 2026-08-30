@@ -59,6 +59,7 @@ import type {
   SystemNoteMessage,
   PersistedBackendKind,
 } from '@maka/core/session';
+import { isManagedCodingSessionToolProfile } from '@maka/core/session';
 import type {
   CreateSessionInput,
   BranchFromTurnInput,
@@ -2065,7 +2066,7 @@ export class SessionManager {
     let header: SessionHeader | undefined;
     if (this.deps.safeBoundaryResumeEnabled !== true) {
       header = await this.deps.store.readHeader(sessionId).catch(() => undefined);
-      if (header?.toolProfile !== 'managed-coding-v1') {
+      if (!isManagedCodingSessionToolProfile(header?.toolProfile)) {
         const plan = resumeFeatureDisabledPlan();
         this.recordContinuationPlan(sessionId, input.sourceRunId, plan);
         return plan;
@@ -2138,8 +2139,9 @@ export class SessionManager {
       currentWorkspaceIdentity: observation.workspaceIdentity,
       backgroundOperationsSettled: observation.backgroundOperationsSettled,
       availableToolNames: observation.availableToolNames,
-      workspaceBoundaryRequirement:
-        header.toolProfile === 'managed-coding-v1' ? 'required' : 'optional',
+      workspaceBoundaryRequirement: isManagedCodingSessionToolProfile(header.toolProfile)
+        ? 'required'
+        : 'optional',
       ...(input.expectedRuntimeEventHighWater !== undefined
         ? { expectedRuntimeEventHighWater: input.expectedRuntimeEventHighWater }
         : {}),
@@ -2161,7 +2163,7 @@ export class SessionManager {
       // discovery; an absent/unreadable/non-managed header stays on the legacy
       // disabled path and cannot silently gain Resume authority.
       const managedHeader = await this.deps.store.readHeader(sessionId).catch(() => undefined);
-      if (managedHeader?.toolProfile !== 'managed-coding-v1') {
+      if (!isManagedCodingSessionToolProfile(managedHeader?.toolProfile)) {
         const plan = resumeFeatureDisabledPlan();
         this.recordContinuationPlan(sessionId, '', plan);
         return plan;
