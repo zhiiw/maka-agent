@@ -1601,6 +1601,54 @@ fn greps_regex_matches_from_one_exact_accepted_tree() {
 }
 
 #[test]
+fn compares_one_baseline_and_accepted_tree_without_a_projection() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("accepted-diff.git");
+    let imported = invoke_import(&fixture.root, &source_head, &destination);
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let baseline = imported["baselineCommitOid"].as_str().unwrap();
+    let baseline_tree = imported["baselineTreeOid"].as_str().unwrap();
+    let candidate = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "create_candidate",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedBaseCommitOid": baseline,
+        "expectedBaseTreeOid": baseline_tree,
+        "candidateRef": "refs/maka/candidates/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "path": "hello.txt",
+        "contentBase64": "dXBkYXRlZAo=",
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(candidate.status.success());
+    let candidate: serde_json::Value = serde_json::from_slice(&candidate.stdout).unwrap();
+
+    let output = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "compare_accepted_trees",
+        "repositoryPath": destination,
+        "baselineCommitOid": baseline,
+        "acceptedCommitOid": candidate["candidateCommitOid"],
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["kind"], "accepted_trees_compared");
+    assert_eq!(response["baselineCommitOid"], baseline);
+    assert_eq!(
+        response["acceptedCommitOid"],
+        candidate["candidateCommitOid"]
+    );
+    assert_eq!(response["changes"][0]["path"], "hello.txt");
+    assert_eq!(response["changes"][0]["status"], "modified");
+}
+
+#[test]
 fn refuses_to_read_a_tree_file_from_an_unavailable_commit_identity() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let output = invoke_request(serde_json::json!({

@@ -173,6 +173,41 @@ test('Read, Glob, and Grep observe only the accepted managed tree', async (t) =>
   );
 });
 
+test('Review compares the durable baseline with the accepted tree, not the attached checkout', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the accepted review test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'accepted baseline\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'accepted review baseline');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-review-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+  const session = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-accepted-review',
+  });
+
+  await writeFile(join(sourceRoot, 'notes.txt'), 'attached checkout drift\n', 'utf8');
+  await writeFile(join(sourceRoot, 'untracked.txt'), 'not accepted\n', 'utf8');
+
+  const review = await session.review.diff();
+  assert.equal(review.baselineCommitOid, review.acceptedCommitOid);
+  assert.equal(review.baselineTreeOid, review.acceptedTreeOid);
+  assert.deepEqual(review.changes, []);
+});
+
 test('fails closed when the source advances after its managed epoch opens', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {
@@ -341,6 +376,7 @@ async function admittedHelper(): Promise<
       'read_tree_file',
       'list_tree_files',
       'grep_tree_files',
+      'compare_accepted_trees',
     ],
   });
   return {
