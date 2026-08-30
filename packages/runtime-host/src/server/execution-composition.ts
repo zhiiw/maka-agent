@@ -1023,9 +1023,6 @@ export async function createExecutionRuntimeHostComposition(
       safeBoundaryResumeEnabled: process.env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME === '1',
       continuationFailpoint: dependencies.continuationFailpoint,
       onContinuationLifecycleEvent: dependencies.onContinuationLifecycleEvent,
-      generateSessionTitle: (input) => sessionEffectCoordinator.generateTitle(input),
-      onSessionTitleChanged: (sessionId) =>
-        continuityCoordinator.enqueueCanonicalRefresh(sessionId),
       inspectContinuationSafety: createLocalContinuationSafetyInspector({
         readSessionCwd: async (sessionId) =>
           (await stores.sessionStore.readHeaderSnapshot(sessionId)).cwd,

@@ -92,7 +92,7 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
   const boundary = await authority.readContinuationBoundary(
     identity.workspaceId,
     identity.workspaceEpochId,
-    MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+    MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   );
   if (!boundary) return undefined;
   if (
