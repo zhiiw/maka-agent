@@ -117,6 +117,7 @@ test('runs one bounded file observation through an enforcing sandbox plan', asyn
     'restricted',
   );
   assert.equal(transformedRequest?.command.env?.PATH, '');
+  assert.equal(transformedRequest?.command.pathContext.runtimeWritableRoots, undefined);
   if (process.platform === 'win32') {
     assert.equal(transformedRequest?.command.env?.SystemRoot, process.env.SystemRoot);
     assert.equal(transformedRequest?.command.env?.SystemDrive, process.env.SystemDrive);

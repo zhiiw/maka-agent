@@ -134,7 +134,6 @@ export function createManagedCommandSandboxOwnerInternal(input: {
           workspaceRoots: [inputRoot, scratchRoot],
           runtimeReadableRoots: [dirname(toolchain.entrypointPath)],
           executableRoots: [dirname(toolchain.executablePath)],
-          runtimeWritableRoots: [scratchRoot],
         },
       },
     });
