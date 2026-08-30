@@ -32,6 +32,8 @@ import { INTERACTION_ID_MAX_BYTES, INTERACTION_TOOL_NAME_MAX_BYTES } from '../in
 import {
   decodeRuntimeEvent,
   isTerminalRuntimeEvent,
+  MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+  MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_SPEC,
   MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC,
   runtimeEventHasModelVisibleContent,
@@ -499,6 +501,83 @@ describe('RuntimeEvent content variants', () => {
 });
 
 describe('RuntimeEvent actions', () => {
+  test('decodes one exact accepted-world observation identity at T1', () => {
+    const managedObservation = {
+      protocol: 'managed_observation_v1',
+      repositoryId: 'repository_11111111111111111111111111111111',
+      workspaceId: 'workspace_22222222222222222222222222222222',
+      workspaceEpochId: 'epoch_33333333333333333333333333333333',
+      workspaceInstanceId: 'instance_44444444444444444444444444444444',
+      objectFormat: 'sha1',
+      acceptedWorkspaceVersionId: 'version_55555555555555555555555555555555',
+      acceptedEventId: 'accepted-event-1',
+      acceptedHeadRevision: 2,
+      acceptedCommitOid: '1'.repeat(40),
+      acceptedTreeOid: '2'.repeat(40),
+      operationKind: 'node_test_v1',
+      effectClass: 'hermetic_observation_v1',
+      executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+      toolchainIdentityDigest: `sha256:${'3'.repeat(64)}`,
+      files: [
+        {
+          relativePath: 'src/a.test.mjs',
+          bytes: 123,
+          sha256: `sha256:${'4'.repeat(64)}`,
+        },
+      ],
+    } as const;
+    const toolDispatch = {
+      protocol: 't1_after_preflight_v1',
+      operationId: 'operation-1',
+      providerToolCallId: 'call-1',
+      toolName: 'ManagedNodeTest',
+      canonicalArgsHash: `sha256:${'b'.repeat(64)}`,
+      recoveryMode: 'replay_safe',
+      managedObservation,
+    } as const;
+
+    assert.deepEqual(
+      decodeRuntimeEvent(baseEvent({ role: 'system', author: 'system', actions: { toolDispatch } }))
+        .actions?.toolDispatch?.managedObservation,
+      managedObservation,
+    );
+    for (const invalid of [
+      { ...managedObservation, acceptedHeadRevision: 0 },
+      { ...managedObservation, acceptedTreeOid: 'not-an-oid' },
+      { ...managedObservation, operationKind: 'bash_v1' },
+      { ...managedObservation, effectClass: 'external_effect_v1' },
+      { ...managedObservation, executionProfileDigest: `sha256:${'0'.repeat(64)}` },
+      { ...managedObservation, files: [] },
+      {
+        ...managedObservation,
+        files: [{ ...managedObservation.files[0], relativePath: '../escape.test.mjs' }],
+      },
+      {
+        ...managedObservation,
+        files: [managedObservation.files[0], managedObservation.files[0]],
+      },
+      { ...managedObservation, extra: true },
+    ]) {
+      assert.throws(() =>
+        decodeRuntimeEvent(
+          baseEvent({
+            role: 'system',
+            author: 'system',
+            actions: { toolDispatch: { ...toolDispatch, managedObservation: invalid } as never },
+          }),
+        ),
+      );
+    }
+  });
+
+  test('binds managed observation identity to one canonical execution profile', () => {
+    const canonical = JSON.stringify(MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_SPEC);
+    assert.equal(
+      MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+      `sha256:${createHash('sha256').update(canonical).digest('hex')}`,
+    );
+  });
+
   test('binds the managed mutation digest to its canonical execution semantics', () => {
     const canonicalProfile = JSON.stringify({
       protocol: 'managed_mutation_execution_profile_v1',

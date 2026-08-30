@@ -144,8 +144,11 @@ exit status、test summary 与 artifact digest。缓存是 projection；test out
 
 1. `run_node_tests_v1` 先执行 accepted tree 内显式 Node tests，不安装依赖、不读取 PATH，也不借用 source checkout
    的 `node_modules`；它证明 test runner、sandbox 与有界结构化 observation；
-2. 后续 durable settlement 在 T1 前绑定 accepted head、测试文件 identity、toolchain/profile 和 effect class，再把
-   outcome 写入 RuntimeEvent。需要外部包的项目在 M5.3 capability 可用前明确 unavailable，禁止静默降级。
+2. durable protocol boundary 已在 T1 前绑定 accepted head、workspace epoch、测试文件 identity、
+   toolchain/profile 和 effect class；Runtime 以线性 operation capability 和单一 immutable result snapshot 写入
+   T2。下一步由 Host admission 只从 accepted-world/toolchain opaque capability 签发这一 envelope，并补真实
+   kill/reopen；
+3. 需要外部包的项目在 M5.3 capability 可用前明确 unavailable，禁止静默降级。
 
 ### M5.5 External-effect fencing
 

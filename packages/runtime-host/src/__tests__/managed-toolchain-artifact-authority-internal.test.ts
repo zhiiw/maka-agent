@@ -56,6 +56,7 @@ test('release owner admits one owner-bound toolchain and re-verifies both artifa
   );
   assert.equal(verified.executablePath, executablePath);
   assert.equal(verified.entrypointPath, entrypointPath);
+  assert.match(verified.identityDigest, /^sha256:[0-9a-f]{64}$/u);
   await assert.rejects(
     verifyManagedToolchainForInvocationInternal({}, capability, 'hermetic_observation_v1'),
     (error) =>

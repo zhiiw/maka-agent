@@ -23,7 +23,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
-import type { RuntimeEvent } from '@maka/core/runtime-event';
+import {
+  MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+  type RuntimeEvent,
+} from '@maka/core/runtime-event';
 import { RunSealedError } from '@maka/core/runtime-event-store';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import {
@@ -394,6 +397,85 @@ describe('SqliteRuntimeStore', () => {
         ['operation-1'],
       );
     });
+  });
+
+  it('reopens an exact managed observation T1/T2 ledger without losing its accepted-world identity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-managed-observation-ledger-'));
+    const dbPath = join(root, 'runtime.sqlite');
+    const args = { relativePaths: ['src/a.test.mjs'] };
+    const argsHash = canonicalToolArgsHash('ManagedNodeTest', args);
+    const call = functionCallEvent({
+      content: {
+        kind: 'function_call',
+        id: 'provider-call-1',
+        name: 'ManagedNodeTest',
+        args,
+      },
+    });
+    const dispatch = toolDispatchEvent({
+      actions: {
+        toolDispatch: {
+          protocol: 't1_after_preflight_v1',
+          operationId: 'operation-1',
+          providerToolCallId: 'provider-call-1',
+          toolName: 'ManagedNodeTest',
+          canonicalArgsHash: argsHash,
+          recoveryMode: 'replay_safe',
+          managedObservation: managedObservationDispatch(),
+        },
+      },
+    });
+    const outcome = functionResponseEvent({
+      content: {
+        kind: 'function_response',
+        id: 'provider-call-1',
+        name: 'ManagedNodeTest',
+        result: { passed: 1, failed: 0, skipped: 0, todo: 0 },
+      },
+    });
+
+    try {
+      const writer = createSqliteRuntimeStore(dbPath);
+      try {
+        await writer.commitToolPrepared({
+          operationId: 'operation-1',
+          journalEventId: 'operation-1_prepared',
+          runtimeEvent: call,
+          dispatchRuntimeEvent: dispatch,
+          providerToolCallId: 'provider-call-1',
+          toolName: 'ManagedNodeTest',
+          canonicalArgsHash: argsHash,
+          recoveryMode: 'replay_safe',
+          committedAt: 10,
+        });
+        await writer.commitToolOutcome({
+          operationId: 'operation-1',
+          journalEventId: 'operation-1_outcome',
+          runtimeEvent: outcome,
+          committedAt: 20,
+        });
+      } finally {
+        writer.close();
+      }
+
+      const reopened = createSqliteRuntimeStore(dbPath);
+      try {
+        assert.deepEqual(await reopened.readImmutableRuntimeEvents('session-1', 'run-1'), [
+          call,
+          dispatch,
+          outcome,
+        ]);
+        assert.equal(
+          (await reopened.readToolOperation('operation-1'))?.currentState,
+          'outcome_committed',
+        );
+        assert.deepEqual(await reopened.listUnsettledToolOperations(), []);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('commits nested T1 events with parent operation linkage', async () => {
@@ -2291,6 +2373,7 @@ function rewindContinuationClaimsToSchema14(db: DatabaseSync): void {
     FROM runtime_continuation_claims_schema_15;
 
     DROP TABLE runtime_continuation_claims_schema_15;
+    DROP TABLE runtime_workspace_active_epochs;
     DELETE FROM runtime_capabilities
       WHERE capability = 'runtime_workspace_bound_continuation_authority';
     PRAGMA user_version = 14;
@@ -2467,6 +2550,33 @@ function toolDispatchEvent(overrides: Partial<RuntimeEvent> = {}): RuntimeEvent 
     refs: { operationId: 'operation-1', toolCallId: 'provider-call-1' },
     ...overrides,
   };
+}
+
+function managedObservationDispatch() {
+  return {
+    protocol: 'managed_observation_v1',
+    repositoryId: `repository_${'1'.repeat(32)}`,
+    workspaceId: `workspace_${'2'.repeat(32)}`,
+    workspaceEpochId: `epoch_${'3'.repeat(32)}`,
+    workspaceInstanceId: `instance_${'4'.repeat(32)}`,
+    objectFormat: 'sha1',
+    acceptedWorkspaceVersionId: `version_${'5'.repeat(32)}`,
+    acceptedEventId: 'accepted-event-1',
+    acceptedHeadRevision: 7,
+    acceptedCommitOid: '6'.repeat(40),
+    acceptedTreeOid: '7'.repeat(40),
+    operationKind: 'node_test_v1',
+    effectClass: 'hermetic_observation_v1',
+    executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+    toolchainIdentityDigest: `sha256:${'8'.repeat(64)}`,
+    files: [
+      {
+        relativePath: 'src/a.test.mjs',
+        bytes: 23,
+        sha256: `sha256:${'9'.repeat(64)}`,
+      },
+    ],
+  } as const;
 }
 
 function commitPrepared(store: Store) {
