@@ -426,7 +426,7 @@ sequenceDiagram
 
 如果在两次提交之间再次崩溃，下次启动仍能从 terminal RuntimeEvent 修好 header。反过来先写 header，就会出现一个没有语义事实支持的“完成”状态。
 
-Desktop 还会恢复 Graph coordinator 和 supervisor wake。只有这些 startup repair 完成，并且 safe-boundary flag 开启后，才会尝试自动 continuation。
+Desktop 还会恢复 Graph coordinator 和 supervisor wake。只有这些 startup repair 完成后，Runtime Host 才会尝试 continuation。普通 Session 仍要求 safe-boundary flag；durable `managed-coding-v1` Session 则按其 T1 前冻结的产品合同自动规划，不允许用运行时 flag 把它静默降级为较弱模式。
 
 ## Phase 1：安全边界上创建新的执行
 
@@ -788,7 +788,8 @@ flowchart LR
 - 启动：先 `recoverInterruptedSessions()`，再恢复 Graph；flag 开启时扫描可继续 Session；
 - 手动：中断横幅调用 `sessions:resumeLatest`；
 - main process：读取 authoritative safety facts，执行 plan/continue；
-- renderer：只发送 `sessionId`，展示 started 或 park diagnostics；
+- renderer：显式 Resume 只发送 `sessionId`；managed 自动恢复成功保持安静，park 时通过只读 plan 查询展示
+  stable diagnostics，查询本身不得 claim 或启动新 Turn；
 - 退出：先停止后台能力和 Shell/Graph，再关闭 runtime persistence。
 
 ### CLI/TUI
@@ -863,7 +864,7 @@ RuntimeEvent 迁移不再由开关控制；首次写入必然迁移。当前恢�
 
 | 开关 | 作用 | 回滚含义 |
 |---|---|---|
-| `MAKA_RUNTIME_SAFE_BOUNDARY_RESUME=1` | 开启 Desktop 手动/自动 resume 与 CLI `/resume` | 可关闭用户可见 continuation，但不会删除或改写 durable facts |
+| `MAKA_RUNTIME_SAFE_BOUNDARY_RESUME=1` | 为普通 Session 开启手动/自动 resume 与 CLI `/resume`；managed coding 不依赖该实验开关 | 可关闭普通 Session 的 continuation，但不会删除或改写 durable facts，也不能降级已冻结的 managed mode |
 
 真正降级到不理解新 schema 的旧版本前，必须显式 export 并验证。Migration 失败不能删除 legacy JSONL；数据库版本比当前程序新时必须 fail closed。
 

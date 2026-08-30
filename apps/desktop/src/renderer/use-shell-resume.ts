@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { UiLocale } from '@maka/core/ui-locale';
 import { resumeParkToastCopy } from '@maka/ui';
 import { getShellCopy, localizedShellErrorMessage } from './locales/shell-copy.js';
@@ -36,15 +36,14 @@ type ToastApi = {
  * Owns the #1223 safe-boundary resume cluster: the in-flight `resumePendingSessionId`
  * guard and the per-session parked-diagnostic descriptions surfaced on the
  * interrupted-turn banner, plus the `resumeInterruptedSession` handler that drives
- * `sessions.resumeLatest`. `activeId` is injected (the handler snapshots it as
- * `sessionId` so a session switch mid-resume settles the ORIGINAL session's pending
- * flag) alongside `toastApi` / `shellCopy` / `uiLocale`. The two state values are
- * returned raw so AppShell's banner JSX keeps its exact `resumePendingSessionId ===
- * activeId` / `resumeParkDescriptionBySession[activeId]` reads; the wiring
- * (`safeResumeAction=` element) stays in AppShell. Pure move — zero behavior change.
+ * `sessions.resumeLatest`. Managed tasks also query the same Host-owned plan on
+ * selection so an automatic-resume park is visible without requiring a failed
+ * manual click. A ready plan remains silent; the query cannot claim or start a Turn.
+ * `activeId` is snapshotted so a session switch cannot publish another task's state.
  */
 export function useShellResume(options: {
   activeId: string | undefined;
+  managed: boolean;
   toastApi: ToastApi;
   shellCopy: ReturnType<typeof getShellCopy>['app'];
   uiLocale: UiLocale;
@@ -53,9 +52,35 @@ export function useShellResume(options: {
   resumeParkDescriptionBySession: Record<string, string>;
   resumeInterruptedSession: () => Promise<void>;
 } {
-  const { activeId, toastApi, shellCopy, uiLocale } = options;
+  const { activeId, managed, toastApi, shellCopy, uiLocale } = options;
   const [resumePendingSessionId, setResumePendingSessionId] = useState<string | null>(null);
   const [resumeParkDescriptionBySession, setResumeParkDescriptionBySession] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!activeId || !managed) return;
+    let current = true;
+    void window.maka.sessions.queryResumeLatest(activeId).then(
+      (plan) => {
+        if (!current) return;
+        setResumeParkDescriptionBySession((descriptions) => {
+          if (plan.disposition === 'park') {
+            const copy = resumeParkToastCopy([...plan.rejectionReasons]);
+            return { ...descriptions, [activeId]: copy.description };
+          }
+          const { [activeId]: _removed, ...remaining } = descriptions;
+          void _removed;
+          return remaining;
+        });
+      },
+      () => {
+        // This is a presentation-only read. Runtime Host reconnection owns
+        // retry; a transient failure must not turn quiet resume into a toast.
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [activeId, managed]);
 
   async function resumeInterruptedSession(): Promise<void> {
     const sessionId = activeId;

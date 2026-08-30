@@ -56,9 +56,7 @@ import {
 test('a started workspace-bound continuation survives Host death without provider replay', async (t) => {
   const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
   if (!helperPath) {
-    t.skip(
-      'MAKA_GITOXIDE_HELPER_PATH is required for the real helper continuation test',
-    );
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the real helper continuation test');
     return;
   }
   await withManagedContinuationFixture(
@@ -170,9 +168,7 @@ test('a started workspace-bound continuation survives Host death without provide
 test('an accepted-head continuation never calls the provider twice after Host death', async (t) => {
   const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
   if (!helperPath) {
-    t.skip(
-      'MAKA_GITOXIDE_HELPER_PATH is required for the real provider crash test',
-    );
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the real provider crash test');
     return;
   }
   await withManagedContinuationFixture(
@@ -241,40 +237,162 @@ test('an accepted-head continuation never calls the provider twice after Host de
   );
 });
 
+test('Host startup automatically resumes one managed task without an experimental flag', async (t) => {
+  const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
+  if (!helperPath) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the automatic managed resume test');
+    return;
+  }
+  await withManagedContinuationFixture(helperPath, async ({ fixture, resourcesRoot, callLog }) => {
+    const source = await fixture.seedSafeBoundaryContinuationSource();
+    const firstHost = await fixture.startHost(undefined, false, {
+      packagedResourcesRoot: resourcesRoot,
+      providerCallLogPath: callLog,
+    });
+    try {
+      await waitForProviderCalls(callLog, 1);
+    } finally {
+      await fixture.stopHost(firstHost);
+    }
+
+    const firstAdmissions = (await fixture.readAdmissionChain()).filter(
+      (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
+    );
+    assert.equal(firstAdmissions.length, 1);
+    const admission = firstAdmissions[0]!;
+    assert.equal(admission.execution.kind, 'safe_boundary_continuation');
+    if (admission.execution.kind !== 'safe_boundary_continuation') {
+      assert.fail('Automatic managed continuation admission is missing');
+    }
+    assert.equal(admission.execution.sourceRunId, source.sourceRunId);
+    assert.deepEqual(await fixture.readTurnFootprint(admission.turnId), {
+      admitted: true,
+      runCount: 1,
+      userMessageCount: 0,
+    });
+
+    const secondHost = await fixture.startHost(undefined, false, {
+      packagedResourcesRoot: resourcesRoot,
+      providerCallLogPath: callLog,
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(await providerCallCount(callLog), 1);
+      assert.equal(
+        (await fixture.readAdmissionChain()).filter(
+          (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
+        ).length,
+        1,
+      );
+    } finally {
+      await fixture.stopHost(secondHost);
+    }
+  });
+});
+
+for (const sourceKind of ['git_repository_v1', 'filesystem_snapshot_v1'] as const) {
+  test(`Host startup never replays an indeterminate ${sourceKind} continuation`, async (t) => {
+    const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
+    if (!helperPath) {
+      t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the automatic resume crash matrix');
+      return;
+    }
+    await withManagedContinuationFixture(
+      helperPath,
+      async ({ fixture, resourcesRoot, callLog, sourceKind: admittedSourceKind }) => {
+        assert.equal(admittedSourceKind, sourceKind);
+        const source = await fixture.seedSafeBoundaryContinuationSource();
+        const firstHost = await fixture.startHost(undefined, false, {
+          packagedResourcesRoot: resourcesRoot,
+          providerCallLogPath: callLog,
+          providerFailpointAfterSend: true,
+        });
+        await waitForProviderCalls(callLog, 1);
+        await fixture.killHost(firstHost);
+
+        const admissions = (await fixture.readAdmissionChain()).filter(
+          (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
+        );
+        assert.equal(admissions.length, 1);
+        assert.equal(admissions[0]!.execution.kind, 'safe_boundary_continuation');
+        if (admissions[0]!.execution.kind !== 'safe_boundary_continuation') {
+          assert.fail(`${sourceKind} automatic continuation admission is missing`);
+        }
+        assert.equal(admissions[0]!.execution.sourceRunId, source.sourceRunId);
+
+        const secondHost = await fixture.startHost(undefined, false, {
+          packagedResourcesRoot: resourcesRoot,
+          providerCallLogPath: callLog,
+        });
+        const secondClient = await connectClient(fixture.root);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          assert.equal(await providerCallCount(callLog), 1);
+          assert.equal(
+            (await fixture.readAdmissionChain()).filter(
+              (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
+            ).length,
+            1,
+          );
+          assert.deepEqual(
+            await secondClient.request('turn.resume.query', {
+              sessionId: fixture.sessionId,
+              sourceRunId: source.sourceRunId,
+              expectedRuntimeEventHighWater: source.sourceRuntimeEventHighWater,
+            }),
+            {
+              sessionId: fixture.sessionId,
+              disposition: 'parked',
+              reason: 'continuation_started_indeterminate',
+            },
+          );
+        } finally {
+          await secondClient.close();
+          await fixture.stopHost(secondHost);
+        }
+      },
+      { sourceKind },
+    );
+  });
+}
+
 async function withManagedContinuationFixture(
   helperInputPath: string,
   run: (input: {
     fixture: ExecutionFixture;
     resourcesRoot: string;
     callLog: string;
+    sourceKind: 'git_repository_v1' | 'filesystem_snapshot_v1';
     boundary: NonNullable<
       Awaited<ReturnType<typeof inspectGitoxideManagedContinuationBoundaryInternal>>
     >;
   }) => Promise<void>,
+  options: {
+    readonly sourceKind?: 'git_repository_v1' | 'filesystem_snapshot_v1';
+  } = {},
 ): Promise<void> {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-continuation-')));
   const root = join(base, 'root');
   const callLog = join(base, 'provider-calls.log');
   await mkdir(root);
   await writeFile(callLog, '', 'utf8');
-  git(root, ['init', '--quiet', '--object-format=sha1']);
   await writeFile(join(root, 'notes.txt'), 'baseline\n', 'utf8');
-  git(root, ['add', 'notes.txt']);
-  git(root, [
-    '-c',
-    'user.name=Maka Test',
-    '-c',
-    'user.email=maka@example.invalid',
-    'commit',
-    '--quiet',
-    '-m',
-    'baseline',
-  ]);
+  if (options.sourceKind !== 'filesystem_snapshot_v1') {
+    git(root, ['init', '--quiet', '--object-format=sha1']);
+    git(root, ['add', 'notes.txt']);
+    git(root, [
+      '-c',
+      'user.name=Maka Test',
+      '-c',
+      'user.email=maka@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'baseline',
+    ]);
+  }
 
-  const resourcesRoot = await preparePackagedResources(
-    base,
-    helperInputPath,
-  );
+  const resourcesRoot = await preparePackagedResources(base, helperInputPath);
   const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const owner = await tryAcquireInteractiveRootOwner(capability);
   assert.ok(owner);
@@ -301,9 +419,9 @@ async function withManagedContinuationFixture(
       sessionId,
       ...helper,
     };
-    await openGitoxideManagedSessionOwnerInternal(sessionInput);
-    const observedBoundary =
-      await inspectGitoxideManagedContinuationBoundaryInternal(sessionInput);
+    const opened = await openGitoxideManagedSessionOwnerInternal(sessionInput);
+    assert.equal(opened.sourceKind, options.sourceKind ?? 'git_repository_v1');
+    const observedBoundary = await inspectGitoxideManagedContinuationBoundaryInternal(sessionInput);
     assert.ok(observedBoundary);
     boundary = observedBoundary;
   } finally {
@@ -313,16 +431,19 @@ async function withManagedContinuationFixture(
 
   const fixture = new ExecutionFixture(base, root, capability, sessionId);
   try {
-    await run({ fixture, resourcesRoot, callLog, boundary: boundary! });
+    await run({
+      fixture,
+      resourcesRoot,
+      callLog,
+      sourceKind: options.sourceKind ?? 'git_repository_v1',
+      boundary: boundary!,
+    });
   } finally {
     await fixture.close();
   }
 }
 
-async function preparePackagedResources(
-  base: string,
-  helperInputPath: string,
-): Promise<string> {
+async function preparePackagedResources(base: string, helperInputPath: string): Promise<string> {
   const resourcesRoot = join(base, 'resources');
   const helperDirectory = join(resourcesRoot, 'gitoxide');
   const executableName =
@@ -347,10 +468,13 @@ async function preparePackagedResources(
       supportedOperations: [
         'inspect_repository',
         'import_source_head',
+        'import_filesystem_snapshot',
         'create_candidate',
         'promote_candidate',
         'observe_accepted_ref',
         'read_tree_file',
+        'list_tree_files',
+        'grep_tree_files',
       ],
       distributionReady: true,
     })}\n`,
@@ -374,10 +498,13 @@ async function admitRealHelper(helperInputPath: string) {
     supportedOperations: [
       'inspect_repository',
       'import_source_head',
+      'import_filesystem_snapshot',
       'create_candidate',
       'promote_candidate',
       'observe_accepted_ref',
       'read_tree_file',
+      'list_tree_files',
+      'grep_tree_files',
     ],
   });
   const helperCapability = await admitGitoxideHelperArtifactInternal({
@@ -456,6 +583,18 @@ function waitForChildMessage(
 
 async function providerCallCount(path: string): Promise<number> {
   return (await readFile(path, 'utf8')).split(/\r?\n/u).filter(Boolean).length;
+}
+
+async function waitForProviderCalls(path: string, expected: number): Promise<void> {
+  await withTimeout(
+    (async () => {
+      while ((await providerCallCount(path)) < expected) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    })(),
+    PROCESS_TIMEOUT_MS,
+    `provider call count did not reach ${expected}`,
+  );
 }
 
 function git(cwd: string, args: readonly string[]): string {
