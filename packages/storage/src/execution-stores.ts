@@ -204,6 +204,7 @@ export interface ExecutionAgentRunReader {
     type: AgentRunProjectionKey,
   ): Promise<AgentRunEvent | null | undefined>;
   readRootTurnAdmission(sessionId: string, turnId: string): Promise<RootTurnAdmission | undefined>;
+  listRootTurnAdmissionsForRecovery(sessionId: string): Promise<RootTurnAdmission[]>;
   readRootTurnSourceMessageReceipt(
     sessionId: string,
     sourceMessageId: string,
@@ -662,6 +663,8 @@ async function openExecutionStoresForRead<K extends StorageRootKind, E extends o
         run(() => agentRunStore.readEventProjection(sessionId, type)),
       readRootTurnAdmission: (sessionId, turnId) =>
         run(() => agentRunStore.readRootTurnAdmission(sessionId, turnId)),
+      listRootTurnAdmissionsForRecovery: (sessionId) =>
+        run(() => agentRunStore.listRootTurnAdmissionsForRecovery(sessionId)),
       readRootTurnSourceMessageReceipt: (sessionId, sourceMessageId) =>
         run(() => agentRunStore.readRootTurnSourceMessageReceipt(sessionId, sourceMessageId)),
     },

@@ -1192,21 +1192,14 @@ export class ExecutionFixture {
   }
 
   async readAdmissionChain() {
-    const deadline = Date.now() + PROCESS_TIMEOUT_MS;
-    let owner = await tryAcquireInteractiveRootOwner(this.capability);
-    while (!owner && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      owner = await tryAcquireInteractiveRootOwner(this.capability);
-    }
-    assert.ok(owner);
-    if (!owner) throw new Error('Unable to acquire execution root for admission inspection');
-    let stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>> | undefined;
+    const reader = await acquireReader(this.capability);
+    let stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForRead>> | undefined;
     try {
-      stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      stores = await openInteractiveExecutionStoresForRead(reader.lease);
       return await stores.agentRunStore.listRootTurnAdmissionsForRecovery(this.sessionId);
     } finally {
       await stores?.sessionStore.close?.();
-      await owner.close();
+      await reader.close();
     }
   }
 

@@ -24,7 +24,7 @@ import { once } from 'node:events';
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test, { type TestContext } from 'node:test';
+import test, { after, type TestContext } from 'node:test';
 import { MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST } from '@maka/core/runtime-event';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import { WORKSPACE_MATERIALIZATION_SEMANTICS_V1 } from '@maka/core/workspace-version-authority';
@@ -41,11 +41,24 @@ import {
   createGitoxideManagedWriteEditOwnerInternal,
   GitoxideManagedWriteEditRecoveryError,
 } from '../server/gitoxide-managed-write-edit-owner-internal.js';
+
 import { createGitoxideManagedHistorySuccessorOwnerInternal } from '../server/gitoxide-managed-history-successor-owner-internal.js';
 import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
 } from '../server/gitoxide-repository-admission-authority-internal.js';
+
+const deferredTemporaryPaths = new Set<string>();
+
+after(async () => {
+  for (const path of deferredTemporaryPaths) {
+    await rm(path, { recursive: true, force: true });
+  }
+});
+
+function deferTemporaryPathRemoval(path: string): void {
+  deferredTemporaryPaths.add(path);
+}
 
 test('rejects a non-canonical managed path before consulting Gitoxide', async () => {
   const root = await mkdtemp(join(tmpdir(), 'maka-gitoxide-write-edit-owner-'));
@@ -262,7 +275,7 @@ test('reopens after a process crash and promotes the exact durable Write success
   ]);
 
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-write-edit-full-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -496,7 +509,7 @@ async function admittedHelper(): Promise<
 
 async function createRepository(t: TestContext): Promise<string> {
   const path = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-write-edit-source-')));
-  t.after(() => rm(path, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(path));
   git(path, ['init', '--quiet', '--object-format=sha1']);
   return path;
 }
