@@ -54,6 +54,8 @@ import {
   withTimeout,
 } from './fixtures/execution-host-suite.js';
 
+const FAKE_CONNECTION_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
 test('a started workspace-bound continuation survives Host death without provider replay', async (t) => {
   const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
   if (!helperPath) {
@@ -374,14 +376,15 @@ async function withManagedContinuationFixture(
 ): Promise<void> {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-continuation-')));
   const root = join(base, 'root');
+  const sourceRoot = join(base, 'source');
   const callLog = join(base, 'provider-calls.log');
-  await mkdir(root);
+  await Promise.all([mkdir(root), mkdir(sourceRoot)]);
   await writeFile(callLog, '', 'utf8');
-  await writeFile(join(root, 'notes.txt'), 'baseline\n', 'utf8');
+  await writeFile(join(sourceRoot, 'notes.txt'), 'baseline\n', 'utf8');
   if (options.sourceKind !== 'filesystem_snapshot_v1') {
-    git(root, ['init', '--quiet', '--object-format=sha1']);
-    git(root, ['add', 'notes.txt']);
-    git(root, [
+    git(sourceRoot, ['init', '--quiet', '--object-format=sha1']);
+    git(sourceRoot, ['add', 'notes.txt']);
+    git(sourceRoot, [
       '-c',
       'user.name=Maka Test',
       '-c',
@@ -405,7 +408,8 @@ async function withManagedContinuationFixture(
   >;
   try {
     const session = await stores.sessionStore.create({
-      cwd: root,
+      cwd: sourceRoot,
+      llmConnectionId: FAKE_CONNECTION_ID,
       llmConnectionSlug: 'fake',
       model: 'fake-model',
       permissionMode: 'ask',
@@ -416,7 +420,7 @@ async function withManagedContinuationFixture(
     const sessionInput = {
       storageRootLease: owner.lease,
       stores,
-      sourceRoot: root,
+      sourceRoot,
       sessionId,
       ...helper,
     };
@@ -430,7 +434,7 @@ async function withManagedContinuationFixture(
     await owner.close();
   }
 
-  const fixture = new ExecutionFixture(base, root, capability, sessionId);
+  const fixture = new ExecutionFixture(base, root, capability, sessionId, sourceRoot);
   try {
     await run({
       fixture,

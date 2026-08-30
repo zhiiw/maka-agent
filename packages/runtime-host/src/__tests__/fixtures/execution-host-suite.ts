@@ -154,6 +154,7 @@ export class ExecutionFixture {
     readonly root: string,
     readonly capability: StorageRootCapability<'interactive'>,
     readonly sessionId: string,
+    readonly workspaceRoot: string = root,
   ) {}
 
   async seedSession(): Promise<string> {
@@ -164,7 +165,7 @@ export class ExecutionFixture {
     try {
       stores = await openInteractiveExecutionStoresForWrite(owner.lease);
       const session = await stores.sessionStore.create({
-        cwd: this.root,
+        cwd: this.workspaceRoot,
         llmConnectionId: FAKE_CONNECTION_ID,
         llmConnectionSlug: 'fake',
         model: 'fake-model',
@@ -193,7 +194,7 @@ export class ExecutionFixture {
       const sourceRunId = randomUUID();
       const sourceTurnId = randomUUID();
       const createdAt = Date.now();
-      const workspace = await resolveWorkspaceIdentity({ path: this.root });
+      const workspace = await resolveWorkspaceIdentity({ path: this.workspaceRoot });
       const sourceRun: AgentRunHeader = {
         runId: sourceRunId,
         invocationId: sourceInvocationId,
@@ -204,7 +205,7 @@ export class ExecutionFixture {
         llmConnectionId: FAKE_CONNECTION_ID,
         llmConnectionSlug: 'fake',
         modelId: 'fake-model',
-        cwd: this.root,
+        cwd: this.workspaceRoot,
         workspaceIdentity: workspace.workspaceIdentity,
         permissionMode: 'ask',
         collaborationMode: 'agent',
@@ -321,7 +322,7 @@ export class ExecutionFixture {
             appendMessage: ctx.appendMessage,
           }),
       );
-      const workspace = await resolveWorkspaceIdentity({ path: this.root });
+      const workspace = await resolveWorkspaceIdentity({ path: this.workspaceRoot });
       let markReached!: () => void;
       const reached = new Promise<void>((resolve) => {
         markReached = resolve;
@@ -413,7 +414,7 @@ export class ExecutionFixture {
     let stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>> | undefined;
     try {
       stores = await openInteractiveExecutionStoresForWrite(owner.lease);
-      const workspace = await resolveWorkspaceIdentity({ path: this.root });
+      const workspace = await resolveWorkspaceIdentity({ path: this.workspaceRoot });
       const manager = new SessionManager({
         store: stores.sessionStore,
         runStore: stores.agentRunStore,
@@ -512,7 +513,7 @@ export class ExecutionFixture {
       const agentId = 'local-read';
       const agentName = 'Local Read';
       const child = await stores.sessionStore.createSubagent({
-        cwd: this.root,
+        cwd: this.workspaceRoot,
         name: `${agentName} ${kind}`,
         llmConnectionId: FAKE_CONNECTION_ID,
         llmConnectionSlug: 'fake',
@@ -573,7 +574,7 @@ export class ExecutionFixture {
           llmConnectionId: FAKE_CONNECTION_ID,
           llmConnectionSlug: 'fake',
           modelId: 'fake-model',
-          cwd: this.root,
+          cwd: this.workspaceRoot,
           permissionMode: 'explore',
           collaborationMode: 'agent',
           createdAt: sourceTs,
@@ -674,7 +675,7 @@ export class ExecutionFixture {
           llmConnectionId: FAKE_CONNECTION_ID,
           llmConnectionSlug: 'fake',
           modelId: 'fake-model',
-          cwd: this.root,
+          cwd: this.workspaceRoot,
           permissionMode: 'explore',
           collaborationMode: 'agent',
           createdAt: ts,
@@ -820,7 +821,7 @@ export class ExecutionFixture {
         backendKind: 'fake',
         llmConnectionSlug: 'fake',
         modelId: 'fake-model',
-        cwd: this.root,
+        cwd: this.workspaceRoot,
         permissionMode: 'ask',
         createdAt: admittedAt,
         updatedAt: admittedAt,
@@ -1025,7 +1026,7 @@ export class ExecutionFixture {
           llmConnectionId: FAKE_CONNECTION_ID,
           llmConnectionSlug: 'fake',
           modelId: 'fake-model',
-          cwd: this.root,
+          cwd: this.workspaceRoot,
           permissionMode: 'ask',
           createdAt: admittedAt,
           updatedAt: admittedAt,
