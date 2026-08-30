@@ -759,9 +759,11 @@ Desktop 现在只对 `managed-coding-v1` 读取现有 resume plan。ready/自动
 parked plan 复用失败 Turn banner 展示稳定原因，查询失败也不升级为用户错误。该 UI 是 continuation facts 的
 只读投影，不新增可变 resume 状态，也不会因查看任务而启动新 Turn。
 
-filesystem snapshot source 已进入真实 Host kill/restart lane：provider after-send 中断后，后继 Host 不会再次
-调用 provider，并把旧 claim 稳定 park 为 `continuation_started_indeterminate`。这完成了 non-Git 的一个关键
-崩溃边界，但完整 Linux/macOS/Windows crash matrix 与更多 failpoint 证据仍在后续切片。
+Git repository 与 filesystem snapshot source 使用同一组三平台真实 Host kill/restart 合同：provider
+after-send 中断后，后继 Host 不会再次调用 provider，并把旧 claim 稳定 park 为
+`continuation_started_indeterminate`。专用 workflow 在 Linux、macOS、Windows 上构建当前 Gitoxide helper，
+分别运行两种 source 的同一自动恢复用例；更多 T1/candidate/acceptance failpoint 则由各自 owner 的 crash
+suite 证明，不能用这个端到端用例替代。
 
 ### M3.6 Production-shaped crash proof
 

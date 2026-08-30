@@ -290,69 +290,71 @@ test('Host startup automatically resumes one managed task without an experimenta
   });
 });
 
-test('Host startup automatically resumes a non-Git filesystem snapshot task once', async (t) => {
-  const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
-  if (!helperPath) {
-    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the non-Git automatic resume test');
-    return;
-  }
-  await withManagedContinuationFixture(
-    helperPath,
-    async ({ fixture, resourcesRoot, callLog, sourceKind }) => {
-      assert.equal(sourceKind, 'filesystem_snapshot_v1');
-      const source = await fixture.seedSafeBoundaryContinuationSource();
-      const firstHost = await fixture.startHost(undefined, false, {
-        packagedResourcesRoot: resourcesRoot,
-        providerCallLogPath: callLog,
-        providerFailpointAfterSend: true,
-      });
-      await waitForProviderCalls(callLog, 1);
-      await fixture.killHost(firstHost);
+for (const sourceKind of ['git_repository_v1', 'filesystem_snapshot_v1'] as const) {
+  test(`Host startup never replays an indeterminate ${sourceKind} continuation`, async (t) => {
+    const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
+    if (!helperPath) {
+      t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the automatic resume crash matrix');
+      return;
+    }
+    await withManagedContinuationFixture(
+      helperPath,
+      async ({ fixture, resourcesRoot, callLog, sourceKind: admittedSourceKind }) => {
+        assert.equal(admittedSourceKind, sourceKind);
+        const source = await fixture.seedSafeBoundaryContinuationSource();
+        const firstHost = await fixture.startHost(undefined, false, {
+          packagedResourcesRoot: resourcesRoot,
+          providerCallLogPath: callLog,
+          providerFailpointAfterSend: true,
+        });
+        await waitForProviderCalls(callLog, 1);
+        await fixture.killHost(firstHost);
 
-      const admissions = (await fixture.readAdmissionChain()).filter(
-        (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
-      );
-      assert.equal(admissions.length, 1);
-      assert.equal(admissions[0]!.execution.kind, 'safe_boundary_continuation');
-      if (admissions[0]!.execution.kind !== 'safe_boundary_continuation') {
-        assert.fail('Non-Git automatic continuation admission is missing');
-      }
-      assert.equal(admissions[0]!.execution.sourceRunId, source.sourceRunId);
+        const admissions = (await fixture.readAdmissionChain()).filter(
+          (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
+        );
+        assert.equal(admissions.length, 1);
+        assert.equal(admissions[0]!.execution.kind, 'safe_boundary_continuation');
+        if (admissions[0]!.execution.kind !== 'safe_boundary_continuation') {
+          assert.fail(`${sourceKind} automatic continuation admission is missing`);
+        }
+        assert.equal(admissions[0]!.execution.sourceRunId, source.sourceRunId);
 
-      const secondHost = await fixture.startHost(undefined, false, {
-        packagedResourcesRoot: resourcesRoot,
-        providerCallLogPath: callLog,
-      });
-      const secondClient = await connectClient(fixture.root);
-      try {
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        assert.equal(await providerCallCount(callLog), 1);
-        assert.equal(
-          (await fixture.readAdmissionChain()).filter(
-            (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
-          ).length,
-          1,
-        );
-        assert.deepEqual(
-          await secondClient.request('turn.resume.query', {
-            sessionId: fixture.sessionId,
-            sourceRunId: source.sourceRunId,
-            expectedRuntimeEventHighWater: source.sourceRuntimeEventHighWater,
-          }),
-          {
-            sessionId: fixture.sessionId,
-            disposition: 'parked',
-            reason: 'continuation_started_indeterminate',
-          },
-        );
-      } finally {
-        await secondClient.close();
-        await fixture.stopHost(secondHost);
-      }
-    },
-    { sourceKind: 'filesystem_snapshot_v1' },
-  );
-});
+        const secondHost = await fixture.startHost(undefined, false, {
+          packagedResourcesRoot: resourcesRoot,
+          providerCallLogPath: callLog,
+        });
+        const secondClient = await connectClient(fixture.root);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          assert.equal(await providerCallCount(callLog), 1);
+          assert.equal(
+            (await fixture.readAdmissionChain()).filter(
+              (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
+            ).length,
+            1,
+          );
+          assert.deepEqual(
+            await secondClient.request('turn.resume.query', {
+              sessionId: fixture.sessionId,
+              sourceRunId: source.sourceRunId,
+              expectedRuntimeEventHighWater: source.sourceRuntimeEventHighWater,
+            }),
+            {
+              sessionId: fixture.sessionId,
+              disposition: 'parked',
+              reason: 'continuation_started_indeterminate',
+            },
+          );
+        } finally {
+          await secondClient.close();
+          await fixture.stopHost(secondHost);
+        }
+      },
+      { sourceKind },
+    );
+  });
+}
 
 async function withManagedContinuationFixture(
   helperInputPath: string,
