@@ -145,6 +145,7 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "candidate_ref_not_direct",
     "candidate_ref_target_invalid",
     "candidate_request_conflict",
+    "history_candidate_request_conflict",
     "candidate_publication_indeterminate",
     "accepted_ref_promotion_indeterminate",
     "invalid_candidate_commit_oid",
@@ -222,6 +223,18 @@ enum Request {
         content_base64: String,
         managed_tree_policy_version: u8,
     },
+    CreateHistoryCandidate {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_ref: String,
+        expected_base_commit_oid: String,
+        expected_base_tree_oid: String,
+        target_commit_oid: String,
+        target_tree_oid: String,
+        candidate_ref: String,
+        restore_id: String,
+        managed_tree_policy_version: u8,
+    },
     PromoteCandidate {
         protocol_version: u8,
         repository_path: PathBuf,
@@ -233,6 +246,21 @@ enum Request {
         expected_result_blob_oid: String,
         request_digest_sha256: String,
         path: String,
+        managed_tree_policy_version: u8,
+    },
+    PromoteHistoryCandidate {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_ref: String,
+        expected_base_commit_oid: String,
+        expected_base_tree_oid: String,
+        candidate_ref: String,
+        expected_candidate_commit_oid: String,
+        expected_candidate_tree_oid: String,
+        target_commit_oid: String,
+        target_tree_oid: String,
+        request_digest_sha256: String,
+        restore_id: String,
         managed_tree_policy_version: u8,
     },
     ObserveAcceptedRef {
@@ -423,6 +451,39 @@ enum Response<'a> {
         managed_tree_policy_version: u8,
     },
     #[serde(rename_all = "camelCase")]
+    HistoryCandidatePublished {
+        protocol_version: u8,
+        object_format: &'static str,
+        base_commit_oid: String,
+        base_tree_oid: String,
+        target_commit_oid: String,
+        target_tree_oid: String,
+        candidate_commit_oid: String,
+        candidate_tree_oid: String,
+        request_digest_sha256: String,
+        accepted_ref: String,
+        candidate_ref: String,
+        restore_id: String,
+        changed_file_count: u64,
+        deleted_file_count: u64,
+        tree_delta_digest_sha256: String,
+        replayed: bool,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    HistoryCandidatePromoted {
+        protocol_version: u8,
+        object_format: &'static str,
+        base_commit_oid: String,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        accepted_ref: String,
+        candidate_ref: String,
+        restore_id: String,
+        replayed: bool,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
     AcceptedRefObserved {
         protocol_version: u8,
         object_format: &'static str,
@@ -592,6 +653,31 @@ fn run() -> Result<ExitCode, &'static str> {
                 managed_tree_policy_version,
             )
         }
+        Request::CreateHistoryCandidate {
+            protocol_version,
+            repository_path,
+            accepted_ref,
+            expected_base_commit_oid,
+            expected_base_tree_oid,
+            target_commit_oid,
+            target_tree_oid,
+            candidate_ref,
+            restore_id,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            create_history_candidate(
+                repository_path,
+                accepted_ref,
+                expected_base_commit_oid,
+                expected_base_tree_oid,
+                target_commit_oid,
+                target_tree_oid,
+                candidate_ref,
+                restore_id,
+                managed_tree_policy_version,
+            )
+        }
         Request::PromoteCandidate {
             protocol_version,
             repository_path,
@@ -616,6 +702,37 @@ fn run() -> Result<ExitCode, &'static str> {
                 expected_result_blob_oid,
                 request_digest_sha256,
                 path,
+                managed_tree_policy_version,
+            )
+        }
+        Request::PromoteHistoryCandidate {
+            protocol_version,
+            repository_path,
+            accepted_ref,
+            expected_base_commit_oid,
+            expected_base_tree_oid,
+            candidate_ref,
+            expected_candidate_commit_oid,
+            expected_candidate_tree_oid,
+            target_commit_oid,
+            target_tree_oid,
+            request_digest_sha256,
+            restore_id,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            promote_history_candidate(
+                repository_path,
+                accepted_ref,
+                expected_base_commit_oid,
+                expected_base_tree_oid,
+                candidate_ref,
+                expected_candidate_commit_oid,
+                expected_candidate_tree_oid,
+                target_commit_oid,
+                target_tree_oid,
+                request_digest_sha256,
+                restore_id,
                 managed_tree_policy_version,
             )
         }
@@ -1774,6 +1891,310 @@ fn create_candidate(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn create_history_candidate(
+    repository_path: PathBuf,
+    accepted_ref: String,
+    expected_base_commit_oid: String,
+    expected_base_tree_oid: String,
+    target_commit_oid: String,
+    target_tree_oid: String,
+    candidate_ref: String,
+    restore_id: String,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    use gix::bstr::ByteSlice;
+
+    assert_history_candidate_input(
+        &accepted_ref,
+        &candidate_ref,
+        &restore_id,
+        managed_tree_policy_version,
+    )?;
+    let repository = open_repository(repository_path)?;
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let expected_base = parse_sha1_oid(&expected_base_commit_oid, "invalid_base_commit_oid")?;
+    let expected_base_tree = parse_sha1_oid(&expected_base_tree_oid, "base_tree_unavailable")?;
+    let target_commit = parse_sha1_oid(&target_commit_oid, "invalid_accepted_commit_oid")?;
+    let target_tree = parse_sha1_oid(&target_tree_oid, "accepted_tree_unavailable")?;
+    let (verified_base_commit, verified_base_tree) =
+        accepted_commit_identity(&repository, &expected_base_commit_oid)?;
+    let (verified_target_commit, verified_target_tree) =
+        accepted_commit_identity(&repository, &target_commit_oid)?;
+    if verified_base_commit != expected_base || verified_base_tree != expected_base_tree {
+        return Err("base_tree_unavailable");
+    }
+    if verified_target_commit != target_commit || verified_target_tree != target_tree {
+        return Err("accepted_tree_unavailable");
+    }
+    let current = read_direct_commit_ref(
+        &repository,
+        &accepted_ref,
+        "accepted_ref_not_direct",
+        "accepted_ref_target_invalid",
+    )?;
+    if current != expected_base {
+        return Err("history_candidate_request_conflict");
+    }
+    let request_digest_sha256 = history_candidate_request_digest_sha256(
+        &accepted_ref,
+        &expected_base_commit_oid,
+        &expected_base_tree_oid,
+        &target_commit_oid,
+        &target_tree_oid,
+        &candidate_ref,
+        &restore_id,
+    );
+    let (changed_file_count, deleted_file_count, tree_delta_digest_sha256) =
+        history_tree_delta(&repository, expected_base_tree, target_tree)?;
+
+    if let Some(reference) = repository
+        .try_find_reference(candidate_ref.as_str())
+        .map_err(|_| "target_ref_unavailable")?
+    {
+        let existing = read_direct_commit_reference(
+            &repository,
+            reference,
+            "candidate_ref_not_direct",
+            "candidate_ref_target_invalid",
+        )?;
+        verify_history_candidate_commit(
+            &repository,
+            existing,
+            expected_base,
+            target_tree,
+            &request_digest_sha256,
+        )?;
+        write_response(&Response::HistoryCandidatePublished {
+            protocol_version: PROTOCOL_VERSION,
+            object_format: "sha1",
+            base_commit_oid: expected_base.to_string(),
+            base_tree_oid: expected_base_tree.to_string(),
+            target_commit_oid: target_commit.to_string(),
+            target_tree_oid: target_tree.to_string(),
+            candidate_commit_oid: existing.to_string(),
+            candidate_tree_oid: target_tree.to_string(),
+            request_digest_sha256,
+            accepted_ref,
+            candidate_ref,
+            restore_id,
+            changed_file_count,
+            deleted_file_count,
+            tree_delta_digest_sha256,
+            replayed: true,
+            managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+        });
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let signature = gix::actor::SignatureRef {
+        name: b"Maka Workspace Service".as_bstr(),
+        email: b"workspace@maka.invalid".as_bstr(),
+        time: "946684800 +0000",
+    };
+    let message = format!(
+        "maka managed workspace history candidate v1\nrequest-sha256 {request_digest_sha256}"
+    );
+    let candidate_commit = repository
+        .new_commit_as(signature, signature, message, target_tree, [expected_base])
+        .map_err(|_| "commit_write_failed")?
+        .id()
+        .detach();
+    verify_history_candidate_commit(
+        &repository,
+        candidate_commit,
+        expected_base,
+        target_tree,
+        &request_digest_sha256,
+    )?;
+    let observed_base = read_direct_commit_ref(
+        &repository,
+        &accepted_ref,
+        "accepted_ref_not_direct",
+        "accepted_ref_target_invalid",
+    )?;
+    if observed_base != expected_base {
+        return Err("history_candidate_request_conflict");
+    }
+    match repository.reference(
+        candidate_ref.as_str(),
+        candidate_commit,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "maka managed workspace history candidate",
+    ) {
+        Ok(_) => {}
+        Err(_) => {
+            let concurrent = read_direct_commit_ref(
+                &repository,
+                &candidate_ref,
+                "candidate_ref_not_direct",
+                "candidate_ref_target_invalid",
+            )?;
+            if concurrent != candidate_commit {
+                return Err("history_candidate_request_conflict");
+            }
+        }
+    }
+    write_response(&Response::HistoryCandidatePublished {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        base_commit_oid: expected_base.to_string(),
+        base_tree_oid: expected_base_tree.to_string(),
+        target_commit_oid: target_commit.to_string(),
+        target_tree_oid: target_tree.to_string(),
+        candidate_commit_oid: candidate_commit.to_string(),
+        candidate_tree_oid: target_tree.to_string(),
+        request_digest_sha256,
+        accepted_ref,
+        candidate_ref,
+        restore_id,
+        changed_file_count,
+        deleted_file_count,
+        tree_delta_digest_sha256,
+        replayed: false,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn promote_history_candidate(
+    repository_path: PathBuf,
+    accepted_ref: String,
+    expected_base_commit_oid: String,
+    expected_base_tree_oid: String,
+    candidate_ref: String,
+    expected_candidate_commit_oid: String,
+    expected_candidate_tree_oid: String,
+    target_commit_oid: String,
+    target_tree_oid: String,
+    request_digest_sha256: String,
+    restore_id: String,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    assert_history_candidate_input(
+        &accepted_ref,
+        &candidate_ref,
+        &restore_id,
+        managed_tree_policy_version,
+    )?;
+    let repository = open_repository(repository_path)?;
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let expected_base = parse_sha1_oid(&expected_base_commit_oid, "invalid_base_commit_oid")?;
+    let expected_candidate = parse_sha1_oid(
+        &expected_candidate_commit_oid,
+        "invalid_candidate_commit_oid",
+    )?;
+    let expected_candidate_tree =
+        parse_sha1_oid(&expected_candidate_tree_oid, "invalid_candidate_tree_oid")?;
+    let target_commit = parse_sha1_oid(&target_commit_oid, "invalid_accepted_commit_oid")?;
+    let target_tree = parse_sha1_oid(&target_tree_oid, "accepted_tree_unavailable")?;
+    let (_, actual_base_tree) = accepted_commit_identity(&repository, &expected_base_commit_oid)?;
+    if actual_base_tree.to_string() != expected_base_tree_oid {
+        return Err("base_tree_unavailable");
+    }
+    let (actual_target_commit, actual_target_tree) =
+        accepted_commit_identity(&repository, &target_commit_oid)?;
+    if actual_target_commit != target_commit || actual_target_tree != target_tree {
+        return Err("accepted_tree_unavailable");
+    }
+    let canonical_digest = history_candidate_request_digest_sha256(
+        &accepted_ref,
+        &expected_base_commit_oid,
+        &actual_base_tree.to_string(),
+        &target_commit_oid,
+        &target_tree_oid,
+        &candidate_ref,
+        &restore_id,
+    );
+    if request_digest_sha256 != canonical_digest || expected_candidate_tree != target_tree {
+        return Err("history_candidate_request_conflict");
+    }
+    let candidate_current = read_direct_commit_ref(
+        &repository,
+        &candidate_ref,
+        "candidate_ref_not_direct",
+        "candidate_ref_target_invalid",
+    )?;
+    if candidate_current != expected_candidate {
+        return Err("history_candidate_request_conflict");
+    }
+    verify_history_candidate_commit(
+        &repository,
+        expected_candidate,
+        expected_base,
+        target_tree,
+        &request_digest_sha256,
+    )?;
+    let current = read_direct_commit_ref(
+        &repository,
+        &accepted_ref,
+        "accepted_ref_not_direct",
+        "accepted_ref_target_invalid",
+    )?;
+    if current == expected_candidate {
+        write_history_candidate_promoted_response(
+            expected_base,
+            expected_candidate,
+            target_tree,
+            &accepted_ref,
+            &candidate_ref,
+            &restore_id,
+            true,
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    if current != expected_base {
+        return Err("history_candidate_request_conflict");
+    }
+    match repository.reference(
+        accepted_ref.as_str(),
+        expected_candidate,
+        gix::refs::transaction::PreviousValue::MustExistAndMatch(gix::refs::Target::Object(
+            expected_base,
+        )),
+        "maka managed workspace accepted history candidate",
+    ) {
+        Ok(_) => {
+            write_history_candidate_promoted_response(
+                expected_base,
+                expected_candidate,
+                target_tree,
+                &accepted_ref,
+                &candidate_ref,
+                &restore_id,
+                false,
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(_) => {
+            let observed = read_direct_commit_ref(
+                &repository,
+                &accepted_ref,
+                "accepted_ref_not_direct",
+                "accepted_ref_target_invalid",
+            )?;
+            if observed != expected_candidate {
+                return Err("accepted_ref_promotion_indeterminate");
+            }
+            write_history_candidate_promoted_response(
+                expected_base,
+                expected_candidate,
+                target_tree,
+                &accepted_ref,
+                &candidate_ref,
+                &restore_id,
+                true,
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn promote_candidate(
     repository_path: PathBuf,
     accepted_ref: String,
@@ -2132,6 +2553,171 @@ fn has_managed_candidate_signature(commit: &gix::objs::Commit) -> bool {
         && commit.committer.time.offset == 0
         && commit.encoding.is_none()
         && commit.extra_headers.is_empty()
+}
+
+fn assert_history_candidate_input(
+    accepted_ref: &str,
+    candidate_ref: &str,
+    restore_id: &str,
+    managed_tree_policy_version: u8,
+) -> Result<(), &'static str> {
+    if !accepted_ref.starts_with("refs/maka/")
+        || !candidate_ref.starts_with("refs/maka/history-candidates/")
+        || accepted_ref == candidate_ref
+    {
+        return Err("target_ref_outside_maka_namespace");
+    }
+    gix::refs::FullName::try_from(accepted_ref).map_err(|_| "target_ref_outside_maka_namespace")?;
+    gix::refs::FullName::try_from(candidate_ref)
+        .map_err(|_| "target_ref_outside_maka_namespace")?;
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    if restore_id.is_empty()
+        || restore_id.len() > 64
+        || !restore_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err("invalid_request");
+    }
+    Ok(())
+}
+
+fn verify_history_candidate_commit(
+    repository: &gix::Repository,
+    candidate_commit_oid: gix::hash::ObjectId,
+    expected_base_commit_oid: gix::hash::ObjectId,
+    expected_target_tree_oid: gix::hash::ObjectId,
+    request_digest_sha256: &str,
+) -> Result<(), &'static str> {
+    let commit = load_verified_object(
+        repository,
+        candidate_commit_oid,
+        gix::objs::Kind::Commit,
+        MANAGED_TREE_POLICY_V3.max_commit_object_bytes,
+        "candidate_ref_target_invalid",
+        "candidate_ref_target_invalid",
+        "commit_object_limit_exceeded",
+        "candidate_ref_target_invalid",
+    )?
+    .try_into_commit()
+    .map_err(|_| "candidate_ref_target_invalid")?
+    .decode()
+    .map_err(|_| "candidate_ref_target_invalid")?
+    .into_owned()
+    .map_err(|_| "candidate_ref_target_invalid")?;
+    let expected_message = format!(
+        "maka managed workspace history candidate v1\nrequest-sha256 {request_digest_sha256}"
+    );
+    if commit.tree != expected_target_tree_oid
+        || commit.parents.as_slice() != [expected_base_commit_oid]
+        || commit.message.as_slice() != expected_message.as_bytes()
+        || !has_managed_candidate_signature(&commit)
+    {
+        return Err("history_candidate_request_conflict");
+    }
+    let mut stats = ManagedTreeStats::default();
+    walk_verified_source_tree(
+        repository,
+        None,
+        expected_target_tree_oid,
+        "",
+        0,
+        MANAGED_TREE_POLICY_V3,
+        &mut stats,
+    )?;
+    Ok(())
+}
+
+fn history_candidate_request_digest_sha256(
+    accepted_ref: &str,
+    expected_base_commit_oid: &str,
+    expected_base_tree_oid: &str,
+    target_commit_oid: &str,
+    target_tree_oid: &str,
+    candidate_ref: &str,
+    restore_id: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"maka.gitoxide.history-candidate-request.v1\0");
+    for value in [
+        accepted_ref,
+        expected_base_commit_oid,
+        expected_base_tree_oid,
+        target_commit_oid,
+        target_tree_oid,
+        candidate_ref,
+        restore_id,
+    ] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn history_tree_delta(
+    repository: &gix::Repository,
+    base_tree_oid: gix::hash::ObjectId,
+    target_tree_oid: gix::hash::ObjectId,
+) -> Result<(u64, u64, String), &'static str> {
+    let base = collect_accepted_tree_files(repository, base_tree_oid)?;
+    let target = collect_accepted_tree_files(repository, target_tree_oid)?;
+    let paths: BTreeSet<&String> = base.keys().chain(target.keys()).collect();
+    let mut changed = 0_u64;
+    let mut deleted = 0_u64;
+    let mut hasher = Sha256::new();
+    hasher.update(b"maka.gitoxide.history-tree-delta.v1\0");
+    hasher.update(base_tree_oid.to_string().as_bytes());
+    hasher.update([0]);
+    hasher.update(target_tree_oid.to_string().as_bytes());
+    for path in paths {
+        let old = base.get(path);
+        let new = target.get(path);
+        if old == new {
+            continue;
+        }
+        changed = changed.checked_add(1).ok_or("tree_diff_limit_exceeded")?;
+        if new.is_none() {
+            deleted = deleted.checked_add(1).ok_or("tree_diff_limit_exceeded")?;
+        }
+        hasher.update([0]);
+        hasher.update((path.len() as u64).to_be_bytes());
+        hasher.update(path.as_bytes());
+        for entry in [old, new] {
+            match entry {
+                Some((oid, executable)) => {
+                    hasher.update([1, u8::from(*executable)]);
+                    hasher.update(oid.as_bytes());
+                }
+                None => hasher.update([0, 0]),
+            }
+        }
+    }
+    Ok((changed, deleted, format!("{:x}", hasher.finalize())))
+}
+
+fn write_history_candidate_promoted_response(
+    base_commit_oid: gix::hash::ObjectId,
+    accepted_commit_oid: gix::hash::ObjectId,
+    accepted_tree_oid: gix::hash::ObjectId,
+    accepted_ref: &str,
+    candidate_ref: &str,
+    restore_id: &str,
+    replayed: bool,
+) {
+    write_response(&Response::HistoryCandidatePromoted {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        base_commit_oid: base_commit_oid.to_string(),
+        accepted_commit_oid: accepted_commit_oid.to_string(),
+        accepted_tree_oid: accepted_tree_oid.to_string(),
+        accepted_ref: accepted_ref.to_owned(),
+        candidate_ref: candidate_ref.to_owned(),
+        restore_id: restore_id.to_owned(),
+        replayed,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

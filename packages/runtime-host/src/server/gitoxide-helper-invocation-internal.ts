@@ -42,6 +42,8 @@ export const GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL = Object.freeze({
   importFilesystemSnapshotMs: 10 * 60_000,
   createCandidateMs: 10 * 60_000,
   promoteCandidateMs: 10 * 60_000,
+  createHistoryCandidateMs: 10 * 60_000,
+  promoteHistoryCandidateMs: 10 * 60_000,
   observeAcceptedRefMs: 10 * 60_000,
   acceptedTreeReadMs: 10 * 60_000,
 });
@@ -117,6 +119,7 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'candidate_ref_not_direct',
   'candidate_ref_target_invalid',
   'candidate_request_conflict',
+  'history_candidate_request_conflict',
   'candidate_publication_indeterminate',
   'accepted_ref_promotion_indeterminate',
   'invalid_candidate_commit_oid',
@@ -282,6 +285,41 @@ export interface GitoxideCandidatePromotionRejectedV1 {
 export type GitoxideCandidatePromotionResultV1 =
   | GitoxideCandidatePromotedV1
   | GitoxideCandidatePromotionRejectedV1;
+
+export interface GitoxideHistoryCandidatePublishedV1 {
+  readonly kind: 'history_candidate_published';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly baseCommitOid: string;
+  readonly baseTreeOid: string;
+  readonly targetCommitOid: string;
+  readonly targetTreeOid: string;
+  readonly candidateCommitOid: string;
+  readonly candidateTreeOid: string;
+  readonly requestDigestSha256: string;
+  readonly acceptedRef: string;
+  readonly candidateRef: string;
+  readonly restoreId: string;
+  readonly changedFileCount: number;
+  readonly deletedFileCount: number;
+  readonly treeDeltaDigestSha256: string;
+  readonly replayed: boolean;
+  readonly managedTreePolicyVersion: 3;
+}
+
+export interface GitoxideHistoryCandidatePromotedV1 {
+  readonly kind: 'history_candidate_promoted';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly baseCommitOid: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly acceptedRef: string;
+  readonly candidateRef: string;
+  readonly restoreId: string;
+  readonly replayed: boolean;
+  readonly managedTreePolicyVersion: 3;
+}
 
 export interface GitoxideAcceptedRefObservationV1 {
   readonly kind: 'accepted_ref_observed';
@@ -851,6 +889,152 @@ export async function promoteCandidateWithGitoxideHelperInternal(input: {
     deadlineAt,
   });
   return decodeCandidatePromotionOutcome(outcome, input);
+}
+
+export async function createHistoryCandidateWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedRef: string;
+  readonly expectedBaseCommitOid: string;
+  readonly expectedBaseTreeOid: string;
+  readonly targetCommitOid: string;
+  readonly targetTreeOid: string;
+  readonly candidateRef: string;
+  readonly restoreId: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideHistoryCandidatePublishedV1> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.createHistoryCandidateMs;
+  const { artifact, repositoryPath } = await runGitoxideOperationWithinDeadlineInternal({
+    deadlineAt,
+    abortSignal: input.abortSignal,
+    operation: async () => {
+      requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.capability, [
+        'create_history_candidate',
+      ]);
+      assertHistoryCandidateInput(input);
+      const [artifact, repositoryPath] = await Promise.all([
+        verifyGitoxideHelperArtifactForInvocationInternal(
+          input.invocationOwnerToken,
+          input.capability,
+        ),
+        realpath(input.repositoryPath).catch((error) => {
+          throw invocationInvalid(
+            `Gitoxide managed repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ]);
+      return { artifact, repositoryPath };
+    },
+  });
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: artifact.protocolVersion,
+      operation: 'create_history_candidate',
+      repositoryPath,
+      acceptedRef: input.acceptedRef,
+      expectedBaseCommitOid: input.expectedBaseCommitOid,
+      expectedBaseTreeOid: input.expectedBaseTreeOid,
+      targetCommitOid: input.targetCommitOid,
+      targetTreeOid: input.targetTreeOid,
+      candidateRef: input.candidateRef,
+      restoreId: input.restoreId,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
+  const outcome = await invokeHelper({
+    executablePath: artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  return decodeHistoryCandidateOutcome(outcome, {
+    ...input,
+    requestDigestSha256: historyCandidateRequestDigestSha256(input),
+  });
+}
+
+export async function promoteHistoryCandidateWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedRef: string;
+  readonly expectedBaseCommitOid: string;
+  readonly expectedBaseTreeOid: string;
+  readonly candidateRef: string;
+  readonly expectedCandidateCommitOid: string;
+  readonly expectedCandidateTreeOid: string;
+  readonly targetCommitOid: string;
+  readonly targetTreeOid: string;
+  readonly requestDigestSha256: string;
+  readonly restoreId: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideHistoryCandidatePromotedV1> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.promoteHistoryCandidateMs;
+  const { artifact, repositoryPath } = await runGitoxideOperationWithinDeadlineInternal({
+    deadlineAt,
+    abortSignal: input.abortSignal,
+    operation: async () => {
+      requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.capability, [
+        'promote_history_candidate',
+      ]);
+      assertHistoryCandidateInput(input);
+      if (
+        !SHA1_OID_PATTERN.test(input.expectedCandidateCommitOid) ||
+        !SHA1_OID_PATTERN.test(input.expectedCandidateTreeOid) ||
+        !/^[0-9a-f]{64}$/.test(input.requestDigestSha256)
+      ) {
+        throw invocationInvalid('Gitoxide history candidate promotion request is invalid');
+      }
+      const canonicalDigest = historyCandidateRequestDigestSha256(input);
+      if (canonicalDigest !== input.requestDigestSha256) {
+        throw invocationInvalid('Gitoxide history candidate request digest is invalid');
+      }
+      const [artifact, repositoryPath] = await Promise.all([
+        verifyGitoxideHelperArtifactForInvocationInternal(
+          input.invocationOwnerToken,
+          input.capability,
+        ),
+        realpath(input.repositoryPath).catch((error) => {
+          throw invocationInvalid(
+            `Gitoxide managed repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ]);
+      return { artifact, repositoryPath };
+    },
+  });
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: artifact.protocolVersion,
+      operation: 'promote_history_candidate',
+      repositoryPath,
+      acceptedRef: input.acceptedRef,
+      expectedBaseCommitOid: input.expectedBaseCommitOid,
+      expectedBaseTreeOid: input.expectedBaseTreeOid,
+      candidateRef: input.candidateRef,
+      expectedCandidateCommitOid: input.expectedCandidateCommitOid,
+      expectedCandidateTreeOid: input.expectedCandidateTreeOid,
+      targetCommitOid: input.targetCommitOid,
+      targetTreeOid: input.targetTreeOid,
+      requestDigestSha256: input.requestDigestSha256,
+      restoreId: input.restoreId,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
+  const outcome = await invokeHelper({
+    executablePath: artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  return decodeHistoryCandidatePromotionOutcome(outcome, input);
 }
 
 export async function observeAcceptedRefWithGitoxideHelperInternal(input: {
@@ -1646,6 +1830,120 @@ function isCandidatePromotionRejected(
   );
 }
 
+function decodeHistoryCandidateOutcome(
+  outcome: HelperProcessOutcome,
+  expected: {
+    readonly acceptedRef: string;
+    readonly expectedBaseCommitOid: string;
+    readonly expectedBaseTreeOid: string;
+    readonly targetCommitOid: string;
+    readonly targetTreeOid: string;
+    readonly candidateRef: string;
+    readonly restoreId: string;
+    readonly requestDigestSha256: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): GitoxideHistoryCandidatePublishedV1 {
+  const value = parseHelperOutcome(outcome);
+  if (
+    outcome.exitCode === 0 &&
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'baseCommitOid',
+      'baseTreeOid',
+      'targetCommitOid',
+      'targetTreeOid',
+      'candidateCommitOid',
+      'candidateTreeOid',
+      'requestDigestSha256',
+      'acceptedRef',
+      'candidateRef',
+      'restoreId',
+      'changedFileCount',
+      'deletedFileCount',
+      'treeDeltaDigestSha256',
+      'replayed',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'history_candidate_published' &&
+    value.objectFormat === 'sha1' &&
+    value.baseCommitOid === expected.expectedBaseCommitOid &&
+    value.baseTreeOid === expected.expectedBaseTreeOid &&
+    value.targetCommitOid === expected.targetCommitOid &&
+    value.targetTreeOid === expected.targetTreeOid &&
+    isSha1(value.candidateCommitOid) &&
+    value.candidateTreeOid === expected.targetTreeOid &&
+    value.requestDigestSha256 === expected.requestDigestSha256 &&
+    value.acceptedRef === expected.acceptedRef &&
+    value.candidateRef === expected.candidateRef &&
+    value.restoreId === expected.restoreId &&
+    isNonnegativeSafeInteger(value.changedFileCount) &&
+    isNonnegativeSafeInteger(value.deletedFileCount) &&
+    value.deletedFileCount <= value.changedFileCount &&
+    typeof value.treeDeltaDigestSha256 === 'string' &&
+    /^[0-9a-f]{64}$/.test(value.treeDeltaDigestSha256) &&
+    typeof value.replayed === 'boolean' &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
+  ) {
+    return Object.freeze(value) as unknown as GitoxideHistoryCandidatePublishedV1;
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('create the history candidate', value.reason);
+  }
+  throw protocolInvalid('Gitoxide history candidate response is invalid');
+}
+
+function decodeHistoryCandidatePromotionOutcome(
+  outcome: HelperProcessOutcome,
+  expected: {
+    readonly acceptedRef: string;
+    readonly expectedBaseCommitOid: string;
+    readonly expectedCandidateCommitOid: string;
+    readonly targetTreeOid: string;
+    readonly candidateRef: string;
+    readonly restoreId: string;
+    readonly managedTreePolicyVersion: 3;
+  },
+): GitoxideHistoryCandidatePromotedV1 {
+  const value = parseHelperOutcome(outcome);
+  if (
+    outcome.exitCode === 0 &&
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'baseCommitOid',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'acceptedRef',
+      'candidateRef',
+      'restoreId',
+      'replayed',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'history_candidate_promoted' &&
+    value.objectFormat === 'sha1' &&
+    value.baseCommitOid === expected.expectedBaseCommitOid &&
+    value.acceptedCommitOid === expected.expectedCandidateCommitOid &&
+    value.acceptedTreeOid === expected.targetTreeOid &&
+    value.acceptedRef === expected.acceptedRef &&
+    value.candidateRef === expected.candidateRef &&
+    value.restoreId === expected.restoreId &&
+    typeof value.replayed === 'boolean' &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
+  ) {
+    return Object.freeze(value) as unknown as GitoxideHistoryCandidatePromotedV1;
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('promote the history candidate', value.reason);
+  }
+  throw protocolInvalid('Gitoxide history candidate promotion response is invalid');
+}
+
 function decodeAcceptedRefObservation(
   outcome: HelperProcessOutcome,
   expected: {
@@ -1999,6 +2297,60 @@ function candidateRequestDigestSha256(input: {
   return hash.digest('hex');
 }
 
+function historyCandidateRequestDigestSha256(input: {
+  readonly acceptedRef: string;
+  readonly expectedBaseCommitOid: string;
+  readonly expectedBaseTreeOid: string;
+  readonly targetCommitOid: string;
+  readonly targetTreeOid: string;
+  readonly candidateRef: string;
+  readonly restoreId: string;
+}): string {
+  const hash = createHash('sha256').update('maka.gitoxide.history-candidate-request.v1\0', 'utf8');
+  for (const value of [
+    input.acceptedRef,
+    input.expectedBaseCommitOid,
+    input.expectedBaseTreeOid,
+    input.targetCommitOid,
+    input.targetTreeOid,
+    input.candidateRef,
+    input.restoreId,
+  ]) {
+    const field = Buffer.from(value, 'utf8');
+    const length = Buffer.allocUnsafe(8);
+    length.writeBigUInt64BE(BigInt(field.length));
+    hash.update(length).update(field);
+  }
+  return hash.digest('hex');
+}
+
+function assertHistoryCandidateInput(input: {
+  readonly repositoryPath: string;
+  readonly acceptedRef: string;
+  readonly expectedBaseCommitOid: string;
+  readonly expectedBaseTreeOid: string;
+  readonly targetCommitOid: string;
+  readonly targetTreeOid: string;
+  readonly candidateRef: string;
+  readonly restoreId: string;
+  readonly managedTreePolicyVersion: 3;
+}): void {
+  if (
+    !isAbsolute(input.repositoryPath) ||
+    !SHA1_OID_PATTERN.test(input.expectedBaseCommitOid) ||
+    !SHA1_OID_PATTERN.test(input.expectedBaseTreeOid) ||
+    !SHA1_OID_PATTERN.test(input.targetCommitOid) ||
+    !SHA1_OID_PATTERN.test(input.targetTreeOid) ||
+    !MAKA_REF_PATTERN.test(input.acceptedRef) ||
+    !/^refs\/maka\/history-candidates\/[0-9a-f]{64}$/.test(input.candidateRef) ||
+    input.acceptedRef === input.candidateRef ||
+    !/^[A-Za-z0-9_-]{1,64}$/.test(input.restoreId) ||
+    input.managedTreePolicyVersion !== 3
+  ) {
+    throw invocationInvalid('Gitoxide history candidate request is invalid');
+  }
+}
+
 function parseHelperOutcome(outcome: HelperProcessOutcome): unknown {
   if (outcome.signal !== null) {
     throw protocolInvalid(`Gitoxide helper exited from signal ${outcome.signal}`);
@@ -2293,6 +2645,10 @@ function isAcceptedTreeChange(value: unknown): value is GitoxideAcceptedTreeChan
 
 function isSha1(value: unknown): value is string {
   return typeof value === 'string' && SHA1_OID_PATTERN.test(value);
+}
+
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {

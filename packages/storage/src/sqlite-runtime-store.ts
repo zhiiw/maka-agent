@@ -25,6 +25,7 @@ import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import {
   buildWorkspaceBaselineAuthorityEvents,
+  buildWorkspaceHistorySuccessorAuthorityEvent,
   buildWorkspaceSuccessorAuthorityEvent,
   scanWorkspaceBaselineAuthority,
   workspaceMutationPolicyHashV1,
@@ -37,9 +38,11 @@ import {
   type WorkspaceBaselineCommitResult,
   type WorkspaceEpochRecordV1,
   type WorkspaceHeadRecordV1,
+  type WorkspaceHistorySuccessorAuthorityInput,
   type WorkspaceProjectionRebuildResult,
   type WorkspaceSuccessorAuthorityInput,
   type WorkspaceVersionAcceptedV1,
+  type WorkspaceHistoryVersionAcceptedV1,
   type WorkspaceVersionRecordV1,
 } from '@maka/core/workspace-version-authority';
 import {
@@ -1583,6 +1586,123 @@ export class SqliteRuntimeStore
     });
   }
 
+  async #commitWorkspaceHistorySuccessor(
+    input: WorkspaceHistorySuccessorAuthorityInput,
+    rootId: string,
+  ): Promise<
+    import('./workspace-version-authority-internal.js').WorkspaceHistorySuccessorCommitResult
+  > {
+    const successorEvent = buildWorkspaceHistorySuccessorAuthorityEvent(input);
+    return this.transaction(() => {
+      this.#assertWorkspaceStorageRootBinding(rootId);
+      const before = this.readCanonicalWorkspaceAuthoritySync();
+      this.assertWorkspaceProjectionsMatchSync(before);
+      const currentHead = before.heads.find(
+        (candidate) =>
+          candidate.workspaceId === input.successor.workspaceId &&
+          candidate.workspaceEpochId === input.successor.workspaceEpochId,
+      );
+      if (!currentHead) throw new Error('Workspace history successor base head is unavailable');
+
+      const existing = before.successors.find(
+        (candidate) =>
+          candidate.acceptedEventId === input.acceptedEventId ||
+          candidate.successor.workspaceVersionId === input.successor.workspaceVersionId,
+      );
+      if (existing) {
+        assertStoredRuntimeEventEquals(
+          successorEvent,
+          this.readRuntimeEventJson(successorEvent.id),
+        );
+        return {
+          created: false,
+          committedSuccessor: {
+            repositoryId: existing.successor.repositoryId,
+            workspaceId: existing.successor.workspaceId,
+            workspaceEpochId: existing.successor.workspaceEpochId,
+            workspaceVersionId: existing.successor.workspaceVersionId,
+            acceptedEventId: existing.acceptedEventId,
+            commitOid: existing.successor.commitOid,
+            treeOid: existing.successor.treeOid,
+            revision: existing.successor.baseHeadRevision + 1,
+          },
+        };
+      }
+
+      const successor = input.successor;
+      if (
+        successor.repositoryId !== currentHead.repositoryId ||
+        successor.parentWorkspaceVersionId !== currentHead.workspaceVersionId ||
+        successor.baseAcceptedEventId !== currentHead.acceptedEventId ||
+        successor.baseHeadRevision !== currentHead.revision
+      ) {
+        throw new Error('Workspace history successor compare-and-set base head conflict');
+      }
+      const target = [...before.baselines, ...before.successors].find((candidate) => {
+        const version = 'baseline' in candidate ? candidate.baseline : candidate.successor;
+        return version.workspaceVersionId === input.origin.targetWorkspaceVersionId;
+      });
+      const targetVersion = target
+        ? 'baseline' in target
+          ? target.baseline
+          : target.successor
+        : undefined;
+      if (
+        !targetVersion ||
+        targetVersion.repositoryId !== successor.repositoryId ||
+        targetVersion.workspaceId !== successor.workspaceId ||
+        targetVersion.workspaceEpochId !== successor.workspaceEpochId ||
+        targetVersion.treeOid !== successor.treeOid ||
+        targetVersion.policyHash !== successor.policyHash
+      ) {
+        throw new Error('Workspace history successor target identity conflict');
+      }
+
+      const successorSeq = this.insertRuntimeEvent(successorEvent, input.committedAt, false);
+      if (successorSeq !== currentHead.revision + 2) {
+        throw new Error('Workspace history successor fact is not the next authority event');
+      }
+      const after = this.readCanonicalWorkspaceAuthoritySync();
+      const accepted = after.successors.find(
+        (candidate) => candidate.acceptedEventId === input.acceptedEventId,
+      );
+      const nextHead = after.heads.find(
+        (candidate) =>
+          candidate.workspaceId === successor.workspaceId &&
+          candidate.workspaceEpochId === successor.workspaceEpochId,
+      );
+      if (!accepted || !nextHead) {
+        throw new Error('Workspace history successor authority scan lost the committed version');
+      }
+      this.insertWorkspaceSuccessorVersionProjection(accepted, input.committedAt);
+      const updated = this.db
+        .prepare(`
+          UPDATE runtime_workspace_heads
+          SET workspace_version_id = ?, accepted_event_id = ?, commit_oid = ?, tree_oid = ?,
+              revision = ?
+          WHERE workspace_id = ? AND workspace_epoch_id = ?
+            AND workspace_version_id = ? AND accepted_event_id = ? AND revision = ?
+        `)
+        .run(
+          nextHead.workspaceVersionId,
+          nextHead.acceptedEventId,
+          nextHead.commitOid,
+          nextHead.treeOid,
+          nextHead.revision,
+          currentHead.workspaceId,
+          currentHead.workspaceEpochId,
+          currentHead.workspaceVersionId,
+          currentHead.acceptedEventId,
+          currentHead.revision,
+        );
+      if (updated.changes !== 1) {
+        throw new Error('Workspace history successor head compare-and-set failed');
+      }
+      this.assertWorkspaceProjectionsMatchSync(after);
+      return { created: true, committedSuccessor: nextHead };
+    });
+  }
+
   async #commitManagedMutationTerminal(
     input: {
       noEffect: ManagedMutationNoEffectClaimV1;
@@ -1664,6 +1784,7 @@ export class SqliteRuntimeStore
       this,
       (input, rootId) => this.#commitWorkspaceBaseline(input, rootId),
       (input, rootId) => this.#commitWorkspaceSuccessor(input, rootId),
+      (input, rootId) => this.#commitWorkspaceHistorySuccessor(input, rootId),
       (input, rootId) => this.#commitManagedMutationTerminal(input, rootId),
       (rootId) => this.#bindWorkspaceStorageRoot(rootId),
       (rootId) => this.#adoptWorkspaceStorageRoot(rootId),
@@ -1962,7 +2083,34 @@ export class SqliteRuntimeStore
     }
     const toolScan = scanToolLedger(events);
     for (const accepted of scan.successors) {
-      const origin = accepted.successor.origin;
+      const successor = accepted.successor;
+      const origin = successor.origin;
+      if (origin.kind === 'history_restore') {
+        const target = [...scan.baselines, ...scan.successors].find((candidate) => {
+          const version = 'baseline' in candidate ? candidate.baseline : candidate.successor;
+          return version.workspaceVersionId === origin.targetWorkspaceVersionId;
+        });
+        const targetVersion = target
+          ? 'baseline' in target
+            ? target.baseline
+            : target.successor
+          : undefined;
+        if (
+          !targetVersion ||
+          targetVersion.repositoryId !== successor.repositoryId ||
+          targetVersion.workspaceId !== successor.workspaceId ||
+          targetVersion.workspaceEpochId !== successor.workspaceEpochId ||
+          targetVersion.treeOid !== successor.treeOid
+        ) {
+          throw new Error(
+            `Corrupt workspace history successor evidence: identity_conflict at ${accepted.acceptedEventId}`,
+          );
+        }
+        continue;
+      }
+      if (successor.protocol !== 'workspace_version_accepted_v1') {
+        throw new Error(`Unsupported workspace successor protocol at ${accepted.acceptedEventId}`);
+      }
       const operation = toolScan.operations.find(
         (candidate) => candidate.operationId === origin.operationId,
       );
@@ -1970,10 +2118,10 @@ export class SqliteRuntimeStore
       const response = operation?.responseEvent;
       const epoch = scan.baselines.find(
         (candidate) =>
-          candidate.epoch.workspaceId === accepted.successor.workspaceId &&
-          candidate.epoch.workspaceEpochId === accepted.successor.workspaceEpochId,
+          candidate.epoch.workspaceId === successor.workspaceId &&
+          candidate.epoch.workspaceEpochId === successor.workspaceEpochId,
       )?.epoch;
-      const baseHead = workspaceHeadBeforeSuccessor(scan, accepted.successor);
+      const baseHead = workspaceHeadBeforeSuccessor(scan, successor);
       if (
         !operation ||
         operation.issues.length > 0 ||
@@ -1986,7 +2134,7 @@ export class SqliteRuntimeStore
         !baseHead ||
         !managedMutationMatchesAcceptedSuccessor(
           dispatch.managedMutation,
-          accepted.successor,
+          successor,
           baseHead,
           epoch.workspaceInstanceId,
         ) ||
@@ -2013,7 +2161,11 @@ export class SqliteRuntimeStore
     authority: ReturnType<typeof scanWorkspaceBaselineAuthority>,
   ): ManagedMutationReservationProjectionRow[] {
     const acceptedOperations = new Set(
-      authority.successors.map((candidate) => candidate.successor.origin.operationId),
+      authority.successors.flatMap((candidate) =>
+        candidate.successor.origin.kind === 'tool_mutation'
+          ? [candidate.successor.origin.operationId]
+          : [],
+      ),
     );
     const reservations: ManagedMutationReservationProjectionRow[] = [];
     const occupied = new Set<string>();
@@ -2199,9 +2351,11 @@ export class SqliteRuntimeStore
           deleted_file_count,
           accepted_event_id,
           protocol_version,
-          committed_at
+          committed_at,
+          history_restore_id,
+          target_workspace_version_id
         ) VALUES (?, ?, ?, ?, ?, 'baseline', ?, '[]', NULL, NULL, NULL, NULL, NULL,
-          ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+          ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NULL, NULL)
       `)
       .run(
         baseline.workspaceVersionId,
@@ -2227,6 +2381,46 @@ export class SqliteRuntimeStore
     committedAt: number,
   ): void {
     const { successor } = accepted;
+    if (successor.origin.kind === 'history_restore') {
+      this.db
+        .prepare(`
+          INSERT INTO runtime_workspace_versions (
+            workspace_version_id, repository_id, workspace_id, workspace_epoch_id,
+            object_format, origin_kind, origin_event_id, parents_json,
+            operation_id, dispatch_event_id, outcome_event_id, base_head_revision,
+            execution_profile_digest, commit_oid, tree_oid, policy_hash,
+            tree_delta_digest, changed_paths_json, changed_file_count,
+            deleted_file_count, accepted_event_id, protocol_version, committed_at,
+            history_restore_id, target_workspace_version_id
+          ) VALUES (?, ?, ?, ?, ?, 'history_restore', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        `)
+        .run(
+          successor.workspaceVersionId,
+          successor.repositoryId,
+          successor.workspaceId,
+          successor.workspaceEpochId,
+          successor.objectFormat,
+          successor.origin.restoreId,
+          JSON.stringify(successor.parents),
+          successor.baseHeadRevision,
+          successor.executionProfileDigest,
+          successor.commitOid,
+          successor.treeOid,
+          successor.policyHash,
+          successor.treeDeltaDigest,
+          '[]',
+          successor.changedFileCount,
+          successor.deletedFileCount,
+          accepted.acceptedEventId,
+          committedAt,
+          successor.origin.restoreId,
+          successor.origin.targetWorkspaceVersionId,
+        );
+      return;
+    }
+    if (successor.protocol !== 'workspace_version_accepted_v1') {
+      throw new Error('Unsupported workspace successor projection protocol');
+    }
     this.db
       .prepare(`
         INSERT INTO runtime_workspace_versions (
@@ -2252,8 +2446,10 @@ export class SqliteRuntimeStore
           deleted_file_count,
           accepted_event_id,
           protocol_version,
-          committed_at
-        ) VALUES (?, ?, ?, ?, ?, 'tool_mutation', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+          committed_at,
+          history_restore_id,
+          target_workspace_version_id
+        ) VALUES (?, ?, ?, ?, ?, 'tool_mutation', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NULL, NULL)
       `)
       .run(
         successor.workspaceVersionId,
@@ -2373,7 +2569,9 @@ export class SqliteRuntimeStore
           deleted_file_count,
           accepted_event_id,
           protocol_version,
-          committed_at
+          committed_at,
+          history_restore_id,
+          target_workspace_version_id
         FROM runtime_workspace_versions
         ORDER BY workspace_version_id ASC
       `)
@@ -4486,6 +4684,8 @@ interface WorkspaceVersionProjectionRow {
   accepted_event_id: string;
   protocol_version: number;
   committed_at: number;
+  history_restore_id: string | null;
+  target_workspace_version_id: string | null;
 }
 
 interface WorkspaceHeadProjectionRow {
@@ -4640,6 +4840,8 @@ function workspaceBaselineVersionProjectionRow(
     accepted_event_id: record.acceptedEventId,
     protocol_version: 1,
     committed_at: record.committedAt,
+    history_restore_id: null,
+    target_workspace_version_id: null,
   };
 }
 
@@ -4647,6 +4849,38 @@ function workspaceSuccessorVersionProjectionRow(
   authority: ScannedWorkspaceSuccessorAuthority,
 ): WorkspaceVersionProjectionRow {
   const record = workspaceSuccessorVersionRecord(authority);
+  if (record.origin.kind === 'history_restore') {
+    return {
+      workspace_version_id: record.workspaceVersionId,
+      repository_id: record.repositoryId,
+      workspace_id: record.workspaceId,
+      workspace_epoch_id: record.workspaceEpochId,
+      object_format: record.objectFormat,
+      origin_kind: record.origin.kind,
+      origin_event_id: record.origin.restoreId,
+      parents_json: JSON.stringify(record.parents),
+      operation_id: null,
+      dispatch_event_id: null,
+      outcome_event_id: null,
+      base_head_revision: record.baseHeadRevision,
+      execution_profile_digest: record.executionProfileDigest,
+      commit_oid: record.commitOid,
+      tree_oid: record.treeOid,
+      policy_hash: record.policyHash,
+      tree_delta_digest: record.treeDeltaDigest,
+      changed_paths_json: '[]',
+      changed_file_count: record.changedFileCount,
+      deleted_file_count: record.deletedFileCount,
+      accepted_event_id: record.acceptedEventId,
+      protocol_version: 1,
+      committed_at: record.committedAt,
+      history_restore_id: record.origin.restoreId,
+      target_workspace_version_id: record.origin.targetWorkspaceVersionId,
+    };
+  }
+  if (record.protocol !== 'workspace_version_accepted_v1') {
+    throw new Error('Unsupported workspace successor projection protocol');
+  }
   return {
     workspace_version_id: record.workspaceVersionId,
     repository_id: record.repositoryId,
@@ -4671,6 +4905,8 @@ function workspaceSuccessorVersionProjectionRow(
     accepted_event_id: record.acceptedEventId,
     protocol_version: 1,
     committed_at: record.committedAt,
+    history_restore_id: null,
+    target_workspace_version_id: null,
   };
 }
 

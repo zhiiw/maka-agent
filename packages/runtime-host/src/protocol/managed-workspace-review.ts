@@ -80,7 +80,7 @@ export interface ManagedWorkspaceHistoryEntry {
   readonly treeOid: string;
   readonly acceptedEventId: string;
   readonly committedAt: number;
-  readonly kind: 'baseline' | 'tool_mutation';
+  readonly kind: 'baseline' | 'tool_mutation' | 'history_restore';
   readonly changedFileCount: number;
 }
 
@@ -430,7 +430,9 @@ function decodeHistoryEntry(value: unknown): ManagedWorkspaceHistoryEntry {
     record.acceptedEventId.length < 1 ||
     record.acceptedEventId.length > 256 ||
     !isCount(record.committedAt) ||
-    (record.kind !== 'baseline' && record.kind !== 'tool_mutation') ||
+    (record.kind !== 'baseline' &&
+      record.kind !== 'tool_mutation' &&
+      record.kind !== 'history_restore') ||
     !isCount(record.changedFileCount) ||
     (record.kind === 'baseline') !== (record.parentWorkspaceVersionId === null)
   ) {

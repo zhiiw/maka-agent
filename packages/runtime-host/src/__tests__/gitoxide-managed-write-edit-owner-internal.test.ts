@@ -40,6 +40,7 @@ import {
   createGitoxideManagedWriteEditOwnerInternal,
   GitoxideManagedWriteEditRecoveryError,
 } from '../server/gitoxide-managed-write-edit-owner-internal.js';
+import { createGitoxideManagedHistorySuccessorOwnerInternal } from '../server/gitoxide-managed-history-successor-owner-internal.js';
 import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
@@ -383,6 +384,80 @@ test('reopens after a process crash and promotes the exact durable Write success
   );
   assert.deepEqual(reopened.immutableBase, { content: 'after\n' });
   assert.equal(await owner.reconcileAcceptedProjection(), 'already_current');
+
+  const historyFixturePath = join(root, 'managed-history-crash-fixture.json');
+  await writeFile(
+    historyFixturePath,
+    `${JSON.stringify({
+      storageRoot: root,
+      repositoryPath,
+      helperPath: helper.helperPath,
+      repositoryId: ids.repositoryId,
+      workspaceId: ids.workspaceId,
+      workspaceEpochId: ids.workspaceEpochId,
+      targetWorkspaceVersionId: ids.workspaceVersionId,
+      restoreId: 'restore_after_crash',
+    })}\n`,
+    'utf8',
+  );
+  await reopenedStores.sessionStore.close?.();
+  await reopenedRootOwner.close();
+  const historyChild = spawn(
+    process.execPath,
+    [
+      join(import.meta.dirname, 'fixtures', 'gitoxide-managed-history-successor-crash-child.js'),
+      historyFixturePath,
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  const historyStderr: Buffer[] = [];
+  historyChild.stderr.on('data', (chunk: Buffer) => historyStderr.push(chunk));
+  const [historyExitCode] = (await once(historyChild, 'exit')) as [number | null];
+  assert.equal(historyExitCode, 74, Buffer.concat(historyStderr).toString('utf8'));
+  assert.equal(
+    gitBare(repositoryPath, ['rev-parse', 'refs/maka/accepted']),
+    reopened.durableDispatch.baseCommitOid,
+  );
+
+  const finalRootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const finalRootOwner = await tryAcquireInteractiveRootOwner(finalRootCapability);
+  assert.ok(finalRootOwner);
+  t.after(() => finalRootOwner.close());
+  const finalStores = await openInteractiveExecutionStoresForWrite(finalRootOwner.lease);
+  t.after(() => finalStores.sessionStore.close?.());
+  const historyOwner = createGitoxideManagedHistorySuccessorOwnerInternal({
+    stores: finalStores,
+    invocationOwnerToken: helper.invocationOwnerToken,
+    helperCapability: helper.helperCapability,
+    repositoryPath,
+    repositoryId: ids.repositoryId,
+    workspaceId: ids.workspaceId,
+    workspaceEpochId: ids.workspaceEpochId,
+  });
+  const restored = await historyOwner.restore({
+    restoreId: 'restore_after_crash',
+    targetWorkspaceVersionId: ids.workspaceVersionId,
+  });
+  assert.equal(restored.created, false);
+  assert.equal(restored.projection, 'promoted');
+  assert.equal(restored.head.revision, baseline.head.revision + 2);
+  assert.equal(restored.head.treeOid, baseline.head.treeOid);
+  assert.notEqual(restored.head.commitOid, baseline.head.commitOid);
+  assert.equal(
+    gitBare(repositoryPath, ['rev-parse', 'refs/maka/accepted']),
+    restored.head.commitOid,
+  );
+  assert.equal(
+    gitBare(repositoryPath, ['rev-parse', `${restored.head.commitOid}^`]),
+    reopened.durableDispatch.baseCommitOid,
+  );
+  const replayedRestore = await historyOwner.restore({
+    restoreId: 'restore_after_crash',
+    targetWorkspaceVersionId: ids.workspaceVersionId,
+  });
+  assert.equal(replayedRestore.created, false);
+  assert.equal(replayedRestore.projection, 'already_current');
+  assert.deepEqual(replayedRestore.head, restored.head);
 });
 
 async function admittedHelper(): Promise<
@@ -413,6 +488,8 @@ async function admittedHelper(): Promise<
       'import_source_head',
       'create_candidate',
       'promote_candidate',
+      'create_history_candidate',
+      'promote_history_candidate',
       'observe_accepted_ref',
       'read_tree_file',
       'list_tree_files',

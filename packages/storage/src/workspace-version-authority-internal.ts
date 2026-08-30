@@ -22,6 +22,7 @@ import type {
   WorkspaceBaselineCommitResult,
   WorkspaceEpochRecordV1,
   WorkspaceHeadRecordV1,
+  WorkspaceHistorySuccessorAuthorityInput,
   WorkspaceSuccessorAuthorityInput,
   WorkspaceVersionRecordV1,
 } from '@maka/core/workspace-version-authority';
@@ -57,6 +58,10 @@ export interface WorkspaceSuccessorCommitResult {
   committedSuccessor: WorkspaceHeadRecordV1;
   outcomeRuntimeEventSeq: number;
 }
+export interface WorkspaceHistorySuccessorCommitResult {
+  created: boolean;
+  committedSuccessor: WorkspaceHeadRecordV1;
+}
 export interface ManagedMutationTerminalCommitInput {
   /** Opaque capability issued after the mutation owner proves that no workspace effect occurred. */
   noEffectOutcome: object;
@@ -84,6 +89,10 @@ type WorkspaceSuccessorAuthorityWriter = (
   input: VerifiedWorkspaceSuccessorCommitInput,
   rootId: string,
 ) => Promise<WorkspaceSuccessorCommitResult>;
+type WorkspaceHistorySuccessorAuthorityWriter = (
+  input: WorkspaceHistorySuccessorAuthorityInput,
+  rootId: string,
+) => Promise<WorkspaceHistorySuccessorCommitResult>;
 type WorkspaceSuccessorCandidateVerifier = (
   candidateOutcome: object,
 ) => WorkspaceSuccessorAuthorityInput;
@@ -137,6 +146,7 @@ type WorkspaceContinuationBoundaryReader = (
 interface WorkspaceBaselineAuthorityRegistration {
   readonly writer: WorkspaceBaselineAuthorityWriter;
   readonly successorWriter: WorkspaceSuccessorAuthorityWriter;
+  readonly historySuccessorWriter: WorkspaceHistorySuccessorAuthorityWriter;
   candidateVerifier?: WorkspaceSuccessorCandidateVerifier;
   noEffectVerifier?: ManagedMutationNoEffectVerifier;
   readonly terminalWriter: ManagedMutationTerminalAuthorityWriter;
@@ -160,6 +170,7 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   store: object,
   writer: WorkspaceBaselineAuthorityWriter,
   successorWriter: WorkspaceSuccessorAuthorityWriter,
+  historySuccessorWriter: WorkspaceHistorySuccessorAuthorityWriter,
   terminalWriter: ManagedMutationTerminalAuthorityWriter,
   bindStorageRoot: WorkspaceStorageRootBinder,
   adoptStorageRoot: WorkspaceStorageRootAdopter,
@@ -176,6 +187,7 @@ export function registerWorkspaceBaselineAuthorityWriterInternal(
   workspaceBaselineAuthorityWriters.set(store, {
     writer,
     successorWriter,
+    historySuccessorWriter,
     terminalWriter,
     readEpoch,
     readHead,
@@ -307,6 +319,18 @@ export function commitVerifiedWorkspaceSuccessorInternal(
     throw new Error('Workspace successor authority store has no durable storage-root binding');
   }
   return registration.successorWriter(input, registration.boundRootId);
+}
+
+export function commitVerifiedWorkspaceHistorySuccessorInternal(
+  store: object,
+  input: WorkspaceHistorySuccessorAuthorityInput,
+): Promise<WorkspaceHistorySuccessorCommitResult> {
+  const registration = workspaceBaselineAuthorityWriters.get(store);
+  if (!registration) throw new Error('Workspace history successor authority writer is unavailable');
+  if (!registration.boundRootId) {
+    throw new Error('Workspace history successor store has no durable storage-root binding');
+  }
+  return registration.historySuccessorWriter(input, registration.boundRootId);
 }
 
 export function registerWorkspaceSuccessorCandidateVerifierInternal(
