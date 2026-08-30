@@ -33,6 +33,7 @@ import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storag
 import { commitExecutionStoresWorkspaceBaselineForTestInternal } from '@maka/storage/test-only/execution-stores-workspace-authority';
 import {
   admitGitoxideHelperArtifactInternal,
+  GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   type GitoxideHelperInvocationCapability,
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../server/gitoxide-helper-artifact-authority-internal.js';
@@ -483,22 +484,7 @@ async function admittedHelper(): Promise<
     platform: process.platform,
     arch: process.arch,
     protocolVersion: 1,
-    supportedOperations: [
-      'inspect_repository',
-      'import_source_head',
-      'create_candidate',
-      'promote_candidate',
-      'create_history_candidate',
-      'promote_history_candidate',
-      'observe_accepted_ref',
-      'read_tree_file',
-      'list_tree_files',
-      'grep_tree_files',
-      'compare_accepted_trees',
-      'materialize_accepted_tree',
-      'publish_accepted_ref',
-      'publish_accepted_tree_to_source_branch',
-    ],
+    supportedOperations: GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   });
   const helperCapability = await admitGitoxideHelperArtifactInternal({
     releaseOwnerToken,

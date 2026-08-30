@@ -1319,6 +1319,12 @@ fn import_filesystem_snapshot(
     {
         return Err("invalid_source_snapshot_root");
     }
+    let source_handle = source_path_handle(&source_root_path)?;
+    let source_confirmed =
+        fs::symlink_metadata(&source_root_path).map_err(|_| "source_file_observation_mismatch")?;
+    if !same_source_metadata(&source_metadata, &source_confirmed) {
+        return Err("source_file_observation_mismatch");
+    }
 
     let mut observed_stats = ManagedTreeStats::default();
     let observed_tree = write_filesystem_snapshot_tree(
@@ -1331,7 +1337,10 @@ fn import_filesystem_snapshot(
     )?;
     let source_after =
         fs::symlink_metadata(&source_root_path).map_err(|_| "source_file_observation_mismatch")?;
-    if !same_source_identity(&source_metadata, &source_after) {
+    let source_after_handle = source_path_handle(&source_root_path)?;
+    if source_handle != source_after_handle
+        || !same_source_metadata(&source_metadata, &source_after)
+    {
         return Err("source_file_observation_mismatch");
     }
     assert_import_destination_parent(&destination_repository_path)?;
@@ -1412,6 +1421,12 @@ fn write_filesystem_snapshot_tree(
     let before = fs::symlink_metadata(directory).map_err(|_| "source_file_observation_mismatch")?;
     if !before.is_dir() || before.file_type().is_symlink() || is_windows_reparse_point(&before) {
         return Err("unsupported_source_entry_kind");
+    }
+    let before_handle = source_path_handle(directory)?;
+    let before_confirmed =
+        fs::symlink_metadata(directory).map_err(|_| "source_file_observation_mismatch")?;
+    if !same_source_metadata(&before, &before_confirmed) {
+        return Err("source_file_observation_mismatch");
     }
     stats.enter_tree(depth, 0, policy)?;
     let mut entries = fs::read_dir(directory)
@@ -1498,7 +1513,8 @@ fn write_filesystem_snapshot_tree(
         }
     };
     let after = fs::symlink_metadata(directory).map_err(|_| "source_file_observation_mismatch")?;
-    if !same_source_identity(&before, &after) {
+    let after_handle = source_path_handle(directory)?;
+    if before_handle != after_handle || !same_source_metadata(&before, &after) {
         return Err("source_file_observation_mismatch");
     }
     Ok(tree_oid)
@@ -1512,13 +1528,16 @@ fn read_bounded_source_file(
     if before.len() > policy.max_file_bytes {
         return Err("source_file_limit_exceeded");
     }
+    let before_handle = source_path_handle(path)?;
     let mut file = open_source_file_no_follow(path)?;
+    let opened_handle = source_file_handle(&file)?;
     let opened = file
         .metadata()
         .map_err(|_| "source_file_observation_mismatch")?;
     if !opened.is_file()
         || is_windows_reparse_point(&opened)
-        || !same_source_identity(before, &opened)
+        || before_handle != opened_handle
+        || !same_source_metadata(before, &opened)
     {
         return Err("source_file_observation_mismatch");
     }
@@ -1534,8 +1553,10 @@ fn read_bounded_source_file(
         .metadata()
         .map_err(|_| "source_file_observation_mismatch")?;
     let path_after = fs::symlink_metadata(path).map_err(|_| "source_file_observation_mismatch")?;
-    if !same_source_identity(before, &opened_after)
-        || !same_source_identity(before, &path_after)
+    let path_after_handle = source_path_handle(path)?;
+    if before_handle != path_after_handle
+        || !same_source_metadata(before, &opened_after)
+        || !same_source_metadata(before, &path_after)
         || bytes.len() as u64 != before.len()
     {
         return Err("source_file_observation_mismatch");
@@ -1573,7 +1594,7 @@ fn open_source_file_no_follow(path: &Path) -> Result<File, &'static str> {
 }
 
 #[cfg(unix)]
-fn same_source_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+fn same_source_metadata(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     left.dev() == right.dev()
         && left.ino() == right.ino()
@@ -1584,18 +1605,28 @@ fn same_source_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 }
 
 #[cfg(windows)]
-fn same_source_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+fn same_source_metadata(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
-    left.volume_serial_number() == right.volume_serial_number()
-        && left.file_index() == right.file_index()
+    left.creation_time() == right.creation_time()
         && left.file_size() == right.file_size()
         && left.last_write_time() == right.last_write_time()
         && left.file_attributes() == right.file_attributes()
 }
 
 #[cfg(not(any(unix, windows)))]
-fn same_source_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+fn same_source_metadata(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.len() == right.len() && left.modified().ok() == right.modified().ok()
+}
+
+fn source_path_handle(path: &Path) -> Result<same_file::Handle, &'static str> {
+    same_file::Handle::from_path(path).map_err(|_| "source_file_observation_mismatch")
+}
+
+fn source_file_handle(file: &File) -> Result<same_file::Handle, &'static str> {
+    let cloned = file
+        .try_clone()
+        .map_err(|_| "source_file_observation_mismatch")?;
+    same_file::Handle::from_file(cloned).map_err(|_| "source_file_observation_mismatch")
 }
 
 #[cfg(unix)]

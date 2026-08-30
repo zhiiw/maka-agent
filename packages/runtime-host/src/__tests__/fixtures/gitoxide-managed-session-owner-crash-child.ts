@@ -18,7 +18,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
 import {
   discoverMarkedStorageRoot,
@@ -26,6 +28,7 @@ import {
 } from '@maka/storage/root-authority';
 import {
   admitGitoxideHelperArtifactInternal,
+  GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../../server/gitoxide-helper-artifact-authority-internal.js';
 import { openGitoxideManagedSessionOwnerInternal } from '../../server/gitoxide-managed-session-owner-internal.js';
@@ -37,6 +40,7 @@ interface Fixture {
   readonly helperPath: string;
   readonly mode?: 'after_repository_import' | 'after_active_epoch_commit';
   readonly rebaselineId?: string;
+  readonly rebaselineContent?: string;
 }
 
 const fixturePath = process.argv[2];
@@ -62,22 +66,7 @@ const helperCapability = await admitGitoxideHelperArtifactInternal({
     platform: process.platform,
     arch: process.arch,
     protocolVersion: 1,
-    supportedOperations: [
-      'inspect_repository',
-      'import_source_head',
-      'create_candidate',
-      'promote_candidate',
-      'observe_accepted_ref',
-      'read_tree_file',
-      'list_tree_files',
-      'grep_tree_files',
-      'compare_accepted_trees',
-      'materialize_accepted_tree',
-      'publish_accepted_ref',
-      'publish_accepted_tree_to_source_branch',
-      'create_history_candidate',
-      'promote_history_candidate',
-    ],
+    supportedOperations: GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   }),
 });
 const mode = fixture.mode ?? 'after_repository_import';
@@ -95,7 +84,23 @@ const session = await openGitoxideManagedSessionOwnerInternal({
   },
 });
 if (mode === 'after_active_epoch_commit') {
-  if (!fixture.rebaselineId) throw new Error('Crash fixture rebaseline id is unavailable');
+  if (!fixture.rebaselineId || fixture.rebaselineContent === undefined) {
+    throw new Error('Crash fixture rebaseline input is unavailable');
+  }
+  await writeFile(join(fixture.sourceRoot, 'notes.txt'), fixture.rebaselineContent, 'utf8');
+  execFileSync('git', ['-C', fixture.sourceRoot, 'add', 'notes.txt']);
+  execFileSync('git', [
+    '-C',
+    fixture.sourceRoot,
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=maka@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'epoch two',
+  ]);
   await session.rebaseline(fixture.rebaselineId);
 }
 throw new Error(`Crash fixture did not stop at ${mode}`);

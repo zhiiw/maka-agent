@@ -48,6 +48,7 @@ import {
   PROCESS_TIMEOUT_MS,
   withTimeout,
 } from './fixtures/execution-host-suite.js';
+import { GITOXIDE_HELPER_OPERATIONS_INTERNAL } from '../server/gitoxide-helper-artifact-authority-internal.js';
 
 const MODEL_ID = 'moonshot-managed-v2-fixture';
 const API_KEY = 'managed-v2-fixture-key';
@@ -336,17 +337,7 @@ async function preparePackagedResources(
       executableRelativePath: `gitoxide/${executableName}`,
       bytes: helperInfo.size,
       sha256: `sha256:${createHash('sha256').update(helperBytes).digest('hex')}`,
-      supportedOperations: [
-        'inspect_repository',
-        'import_source_head',
-        'import_filesystem_snapshot',
-        'create_candidate',
-        'promote_candidate',
-        'observe_accepted_ref',
-        'read_tree_file',
-        'list_tree_files',
-        'grep_tree_files',
-      ],
+      supportedOperations: GITOXIDE_HELPER_OPERATIONS_INTERNAL,
       distributionReady: true,
     })}\n`,
     'utf8',

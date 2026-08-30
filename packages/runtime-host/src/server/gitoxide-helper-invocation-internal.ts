@@ -50,6 +50,7 @@ export const GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL = Object.freeze({
 });
 const SHA1_OID_PATTERN = /^[0-9a-f]{40}$/;
 const MAKA_REF_PATTERN = /^refs\/maka\/[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
+const MAKA_SOURCE_BRANCH_REF_PATTERN = /^refs\/heads\/maka\/[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
 export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'internal_error_reason_invalid',
   'request_read_failed',
@@ -1406,8 +1407,7 @@ export async function publishAcceptedTreeToSourceBranchWithGitoxideHelperInterna
     !SHA1_OID_PATTERN.test(input.sourceBaseTreeOid) ||
     !SHA1_OID_PATTERN.test(input.acceptedCommitOid) ||
     !SHA1_OID_PATTERN.test(input.acceptedTreeOid) ||
-    !MAKA_REF_PATTERN.test(input.publishedRef) ||
-    !input.publishedRef.startsWith('refs/heads/maka/') ||
+    !MAKA_SOURCE_BRANCH_REF_PATTERN.test(input.publishedRef) ||
     input.managedTreePolicyVersion !== 3
   ) {
     throw invocationInvalid('Gitoxide source-branch publication request is invalid');
@@ -2710,8 +2710,7 @@ function isSourceBranchPublished(value: unknown): value is GitoxideSourceBranchP
     isSha1(value.acceptedTreeOid) &&
     isSha1(value.publishedCommitOid) &&
     typeof value.publishedRef === 'string' &&
-    MAKA_REF_PATTERN.test(value.publishedRef) &&
-    value.publishedRef.startsWith('refs/heads/maka/') &&
+    MAKA_SOURCE_BRANCH_REF_PATTERN.test(value.publishedRef) &&
     typeof value.replayed === 'boolean' &&
     value.managedTreePolicyVersion === 3
   );

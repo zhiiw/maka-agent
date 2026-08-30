@@ -29,6 +29,7 @@ import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import {
   admitGitoxideHelperArtifactInternal,
+  GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   type GitoxideHelperInvocationCapability,
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../server/gitoxide-helper-artifact-authority-internal.js';
@@ -551,9 +552,6 @@ test('reopens the activated epoch after the rebaseline response process exits', 
   await initialStores.sessionStore.close?.();
   await initialRootOwner.close();
 
-  await writeFile(join(sourceRoot, 'notes.txt'), 'epoch two\n', 'utf8');
-  git(sourceRoot, ['add', 'notes.txt']);
-  commit(sourceRoot, 'epoch two');
   const fixturePath = join(root, 'managed-rebaseline-crash-fixture.json');
   await writeFile(
     fixturePath,
@@ -564,6 +562,7 @@ test('reopens the activated epoch after the rebaseline response process exits', 
       helperPath: helper.helperPath,
       mode: 'after_active_epoch_commit',
       rebaselineId: 'source-head-2',
+      rebaselineContent: 'epoch two\n',
     })}\n`,
     'utf8',
   );
@@ -728,22 +727,7 @@ async function admittedHelper(): Promise<
     platform: process.platform,
     arch: process.arch,
     protocolVersion: 1,
-    supportedOperations: [
-      'inspect_repository',
-      'import_source_head',
-      'create_candidate',
-      'promote_candidate',
-      'create_history_candidate',
-      'promote_history_candidate',
-      'observe_accepted_ref',
-      'read_tree_file',
-      'list_tree_files',
-      'grep_tree_files',
-      'compare_accepted_trees',
-      'materialize_accepted_tree',
-      'publish_accepted_ref',
-      'publish_accepted_tree_to_source_branch',
-    ],
+    supportedOperations: GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   });
   return {
     invocationOwnerToken,
