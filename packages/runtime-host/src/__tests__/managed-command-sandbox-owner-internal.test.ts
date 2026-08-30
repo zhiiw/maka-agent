@@ -117,6 +117,11 @@ test('runs one bounded file observation through an enforcing sandbox plan', asyn
     'restricted',
   );
   assert.equal(transformedRequest?.command.env?.PATH, '');
+  if (process.platform === 'win32') {
+    assert.equal(transformedRequest?.command.env?.SystemRoot, process.env.SystemRoot);
+    assert.equal(transformedRequest?.command.env?.SystemDrive, process.env.SystemDrive);
+    assert.equal(transformedRequest?.command.env?.LOCALAPPDATA, process.env.LOCALAPPDATA);
+  }
   assert.equal(dirname(transformedRequest?.command.program ?? ''), dirname(executablePath));
 });
 

@@ -238,6 +238,14 @@ function hermeticEnvironment(scratchRoot: string): Readonly<Record<string, strin
     NODE_OPTIONS: '',
     NO_COLOR: '1',
     CI: '1',
+    ...(process.platform === 'win32'
+      ? Object.fromEntries(
+          (['SystemRoot', 'SystemDrive', 'LOCALAPPDATA'] as const).flatMap((name) => {
+            const value = process.env[name];
+            return value ? [[name, value] as const] : [];
+          }),
+        )
+      : {}),
   });
 }
 
