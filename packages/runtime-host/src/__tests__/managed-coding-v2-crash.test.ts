@@ -101,8 +101,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
       runtimeExecutablePath: electronExecutable,
     });
     const firstClient = await connectClient(root);
-    const start = firstClient
-      .request('hosted.execution.start', {
+    const startRequest = firstClient.request('hosted.execution.start', {
         executionId,
         session: {
           workspace: { kind: 'host_path', path: root },
@@ -118,12 +117,24 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
           toolProfile: 'managed-coding-v2',
         },
         content: { text: 'Run managed.test.mjs and report the result.' },
-      })
-      .then(
-        () => undefined,
-        () => undefined,
-      );
-    const completedToolResult = await provider.waitForCompletedToolResult().catch((error) => {
+      });
+    const start = startRequest.then(
+      () => undefined,
+      () => undefined,
+    );
+    const completedToolResult = await Promise.race([
+      provider.waitForCompletedToolResult(),
+      startRequest.then(
+        () => Promise.reject(new Error('hosted execution completed before the Node test result')),
+        (error: unknown) =>
+          Promise.reject(
+            new Error(
+              `hosted execution failed before the Node test result: ${error instanceof Error ? error.message : String(error)}`,
+              { cause: error },
+            ),
+          ),
+      ),
+    ]).catch((error) => {
       throw new Error(
         `${error instanceof Error ? error.message : String(error)}; durable snapshot: ${readDurableExecutionSnapshot(root, executionId)}`,
         { cause: error },
