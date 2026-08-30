@@ -1,0 +1,218 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+import { lstat, realpath } from 'node:fs/promises';
+import { dirname } from 'node:path';
+import type { PermissionProfileManaged } from '@maka/core/permission-profile';
+import {
+  runFilesystemWorkerProcess,
+  type FilesystemWorkerProcessRunner,
+} from '@maka/runtime/filesystem-worker/process-runner';
+import type { SandboxManager } from '@maka/runtime/sandbox';
+import {
+  verifyManagedToolchainForInvocationInternal,
+  type ManagedToolchainInvocationCapabilityInternal,
+} from './managed-toolchain-artifact-authority-internal.js';
+
+const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
+const PORTABLE_PATH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/u;
+
+export interface ManagedFileObservationInternal {
+  readonly protocolVersion: 1;
+  readonly kind: 'file_observation';
+  readonly relativePath: string;
+  readonly bytes: number;
+  readonly sha256: `sha256:${string}`;
+}
+
+export interface ManagedCommandSandboxOwnerInternal {
+  inspectFile(
+    input: ManagedCommandInspectFileInputInternal,
+  ): Promise<ManagedFileObservationInternal>;
+}
+
+export interface ManagedCommandInspectFileInputInternal {
+  readonly relativePath: string;
+  readonly inputRoot: string;
+  readonly scratchRoot: string;
+  readonly abortSignal?: AbortSignal;
+}
+
+export function createManagedCommandSandboxOwnerInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly toolchainCapability: ManagedToolchainInvocationCapabilityInternal;
+  readonly sandboxManager: Pick<SandboxManager, 'transform'>;
+  readonly runProcess?: FilesystemWorkerProcessRunner;
+}): ManagedCommandSandboxOwnerInternal {
+  const runProcess = input.runProcess ?? runFilesystemWorkerProcess;
+  return Object.freeze({
+    async inspectFile(request: ManagedCommandInspectFileInputInternal) {
+      if (!isPortableRelativePath(request.relativePath)) {
+        throw new Error('Managed command observation path is invalid');
+      }
+      request.abortSignal?.throwIfAborted();
+      const [inputRoot, scratchRoot] = await Promise.all([
+        requireRealDirectory(request.inputRoot, 'input'),
+        requireRealDirectory(request.scratchRoot, 'scratch'),
+      ]);
+      if (inputRoot === scratchRoot) {
+        throw new Error('Managed command input and scratch roots must be distinct');
+      }
+      const toolchain = await verifyManagedToolchainForInvocationInternal(
+        input.invocationOwnerToken,
+        input.toolchainCapability,
+        'hermetic_observation_v1',
+      );
+      request.abortSignal?.throwIfAborted();
+      const profile = hermeticObservationProfile(inputRoot, scratchRoot);
+      const transformed = input.sandboxManager.transform({
+        preference: 'require',
+        command: {
+          program: toolchain.executablePath,
+          args: [
+            '--permission',
+            `--allow-fs-read=${inputRoot}`,
+            `--allow-fs-write=${scratchRoot}`,
+            toolchain.entrypointPath,
+          ],
+          cwd: inputRoot,
+          env: hermeticEnvironment(scratchRoot),
+          profile,
+          pathContext: {
+            workspaceRoots: [inputRoot, scratchRoot],
+            runtimeReadableRoots: [dirname(toolchain.entrypointPath)],
+            executableRoots: [dirname(toolchain.executablePath)],
+            runtimeWritableRoots: [scratchRoot],
+          },
+        },
+      });
+      if (!transformed.ok || !transformed.requiresSandbox || transformed.sandboxType === 'none') {
+        throw new Error('Managed command sandbox profile is unavailable');
+      }
+      const result = await runProcess({
+        argv: transformed.exec.argv,
+        cwd: transformed.exec.cwd,
+        env: transformed.exec.env ?? {},
+        stdin: `${JSON.stringify({
+          protocolVersion: 1,
+          operation: 'inspect_file_v1',
+          relativePath: request.relativePath,
+        })}\n`,
+        timeoutMs: 30_000,
+        maxResponseBytes: 64 * 1024,
+        maxStderrBytes: 64 * 1024,
+        ...(transformed.exec.fdInputs ? { fdInputs: transformed.exec.fdInputs } : {}),
+        ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
+      });
+      if (
+        result.timedOut ||
+        result.aborted ||
+        result.responseOverflow ||
+        result.exitCode !== 0 ||
+        !result.dispatched
+      ) {
+        throw new Error('Managed command execution did not complete safely');
+      }
+      return decodeObservation(result.stdout, request.relativePath, toolchain.nodeVersion);
+    },
+  });
+}
+
+function hermeticObservationProfile(
+  inputRoot: string,
+  scratchRoot: string,
+): PermissionProfileManaged {
+  return {
+    type: 'managed',
+    name: 'managed-hermetic-observation-v1',
+    fileSystem: {
+      kind: 'restricted',
+      entries: [
+        { kind: 'path', access: 'read', path: inputRoot, match: 'subtree' },
+        { kind: 'path', access: 'write', path: scratchRoot, match: 'subtree' },
+      ],
+      protectedMetadata: { access: 'deny_write', names: ['.git', '.agents', '.codex'] },
+    },
+    network: { kind: 'restricted' },
+  };
+}
+
+function hermeticEnvironment(scratchRoot: string): Readonly<Record<string, string>> {
+  return Object.freeze({
+    ELECTRON_RUN_AS_NODE: '1',
+    HOME: scratchRoot,
+    USERPROFILE: scratchRoot,
+    TMP: scratchRoot,
+    TEMP: scratchRoot,
+    PATH: '',
+    NODE_OPTIONS: '',
+    NO_COLOR: '1',
+    CI: '1',
+  });
+}
+
+async function requireRealDirectory(path: string, label: string): Promise<string> {
+  const canonical = await realpath(path);
+  const info = await lstat(canonical);
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`Managed command ${label} root is invalid`);
+  }
+  return canonical;
+}
+
+function isPortableRelativePath(value: string): boolean {
+  return (
+    value.length > 0 &&
+    Buffer.byteLength(value, 'utf8') <= 4096 &&
+    !value.includes('\\') &&
+    value.split('/').every((segment) => PORTABLE_PATH_SEGMENT.test(segment) && segment !== '..')
+  );
+}
+
+function decodeObservation(
+  raw: string,
+  relativePath: string,
+  nodeVersion: string,
+): ManagedFileObservationInternal {
+  const value = JSON.parse(raw) as Record<string, unknown>;
+  if (
+    Object.keys(value).sort().join('\0') !==
+      ['bytes', 'kind', 'nodeVersion', 'protocolVersion', 'relativePath', 'sha256']
+        .sort()
+        .join('\0') ||
+    value.protocolVersion !== 1 ||
+    value.kind !== 'file_observation' ||
+    value.nodeVersion !== nodeVersion ||
+    value.relativePath !== relativePath ||
+    !Number.isSafeInteger(value.bytes) ||
+    (value.bytes as number) < 0 ||
+    (value.bytes as number) > 16 * 1024 * 1024 ||
+    typeof value.sha256 !== 'string' ||
+    !SHA256_PATTERN.test(value.sha256)
+  ) {
+    throw new Error('Managed command response is invalid');
+  }
+  return Object.freeze({
+    protocolVersion: 1 as const,
+    kind: 'file_observation' as const,
+    relativePath,
+    bytes: value.bytes as number,
+    sha256: value.sha256 as `sha256:${string}`,
+  });
+}
