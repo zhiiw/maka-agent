@@ -101,6 +101,23 @@ export interface ManagedWorkspaceHistoricalRestoreResult extends ManagedWorkspac
   readonly workspaceVersionId: string;
 }
 
+export interface ManagedWorkspaceHistoryUndoInput {
+  readonly sessionId: string;
+  readonly workspaceVersionId: string;
+  readonly restoreId: string;
+}
+
+export interface ManagedWorkspaceHistoryUndoResult {
+  readonly kind: 'accepted_history_successor';
+  readonly restoreId: string;
+  readonly targetWorkspaceVersionId: string;
+  readonly workspaceVersionId: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly revision: number;
+  readonly created: boolean;
+}
+
 const QUERY_ERRORS = [
   'host_not_ready',
   'host_draining',
@@ -257,6 +274,44 @@ export const MANAGED_WORKSPACE_REVIEW_OPERATION_SPECS = {
       }
     },
   }),
+  'managed-workspace.history.undo.mutate': defineOperation<
+    ManagedWorkspaceHistoryUndoInput,
+    ManagedWorkspaceHistoryUndoResult,
+    (typeof QUERY_ERRORS)[number]
+  >({
+    mode: 'command',
+    availability: 'ready',
+    errors: QUERY_ERRORS,
+    decodeInput(value) {
+      const record = requireExactRecord(value, 'managed workspace history undo', [
+        'sessionId',
+        'workspaceVersionId',
+        'restoreId',
+      ]);
+      const workspaceVersionId = requireEntityId(
+        record.workspaceVersionId,
+        'managed history undo workspace version id',
+      );
+      const restoreId = requireEntityId(record.restoreId, 'managed history undo id');
+      if (!VERSION_ID_PATTERN.test(workspaceVersionId) || !RESTORE_ID_PATTERN.test(restoreId)) {
+        throw invalidProtocolFrame('Invalid managed history undo identity');
+      }
+      return {
+        sessionId: requireEntityId(record.sessionId, 'managed history undo Session id'),
+        workspaceVersionId,
+        restoreId,
+      };
+    },
+    decodeOutput: decodeManagedWorkspaceHistoryUndoResult,
+    assertOutputForInput(input, output) {
+      if (
+        output.restoreId !== input.restoreId ||
+        output.targetWorkspaceVersionId !== input.workspaceVersionId
+      ) {
+        throw invalidProtocolFrame('Managed history undo conflicts with its request');
+      }
+    },
+  }),
 } as const;
 
 export function decodeManagedWorkspacePublishResult(value: unknown): ManagedWorkspacePublishResult {
@@ -359,6 +414,50 @@ export function decodeManagedWorkspaceHistoricalRestoreResult(
     throw invalidProtocolFrame('Invalid managed historical restore result');
   }
   return { ...restored, workspaceVersionId: record.workspaceVersionId };
+}
+
+export function decodeManagedWorkspaceHistoryUndoResult(
+  value: unknown,
+): ManagedWorkspaceHistoryUndoResult {
+  const record = requireExactRecord(value, 'managed workspace history successor', [
+    'kind',
+    'restoreId',
+    'targetWorkspaceVersionId',
+    'workspaceVersionId',
+    'acceptedCommitOid',
+    'acceptedTreeOid',
+    'revision',
+    'created',
+  ]);
+  if (
+    record.kind !== 'accepted_history_successor' ||
+    typeof record.restoreId !== 'string' ||
+    !RESTORE_ID_PATTERN.test(record.restoreId) ||
+    typeof record.targetWorkspaceVersionId !== 'string' ||
+    !VERSION_ID_PATTERN.test(record.targetWorkspaceVersionId) ||
+    typeof record.workspaceVersionId !== 'string' ||
+    !VERSION_ID_PATTERN.test(record.workspaceVersionId) ||
+    record.workspaceVersionId === record.targetWorkspaceVersionId ||
+    typeof record.acceptedCommitOid !== 'string' ||
+    !SHA1_PATTERN.test(record.acceptedCommitOid) ||
+    typeof record.acceptedTreeOid !== 'string' ||
+    !SHA1_PATTERN.test(record.acceptedTreeOid) ||
+    !Number.isSafeInteger(record.revision) ||
+    (record.revision as number) < 1 ||
+    typeof record.created !== 'boolean'
+  ) {
+    throw invalidProtocolFrame('Invalid managed workspace history successor');
+  }
+  return {
+    kind: 'accepted_history_successor',
+    restoreId: record.restoreId,
+    targetWorkspaceVersionId: record.targetWorkspaceVersionId,
+    workspaceVersionId: record.workspaceVersionId,
+    acceptedCommitOid: record.acceptedCommitOid,
+    acceptedTreeOid: record.acceptedTreeOid,
+    revision: record.revision as number,
+    created: record.created,
+  };
 }
 
 export function decodeManagedWorkspaceHistoryResult(value: unknown): ManagedWorkspaceHistoryResult {

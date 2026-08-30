@@ -55,6 +55,7 @@ export function createDesktopWorkbarServices(
       restore: (input) => bridge.gitReview.restore(input),
       history: (input) => bridge.gitReview.history(input),
       restoreVersion: (input) => bridge.gitReview.restoreVersion(input),
+      undoVersion: (input) => bridge.gitReview.undoVersion(input),
       subscribeSessionEvents: (sessionId, handler) =>
         bridge.sessions.subscribeEvents(sessionId, handler),
     },

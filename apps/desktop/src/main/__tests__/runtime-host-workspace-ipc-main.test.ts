@@ -104,6 +104,9 @@ test('ordinary Review keeps reading the attached checkout', async (t) => {
       async restoreManagedWorkspaceVersion() {
         throw new Error('not used');
       },
+      async undoManagedWorkspaceVersion() {
+        throw new Error('not used');
+      },
     },
   });
 
@@ -138,6 +141,9 @@ test('managed Review fails closed instead of reading the attached checkout', asy
         throw new Error('not used');
       },
       async restoreManagedWorkspaceVersion() {
+        throw new Error('not used');
+      },
+      async undoManagedWorkspaceVersion() {
         throw new Error('not used');
       },
     },
@@ -258,6 +264,9 @@ test('managed workspace Restore delegates one isolated accepted snapshot to Runt
       async restoreManagedWorkspaceVersion() {
         throw new Error('not used');
       },
+      async undoManagedWorkspaceVersion() {
+        throw new Error('not used');
+      },
     },
   });
 
@@ -300,6 +309,9 @@ test('ordinary workspace cannot enter managed isolated Restore', async () => {
       async restoreManagedWorkspaceVersion() {
         throw new Error('not used');
       },
+      async undoManagedWorkspaceVersion() {
+        throw new Error('not used');
+      },
     },
   });
 
@@ -312,7 +324,7 @@ test('ordinary workspace cannot enter managed isolated Restore', async () => {
   );
 });
 
-test('managed workspace History and historical Restore stay bound to the same session', async () => {
+test('managed workspace History, isolated Restore, and Undo stay bound to the same session', async () => {
   const ipc = ipcHarness();
   const workspaceVersionId = `version_${'1'.repeat(32)}`;
   registerRuntimeHostWorkspaceIpc({
@@ -361,6 +373,25 @@ test('managed workspace History and historical Restore stay bound to the same se
           bytesMaterialized: 12,
         };
       },
+      async undoManagedWorkspaceVersion(
+        sessionId: string,
+        selectedVersionId: string,
+        restoreId: string,
+      ) {
+        assert.equal(sessionId, 'session-managed');
+        assert.equal(selectedVersionId, workspaceVersionId);
+        assert.equal(restoreId, 'desktop-undo-1');
+        return {
+          kind: 'accepted_history_successor' as const,
+          restoreId,
+          targetWorkspaceVersionId: selectedVersionId,
+          workspaceVersionId: `version_${'2'.repeat(32)}`,
+          acceptedCommitOid: '2'.repeat(40),
+          acceptedTreeOid: '1'.repeat(40),
+          revision: 2,
+          created: true,
+        };
+      },
     } as never,
   });
 
@@ -375,6 +406,12 @@ test('managed workspace History and historical Restore stay bound to the same se
     restoreId: 'desktop-history-1',
   });
   assert.equal((restored as { workspaceVersionId: string }).workspaceVersionId, workspaceVersionId);
+  const undone = await ipc.invoke('managed-workspace:undo-version', {
+    sessionId: 'session-managed',
+    workspaceVersionId,
+    restoreId: 'desktop-undo-1',
+  });
+  assert.equal((undone as { targetWorkspaceVersionId: string }).targetWorkspaceVersionId, workspaceVersionId);
 });
 
 function sessionProjection(

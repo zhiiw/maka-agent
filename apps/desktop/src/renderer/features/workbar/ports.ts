@@ -48,6 +48,7 @@ import type {
   ContextDiagnosticsResult,
   ManagedWorkspaceHistoricalRestoreResult,
   ManagedWorkspaceHistoryResult,
+  ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspacePublishResult,
   ManagedWorkspaceRestoreResult,
 } from '@maka/runtime-host/protocol';
@@ -86,6 +87,11 @@ export interface WorkbarReviewService {
     workspaceVersionId: string;
     restoreId: string;
   }): Promise<ManagedWorkspaceHistoricalRestoreResult>;
+  undoVersion(input: {
+    sessionId: string;
+    workspaceVersionId: string;
+    restoreId: string;
+  }): Promise<ManagedWorkspaceHistoryUndoResult>;
   subscribeSessionEvents(
     sessionId: string,
     handler: (event: SessionEvent) => void,

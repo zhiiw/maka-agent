@@ -24,6 +24,7 @@ import type {
   ManagedWorkspacePublishInput,
   ManagedWorkspaceHistoricalRestoreInput,
   ManagedWorkspaceHistoryInput,
+  ManagedWorkspaceHistoryUndoInput,
   ManagedWorkspaceReviewQueryInput,
   ManagedWorkspaceRestoreInput,
   OperationOutcome,
@@ -39,6 +40,7 @@ export class HostManagedWorkspaceReviewCoordinator {
     'managed-workspace.restore.mutate': (input) => this.#restore(input),
     'managed-workspace.history.query': (input) => this.#history(input),
     'managed-workspace.history.restore.mutate': (input) => this.#restoreHistory(input),
+    'managed-workspace.history.undo.mutate': (input) => this.#undoHistory(input),
   };
 
   constructor(
@@ -236,6 +238,50 @@ export class HostManagedWorkspaceReviewCoordinator {
         return failure('not_found', 'Session was not found');
       }
       return failure('persistence_failed', 'Managed workspace historical Restore is unavailable');
+    }
+  }
+
+  async #undoHistory(
+    input: ManagedWorkspaceHistoryUndoInput,
+  ): Promise<OperationOutcome<'managed-workspace.history.undo.mutate'>> {
+    if (!this.input.helperCapability) {
+      return failure('operation_unavailable', 'Managed workspace Undo is unavailable');
+    }
+    try {
+      const header = await this.input.stores.sessionStore.readHeaderSnapshot(input.sessionId);
+      if (header.toolProfile !== 'managed-coding-v1') {
+        return failure('invalid_request', 'Session does not own a managed workspace');
+      }
+      const session = await openGitoxideManagedSessionOwnerInternal({
+        storageRootLease: this.input.storageRootLease,
+        stores: this.input.stores,
+        invocationOwnerToken: this.input.invocationOwnerToken,
+        helperCapability: this.input.helperCapability,
+        sourceRoot: header.cwd,
+        sessionId: input.sessionId,
+      });
+      const restored = await session.historySuccessor.restore({
+        restoreId: input.restoreId,
+        targetWorkspaceVersionId: input.workspaceVersionId,
+      });
+      return {
+        ok: true,
+        result: {
+          kind: 'accepted_history_successor',
+          restoreId: input.restoreId,
+          targetWorkspaceVersionId: input.workspaceVersionId,
+          workspaceVersionId: restored.head.workspaceVersionId,
+          acceptedCommitOid: restored.head.commitOid,
+          acceptedTreeOid: restored.head.treeOid,
+          revision: restored.head.revision,
+          created: restored.created,
+        },
+      };
+    } catch (error) {
+      if (isSessionNotFoundError(error)) {
+        return failure('not_found', 'Session was not found');
+      }
+      return failure('persistence_failed', 'Managed workspace Undo is unavailable');
     }
   }
 }

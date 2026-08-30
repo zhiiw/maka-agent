@@ -184,6 +184,10 @@ export interface DesktopConversationCopy {
     historyBaseline: string;
     historyMutation(files: number): string;
     historyRestore: string;
+    historyUndo: string;
+    historyUndoing: string;
+    historyUndoFailed: string;
+    historyUndone: string;
     historyLoadFailed: string;
     historyRestoreFailed: string;
     historyRestoredDetail(path: string, files: number): string;
@@ -568,6 +572,10 @@ const COPY = {
       historyBaseline: '初始基线',
       historyMutation: (files) => `修改了 ${files} 个文件`,
       historyRestore: '恢复这个版本',
+      historyUndo: '设为新的当前版本',
+      historyUndoing: '正在创建新版本',
+      historyUndoFailed: '无法从这个历史版本创建新版本',
+      historyUndone: '已创建新的 accepted 版本；原历史仍然保留',
       historyLoadFailed: '无法读取 accepted 历史',
       historyRestoreFailed: '无法恢复历史版本',
       historyRestoredDetail: (path, files) => `已在 ${path} 恢复历史版本（${files} 个文件）`,
@@ -821,6 +829,10 @@ const COPY = {
       historyBaseline: 'Initial baseline',
       historyMutation: (files) => `${files} changed file${files === 1 ? '' : 's'}`,
       historyRestore: 'Restore this version',
+      historyUndo: 'Make current as a new version',
+      historyUndoing: 'Creating new version',
+      historyUndoFailed: 'Could not create a new version from this history entry',
+      historyUndone: 'Created a new accepted version; the original history is preserved',
       historyLoadFailed: 'Could not read accepted history',
       historyRestoreFailed: 'Could not restore the historical version',
       historyRestoredDetail: (path, files) =>

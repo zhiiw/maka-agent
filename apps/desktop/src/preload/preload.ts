@@ -190,6 +190,7 @@ import type {
   ContextDiagnosticsResult,
   ManagedWorkspaceHistoricalRestoreResult,
   ManagedWorkspaceHistoryResult,
+  ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspacePublishResult,
   ManagedWorkspaceRestoreResult,
 } from '@maka/runtime-host/protocol';
@@ -2537,6 +2538,13 @@ const makaBridge = {
       restoreId: string;
     }): Promise<ManagedWorkspaceHistoricalRestoreResult> {
       return invokeSessionInput('managed-workspace:restore-version', input);
+    },
+    undoVersion(input: {
+      sessionId: string;
+      workspaceVersionId: string;
+      restoreId: string;
+    }): Promise<ManagedWorkspaceHistoryUndoResult> {
+      return invokeSessionInput('managed-workspace:undo-version', input);
     },
   },
   goal: {

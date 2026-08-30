@@ -120,6 +120,11 @@ describe('createDesktopWorkbarServices', () => {
       workspaceVersionId: `version_${'1'.repeat(32)}`,
       restoreId: 'desktop-history-1',
     });
+    await services.review.undoVersion({
+      sessionId: 's',
+      workspaceVersionId: `version_${'1'.repeat(32)}`,
+      restoreId: 'desktop-undo-1',
+    });
     services.review.subscribeSessionEvents('s', eventHandler)();
 
     await services.terminal.start('s');
@@ -198,6 +203,7 @@ describe('createDesktopWorkbarServices', () => {
         'gitReview.restore',
         'gitReview.history',
         'gitReview.restoreVersion',
+        'gitReview.undoVersion',
         'sessions.subscribeEvents',
         'shellRuns.start',
         'shellRuns.stop',
