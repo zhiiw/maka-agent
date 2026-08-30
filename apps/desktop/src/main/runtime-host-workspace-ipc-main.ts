@@ -33,6 +33,7 @@ type WorkspaceClient = Pick<
   | 'publishManagedWorkspaceSnapshot'
   | 'publishManagedWorkspaceSourceBranch'
   | 'restoreManagedWorkspaceSnapshot'
+  | 'maintainManagedWorkspace'
   | 'readManagedWorkspaceHistory'
   | 'restoreManagedWorkspaceVersion'
   | 'undoManagedWorkspaceVersion'
@@ -90,6 +91,12 @@ export function registerRuntimeHostWorkspaceIpc(
     return input.client.restoreManagedWorkspaceSnapshot(request.sessionId, request.restoreId);
   });
 
+  input.ipcMain.handle('managed-workspace:maintain', async (_event, raw: unknown) => {
+    const request = maintenanceRequest(raw);
+    await requireManagedSession(input.client, request.sessionId);
+    return input.client.maintainManagedWorkspace(request.sessionId);
+  });
+
   input.ipcMain.handle('managed-workspace:history', async (_event, raw: unknown) => {
     const request = historyRequest(raw);
     await requireManagedSession(input.client, request.sessionId);
@@ -133,6 +140,11 @@ function publishRequest(value: unknown): { sessionId: string; publishId: string 
     sessionId: requiredString(record.sessionId, 'Session id'),
     publishId,
   };
+}
+
+function maintenanceRequest(value: unknown): { sessionId: string } {
+  const record = requiredRecord(value, 'managed workspace maintenance');
+  return { sessionId: requiredString(record.sessionId, 'Session id') };
 }
 
 function rebaselineRequest(value: unknown): { sessionId: string; rebaselineId: string } {

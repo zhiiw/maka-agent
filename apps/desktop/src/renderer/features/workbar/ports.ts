@@ -50,6 +50,7 @@ import type {
   ManagedWorkspaceHistoryResult,
   ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspacePublishResult,
+  ManagedWorkspaceMaintenanceResult,
   ManagedWorkspaceSourceBranchPublishResult,
   ManagedWorkspaceRestoreResult,
   ManagedWorkspaceRebaselineResult,
@@ -80,6 +81,7 @@ export interface WorkbarReviewService {
     sessionId: string;
     publishId: string;
   }): Promise<ManagedWorkspaceSourceBranchPublishResult>;
+  maintain(input: { sessionId: string }): Promise<ManagedWorkspaceMaintenanceResult>;
   restore(input: {
     sessionId: string;
     restoreId: string;

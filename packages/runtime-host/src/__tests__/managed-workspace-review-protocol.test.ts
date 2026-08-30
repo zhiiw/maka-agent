@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   decodeManagedWorkspacePublishResult,
+  decodeManagedWorkspaceMaintenanceResult,
   decodeManagedWorkspaceSourceBranchPublishResult,
   decodeManagedWorkspaceHistoryResult,
   decodeManagedWorkspaceHistoryUndoResult,
@@ -28,6 +29,29 @@ import {
   decodeManagedWorkspaceRebaselineResult,
   decodeManagedWorkspaceRestoreResult,
 } from '../protocol/managed-workspace-review.js';
+
+test('managed maintenance decodes one bounded restore-orphan collection result', () => {
+  const result = {
+    kind: 'managed_workspace_maintenance_completed',
+    scope: 'restore_orphans_v1',
+    collected: 3,
+    retained: 5,
+  } as const;
+  assert.deepEqual(decodeManagedWorkspaceMaintenanceResult(result), result);
+});
+
+test('managed maintenance rejects counters outside its bounded inventory', () => {
+  assert.throws(
+    () =>
+      decodeManagedWorkspaceMaintenanceResult({
+        kind: 'managed_workspace_maintenance_completed',
+        scope: 'restore_orphans_v1',
+        collected: 257,
+        retained: 0,
+      }),
+    /maintenance result/u,
+  );
+});
 
 test('managed source branch Publish decodes one exact source-repository receipt', () => {
   const result = {

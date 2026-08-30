@@ -54,6 +54,7 @@ import type { UserQuestionResponse } from '@maka/core/user-question';
 import type { RuntimeHostProfileKind } from '@maka/runtime-host/profile-kind';
 import type {
   ManagedWorkspacePublishResult,
+  ManagedWorkspaceMaintenanceResult,
   ManagedWorkspaceSourceBranchPublishResult,
   ManagedWorkspaceHistoricalRestoreResult,
   ManagedWorkspaceHistoryResult,
@@ -1295,6 +1296,7 @@ export interface MakaBridge {
       sessionId: string;
       publishId: string;
     }): Promise<ManagedWorkspaceSourceBranchPublishResult>;
+    maintain(input: { sessionId: string }): Promise<ManagedWorkspaceMaintenanceResult>;
     restore(input: {
       sessionId: string;
       restoreId: string;

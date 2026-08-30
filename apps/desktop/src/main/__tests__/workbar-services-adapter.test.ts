@@ -117,6 +117,7 @@ describe('createDesktopWorkbarServices', () => {
       sessionId: 's',
       publishId: 'desktop-branch-1',
     });
+    await services.review.maintain({ sessionId: 's' });
     await services.review.restore({ sessionId: 's', restoreId: 'desktop-restore-1' });
     await services.review.history({ sessionId: 's', limit: 50 });
     await services.review.restoreVersion({
@@ -206,6 +207,7 @@ describe('createDesktopWorkbarServices', () => {
         'gitReview.read',
         'gitReview.publish',
         'gitReview.publishSourceBranch',
+        'gitReview.maintain',
         'gitReview.restore',
         'gitReview.history',
         'gitReview.restoreVersion',

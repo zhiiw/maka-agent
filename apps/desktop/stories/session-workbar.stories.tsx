@@ -874,6 +874,12 @@ function bridge(options: {
         publishedRef: `refs/heads/maka/${publishId}`,
         replayed: false,
       }),
+      maintain: async () => ({
+        kind: 'managed_workspace_maintenance_completed' as const,
+        scope: 'restore_orphans_v1' as const,
+        collected: 0,
+        retained: 0,
+      }),
       restore: async ({ restoreId }) => ({
         kind: 'accepted_snapshot_restored' as const,
         restoreId,
