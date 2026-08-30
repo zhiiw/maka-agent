@@ -746,6 +746,9 @@ Publish。所谓“无感 resume”是隐藏确定性的恢复仪式，不是把
 - 只自动继续 strict recovery 已终结为 `failed/app_restarted`，或已有 durable proof 证明 provider 尚未
   dispatch 的 `continuation_abandoned_before_provider_dispatch` source Run；用户取消、provider/tool
   failure 不会形成自动重启循环；
+- `app_restarted` continuation child 不会成为新的自动 source；它可能已经跨过 provider dispatch，必须
+  由原 continuation claim 判定为 indeterminate 并 park。只有明确的 before-dispatch repair failure 才能
+  再签发后继 Run；
 - 先完成既有 claim/Run repair 和 admitted-turn recovery，再规划新的 continuation；
 - 规划必须重验 accepted head、workspace epoch、source identity、tool availability 与 background
   quiescence；任一 gate 不成立只 park，不创建 Run；

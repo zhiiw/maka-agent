@@ -290,35 +290,105 @@ test('Host startup automatically resumes one managed task without an experimenta
   });
 });
 
+test('Host startup automatically resumes a non-Git filesystem snapshot task once', async (t) => {
+  const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
+  if (!helperPath) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the non-Git automatic resume test');
+    return;
+  }
+  await withManagedContinuationFixture(
+    helperPath,
+    async ({ fixture, resourcesRoot, callLog, sourceKind }) => {
+      assert.equal(sourceKind, 'filesystem_snapshot_v1');
+      const source = await fixture.seedSafeBoundaryContinuationSource();
+      const firstHost = await fixture.startHost(undefined, false, {
+        packagedResourcesRoot: resourcesRoot,
+        providerCallLogPath: callLog,
+        providerFailpointAfterSend: true,
+      });
+      await waitForProviderCalls(callLog, 1);
+      await fixture.killHost(firstHost);
+
+      const admissions = (await fixture.readAdmissionChain()).filter(
+        (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
+      );
+      assert.equal(admissions.length, 1);
+      assert.equal(admissions[0]!.execution.kind, 'safe_boundary_continuation');
+      if (admissions[0]!.execution.kind !== 'safe_boundary_continuation') {
+        assert.fail('Non-Git automatic continuation admission is missing');
+      }
+      assert.equal(admissions[0]!.execution.sourceRunId, source.sourceRunId);
+
+      const secondHost = await fixture.startHost(undefined, false, {
+        packagedResourcesRoot: resourcesRoot,
+        providerCallLogPath: callLog,
+      });
+      const secondClient = await connectClient(fixture.root);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        assert.equal(await providerCallCount(callLog), 1);
+        assert.equal(
+          (await fixture.readAdmissionChain()).filter(
+            (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
+          ).length,
+          1,
+        );
+        assert.deepEqual(
+          await secondClient.request('turn.resume.query', {
+            sessionId: fixture.sessionId,
+            sourceRunId: source.sourceRunId,
+            expectedRuntimeEventHighWater: source.sourceRuntimeEventHighWater,
+          }),
+          {
+            sessionId: fixture.sessionId,
+            disposition: 'parked',
+            reason: 'continuation_started_indeterminate',
+          },
+        );
+      } finally {
+        await secondClient.close();
+        await fixture.stopHost(secondHost);
+      }
+    },
+    { sourceKind: 'filesystem_snapshot_v1' },
+  );
+});
+
 async function withManagedContinuationFixture(
   helperInputPath: string,
   run: (input: {
     fixture: ExecutionFixture;
     resourcesRoot: string;
     callLog: string;
+    sourceKind: 'git_repository_v1' | 'filesystem_snapshot_v1';
     boundary: NonNullable<
       Awaited<ReturnType<typeof inspectGitoxideManagedContinuationBoundaryInternal>>
     >;
   }) => Promise<void>,
+  options: {
+    readonly sourceKind?: 'git_repository_v1' | 'filesystem_snapshot_v1';
+  } = {},
 ): Promise<void> {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-continuation-')));
   const root = join(base, 'root');
   const callLog = join(base, 'provider-calls.log');
   await mkdir(root);
   await writeFile(callLog, '', 'utf8');
-  git(root, ['init', '--quiet', '--object-format=sha1']);
   await writeFile(join(root, 'notes.txt'), 'baseline\n', 'utf8');
-  git(root, ['add', 'notes.txt']);
-  git(root, [
-    '-c',
-    'user.name=Maka Test',
-    '-c',
-    'user.email=maka@example.invalid',
-    'commit',
-    '--quiet',
-    '-m',
-    'baseline',
-  ]);
+  if (options.sourceKind !== 'filesystem_snapshot_v1') {
+    git(root, ['init', '--quiet', '--object-format=sha1']);
+    git(root, ['add', 'notes.txt']);
+    git(root, [
+      '-c',
+      'user.name=Maka Test',
+      '-c',
+      'user.email=maka@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'baseline',
+    ]);
+  }
 
   const resourcesRoot = await preparePackagedResources(base, helperInputPath);
   const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
@@ -347,7 +417,8 @@ async function withManagedContinuationFixture(
       sessionId,
       ...helper,
     };
-    await openGitoxideManagedSessionOwnerInternal(sessionInput);
+    const opened = await openGitoxideManagedSessionOwnerInternal(sessionInput);
+    assert.equal(opened.sourceKind, options.sourceKind ?? 'git_repository_v1');
     const observedBoundary = await inspectGitoxideManagedContinuationBoundaryInternal(sessionInput);
     assert.ok(observedBoundary);
     boundary = observedBoundary;
@@ -358,7 +429,13 @@ async function withManagedContinuationFixture(
 
   const fixture = new ExecutionFixture(base, root, capability, sessionId);
   try {
-    await run({ fixture, resourcesRoot, callLog, boundary: boundary! });
+    await run({
+      fixture,
+      resourcesRoot,
+      callLog,
+      sourceKind: options.sourceKind ?? 'git_repository_v1',
+      boundary: boundary!,
+    });
   } finally {
     await fixture.close();
   }

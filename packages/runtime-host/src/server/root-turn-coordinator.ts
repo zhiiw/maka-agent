@@ -493,6 +493,15 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
           ) {
             return undefined;
           }
+          if (
+            sourceRun.failureClass === 'app_restarted' &&
+            sourceRun.continuationSource !== undefined
+          ) {
+            // A continuation child may already have crossed provider dispatch.
+            // Its original claim is the only authority that can classify that
+            // uncertainty; never create a second continuation from the child.
+            return undefined;
+          }
           if (this.#admissions.get(sessionId) !== reservation) return undefined;
 
           const continuation = plan.continuation;
