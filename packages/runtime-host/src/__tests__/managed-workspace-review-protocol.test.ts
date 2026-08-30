@@ -21,12 +21,47 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   decodeManagedWorkspacePublishResult,
+  decodeManagedWorkspaceSourceBranchPublishResult,
   decodeManagedWorkspaceHistoryResult,
   decodeManagedWorkspaceHistoryUndoResult,
   decodeManagedWorkspaceReviewQueryResult,
   decodeManagedWorkspaceRebaselineResult,
   decodeManagedWorkspaceRestoreResult,
 } from '../protocol/managed-workspace-review.js';
+
+test('managed source branch Publish decodes one exact source-repository receipt', () => {
+  const result = {
+    kind: 'accepted_source_branch_published',
+    publishId: 'desktop-branch-123',
+    sourceBaseCommitOid: 'a'.repeat(40),
+    sourceBaseTreeOid: 'b'.repeat(40),
+    acceptedCommitOid: 'c'.repeat(40),
+    acceptedTreeOid: 'd'.repeat(40),
+    publishedCommitOid: 'e'.repeat(40),
+    publishedRef: 'refs/heads/maka/desktop-branch-123',
+    replayed: false,
+  } as const;
+
+  assert.deepEqual(decodeManagedWorkspaceSourceBranchPublishResult(result), result);
+});
+
+test('managed source branch Publish rejects a caller-selected branch namespace', () => {
+  assert.throws(
+    () =>
+      decodeManagedWorkspaceSourceBranchPublishResult({
+        kind: 'accepted_source_branch_published',
+        publishId: 'desktop-branch-123',
+        sourceBaseCommitOid: 'a'.repeat(40),
+        sourceBaseTreeOid: 'b'.repeat(40),
+        acceptedCommitOid: 'c'.repeat(40),
+        acceptedTreeOid: 'd'.repeat(40),
+        publishedCommitOid: 'e'.repeat(40),
+        publishedRef: 'refs/heads/main',
+        replayed: false,
+      }),
+    /published ref/u,
+  );
+});
 
 test('managed Rebaseline decodes one exact active epoch result', () => {
   const result = {
@@ -73,6 +108,7 @@ test('managed History Undo rejects a malformed accepted successor', () => {
 
 const valid = {
   kind: 'accepted_review',
+  sourceKind: 'git_repository_v1',
   snapshot: {
     source: 'branch',
     repositoryRoot: 'maka-managed://session-1',

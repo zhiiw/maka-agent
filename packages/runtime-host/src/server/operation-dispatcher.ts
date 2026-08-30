@@ -171,6 +171,7 @@ export type ManagedWorkspaceReviewOperationHandlerMap = Pick<
   OperationHandlerMap,
   | 'managed-workspace.review.query'
   | 'managed-workspace.publish.mutate'
+  | 'managed-workspace.source-branch.publish.mutate'
   | 'managed-workspace.restore.mutate'
   | 'managed-workspace.history.query'
   | 'managed-workspace.history.restore.mutate'

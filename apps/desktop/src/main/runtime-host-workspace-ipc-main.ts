@@ -31,6 +31,7 @@ type WorkspaceClient = Pick<
   | 'getSession'
   | 'readManagedWorkspaceReview'
   | 'publishManagedWorkspaceSnapshot'
+  | 'publishManagedWorkspaceSourceBranch'
   | 'restoreManagedWorkspaceSnapshot'
   | 'readManagedWorkspaceHistory'
   | 'restoreManagedWorkspaceVersion'
@@ -71,6 +72,12 @@ export function registerRuntimeHostWorkspaceIpc(
       throw new Error('Session does not own a managed workspace');
     }
     return input.client.publishManagedWorkspaceSnapshot(request.sessionId, request.publishId);
+  });
+
+  input.ipcMain.handle('managed-workspace:publish-source-branch', async (_event, raw: unknown) => {
+    const request = publishRequest(raw);
+    await requireManagedSession(input.client, request.sessionId);
+    return input.client.publishManagedWorkspaceSourceBranch(request.sessionId, request.publishId);
   });
 
   input.ipcMain.handle('managed-workspace:restore', async (_event, raw: unknown) => {

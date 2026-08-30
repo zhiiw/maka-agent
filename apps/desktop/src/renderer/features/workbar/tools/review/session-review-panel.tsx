@@ -31,6 +31,7 @@ import { generalizedErrorMessage, generalizedErrorMessageChinese } from '@maka/c
 import { type GitReviewReadResult } from '@maka/core/git-review';
 import type {
   ManagedWorkspacePublishResult,
+  ManagedWorkspaceSourceBranchPublishResult,
   ManagedWorkspaceHistoricalRestoreResult,
   ManagedWorkspaceHistoryResult,
   ManagedWorkspaceHistoryUndoResult,
@@ -71,6 +72,10 @@ export function SessionReviewPanel(props: {
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
   const [published, setPublished] = useState<ManagedWorkspacePublishResult | null>(null);
+  const [sourceBranchPublishing, setSourceBranchPublishing] = useState(false);
+  const [sourceBranchPublishError, setSourceBranchPublishError] = useState<string | null>(null);
+  const [sourceBranchPublished, setSourceBranchPublished] =
+    useState<ManagedWorkspaceSourceBranchPublishResult | null>(null);
   const [restoring, setRestoring] = useState(false);
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [restored, setRestored] = useState<ManagedWorkspaceRestoreResult | null>(null);
@@ -88,6 +93,7 @@ export function SessionReviewPanel(props: {
   const [rebaselined, setRebaselined] = useState<ManagedWorkspaceRebaselineResult | null>(null);
   const revisionRef = useRef(0);
   const publishIdRef = useRef<string | null>(null);
+  const sourceBranchPublishIdRef = useRef<string | null>(null);
   const restoreIdRef = useRef<string | null>(null);
   const historyRestoreIdsRef = useRef(new Map<string, string>());
   const historyUndoIdsRef = useRef(new Map<string, string>());
@@ -189,9 +195,12 @@ export function SessionReviewPanel(props: {
     setVisibleFileCount(REVIEW_FILE_PAGE_SIZE);
     setPublished(null);
     setPublishError(null);
+    setSourceBranchPublished(null);
+    setSourceBranchPublishError(null);
     setRestored(null);
     setRestoreError(null);
     publishIdRef.current = null;
+    sourceBranchPublishIdRef.current = null;
     restoreIdRef.current = null;
     setHistoricalRestore(null);
     setHistoryRestoreError(null);
@@ -223,6 +232,38 @@ export function SessionReviewPanel(props: {
       setPublishing(false);
     }
   }, [copy.publishFailed, gitSnapshot, locale, props.sessionId, published, publishing, review]);
+
+  const publishSourceBranch = useCallback(async () => {
+    if (!gitSnapshot || sourceBranchPublishing || sourceBranchPublished) return;
+    const publishId =
+      sourceBranchPublishIdRef.current ?? `desktop-${crypto.randomUUID()}`;
+    sourceBranchPublishIdRef.current = publishId;
+    setSourceBranchPublishing(true);
+    setSourceBranchPublishError(null);
+    try {
+      const result = await review.publishSourceBranch({
+        sessionId: props.sessionId,
+        publishId,
+      });
+      setSourceBranchPublished(result);
+    } catch (nextError) {
+      setSourceBranchPublishError(
+        locale === 'zh'
+          ? generalizedErrorMessageChinese(nextError, copy.sourceBranchPublishFailed)
+          : generalizedErrorMessage(nextError, copy.sourceBranchPublishFailed),
+      );
+    } finally {
+      setSourceBranchPublishing(false);
+    }
+  }, [
+    copy.sourceBranchPublishFailed,
+    gitSnapshot,
+    locale,
+    props.sessionId,
+    review,
+    sourceBranchPublished,
+    sourceBranchPublishing,
+  ]);
 
   const restoreSnapshot = useCallback(async () => {
     if (!gitSnapshot || restoring || restored) return;
@@ -397,10 +438,47 @@ export function SessionReviewPanel(props: {
               isDisabled={publishing || published !== null}
               onClick={() => void publishSnapshot()}
             />
+            {gitResult?.ok && gitResult.managedSourceKind === 'git_repository_v1' ? (
+              <Button
+                variant="primary"
+                size="sm"
+                label={
+                  sourceBranchPublishing
+                    ? copy.sourceBranchPublishing
+                    : sourceBranchPublished
+                      ? copy.sourceBranchPublished
+                      : copy.sourceBranchPublish
+                }
+                isLoading={sourceBranchPublishing}
+                isDisabled={sourceBranchPublishing || sourceBranchPublished !== null}
+                onClick={() => void publishSourceBranch()}
+              />
+            ) : null}
           </HStack>
         ) : null}
         {published ? (
           <Banner status="success" title={copy.publishedDetail(published.publishedRef)} />
+        ) : null}
+        {sourceBranchPublished ? (
+          <Banner
+            status="success"
+            title={copy.sourceBranchPublishedDetail(sourceBranchPublished.publishedRef)}
+          />
+        ) : null}
+        {sourceBranchPublishError ? (
+          <Banner
+            status="error"
+            title={sourceBranchPublishError}
+            endContent={
+              <Button
+                variant="ghost"
+                size="sm"
+                label={copy.retrySourceBranchPublish}
+                isLoading={sourceBranchPublishing}
+                onClick={() => void publishSourceBranch()}
+              />
+            }
+          />
         ) : null}
         {restored ? (
           <Banner

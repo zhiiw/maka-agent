@@ -51,7 +51,12 @@ export interface GitReviewSnapshot {
 }
 
 export type GitReviewReadResult =
-  | { ok: true; snapshot: GitReviewSnapshot }
+  | {
+      ok: true;
+      snapshot: GitReviewSnapshot;
+      /** Present only for Runtime-owned managed workspace projections. */
+      managedSourceKind?: 'git_repository_v1' | 'filesystem_snapshot_v1';
+    }
   | {
       ok: false;
       reason:
