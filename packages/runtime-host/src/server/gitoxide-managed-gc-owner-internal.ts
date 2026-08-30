@@ -34,10 +34,13 @@ export interface GitoxideManagedGcOwnerInternal {
   }): Promise<GitoxideManagedGcResultInternal>;
 }
 
+export type GitoxideManagedGcFailpoint = 'after_restore_orphan_tombstone';
+
 export function createGitoxideManagedGcOwnerInternal(input: {
   readonly storageRoot: string;
   readonly workspaceEpochId: string;
   readonly now?: () => number;
+  readonly failpoint?: (point: GitoxideManagedGcFailpoint) => void | Promise<void>;
 }): GitoxideManagedGcOwnerInternal {
   const now = input.now ?? Date.now;
   let inflight: Promise<GitoxideManagedGcResultInternal> | undefined;
@@ -58,6 +61,7 @@ export function createGitoxideManagedGcOwnerInternal(input: {
         request.olderThanMs,
         request.maxEntries,
         now(),
+        input.failpoint,
       ).finally(() => {
         if (inflight === started) inflight = undefined;
       });
@@ -72,6 +76,7 @@ async function collect(
   olderThanMs: number,
   maxEntries: number,
   now: number,
+  failpoint?: (point: GitoxideManagedGcFailpoint) => void | Promise<void>,
 ): Promise<GitoxideManagedGcResultInternal> {
   let root;
   try {
@@ -99,6 +104,9 @@ async function collect(
       throw new Error('Gitoxide managed GC artifact identity is invalid');
     }
     const info = await lstat(path);
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error('Gitoxide managed GC artifact identity changed during collection');
+    }
     const interrupted = entry.name.startsWith('.gc-');
     const expired = now - info.mtimeMs >= olderThanMs;
     if ((!interrupted && !expired) || collected >= maxEntries) {
@@ -106,7 +114,10 @@ async function collect(
       continue;
     }
     const tombstonePath = interrupted ? path : join(orphanRoot, `.gc-${randomUUID()}`);
-    if (!interrupted) await rename(path, tombstonePath);
+    if (!interrupted) {
+      await rename(path, tombstonePath);
+      await failpoint?.('after_restore_orphan_tombstone');
+    }
     await rm(tombstonePath, { recursive: true, force: true });
     collected += 1;
   }

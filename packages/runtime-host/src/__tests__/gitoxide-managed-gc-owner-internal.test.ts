@@ -18,6 +18,8 @@
  */
 
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -49,4 +51,40 @@ test('collects only expired restore orphans and converges interrupted tombstones
     retained: 1,
   });
   assert.deepEqual(await readdir(orphans), ['retained']);
+});
+
+test('a new process converges an orphan after the collector is killed post-rename', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-gitoxide-gc-crash-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const epoch = 'epoch_gc_crash';
+  const orphans = join(root, 'gitoxide-managed-restores', epoch, 'orphans');
+  const expired = join(orphans, 'expired');
+  await mkdir(expired, { recursive: true });
+  await writeFile(join(expired, 'content.txt'), 'recover me\n', 'utf8');
+  await utimes(expired, 1, 1);
+  const fixturePath = join(root, 'gc-crash-fixture.json');
+  await writeFile(fixturePath, `${JSON.stringify({ root, epoch })}\n`, 'utf8');
+
+  const child = spawn(
+    process.execPath,
+    [join(import.meta.dirname, 'fixtures', 'gitoxide-managed-gc-crash-child.js'), fixturePath],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  const stderr: Buffer[] = [];
+  child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+  const [exitCode] = (await once(child, 'exit')) as [number | null];
+  assert.equal(exitCode, 76, Buffer.concat(stderr).toString('utf8'));
+  assert.equal((await readdir(orphans)).length, 1);
+  assert.match((await readdir(orphans))[0] ?? '', /^\.gc-/u);
+
+  const recovered = createGitoxideManagedGcOwnerInternal({
+    storageRoot: root,
+    workspaceEpochId: epoch,
+  });
+  assert.deepEqual(await recovered.collectRestoreOrphans({ olderThanMs: 60_000, maxEntries: 8 }), {
+    protocol: 'gitoxide_managed_gc_v1',
+    collected: 1,
+    retained: 0,
+  });
+  assert.deepEqual(await readdir(orphans), []);
 });

@@ -13,3 +13,7 @@ GC 只能删除已经失去恢复根资格、且位于 Maka-owned restore `orpha
 ## 失败、保留和平台
 
 rename 失败或身份不可信时 fail closed。Linux/macOS/Windows 均使用相同 tombstone 协议；Windows 文件占用使删除失败时保留 tombstone，下一次重试。v1 只回收 restore orphan，candidate/ref/object 的 reachability GC 要在其全部 durable roots 可枚举后另行扩展。
+
+真实子进程测试会在 orphan 已 rename 成 tombstone、尚未删除时终止进程。新进程只识别固定 orphan root 下的 `.gc-*`，并以同一有界批次继续删除。进程退出不会重新物化 accepted tree，也不会触碰 active restore、accepted ref、published ref 或历史版本。
+
+v1 采用保守 retention：无法证明不属于 durable root 的对象一律保留。它因此可能暂时多占磁盘，但绝不会为了降低空间占用而缩短 Resume、Review、历史恢复或 publication 的证据寿命。
