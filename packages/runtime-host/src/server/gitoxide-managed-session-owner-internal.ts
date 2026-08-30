@@ -20,7 +20,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, realpath } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { MANAGED_MUTATION_EXECUTION_PROFILE_V1 } from '@maka/core/runtime-event';
+import { MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST } from '@maka/core/runtime-event';
 import {
   WORKSPACE_MATERIALIZATION_SEMANTICS_V1,
   type WorkspaceBaselineAuthorityInput,
@@ -97,7 +97,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     `maka-gitoxide-materialization-v3\0${source.helperArtifactSha256}\0`,
   );
   const policyHash = sha256(
-    `maka-managed-write-edit-policy-v1\0${materializationProfileDigest}\0${MANAGED_MUTATION_EXECUTION_PROFILE_V1}\0`,
+    `maka-managed-write-edit-policy-v1\0${materializationProfileDigest}\0${MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST}\0`,
   );
   const baselineOwnerToken = {};
   const verifiedBaselines = new WeakMap<object, WorkspaceBaselineAuthorityInput>();
