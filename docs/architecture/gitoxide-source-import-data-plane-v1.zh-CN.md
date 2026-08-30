@@ -28,7 +28,9 @@
 
 > source import 只能消费 owner-bound repository admission capability 中冻结的 exact SHA-1 HEAD、
 > helper artifact identity 与 managed-tree policy；helper 只把该 commit 的 reachable tree/blob 导入
-> 此前不存在的 fresh bare repository，并以确定性零父 baseline commit 发布 `refs/maka/*`。caller 不能
+> 此前不存在的 fresh bare repository，并以确定性零父 baseline commit 发布 `refs/maka/*`。首次成功
+> import 会写入严格的 Maka owner marker；之后只有 marker、bare repository、object format、source
+> observation、确定性 baseline commit 与目标 ref 全部完全一致时，才允许 exact retry。caller 不能
 > 重新提交 source path、HEAD、tree identity、helper identity 或 tree policy。
 
 v1 尚未接入 state-root lease，因此不能证明 destination 属于 Maka。正式消费者必须在调用 helper
@@ -59,7 +61,8 @@ storage-root owner 与 destination capability，不能把 fresh `create_dir()` �
 | --- | --- |
 | source HEAD 与 admission 不一致 | 创建 destination 前失败 |
 | baseline ref 不满足 Gitoxide authoritative ref grammar | `invalid_baseline_ref`，创建 destination 前失败 |
-| destination 已存在（包括 source 自身、foreign bare repo、partial import） | `import_destination_not_fresh`，不读取、修复或删除原内容 |
+| destination 已存在但没有严格 owner marker（包括 source 自身、foreign bare repo） | `import_destination_not_fresh`，不接管、修复或删除原内容 |
+| Maka-owned destination exact retry | 重新执行有界 source/object 验证；baseline ref 已等于确定性 baseline 时返回同一结果，任何 marker/ref/identity 漂移 fail closed |
 | destination parent 含 symlink/junction/reparse alias | `import_destination_parent_untrusted`，创建前拒绝 |
 | path/type/quota/object copy 失败 | destination 可能是 untrusted partial artifact；helper 不自动清理或重试 |
 | helper 进程中断或响应丢失 | 不推断成功；未来 storage owner 必须先验证/隔离 partial artifact，再签发新的 fresh destination |

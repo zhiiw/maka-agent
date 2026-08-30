@@ -528,7 +528,18 @@ fn imports_an_exact_source_head_into_a_fresh_managed_repository() {
         "baselineRef": "refs/maka/baseline",
         "managedTreePolicyVersion": 3,
     }));
-    assert_helper_error(&retry, "import_destination_not_fresh");
+    assert!(
+        retry.status.success(),
+        "exact helper import retry failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&retry.stdout),
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let retry_response: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
+    assert_eq!(retry_response["sourceHeadCommitOid"], source_head);
+    assert_eq!(retry_response["sourceTreeOid"], source_tree);
+    assert_eq!(retry_response["baselineCommitOid"], baseline_commit);
+    assert_eq!(retry_response["baselineTreeOid"], source_tree);
+    assert_eq!(retry_response["baselineRef"], "refs/maka/baseline");
 }
 
 #[test]
@@ -749,6 +760,90 @@ fn rejects_an_exact_candidate_retry_when_the_result_blob_is_corrupt() {
 
     let retry = invoke_request(request);
     assert_helper_error(&retry, "candidate_ref_target_invalid");
+}
+
+#[test]
+fn promotes_a_verified_candidate_with_exact_cas_and_replays_without_moving_again() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("promote-candidate.git");
+    let imported = invoke_import(&fixture.root, &source_head, &destination);
+    assert!(imported.status.success());
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let candidate_ref =
+        "refs/maka/candidates/1212121212121212121212121212121212121212121212121212121212121212";
+    let candidate = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "create_candidate",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedBaseCommitOid": imported["baselineCommitOid"],
+        "expectedBaseTreeOid": imported["baselineTreeOid"],
+        "candidateRef": candidate_ref,
+        "path": "docs/promoted.txt",
+        "contentBase64": "cHJvbW90ZWQgY29udGVudAo=",
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(candidate.status.success());
+    let candidate: serde_json::Value = serde_json::from_slice(&candidate.stdout).unwrap();
+    let promotion_request = serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "promote_candidate",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedBaseCommitOid": imported["baselineCommitOid"],
+        "candidateRef": candidate_ref,
+        "expectedCandidateCommitOid": candidate["candidateCommitOid"],
+        "expectedCandidateTreeOid": candidate["candidateTreeOid"],
+        "expectedResultBlobOid": candidate["resultBlobOid"],
+        "requestDigestSha256": candidate["requestDigestSha256"],
+        "path": "docs/promoted.txt",
+        "managedTreePolicyVersion": 3,
+    });
+
+    let promoted = invoke_request(promotion_request.clone());
+    assert!(
+        promoted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&promoted.stdout)
+    );
+    let promoted: serde_json::Value = serde_json::from_slice(&promoted.stdout).unwrap();
+    assert_eq!(promoted["kind"], "candidate_promoted");
+    assert_eq!(promoted["replayed"], false);
+    assert_eq!(
+        promoted["acceptedCommitOid"],
+        candidate["candidateCommitOid"]
+    );
+    assert_eq!(promoted["acceptedTreeOid"], candidate["candidateTreeOid"]);
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/baseline"]),
+        candidate["candidateCommitOid"].as_str().unwrap()
+    );
+
+    let replay = invoke_request(promotion_request);
+    assert!(replay.status.success());
+    let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(replay["kind"], "candidate_promoted");
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["acceptedCommitOid"], candidate["candidateCommitOid"]);
+
+    let observed = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "observe_accepted_ref",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedAcceptedCommitOid": candidate["candidateCommitOid"],
+        "expectedAcceptedTreeOid": candidate["candidateTreeOid"],
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(observed.status.success());
+    let observed: serde_json::Value = serde_json::from_slice(&observed.stdout).unwrap();
+    assert_eq!(observed["kind"], "accepted_ref_observed");
+    assert_eq!(
+        observed["acceptedCommitOid"],
+        candidate["candidateCommitOid"]
+    );
+    assert_eq!(observed["acceptedTreeOid"], candidate["candidateTreeOid"]);
 }
 
 #[test]
@@ -1517,6 +1612,29 @@ fn rejects_a_foreign_bare_destination_without_modifying_it() {
         &destination,
         ["show-ref", "--verify", "refs/maka/accepted"]
     ));
+}
+
+#[test]
+fn rejects_a_managed_destination_with_a_tampered_owner_marker() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("managed-tampered-marker.git");
+    let imported = invoke_import(&fixture.root, &source_head, &destination);
+    assert!(imported.status.success());
+    let accepted_before = git_bare_output(&destination, ["rev-parse", "refs/maka/baseline"]);
+    fs::write(
+        destination.join("maka-managed-import-owner-v1"),
+        b"foreign-owner\n",
+    )
+    .unwrap();
+
+    let retry = invoke_import(&fixture.root, &source_head, &destination);
+
+    assert_helper_error(&retry, "import_destination_not_fresh");
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/baseline"]),
+        accepted_before
+    );
 }
 
 #[test]

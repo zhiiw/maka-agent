@@ -50,6 +50,8 @@ const MAX_COMMIT_OBJECT_BYTES: u64 = 1024 * 1024;
 const MAX_SINGLE_TREE_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TOTAL_TREE_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_GITOXIDE_OBJECT_ALLOCATION_BYTES: &str = "gitoxide.objects.allocLimit=67108864";
+const MANAGED_IMPORT_OWNER_MARKER_NAME: &str = "maka-managed-import-owner-v1";
+const MANAGED_IMPORT_OWNER_MARKER_BYTES: &[u8] = b"maka-managed-import-owner-v1\n";
 const MANAGED_TREE_POLICY_V3: ManagedTreePolicy = ManagedTreePolicy {
     max_depth: 64,
     max_tree_visits: 250_000,
@@ -133,6 +135,11 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "candidate_ref_target_invalid",
     "candidate_request_conflict",
     "candidate_publication_indeterminate",
+    "accepted_ref_promotion_indeterminate",
+    "invalid_candidate_commit_oid",
+    "invalid_candidate_tree_oid",
+    "invalid_result_blob_oid",
+    "invalid_request_digest",
     "target_ref_outside_maka_namespace",
     "target_ref_unavailable",
     "tree_edit_failed",
@@ -184,6 +191,27 @@ enum Request {
         candidate_ref: String,
         path: String,
         content_base64: String,
+        managed_tree_policy_version: u8,
+    },
+    PromoteCandidate {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_ref: String,
+        expected_base_commit_oid: String,
+        candidate_ref: String,
+        expected_candidate_commit_oid: String,
+        expected_candidate_tree_oid: String,
+        expected_result_blob_oid: String,
+        request_digest_sha256: String,
+        path: String,
+        managed_tree_policy_version: u8,
+    },
+    ObserveAcceptedRef {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_ref: String,
+        expected_accepted_commit_oid: String,
+        expected_accepted_tree_oid: String,
         managed_tree_policy_version: u8,
     },
     ReadTreeFile {
@@ -264,6 +292,39 @@ enum Response<'a> {
         actual_base_commit_oid: String,
         accepted_ref: String,
         candidate_ref: String,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    CandidatePromoted {
+        protocol_version: u8,
+        object_format: &'static str,
+        base_commit_oid: String,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        accepted_ref: String,
+        candidate_ref: String,
+        replayed: bool,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    CandidatePromotionRejected {
+        protocol_version: u8,
+        reason: &'static str,
+        object_format: &'static str,
+        expected_base_commit_oid: String,
+        expected_candidate_commit_oid: String,
+        actual_accepted_commit_oid: String,
+        accepted_ref: String,
+        candidate_ref: String,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    AcceptedRefObserved {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        accepted_ref: String,
         managed_tree_policy_version: u8,
     },
     #[serde(rename_all = "camelCase")]
@@ -350,6 +411,50 @@ fn run() -> Result<ExitCode, &'static str> {
                 candidate_ref,
                 path,
                 content_base64,
+                managed_tree_policy_version,
+            )
+        }
+        Request::PromoteCandidate {
+            protocol_version,
+            repository_path,
+            accepted_ref,
+            expected_base_commit_oid,
+            candidate_ref,
+            expected_candidate_commit_oid,
+            expected_candidate_tree_oid,
+            expected_result_blob_oid,
+            request_digest_sha256,
+            path,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            promote_candidate(
+                repository_path,
+                accepted_ref,
+                expected_base_commit_oid,
+                candidate_ref,
+                expected_candidate_commit_oid,
+                expected_candidate_tree_oid,
+                expected_result_blob_oid,
+                request_digest_sha256,
+                path,
+                managed_tree_policy_version,
+            )
+        }
+        Request::ObserveAcceptedRef {
+            protocol_version,
+            repository_path,
+            accepted_ref,
+            expected_accepted_commit_oid,
+            expected_accepted_tree_oid,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            observe_accepted_ref(
+                repository_path,
+                accepted_ref,
+                expected_accepted_commit_oid,
+                expected_accepted_tree_oid,
                 managed_tree_policy_version,
             )
         }
@@ -697,7 +802,7 @@ fn import_source_head(
     drop(stats);
 
     assert_import_destination_parent(&destination_repository_path)?;
-    let destination = claim_fresh_import_destination(&destination_repository_path)?;
+    let destination = claim_or_reopen_import_destination(&destination_repository_path)?;
     if destination.object_hash() != gix::hash::Kind::Sha1 {
         return Err("import_destination_object_format_mismatch");
     }
@@ -732,14 +837,7 @@ fn import_source_head(
         .map_err(|_| "baseline_commit_write_failed")?
         .id()
         .detach();
-    destination
-        .reference(
-            baseline_ref.as_str(),
-            baseline_commit,
-            gix::refs::transaction::PreviousValue::MustNotExist,
-            "maka managed workspace baseline",
-        )
-        .map_err(|_| "baseline_publish_failed")?;
+    publish_exact_baseline_reference(&destination, &baseline_ref, baseline_commit)?;
 
     write_response(&Response::SourceImported {
         protocol_version: PROTOCOL_VERSION,
@@ -1075,6 +1173,287 @@ fn create_candidate(
         &path,
     );
     Ok(ExitCode::SUCCESS)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn promote_candidate(
+    repository_path: PathBuf,
+    accepted_ref: String,
+    expected_base_commit_oid: String,
+    candidate_ref: String,
+    expected_candidate_commit_oid: String,
+    expected_candidate_tree_oid: String,
+    expected_result_blob_oid: String,
+    request_digest_sha256: String,
+    path: String,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    if !accepted_ref.starts_with("refs/maka/")
+        || !candidate_ref.starts_with("refs/maka/candidates/")
+        || accepted_ref == candidate_ref
+    {
+        return Err("target_ref_outside_maka_namespace");
+    }
+    gix::refs::FullName::try_from(accepted_ref.as_str())
+        .map_err(|_| "target_ref_outside_maka_namespace")?;
+    gix::refs::FullName::try_from(candidate_ref.as_str())
+        .map_err(|_| "target_ref_outside_maka_namespace")?;
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    if !is_canonical_successor_path_v3(&path) {
+        return Err("invalid_successor_path");
+    }
+    if request_digest_sha256.len() != 64
+        || !request_digest_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("invalid_request_digest");
+    }
+
+    let repository = open_repository(repository_path)?;
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let expected_base = parse_sha1_oid(&expected_base_commit_oid, "invalid_base_commit_oid")?;
+    let expected_candidate = parse_sha1_oid(
+        &expected_candidate_commit_oid,
+        "invalid_candidate_commit_oid",
+    )?;
+    let expected_candidate_tree =
+        parse_sha1_oid(&expected_candidate_tree_oid, "invalid_candidate_tree_oid")?;
+    let expected_result_blob =
+        parse_sha1_oid(&expected_result_blob_oid, "invalid_result_blob_oid")?;
+
+    let candidate_reference = repository
+        .find_reference(candidate_ref.as_str())
+        .map_err(|_| "target_ref_unavailable")?;
+    let candidate_current = read_direct_commit_reference(
+        &repository,
+        candidate_reference,
+        "candidate_ref_not_direct",
+        "candidate_ref_target_invalid",
+    )?;
+    if candidate_current != expected_candidate {
+        return Err("candidate_request_conflict");
+    }
+    verify_candidate_commit_and_result(
+        &repository,
+        expected_candidate,
+        expected_base,
+        expected_candidate_tree,
+        &path,
+        expected_result_blob,
+        &request_digest_sha256,
+    )?;
+    load_verified_object(
+        &repository,
+        expected_result_blob,
+        gix::objs::Kind::Blob,
+        MAX_IMPORT_FILE_BYTES,
+        "candidate_ref_target_invalid",
+        "candidate_ref_target_invalid",
+        "successor_content_limit_exceeded",
+        "candidate_ref_target_invalid",
+    )?;
+    let mut candidate_stats = ManagedTreeStats::default();
+    walk_verified_source_tree(
+        &repository,
+        None,
+        expected_candidate_tree,
+        "",
+        0,
+        MANAGED_TREE_POLICY_V3,
+        &mut candidate_stats,
+    )?;
+
+    let current = read_direct_commit_ref(
+        &repository,
+        &accepted_ref,
+        "accepted_ref_not_direct",
+        "accepted_ref_target_invalid",
+    )?;
+    if current == expected_candidate {
+        write_candidate_promoted_response(
+            expected_base,
+            expected_candidate,
+            expected_candidate_tree,
+            &accepted_ref,
+            &candidate_ref,
+            true,
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    if current != expected_base {
+        write_candidate_promotion_rejected_response(
+            expected_base,
+            expected_candidate,
+            current,
+            &accepted_ref,
+            &candidate_ref,
+        );
+        return Ok(ExitCode::from(3));
+    }
+
+    match repository.reference(
+        accepted_ref.as_str(),
+        expected_candidate,
+        gix::refs::transaction::PreviousValue::MustExistAndMatch(gix::refs::Target::Object(
+            expected_base,
+        )),
+        "maka managed workspace accepted candidate",
+    ) {
+        Ok(_) => {
+            write_candidate_promoted_response(
+                expected_base,
+                expected_candidate,
+                expected_candidate_tree,
+                &accepted_ref,
+                &candidate_ref,
+                false,
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(_) => {
+            let observed = read_direct_commit_ref(
+                &repository,
+                &accepted_ref,
+                "accepted_ref_not_direct",
+                "accepted_ref_target_invalid",
+            )?;
+            if observed == expected_candidate {
+                write_candidate_promoted_response(
+                    expected_base,
+                    expected_candidate,
+                    expected_candidate_tree,
+                    &accepted_ref,
+                    &candidate_ref,
+                    true,
+                );
+                Ok(ExitCode::SUCCESS)
+            } else if observed != expected_base {
+                write_candidate_promotion_rejected_response(
+                    expected_base,
+                    expected_candidate,
+                    observed,
+                    &accepted_ref,
+                    &candidate_ref,
+                );
+                Ok(ExitCode::from(3))
+            } else {
+                Err("accepted_ref_promotion_indeterminate")
+            }
+        }
+    }
+}
+
+fn observe_accepted_ref(
+    repository_path: PathBuf,
+    accepted_ref: String,
+    expected_accepted_commit_oid: String,
+    expected_accepted_tree_oid: String,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    if !accepted_ref.starts_with("refs/maka/") {
+        return Err("target_ref_outside_maka_namespace");
+    }
+    gix::refs::FullName::try_from(accepted_ref.as_str())
+        .map_err(|_| "target_ref_outside_maka_namespace")?;
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    let repository = open_repository(repository_path)?;
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let expected_commit =
+        parse_sha1_oid(&expected_accepted_commit_oid, "invalid_accepted_commit_oid")?;
+    let expected_tree = parse_sha1_oid(&expected_accepted_tree_oid, "accepted_tree_unavailable")?;
+    let current = read_direct_commit_ref(
+        &repository,
+        &accepted_ref,
+        "accepted_ref_not_direct",
+        "accepted_ref_target_invalid",
+    )?;
+    if current != expected_commit {
+        return Err("accepted_ref_target_invalid");
+    }
+    let (_, actual_tree) = accepted_commit_identity(&repository, &expected_accepted_commit_oid)?;
+    if actual_tree != expected_tree {
+        return Err("accepted_tree_unavailable");
+    }
+    let mut stats = ManagedTreeStats::default();
+    walk_verified_source_tree(
+        &repository,
+        None,
+        expected_tree,
+        "",
+        0,
+        MANAGED_TREE_POLICY_V3,
+        &mut stats,
+    )?;
+    write_response(&Response::AcceptedRefObserved {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        accepted_commit_oid: expected_commit.to_string(),
+        accepted_tree_oid: expected_tree.to_string(),
+        accepted_ref,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+fn parse_sha1_oid(
+    value: &str,
+    invalid_reason: &'static str,
+) -> Result<gix::hash::ObjectId, &'static str> {
+    let oid = gix::hash::ObjectId::from_hex(value.as_bytes()).map_err(|_| invalid_reason)?;
+    if oid.kind() != gix::hash::Kind::Sha1 {
+        return Err(invalid_reason);
+    }
+    Ok(oid)
+}
+
+fn write_candidate_promoted_response(
+    base_commit_oid: gix::hash::ObjectId,
+    accepted_commit_oid: gix::hash::ObjectId,
+    accepted_tree_oid: gix::hash::ObjectId,
+    accepted_ref: &str,
+    candidate_ref: &str,
+    replayed: bool,
+) {
+    write_response(&Response::CandidatePromoted {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        base_commit_oid: base_commit_oid.to_string(),
+        accepted_commit_oid: accepted_commit_oid.to_string(),
+        accepted_tree_oid: accepted_tree_oid.to_string(),
+        accepted_ref: accepted_ref.to_owned(),
+        candidate_ref: candidate_ref.to_owned(),
+        replayed,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
+}
+
+fn write_candidate_promotion_rejected_response(
+    expected_base_commit_oid: gix::hash::ObjectId,
+    expected_candidate_commit_oid: gix::hash::ObjectId,
+    actual_accepted_commit_oid: gix::hash::ObjectId,
+    accepted_ref: &str,
+    candidate_ref: &str,
+) {
+    write_response(&Response::CandidatePromotionRejected {
+        protocol_version: PROTOCOL_VERSION,
+        reason: "accepted_ref_conflict",
+        object_format: "sha1",
+        expected_base_commit_oid: expected_base_commit_oid.to_string(),
+        expected_candidate_commit_oid: expected_candidate_commit_oid.to_string(),
+        actual_accepted_commit_oid: actual_accepted_commit_oid.to_string(),
+        accepted_ref: accepted_ref.to_owned(),
+        candidate_ref: candidate_ref.to_owned(),
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
 }
 
 fn verify_existing_candidate_receipt(
@@ -1579,26 +1958,111 @@ fn accepted_commit_identity(
         .detach();
     Ok((accepted_commit, accepted_tree))
 }
-fn claim_fresh_import_destination(path: &Path) -> Result<gix::Repository, &'static str> {
-    match fs::create_dir(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            return Err("import_destination_not_fresh");
+fn claim_or_reopen_import_destination(path: &Path) -> Result<gix::Repository, &'static str> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || is_windows_reparse_point(&metadata)
+            {
+                return Err("import_destination_not_fresh");
+            }
+            assert_managed_import_owner_marker(path)?;
+            let repository = open_repository(path.to_path_buf())?;
+            if repository.work_dir().is_some() || repository.object_hash() != gix::hash::Kind::Sha1
+            {
+                return Err("import_destination_not_fresh");
+            }
+            Ok(repository)
         }
-        Err(_) => return Err("import_destination_create_failed"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(|_| "import_destination_create_failed")?;
+            let repository = gix::ThreadSafeRepository::init_opts(
+                path,
+                gix::create::Kind::Bare,
+                gix::create::Options {
+                    destination_must_be_empty: Some(true),
+                    object_hash: Some(gix::hash::Kind::Sha1),
+                    ..Default::default()
+                },
+                managed_open_options(),
+            )
+            .map_err(|_| "import_destination_create_failed")?
+            .to_thread_local();
+            fs::write(
+                path.join(MANAGED_IMPORT_OWNER_MARKER_NAME),
+                MANAGED_IMPORT_OWNER_MARKER_BYTES,
+            )
+            .map_err(|_| "import_destination_create_failed")?;
+            Ok(repository)
+        }
+        Err(_) => Err("import_destination_create_failed"),
     }
-    gix::ThreadSafeRepository::init_opts(
-        path,
-        gix::create::Kind::Bare,
-        gix::create::Options {
-            destination_must_be_empty: Some(true),
-            object_hash: Some(gix::hash::Kind::Sha1),
-            ..Default::default()
+}
+
+fn assert_managed_import_owner_marker(path: &Path) -> Result<(), &'static str> {
+    let marker = path.join(MANAGED_IMPORT_OWNER_MARKER_NAME);
+    let metadata = fs::symlink_metadata(&marker).map_err(|_| "import_destination_not_fresh")?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || is_windows_reparse_point(&metadata)
+        || metadata.len() != MANAGED_IMPORT_OWNER_MARKER_BYTES.len() as u64
+    {
+        return Err("import_destination_not_fresh");
+    }
+    let bytes = fs::read(marker).map_err(|_| "import_destination_not_fresh")?;
+    if bytes != MANAGED_IMPORT_OWNER_MARKER_BYTES {
+        return Err("import_destination_not_fresh");
+    }
+    Ok(())
+}
+
+fn publish_exact_baseline_reference(
+    repository: &gix::Repository,
+    baseline_ref: &str,
+    baseline_commit: gix::hash::ObjectId,
+) -> Result<(), &'static str> {
+    match repository
+        .try_find_reference(baseline_ref)
+        .map_err(|_| "baseline_publish_failed")?
+    {
+        Some(reference) => {
+            let current = read_direct_commit_reference(
+                repository,
+                reference,
+                "baseline_ref_not_direct",
+                "baseline_ref_target_invalid",
+            )?;
+            if current != baseline_commit {
+                return Err("baseline_request_conflict");
+            }
+            Ok(())
+        }
+        None => match repository.reference(
+            baseline_ref,
+            baseline_commit,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "maka managed workspace baseline",
+        ) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let concurrent = repository
+                    .try_find_reference(baseline_ref)
+                    .map_err(|_| "baseline_publish_failed")?
+                    .ok_or("baseline_publish_failed")?;
+                let concurrent = read_direct_commit_reference(
+                    repository,
+                    concurrent,
+                    "baseline_ref_not_direct",
+                    "baseline_ref_target_invalid",
+                )?;
+                if concurrent != baseline_commit {
+                    return Err("baseline_request_conflict");
+                }
+                Ok(())
+            }
         },
-        managed_open_options(),
-    )
-    .map_err(|_| "import_destination_create_failed")
-    .map(|repository| repository.to_thread_local())
+    }
 }
 
 fn load_verified_object<'repo>(

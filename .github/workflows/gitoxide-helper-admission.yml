@@ -25,7 +25,15 @@ on:
       - 'packages/runtime-host/src/server/gitoxide-helper-*.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-helper-*.test.ts'
       - 'packages/runtime-host/src/server/gitoxide-repository-admission-authority-internal.ts'
+      - 'packages/runtime-host/src/server/gitoxide-mutation-candidate-receipt-authority-internal.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-write-edit-owner-internal.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-repository-admission-authority-internal.test.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-write-edit-owner-internal.test.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-candidate-receipt-crash-child.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-write-edit-owner-crash-child.ts'
+      - 'packages/storage/src/execution-stores-workspace-authority-internal.ts'
+      - 'packages/storage/src/workspace-version-authority-internal.ts'
+      - 'packages/storage/src/sqlite-runtime-store.ts'
       - 'packages/runtime/package.json'
       - 'docs/architecture/gitoxide-*.md'
   push:
@@ -37,7 +45,15 @@ on:
       - 'packages/runtime-host/src/server/gitoxide-helper-*.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-helper-*.test.ts'
       - 'packages/runtime-host/src/server/gitoxide-repository-admission-authority-internal.ts'
+      - 'packages/runtime-host/src/server/gitoxide-mutation-candidate-receipt-authority-internal.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-write-edit-owner-internal.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-repository-admission-authority-internal.test.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-write-edit-owner-internal.test.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-candidate-receipt-crash-child.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-write-edit-owner-crash-child.ts'
+      - 'packages/storage/src/execution-stores-workspace-authority-internal.ts'
+      - 'packages/storage/src/workspace-version-authority-internal.ts'
+      - 'packages/storage/src/sqlite-runtime-store.ts'
       - 'packages/runtime/package.json'
       - 'docs/architecture/gitoxide-*.md'
 
@@ -90,3 +106,4 @@ jobs:
           packages/runtime-host/dist/__tests__/gitoxide-helper-artifact-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-helper-invocation-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
+          packages/runtime-host/dist/__tests__/gitoxide-managed-write-edit-owner-internal.test.js

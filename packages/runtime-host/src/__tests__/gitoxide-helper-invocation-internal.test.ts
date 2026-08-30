@@ -37,6 +37,7 @@ import {
   GitoxideHelperInvocationError,
   importSourceHeadWithGitoxideHelperInternal,
   inspectRepositoryWithGitoxideHelperInternal,
+  promoteCandidateWithGitoxideHelperInternal,
   readTreeFileWithGitoxideHelperInternal,
   runGitoxideOperationWithinDeadlineInternal,
 } from '../server/gitoxide-helper-invocation-internal.js';
@@ -53,6 +54,8 @@ test('uses bounded mutation/import deadlines distinct from repository inspection
     inspectRepositoryMs: 5_000,
     importSourceHeadMs: 10 * 60_000,
     createCandidateMs: 10 * 60_000,
+    promoteCandidateMs: 10 * 60_000,
+    observeAcceptedRefMs: 10 * 60_000,
     acceptedTreeReadMs: 10 * 60_000,
   });
 });
@@ -363,6 +366,52 @@ test('rejects a candidate response whose blob identity does not match the reques
   );
 });
 
+test('accepts only an exactly correlated candidate-promotion response', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-promotion-wire-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repositoryPath = await createRepository(t, 'sha1');
+  const acceptedRef = 'refs/maka/accepted';
+  const candidateRef = `refs/maka/candidates/${'2'.repeat(64)}`;
+  const expectedBaseCommitOid = 'a'.repeat(40);
+  const expectedCandidateCommitOid = 'b'.repeat(40);
+  const expectedCandidateTreeOid = 'c'.repeat(40);
+  const helperPath = join(root, 'promotion-helper');
+  const response = JSON.stringify({
+    protocolVersion: 1,
+    kind: 'candidate_promoted',
+    objectFormat: 'sha1',
+    baseCommitOid: expectedBaseCommitOid,
+    acceptedCommitOid: expectedCandidateCommitOid,
+    acceptedTreeOid: expectedCandidateTreeOid,
+    acceptedRef,
+    candidateRef,
+    replayed: false,
+    managedTreePolicyVersion: 3,
+  });
+  await writeFile(helperPath, `#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' '${response}'\n`);
+  await chmod(helperPath, 0o755);
+  const helper = await admitHelperPath(helperPath, ['promote_candidate']);
+
+  const result = await promoteCandidateWithGitoxideHelperInternal({
+    ...helper,
+    repositoryPath,
+    acceptedRef,
+    expectedBaseCommitOid,
+    candidateRef,
+    expectedCandidateCommitOid,
+    expectedCandidateTreeOid,
+    expectedResultBlobOid: 'd'.repeat(40),
+    requestDigestSha256: 'e'.repeat(64),
+    path: 'result.txt',
+    managedTreePolicyVersion: 3,
+  });
+  assert.equal(result.kind, 'candidate_promoted');
+  assert.equal(result.acceptedCommitOid, expectedCandidateCommitOid);
+  assert.equal(result.replayed, false);
+});
+
 test('rejects a direct-read response whose blob identity does not match its content', {
   skip: process.platform === 'win32',
 }, async (t) => {
@@ -587,6 +636,8 @@ async function admitHelperPath(
     | 'inspect_repository'
     | 'import_source_head'
     | 'create_candidate'
+    | 'promote_candidate'
+    | 'observe_accepted_ref'
     | 'read_tree_file'
   )[] = ['inspect_repository', 'import_source_head'],
 ): Promise<AdmittedHelper> {
