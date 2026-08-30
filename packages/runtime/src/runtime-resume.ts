@@ -27,13 +27,18 @@ import {
   type RuntimeEventFunctionResponseContent,
 } from '@maka/core/runtime-event';
 import type {
-  ContinuationClaimV1,
+  ContinuationClaim,
   ImmutableRuntimePrefixV1,
+  ManagedWorkspaceContinuationBoundaryV1,
   RuntimeBoundaryCursorV1,
   RuntimeBoundaryDigest,
 } from '@maka/core/runtime-boundary';
+import { digestWorkspaceBoundContinuationBoundary } from '@maka/core/runtime-boundary';
 import type { AgentRunHeader } from '@maka/core/agent-run';
-import type { ContinuationClaimStateV1 } from '@maka/core/runtime-event-store';
+import type {
+  ContinuationClaimStateV1,
+  ContinuationClaimStateV2,
+} from '@maka/core/runtime-event-store';
 import { isDeepStrictEqual } from 'node:util';
 import {
   buildContinuationReplayPlan,
@@ -77,6 +82,7 @@ export type RuntimeContinuationRevalidationCode =
   | 'source_ledger_identity_changed'
   | 'source_replay_changed'
   | 'workspace_identity_changed'
+  | 'workspace_version_changed'
   | 'background_operation_started'
   | 'tool_catalog_changed'
   | 'workspace_checkpoint_changed';
@@ -123,6 +129,7 @@ export type ResumePlanDiagnosticCode =
   | 'source_run_unreadable'
   | 'continuation_already_exists'
   | 'continuation_authority_unavailable'
+  | 'workspace_boundary_unavailable'
   | 'continuation_claim_repair_required'
   | 'continuation_started_indeterminate'
   | 'workspace_identity_missing'
@@ -166,6 +173,7 @@ export type ResumeRejectionReason =
   | 'source_run_unreadable'
   | 'continuation_already_exists'
   | 'continuation_authority_unavailable'
+  | 'workspace_boundary_unavailable'
   | 'continuation_claim_repair_required'
   | 'continuation_started_indeterminate'
   | 'workspace_identity_missing'
@@ -300,6 +308,7 @@ export interface SafeBoundaryContinuationFacts {
     restored: boolean;
     runtimeEventHighWater: number;
   };
+  workspaceBoundary?: ManagedWorkspaceContinuationBoundaryV1;
 }
 
 export interface RuntimeContinuation {
@@ -322,6 +331,7 @@ export interface RuntimeContinuation {
   /** Identity of the exact provider-facing replay projection. */
   providerReplayDigest?: RuntimeBoundaryDigest;
   providerProjectionVersion?: typeof PROVIDER_REPLAY_PROJECTION_VERSION;
+  workspaceBoundary?: ManagedWorkspaceContinuationBoundaryV1;
   safetySnapshot: RuntimeContinuationSafetySnapshot;
 }
 
@@ -333,6 +343,7 @@ export interface RuntimeContinuationSafetySnapshot {
     ref: string;
     runtimeEventHighWater: number;
   };
+  workspaceBoundary?: ManagedWorkspaceContinuationBoundaryV1;
 }
 
 export interface RuntimeContinuationSafetyObservation {
@@ -346,6 +357,7 @@ export interface RuntimeContinuationSafetyObservation {
     restored: boolean;
     runtimeEventHighWater: number;
   };
+  workspaceBoundary?: ManagedWorkspaceContinuationBoundaryV1;
 }
 
 export interface SafeBoundaryContinuationPlan {
@@ -365,6 +377,9 @@ export interface RuntimeContinuationPlannerInput {
   availableToolNames: readonly string[];
   expectedRuntimeEventHighWater?: number;
   workspaceCheckpoint?: SafeBoundaryContinuationFacts['workspaceCheckpoint'];
+  workspaceBoundary?: ManagedWorkspaceContinuationBoundaryV1;
+  /** Managed coding requires an authenticated workspace boundary and may never downgrade to v1. */
+  workspaceBoundaryRequirement?: 'optional' | 'required';
 }
 
 export interface RuntimeContinuationPlannerDeps {
@@ -377,6 +392,9 @@ export interface RuntimeContinuationPlannerDeps {
   readContinuationClaimStateByBoundary?(
     boundaryDigest: RuntimeBoundaryDigest,
   ): Promise<ContinuationClaimStateV1 | undefined>;
+  readWorkspaceBoundContinuationClaimStateByBoundary?(
+    boundaryDigest: RuntimeBoundaryDigest,
+  ): Promise<ContinuationClaimStateV2 | undefined>;
   findExistingContinuation?(
     sessionId: string,
     sourceRunId: string,
@@ -389,6 +407,12 @@ export class RuntimeContinuationPlanner {
   constructor(private readonly deps: RuntimeContinuationPlannerDeps) {}
 
   async plan(input: RuntimeContinuationPlannerInput): Promise<SafeBoundaryContinuationPlan> {
+    if (input.workspaceBoundaryRequirement === 'required' && !input.workspaceBoundary) {
+      return parkedPlan(
+        'workspace_boundary_unavailable',
+        'managed continuation requires an authoritative workspace boundary',
+      );
+    }
     let sourceRun: Awaited<ReturnType<RuntimeContinuationPlannerDeps['readSourceRun']>>;
     try {
       sourceRun = await this.deps.readSourceRun(input.sessionId, input.sourceRunId);
@@ -435,11 +459,22 @@ export class RuntimeContinuationPlanner {
         `continuation replay segment ${replay.segmentIndex} is not replayable: ${replay.reason}`,
       );
     }
-    let durableClaimState: ContinuationClaimStateV1 | undefined;
-    try {
-      durableClaimState = await this.deps.readContinuationClaimStateByBoundary?.(
-        replay.plan.boundary.manifestDigest,
+    const plannedBoundaryDigest = input.workspaceBoundary
+      ? digestWorkspaceBoundContinuationBoundary(replay.plan.boundary, input.workspaceBoundary)
+      : replay.plan.boundary.manifestDigest;
+    if (input.workspaceBoundary && !this.deps.readWorkspaceBoundContinuationClaimStateByBoundary) {
+      return parkedPlan(
+        'continuation_authority_unavailable',
+        'workspace-bound continuation authority is unavailable',
       );
+    }
+    let durableClaimState: ContinuationClaimStateV1 | ContinuationClaimStateV2 | undefined;
+    try {
+      durableClaimState = input.workspaceBoundary
+        ? await this.deps.readWorkspaceBoundContinuationClaimStateByBoundary?.(
+            plannedBoundaryDigest,
+          )
+        : await this.deps.readContinuationClaimStateByBoundary?.(plannedBoundaryDigest);
     } catch {
       return parkedPlan(
         'continuation_authority_unavailable',
@@ -449,8 +484,11 @@ export class RuntimeContinuationPlanner {
     if (durableClaimState) {
       const claim = durableClaimState.claim;
       if (
-        claim.boundaryDigest !== replay.plan.boundary.manifestDigest ||
+        claim.boundaryDigest !== plannedBoundaryDigest ||
         !isDeepStrictEqual(claim.boundary, replay.plan.boundary) ||
+        (claim.protocol === 'continuation_claim_v2' &&
+          !isDeepStrictEqual(claim.workspaceBoundary, input.workspaceBoundary)) ||
+        (claim.protocol === 'continuation_claim_v1' && input.workspaceBoundary !== undefined) ||
         claim.providerProjectionVersion !== replay.plan.providerProjectionVersion ||
         claim.providerReplayDigest !== replay.plan.providerReplayDigest
       ) {
@@ -500,12 +538,15 @@ export class RuntimeContinuationPlanner {
       ...(input.workspaceCheckpoint !== undefined
         ? { workspaceCheckpoint: input.workspaceCheckpoint }
         : {}),
+      ...(input.workspaceBoundary !== undefined
+        ? { workspaceBoundary: input.workspaceBoundary }
+        : {}),
     });
   }
 
   private async classifyExistingClaim(
     sessionId: string,
-    state: ContinuationClaimStateV1,
+    state: ContinuationClaimStateV1 | ContinuationClaimStateV2,
   ): Promise<SafeBoundaryContinuationPlan> {
     const { claim } = state;
     const detail = {
@@ -583,6 +624,17 @@ export class RuntimeContinuationPlanner {
       isTerminalRunStatus(targetRun.status) &&
       terminalRunHeaderMatchesFact(targetRun, terminalClassification.fact)
     ) {
+      if (
+        state.startKind === 'runtime_admission' &&
+        terminalClassification.fact.runStatus === 'failed' &&
+        terminalClassification.fact.failureClass === 'app_restarted'
+      ) {
+        return parkedPlan(
+          'continuation_started_indeterminate',
+          'continuation-start is durable and Host restart closure does not prove provider absence',
+          detail,
+        );
+      }
       return parkedPlan(
         'continuation_already_exists',
         'source boundary already has a terminal continuation',
@@ -621,13 +673,15 @@ export class RuntimeContinuationPlanner {
     });
     const segments: ImmutableRuntimePrefixV1[] = [immediate];
     const seen = new Set<string>([sourceRunId]);
-    const v2Edges: Array<{
+    const canonicalEdges: Array<{
       childRunId: string;
       childRunHeader: AgentRunHeader;
       startEvent: RuntimeEvent;
       startKind: 'runtime_admission' | 'claim_repair';
+      protocol: 'continuation_source_v2' | 'continuation_source_v3';
       claimId: string;
       boundaryDigest: RuntimeBoundaryDigest;
+      replayManifestDigest: RuntimeBoundaryDigest;
       providerProjectionVersion: typeof PROVIDER_REPLAY_PROJECTION_VERSION;
       providerReplayDigest: RuntimeBoundaryDigest;
     }> = [];
@@ -638,41 +692,46 @@ export class RuntimeContinuationPlanner {
     while (true) {
       const current = childRun.continuationSource;
       const start = childPrefix.events[0]?.actions?.continuationStart;
-      const currentV2 =
-        current && 'protocol' in current && current.protocol === 'continuation_source_v2'
+      const canonicalSource =
+        current &&
+        'protocol' in current &&
+        (current.protocol === 'continuation_source_v2' ||
+          current.protocol === 'continuation_source_v3')
           ? current
           : undefined;
-      if (start && !currentV2) {
+      if (start && !canonicalSource) {
         throw new RuntimeLineageError(
           'runtime_lineage_start_mismatch',
           `canonical continuation-start cannot be downgraded to legacy lineage for ${childRunId}`,
         );
       }
-      if (currentV2) {
+      if (canonicalSource) {
         if (
           !start ||
-          start.claimId !== currentV2.claimId ||
-          start.boundaryDigest !== currentV2.boundaryDigest ||
-          start.replayManifestDigest !== currentV2.replayManifestDigest ||
+          start.claimId !== canonicalSource.claimId ||
+          start.boundaryDigest !== canonicalSource.boundaryDigest ||
+          start.replayManifestDigest !== canonicalSource.replayManifestDigest ||
           start.immediateSource.sessionId !== sessionId ||
-          start.immediateSource.invocationId !== currentV2.sourceInvocationId ||
-          start.immediateSource.runId !== currentV2.sourceRunId ||
-          start.immediateSource.turnId !== currentV2.sourceTurnId ||
-          start.immediateSource.highWater !== currentV2.sourceRuntimeEventHighWater ||
-          start.immediateSource.prefixDigest !== currentV2.sourcePrefixDigest
+          start.immediateSource.invocationId !== canonicalSource.sourceInvocationId ||
+          start.immediateSource.runId !== canonicalSource.sourceRunId ||
+          start.immediateSource.turnId !== canonicalSource.sourceTurnId ||
+          start.immediateSource.highWater !== canonicalSource.sourceRuntimeEventHighWater ||
+          start.immediateSource.prefixDigest !== canonicalSource.sourcePrefixDigest
         ) {
           throw new RuntimeLineageError(
             'runtime_lineage_start_mismatch',
             `continuation-start does not authenticate lineage edge for ${childRunId}`,
           );
         }
-        v2Edges.push({
+        canonicalEdges.push({
           childRunId,
           childRunHeader: childRun,
           startEvent: childPrefix.events[0]!,
           startKind: start.provenance,
+          protocol: canonicalSource.protocol,
           claimId: start.claimId,
-          boundaryDigest: currentV2.boundaryDigest,
+          boundaryDigest: canonicalSource.boundaryDigest,
+          replayManifestDigest: canonicalSource.replayManifestDigest,
           providerProjectionVersion: start.providerProjectionVersion,
           providerReplayDigest: start.providerReplayDigest,
         });
@@ -722,7 +781,8 @@ export class RuntimeContinuationPlanner {
       }
       if (
         'protocol' in current &&
-        current.protocol === 'continuation_source_v2' &&
+        (current.protocol === 'continuation_source_v2' ||
+          current.protocol === 'continuation_source_v3') &&
         current.sourcePrefixDigest !== prefix.prefixDigest
       ) {
         throw new RuntimeLineageError(
@@ -736,7 +796,7 @@ export class RuntimeContinuationPlanner {
       childRunId = current.sourceRunId;
       depth += 1;
     }
-    for (const edge of v2Edges) {
+    for (const edge of canonicalEdges) {
       const childIndex = segments.findIndex((prefix) => prefix.identity.runId === edge.childRunId);
       if (childIndex <= 0) {
         throw new RuntimeLineageError(
@@ -753,7 +813,7 @@ export class RuntimeContinuationPlanner {
       });
       if (
         edgeReplay.kind !== 'replayable' ||
-        edgeReplay.plan.boundary.manifestDigest !== edge.boundaryDigest ||
+        edgeReplay.plan.boundary.manifestDigest !== edge.replayManifestDigest ||
         edgeReplay.plan.providerReplayDigest !== edge.providerReplayDigest
       ) {
         throw new RuntimeLineageError(
@@ -761,15 +821,19 @@ export class RuntimeContinuationPlanner {
           `continuation provider replay changed before ${edge.childRunId}`,
         );
       }
-      if (!this.deps.readContinuationClaimStateByBoundary) {
+      const readClaimState =
+        edge.protocol === 'continuation_source_v3'
+          ? this.deps.readWorkspaceBoundContinuationClaimStateByBoundary
+          : this.deps.readContinuationClaimStateByBoundary;
+      if (!readClaimState) {
         throw new RuntimeLineageError(
           'continuation_authority_unavailable',
           `durable continuation authority is unavailable for ${edge.childRunId}`,
         );
       }
-      let state: ContinuationClaimStateV1 | undefined;
+      let state: ContinuationClaimStateV1 | ContinuationClaimStateV2 | undefined;
       try {
-        state = await this.deps.readContinuationClaimStateByBoundary(edge.boundaryDigest);
+        state = await readClaimState(edge.boundaryDigest);
       } catch {
         throw new RuntimeLineageError(
           'continuation_authority_unavailable',
@@ -1169,6 +1233,7 @@ export function buildSafeBoundaryContinuationPlan(
           : {}),
       runtimeContext: [...modelRuntimeContext],
       ...(facts.continuationClaimId ? { claimId: facts.continuationClaimId } : {}),
+      ...(facts.workspaceBoundary ? { workspaceBoundary: facts.workspaceBoundary } : {}),
       ...(compositeReplay
         ? {
             boundary: compositeReplay.boundary,
@@ -1188,6 +1253,7 @@ export function buildSafeBoundaryContinuationPlan(
               },
             }
           : {}),
+        ...(facts.workspaceBoundary ? { workspaceBoundary: facts.workspaceBoundary } : {}),
       },
     },
   };
@@ -1466,7 +1532,7 @@ function hasMatchingCall(
   return call !== undefined && call.name === response.name;
 }
 
-function claimTargetRunHeaderMatches(actual: AgentRunHeader, claim: ContinuationClaimV1): boolean {
+function claimTargetRunHeaderMatches(actual: AgentRunHeader, claim: ContinuationClaim): boolean {
   const candidate = actual as unknown as Record<string, unknown>;
   const expected = claim.targetRunHeader as unknown as Record<string, unknown>;
   const immutable = (header: Record<string, unknown>) => {
@@ -1487,7 +1553,7 @@ function claimTargetRunHeaderMatches(actual: AgentRunHeader, claim: Continuation
 
 function continuationStartMatchesClaim(
   event: RuntimeEvent | undefined,
-  claim: ContinuationClaimV1,
+  claim: ContinuationClaim,
   startKind: ContinuationClaimStateV1['startKind'],
 ): boolean {
   const start = event?.actions?.continuationStart;

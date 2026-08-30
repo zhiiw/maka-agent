@@ -24,6 +24,7 @@ import {
   buildImmutableRuntimePrefix,
   createRuntimeBoundaryCursor,
   decodeContinuationClaim,
+  digestWorkspaceBoundContinuationBoundary,
   runtimePrefixSegment,
   type RuntimeBoundaryCursorV1,
   type RuntimePrefixIdentityV1,
@@ -298,7 +299,84 @@ describe('immutable RuntimeEvent boundary', () => {
       /target turnId reuses source identity/,
     );
   });
+
+  it('binds a v2 continuation claim to one exact accepted workspace head', () => {
+    const boundary = boundaryForRuns('run-source');
+    const workspaceBoundary = workspaceBoundaryV1();
+    const claim = claimForBoundary(boundary);
+    const boundaryDigest = digestWorkspaceBoundContinuationBoundary(boundary, workspaceBoundary);
+
+    const decoded = decodeContinuationClaim({
+      ...claim,
+      protocol: 'continuation_claim_v2',
+      boundaryDigest,
+      workspaceBoundary,
+      targetRunHeader: {
+        ...claim.targetRunHeader,
+        continuationSource: {
+          ...claim.targetRunHeader.continuationSource,
+          protocol: 'continuation_source_v3',
+          boundaryDigest,
+        },
+      },
+    });
+
+    assert.equal(decoded.protocol, 'continuation_claim_v2');
+    if (decoded.protocol !== 'continuation_claim_v2') return;
+    assert.deepEqual(decoded.workspaceBoundary, workspaceBoundary);
+  });
+
+  it('rejects a v2 claim when the accepted workspace version changes', () => {
+    const boundary = boundaryForRuns('run-source');
+    const workspaceBoundary = workspaceBoundaryV1();
+    const claim = claimForBoundary(boundary);
+    const boundaryDigest = digestWorkspaceBoundContinuationBoundary(boundary, workspaceBoundary);
+
+    assert.throws(
+      () =>
+        decodeContinuationClaim({
+          ...claim,
+          protocol: 'continuation_claim_v2',
+          boundaryDigest,
+          workspaceBoundary: {
+            ...workspaceBoundary,
+            workspaceVersionId: `version_${'9'.repeat(32)}`,
+          },
+          targetRunHeader: {
+            ...claim.targetRunHeader,
+            continuationSource: {
+              ...claim.targetRunHeader.continuationSource,
+              protocol: 'continuation_source_v3',
+              boundaryDigest,
+            },
+          },
+        }),
+      /workspace boundary digest mismatch/,
+    );
+  });
 });
+
+function workspaceBoundaryV1() {
+  return {
+    protocol: 'managed_workspace_continuation_boundary_v1' as const,
+    storageRootId: '1'.repeat(64),
+    repositoryId: `repository_${'2'.repeat(32)}`,
+    workspaceId: `workspace_${'3'.repeat(32)}`,
+    workspaceEpochId: `epoch_${'4'.repeat(32)}`,
+    workspaceInstanceId: `instance_${'5'.repeat(32)}`,
+    workspaceVersionId: `version_${'6'.repeat(32)}`,
+    acceptedEventId: 'workspace-accepted-event-1',
+    revision: 2,
+    objectFormat: 'sha1' as const,
+    sourceCommitOid: '5'.repeat(40),
+    sourceTreeOid: '6'.repeat(40),
+    commitOid: '7'.repeat(40),
+    treeOid: '8'.repeat(40),
+    materializationProfileDigest: `sha256:${'9'.repeat(64)}` as const,
+    policyHash: `sha256:${'a'.repeat(64)}` as const,
+    executionProfileDigest: `sha256:${'b'.repeat(64)}` as const,
+  };
+}
 
 function runtimeIdentity(runId: string): RuntimePrefixIdentityV1 {
   return {

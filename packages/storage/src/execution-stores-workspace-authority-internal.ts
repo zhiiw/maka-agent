@@ -18,6 +18,10 @@
  */
 
 import type {
+  ManagedWorkspaceContinuationBoundaryV1,
+  RuntimeBoundaryDigest,
+} from '@maka/core/runtime-boundary';
+import type {
   WorkspaceBaselineAuthorityInput,
   WorkspaceBaselineCommitResult,
   WorkspaceHeadRecordV1,
@@ -32,6 +36,7 @@ import {
   commitVerifiedWorkspaceSuccessorInternal,
   readActiveManagedMutationInternal,
   readManagedMutationEvidenceInternal,
+  readWorkspaceContinuationBoundaryInternal,
   readWorkspaceEpochInternal,
   readWorkspaceHeadInternal,
   readWorkspaceVersionInternal,
@@ -51,6 +56,18 @@ export interface ExecutionStoresWorkspaceMutationAuthorityCapabilityInternal {
 
 export interface ExecutionStoresWorkspaceBaselineAuthorityCapabilityInternal {
   readonly kind: 'execution_stores_workspace_baseline_authority_v1';
+}
+
+export interface ExecutionStoresWorkspaceContinuationAuthorityCapabilityInternal {
+  readonly kind: 'execution_stores_workspace_continuation_authority_v1';
+}
+
+export interface ExecutionStoresWorkspaceContinuationAuthorityInternal {
+  readContinuationBoundary(
+    workspaceId: string,
+    workspaceEpochId: string,
+    executionProfileDigest: RuntimeBoundaryDigest,
+  ): Promise<ManagedWorkspaceContinuationBoundaryV1 | undefined>;
 }
 
 export interface ExecutionStoresWorkspaceBaselineAuthorityInternal {
@@ -122,6 +139,10 @@ const sources = new WeakMap<object, AuthoritySource>();
 const capabilities = new WeakMap<object, AuthorityCapabilityRecord>();
 const noEffectCapabilities = new WeakMap<object, NoEffectCapabilityRecord>();
 const baselineCapabilities = new WeakMap<object, BaselineAuthorityCapabilityRecord>();
+const continuationCapabilities = new WeakMap<
+  object,
+  AuthoritySource & { readonly ownerToken: object }
+>();
 const projectionCapabilities = new WeakMap<
   object,
   {
@@ -204,6 +225,46 @@ export function issueExecutionStoresWorkspaceBaselineAuthorityInternal(input: {
     }),
   );
   return capability;
+}
+
+export function issueExecutionStoresWorkspaceContinuationAuthorityInternal(input: {
+  readonly ownerToken: object;
+  readonly stores: object;
+}): ExecutionStoresWorkspaceContinuationAuthorityCapabilityInternal {
+  const source = sources.get(input.stores);
+  if (!source) throw new Error('Execution stores workspace continuation source is unavailable');
+  adoptWorkspaceBaselineAuthorityStoreRootInternal(source.store, source.rootId);
+  const capability = Object.freeze({
+    kind: 'execution_stores_workspace_continuation_authority_v1' as const,
+  });
+  continuationCapabilities.set(
+    capability,
+    Object.freeze({ ...source, ownerToken: input.ownerToken }),
+  );
+  return capability;
+}
+
+export function requireExecutionStoresWorkspaceContinuationAuthorityInternal(
+  ownerToken: object,
+  capability: ExecutionStoresWorkspaceContinuationAuthorityCapabilityInternal,
+): ExecutionStoresWorkspaceContinuationAuthorityInternal {
+  const record = continuationCapabilities.get(capability);
+  if (!record || record.ownerToken !== ownerToken) {
+    throw new Error('Execution stores workspace continuation authority capability is invalid');
+  }
+  return Object.freeze({
+    readContinuationBoundary: (
+      workspaceId: string,
+      workspaceEpochId: string,
+      executionProfileDigest: RuntimeBoundaryDigest,
+    ) =>
+      readWorkspaceContinuationBoundaryInternal(
+        record.store,
+        workspaceId,
+        workspaceEpochId,
+        executionProfileDigest,
+      ),
+  });
 }
 
 export function requireExecutionStoresWorkspaceBaselineAuthorityInternal(

@@ -75,6 +75,19 @@ describe('AgentRun continuation source decoding', () => {
       /Invalid AgentRun header schema/,
     );
   });
+
+  it('accepts a V3 workspace-bound source with a distinct replay manifest digest', () => {
+    const source = {
+      ...validV2ContinuationSource(),
+      protocol: 'continuation_source_v3' as const,
+      replayManifestDigest: `sha256:${'c'.repeat(64)}` as const,
+    };
+
+    assert.deepEqual(
+      decodeAgentRunHeader(headerWithContinuation(source)).continuationSource,
+      source,
+    );
+  });
 });
 
 function headerWithContinuation(

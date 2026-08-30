@@ -665,7 +665,7 @@ describe('workspace version persistence authority', () => {
       bindWorkspaceBaselineAuthorityStoreRootInternal(upgraded, TEST_STORAGE_ROOT_ID);
       registerWorkspaceSuccessorCandidateVerifierInternal(upgraded, verifyTestCandidate);
       try {
-        assert.equal(upgraded.schemaVersion(), 14);
+        assert.equal(upgraded.schemaVersion(), 15);
         assert.equal(
           (
             await upgraded.readWorkspaceHead(
@@ -1350,6 +1350,8 @@ function recreateWorkspaceTablesAsSchema12(database: DatabaseSync): void {
     DROP TABLE runtime_workspace_heads_schema_13;
     DROP TABLE runtime_workspace_versions_schema_13;
     DROP TABLE runtime_managed_mutation_reservations;
+    DELETE FROM runtime_capabilities
+      WHERE capability = 'runtime_workspace_bound_continuation_authority';
     PRAGMA user_version = 12;
     COMMIT;
     PRAGMA foreign_keys = ON;
