@@ -1058,6 +1058,7 @@ dependencies = [
  "caseless",
  "gix",
  "gix-glob",
+ "libc",
  "regex",
  "serde",
  "serde_json",

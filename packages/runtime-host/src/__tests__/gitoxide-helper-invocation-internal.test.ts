@@ -53,6 +53,7 @@ test('uses bounded mutation/import deadlines distinct from repository inspection
   assert.deepEqual(GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL, {
     inspectRepositoryMs: 5_000,
     importSourceHeadMs: 10 * 60_000,
+    importFilesystemSnapshotMs: 10 * 60_000,
     createCandidateMs: 10 * 60_000,
     promoteCandidateMs: 10 * 60_000,
     observeAcceptedRefMs: 10 * 60_000,

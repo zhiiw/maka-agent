@@ -81,6 +81,40 @@ test('opens one durable Gitoxide baseline and reuses it for the same session', a
   assert.deepEqual(admission.immutableBase, { content: 'before\n' });
 });
 
+test('imports a non-Git directory as one durable synthetic baseline', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the snapshot source test');
+    return;
+  }
+  const sourceRoot = await realpath(
+    await mkdtemp(join(tmpdir(), 'maka-gitoxide-snapshot-source-')),
+  );
+  t.after(() => rm(sourceRoot, { recursive: true, force: true }));
+  await writeFile(join(sourceRoot, 'notes.txt'), 'snapshot baseline\n', 'utf8');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-snapshot-owner-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
+  assert.ok(rootOwner);
+  t.after(() => rootOwner.close());
+  const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  t.after(() => stores.sessionStore.close?.());
+
+  const session = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-snapshot-source',
+  });
+
+  assert.deepEqual(await session.inspection.execute({ kind: 'read', path: 'notes.txt' }), {
+    kind: 'read',
+    content: 'snapshot baseline\n',
+  });
+});
+
 test('Read, Glob, and Grep observe only the accepted managed tree', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {

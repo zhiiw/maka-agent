@@ -27,6 +27,7 @@ const MAX_HELPER_ARTIFACT_BYTES = 256 * 1024 * 1024;
 export const GITOXIDE_HELPER_OPERATIONS_INTERNAL = Object.freeze([
   'inspect_repository',
   'import_source_head',
+  'import_filesystem_snapshot',
   'create_candidate',
   'promote_candidate',
   'observe_accepted_ref',

@@ -537,6 +537,22 @@ Attached 模式继续服务现有用户目录与兼容场景，但不冒充强 w
 receipt、worktree materialization 与 Runtime Host admission path 已删除。schema 9 RuntimeEvents、workspace
 projection reader/rebuild 与升级合同继续保留；它们是历史事实 authority，不是可执行 Git path。
 
+Managed task admission 只在 T1 前区分 source adapter：
+
+| source kind | importer | durable identity |
+| --- | --- | --- |
+| `git_repository_v1` | 导入经过 policy 验证的 immutable source HEAD | repository identity、object format、source HEAD |
+| `filesystem_snapshot_v1` | 对普通目录做两次有界观察并生成 synthetic commit | canonical root identity、snapshot tree/manifest digest |
+
+两种 adapter 最终都签发同一种 owner-bound accepted repository capability。进入 accepted baseline 后，
+Read/Glob/Grep/Write/Edit、candidate、SQLite acceptance 与 continuation 不得再按 source kind 分叉。
+发现 `.git` marker 时必须进入 Git admission；损坏或不受支持的 repository 要明确拒绝，不能静默当作
+普通目录导入。
+
+Filesystem snapshot v1 只接受 portable regular files/directories，拒绝 symlink、junction/reparse point、
+`.git` 控制路径和超出 path/file/tree/byte/depth 配额的输入。它不宣称拥有跨整棵目录的原子物理快照；
+只承诺两次完整有界观察得到同一个 immutable Git tree，否则在 destination publication 前 fail closed。
+
 ## 4. Gitoxide managed workspace 后续边界
 
 后续强模式必须从 Gitoxide data plane 建立新的 production composition，并分别证明：
