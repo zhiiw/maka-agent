@@ -67,6 +67,7 @@ import { type MakaTool, type MakaToolContext } from '@maka/runtime/tool-runtime'
 import {
   openInteractiveExecutionStoresForRead,
   openInteractiveExecutionStoresForWrite,
+  type RootTurnAdmission,
 } from '@maka/storage/execution-stores';
 import { OPERATIONAL_STATE_DATABASE_NAME } from '@maka/storage/operational-state-store';
 import { openInteractiveRuntimePolicyStoresForWrite } from '@maka/storage/runtime-policy-stores';
@@ -1192,14 +1193,21 @@ export class ExecutionFixture {
   }
 
   async readAdmissionChain() {
-    const reader = await acquireReader(this.capability);
-    let stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForRead>> | undefined;
+    const database = new DatabaseSync(join(this.root, OPERATIONAL_STATE_DATABASE_NAME), {
+      readOnly: true,
+    });
     try {
-      stores = await openInteractiveExecutionStoresForRead(reader.lease);
-      return await stores.agentRunStore.listRootTurnAdmissionsForRecovery(this.sessionId);
+      return database
+        .prepare(`
+          SELECT record_json AS recordJson
+          FROM core_root_turn_admissions
+          WHERE session_id = ?
+          ORDER BY admitted_at, turn_id
+        `)
+        .all(this.sessionId)
+        .map(({ recordJson }) => JSON.parse(recordJson as string) as RootTurnAdmission);
     } finally {
-      await stores?.sessionStore.close?.();
-      await reader.close();
+      database.close();
     }
   }
 
