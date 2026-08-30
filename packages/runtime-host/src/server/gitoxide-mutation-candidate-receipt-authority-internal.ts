@@ -22,7 +22,7 @@ import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, realpath, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { MANAGED_MUTATION_EXECUTION_PROFILE_V1 } from '@maka/core/runtime-event';
+import { MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST } from '@maka/core/runtime-event';
 import type { WorkspaceHeadRecordV1 } from '@maka/core/workspace-version-authority';
 import { withProcessLifetimeFileUpdateLock } from '@maka/storage/process-lifetime-file-update-lock';
 import {
@@ -433,7 +433,7 @@ function assertCaptureInput(input: GitoxideMutationCandidateCaptureInput): void 
   if (
     input.operationId.length === 0 ||
     Buffer.byteLength(input.operationId, 'utf8') > 1024 ||
-    input.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V1
+    input.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST
   ) {
     throw new GitoxideMutationCandidateAuthorityError(
       'gitoxide_mutation_candidate_request_invalid',

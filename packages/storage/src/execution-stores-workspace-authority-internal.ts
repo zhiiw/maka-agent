@@ -71,8 +71,8 @@ export interface ExecutionStoresWorkspaceMutationAuthorityInternal {
   readActiveMutation(
     workspaceInstanceId: string,
   ): Promise<ManagedMutationReservationRecordV1 | undefined>;
-  issueNoEffectOutcome(claim: ManagedMutationNoEffectClaimV1): object;
   readMutationEvidence(operationId: string): Promise<ManagedMutationEvidenceRecordV1 | undefined>;
+  issueNoEffectOutcome(claim: ManagedMutationNoEffectClaimV1): object;
   commitSuccessor(
     input: WorkspaceSuccessorCommitInput,
   ): Promise<ExecutionStoresWorkspaceSuccessorCommitResult>;
@@ -207,7 +207,7 @@ export function requireExecutionStoresWorkspaceMutationAuthorityInternal(
         Object.freeze({
           ownerToken,
           candidateOutcome: input.candidateOutcome,
-          head: result.head,
+          head: result.committedSuccessor,
         }),
       );
       return Object.freeze({ ...result, projectionCapability });

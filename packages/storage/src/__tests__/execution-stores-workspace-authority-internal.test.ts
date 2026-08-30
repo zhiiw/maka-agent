@@ -83,6 +83,54 @@ test('binds each workspace mutation verifier to its execution-stores owner capab
       ),
       undefined,
     );
+    const claim = {
+      operationId: 'operation-no-effect',
+      dispatchEventId: 'dispatch-no-effect',
+      workspaceInstanceId: `instance_${'3'.repeat(32)}`,
+      terminalKind: 'no_workspace_change' as const,
+    };
+    const outcomeEvent: RuntimeEvent = {
+      id: 'outcome-no-effect',
+      sessionId: 'session-no-effect',
+      invocationId: 'invocation-no-effect',
+      runId: 'run-no-effect',
+      turnId: 'turn-no-effect',
+      ts: 2,
+      partial: false,
+      role: 'tool',
+      author: 'tool',
+      content: {
+        kind: 'function_response',
+        id: 'call-no-effect',
+        name: 'Write',
+        result: 'unchanged',
+      },
+      actions: {
+        managedMutationTerminal: {
+          protocol: 'managed_mutation_terminal_v1',
+          ...claim,
+        },
+      },
+      refs: { operationId: claim.operationId, toolCallId: 'call-no-effect' },
+    };
+    const toolOutcome = {
+      operationId: claim.operationId,
+      journalEventId: 'journal-no-effect',
+      runtimeEvent: outcomeEvent,
+      committedAt: 2,
+    };
+    await assert.rejects(
+      async () => authority.commitTerminal({ noEffectOutcome: {}, toolOutcome }),
+      /no-effect proof is invalid/i,
+    );
+    await assert.rejects(
+      async () =>
+        authority.commitTerminal({
+          noEffectOutcome: authority.issueNoEffectOutcome(claim),
+          toolOutcome,
+        }),
+      /T2 journal identity must be derived from the tool operation/i,
+    );
   } finally {
     await stores.sessionStore.close?.();
     await rootOwner.close();

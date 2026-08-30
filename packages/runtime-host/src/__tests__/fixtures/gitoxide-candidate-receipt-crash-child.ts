@@ -23,7 +23,7 @@ import {
   discoverMarkedStorageRoot,
   tryAcquireInteractiveRootOwner,
 } from '@maka/storage/root-authority';
-import { MANAGED_MUTATION_EXECUTION_PROFILE_V1 } from '@maka/core/runtime-event';
+import { MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST } from '@maka/core/runtime-event';
 import {
   admitGitoxideHelperArtifactInternal,
   issueGitoxideHelperReleaseArtifactClaimInternal,
@@ -129,6 +129,6 @@ await authority.capture({
   operationId: fixture.operationId,
   path: fixture.path,
   content: fixture.content,
-  executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+  executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
 });
 throw new Error('Crash fixture did not stop after candidate publication');

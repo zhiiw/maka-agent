@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
   isCanonicalManagedMutationPathV1,
-  MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+  MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   type RuntimeEvent,
   type RuntimeEventManagedWorkspaceMutationV2,
 } from '@maka/core/runtime-event';
@@ -249,7 +249,7 @@ export function createGitoxideManagedWriteEditOwnerInternal(
         operationId: version.origin.operationId,
         path: recovered.path,
         content: recovered.content,
-        executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+        executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
         ...(abortSignal ? { abortSignal } : {}),
       });
       assertCandidateProof(candidate, parentHead, recovered.path, recovered.content);
@@ -269,7 +269,7 @@ export function createGitoxideManagedWriteEditOwnerInternal(
         candidateOutcome: candidate,
         toolOutcome: toolOutcome(version.origin.operationId, evidence.outcomeEvent),
       });
-      if (replay.created || !headRecordsEqual(replay.head, head)) {
+      if (replay.created || !headRecordsEqual(replay.committedSuccessor, head)) {
         throw new Error('Gitoxide projection recovery did not exact-replay the durable successor');
       }
       const promoted = await candidateAuthority.promote({
@@ -313,14 +313,14 @@ async function settleManagedMutation(input: {
   }
 
   if (proof.isError) {
-    return commitTerminal(input, proof, 'operation_failed_no_effect');
+    return commitTerminal(input, proof, reservation!, 'operation_failed_no_effect');
   }
   const mutation = proof.mutationResult;
   if (!mutation || mutation.path !== input.path) {
     return unsettled('Managed Write/Edit operation has no exact mutation result');
   }
   if (!mutation.changed) {
-    return commitTerminal(input, proof, 'no_workspace_change');
+    return commitTerminal(input, proof, reservation!, 'no_workspace_change');
   }
 
   let candidate: GitoxideMutationCandidateProofV1;
@@ -329,7 +329,7 @@ async function settleManagedMutation(input: {
       operationId: input.request.operationId,
       path: input.path,
       content: mutation.content,
-      executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+      executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
       abortSignal: input.request.abortSignal,
     });
     assertCandidateProof(candidate, input.head, input.path, mutation.content);
@@ -359,8 +359,8 @@ async function settleManagedMutation(input: {
       abortSignal: input.request.abortSignal,
     });
     if (
-      promoted.acceptedCommitOid !== committed.head.commitOid ||
-      promoted.acceptedTreeOid !== committed.head.treeOid
+      promoted.acceptedCommitOid !== committed.committedSuccessor.commitOid ||
+      promoted.acceptedTreeOid !== committed.committedSuccessor.treeOid
     ) {
       return unsettled('Accepted Gitoxide projection conflicts with the durable workspace head');
     }
@@ -376,13 +376,23 @@ async function settleManagedMutation(input: {
 async function commitTerminal(
   input: Parameters<typeof settleManagedMutation>[0],
   proof: RuntimeManagedMutationOperationProof,
+  reservation: NonNullable<
+    Awaited<ReturnType<ExecutionStoresWorkspaceMutationAuthorityInternal['readActiveMutation']>>
+  >,
   terminalKind: 'no_workspace_change' | 'operation_failed_no_effect',
 ): Promise<RuntimeManagedMutationSettlement> {
   if (proof.terminalOutcome?.kind !== terminalKind) {
     return unsettled('Managed Write/Edit terminal proof is unavailable');
   }
   try {
+    const noEffectOutcome = input.persistence.issueNoEffectOutcome({
+      operationId: input.request.operationId,
+      dispatchEventId: reservation.dispatchEventId,
+      workspaceInstanceId: reservation.workspaceInstanceId,
+      terminalKind,
+    });
     await input.persistence.commitTerminal({
+      noEffectOutcome,
       toolOutcome: toolOutcome(input.request.operationId, proof.terminalOutcome.durableOutcome),
     });
     return Object.freeze({
@@ -445,7 +455,7 @@ function freezeManagedDispatch(input: {
     baseTreeOid: input.head.treeOid,
     expectedPath: input.expectedPath,
     pathPolicyVersion: 3 as const,
-    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   });
 }
 
@@ -502,7 +512,7 @@ function reservationMatchesAdmission(
       reservation.baseCommitOid === input.head.commitOid &&
       reservation.baseTreeOid === input.head.treeOid &&
       reservation.expectedPath === input.path &&
-      reservation.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+      reservation.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   );
 }
 
@@ -525,7 +535,7 @@ function assertCandidateProof(
     receipt.baseTreeOid !== head.treeOid ||
     receipt.path !== path ||
     receipt.contentSha256 !== sha256(content) ||
-    receipt.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V1 ||
+    receipt.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST ||
     !SHA1_PATTERN.test(receipt.candidateCommitOid) ||
     !SHA1_PATTERN.test(receipt.candidateTreeOid) ||
     !SHA1_PATTERN.test(receipt.resultBlobOid)
@@ -565,7 +575,7 @@ function buildSuccessor(input: {
       changedPaths: Object.freeze([receipt.path]),
       changedFileCount: 1,
       deletedFileCount: 0,
-      executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+      executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
     }),
     origin: Object.freeze({
       operationId: input.operationId,
@@ -676,7 +686,7 @@ async function reconstructAcceptedSuccessor(input: {
     path !== managed.expectedPath ||
     input.successorVersion.changedPaths.length !== 1 ||
     input.successorVersion.changedPaths[0] !== path ||
-    input.successorVersion.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V1
+    input.successorVersion.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST
   ) {
     throw new Error('Gitoxide projection recovery path authority is invalid');
   }
@@ -717,7 +727,7 @@ function managedMutationMatchesParent(
       managed.baseCommitOid === parent.commitOid &&
       managed.baseTreeOid === parent.treeOid &&
       managed.pathPolicyVersion === 3 &&
-      managed.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+      managed.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   );
 }
 

@@ -25,7 +25,7 @@ import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { MANAGED_MUTATION_EXECUTION_PROFILE_V1 } from '@maka/core/runtime-event';
+import { MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST } from '@maka/core/runtime-event';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import {
   admitGitoxideHelperArtifactInternal,
@@ -550,7 +550,7 @@ test('publishes a durable operation-bound candidate receipt and rejects tamperin
     operationId: 'operation-durable-receipt',
     path: 'docs/result.txt',
     content: 'durable result\n',
-    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   } as const;
 
   const first = await authority.capture(request);
@@ -647,7 +647,7 @@ test('converges a ref-only candidate publication by replaying the pure request',
     operationId: 'operation-ref-only',
     path: 'result.txt',
     content: 'replayed pure result\n',
-    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   } as const;
   await assert.rejects(interrupted.capture(request), /simulated process stop/);
 
@@ -762,7 +762,7 @@ test('recovers a ref-only candidate after the publishing process exits', async (
     operationId: fixture.operationId,
     path: fixture.path,
     content: fixture.content,
-    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1,
+    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   });
   assert.equal(
     proof.receipt.candidateCommitOid,
