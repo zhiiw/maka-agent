@@ -102,22 +102,22 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
     });
     const firstClient = await connectClient(root);
     const startRequest = firstClient.request('hosted.execution.start', {
-        executionId,
-        session: {
-          workspace: { kind: 'host_path', path: root },
-          modelTarget: {
-            kind: 'explicit',
-            connectionId,
-            connectionSlug: 'managed-v2-provider',
-            model: MODEL_ID,
-          },
-          permissionMode: 'bypass',
-          collaborationMode: 'agent',
-          orchestrationMode: 'default',
-          toolProfile: 'managed-coding-v2',
+      executionId,
+      session: {
+        workspace: { kind: 'host_path', path: root },
+        modelTarget: {
+          kind: 'explicit',
+          connectionId,
+          connectionSlug: 'managed-v2-provider',
+          model: MODEL_ID,
         },
-        content: { text: 'Run managed.test.mjs and report the result.' },
-      });
+        permissionMode: 'bypass',
+        collaborationMode: 'agent',
+        orchestrationMode: 'default',
+        toolProfile: 'managed-coding-v2',
+      },
+      content: { text: 'Run managed.test.mjs and report the result.' },
+    });
     const start = startRequest.then(
       () => undefined,
       () => undefined,
