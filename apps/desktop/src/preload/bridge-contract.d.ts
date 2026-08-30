@@ -58,6 +58,7 @@ import type {
   ManagedWorkspaceHistoryResult,
   ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspaceRestoreResult,
+  ManagedWorkspaceRebaselineResult,
 } from '@maka/runtime-host/protocol';
 import type { PermissionMode } from '@maka/core/permission';
 import type { CollaborationMode } from '@maka/core/collaboration';
@@ -1307,6 +1308,10 @@ export interface MakaBridge {
       workspaceVersionId: string;
       restoreId: string;
     }): Promise<ManagedWorkspaceHistoryUndoResult>;
+    rebaseline(input: {
+      sessionId: string;
+      rebaselineId: string;
+    }): Promise<ManagedWorkspaceRebaselineResult>;
   };
   goal: {
     /** The session's current goal (null when none is set). */

@@ -24,8 +24,21 @@ import {
   decodeManagedWorkspaceHistoryResult,
   decodeManagedWorkspaceHistoryUndoResult,
   decodeManagedWorkspaceReviewQueryResult,
+  decodeManagedWorkspaceRebaselineResult,
   decodeManagedWorkspaceRestoreResult,
 } from '../protocol/managed-workspace-review.js';
+
+test('managed Rebaseline decodes one exact active epoch result', () => {
+  const result = {
+    kind: 'managed_workspace_rebaselined',
+    rebaselineId: 'desktop-rebaseline-1',
+    workspaceId: `workspace_${'1'.repeat(32)}`,
+    workspaceEpochId: `epoch_${'2'.repeat(32)}`,
+    baselineWorkspaceVersionId: `version_${'3'.repeat(32)}`,
+    sourceKind: 'git_repository_v1',
+  } as const;
+  assert.deepEqual(decodeManagedWorkspaceRebaselineResult(result), result);
+});
 
 test('managed History Undo decodes one accepted successor', () => {
   const result = {

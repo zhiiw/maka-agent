@@ -35,6 +35,7 @@ import type {
   ManagedWorkspaceHistoryResult,
   ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspaceRestoreResult,
+  ManagedWorkspaceRebaselineResult,
 } from '@maka/runtime-host/protocol';
 import { DiffCodePreview, useUiLocale } from '@maka/ui';
 import { ICON_SIZE, GitBranch } from '@maka/ui/icons';
@@ -82,11 +83,15 @@ export function SessionReviewPanel(props: {
   const [historyUndoingVersion, setHistoryUndoingVersion] = useState<string | null>(null);
   const [historyUndoError, setHistoryUndoError] = useState<string | null>(null);
   const [historyUndo, setHistoryUndo] = useState<ManagedWorkspaceHistoryUndoResult | null>(null);
+  const [rebaselining, setRebaselining] = useState(false);
+  const [rebaselineError, setRebaselineError] = useState<string | null>(null);
+  const [rebaselined, setRebaselined] = useState<ManagedWorkspaceRebaselineResult | null>(null);
   const revisionRef = useRef(0);
   const publishIdRef = useRef<string | null>(null);
   const restoreIdRef = useRef<string | null>(null);
   const historyRestoreIdsRef = useRef(new Map<string, string>());
   const historyUndoIdsRef = useRef(new Map<string, string>());
+  const rebaselineIdRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     const revision = ++revisionRef.current;
@@ -300,6 +305,27 @@ export function SessionReviewPanel(props: {
     [copy.historyUndoFailed, historyUndoingVersion, load, locale, props.sessionId, review],
   );
 
+  const rebaselineWorkspace = useCallback(async () => {
+    if (rebaselining) return;
+    const rebaselineId = rebaselineIdRef.current ?? `desktop-${crypto.randomUUID()}`;
+    rebaselineIdRef.current = rebaselineId;
+    setRebaselining(true);
+    setRebaselineError(null);
+    try {
+      const result = await review.rebaseline({ sessionId: props.sessionId, rebaselineId });
+      setRebaselined(result);
+      await load();
+    } catch (nextError) {
+      setRebaselineError(
+        locale === 'zh'
+          ? generalizedErrorMessageChinese(nextError, copy.rebaselineFailed)
+          : generalizedErrorMessage(nextError, copy.rebaselineFailed),
+      );
+    } finally {
+      setRebaselining(false);
+    }
+  }, [copy.rebaselineFailed, load, locale, props.sessionId, rebaselining, review]);
+
   return (
     <Section
       variant="transparent"
@@ -347,6 +373,14 @@ export function SessionReviewPanel(props: {
         ) : null}
         {gitSnapshot ? (
           <HStack gap={2} align="center" justify="end">
+            <Button
+              variant="ghost"
+              size="sm"
+              label={rebaselining ? copy.rebaselining : copy.rebaseline}
+              isLoading={rebaselining}
+              isDisabled={rebaselining}
+              onClick={() => void rebaselineWorkspace()}
+            />
             <Button
               variant="ghost"
               size="sm"
@@ -406,6 +440,8 @@ export function SessionReviewPanel(props: {
         {historyRestoreError ? <Banner status="error" title={historyRestoreError} /> : null}
         {historyUndo ? <Banner status="success" title={copy.historyUndone} /> : null}
         {historyUndoError ? <Banner status="error" title={historyUndoError} /> : null}
+        {rebaselined ? <Banner status="success" title={copy.rebaselined} /> : null}
+        {rebaselineError ? <Banner status="error" title={rebaselineError} /> : null}
         {publishError ? (
           <Banner
             status="error"
@@ -426,7 +462,16 @@ export function SessionReviewPanel(props: {
             status="error"
             title={error}
             endContent={
-              <Button variant="ghost" size="sm" label={copy.retry} onClick={() => void load()} />
+              <HStack gap={1} align="center">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  label={rebaselining ? copy.rebaselining : copy.rebaseline}
+                  isLoading={rebaselining}
+                  onClick={() => void rebaselineWorkspace()}
+                />
+                <Button variant="ghost" size="sm" label={copy.retry} onClick={() => void load()} />
+              </HStack>
             }
           />
         ) : null}

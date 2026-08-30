@@ -118,6 +118,20 @@ export interface ManagedWorkspaceHistoryUndoResult {
   readonly created: boolean;
 }
 
+export interface ManagedWorkspaceRebaselineInput {
+  readonly sessionId: string;
+  readonly rebaselineId: string;
+}
+
+export interface ManagedWorkspaceRebaselineResult {
+  readonly kind: 'managed_workspace_rebaselined';
+  readonly rebaselineId: string;
+  readonly workspaceId: string;
+  readonly workspaceEpochId: string;
+  readonly baselineWorkspaceVersionId: string;
+  readonly sourceKind: 'git_repository_v1' | 'filesystem_snapshot_v1';
+}
+
 const QUERY_ERRORS = [
   'host_not_ready',
   'host_draining',
@@ -312,7 +326,64 @@ export const MANAGED_WORKSPACE_REVIEW_OPERATION_SPECS = {
       }
     },
   }),
+  'managed-workspace.rebaseline.mutate': defineOperation<
+    ManagedWorkspaceRebaselineInput,
+    ManagedWorkspaceRebaselineResult,
+    (typeof QUERY_ERRORS)[number]
+  >({
+    mode: 'command',
+    availability: 'ready',
+    errors: QUERY_ERRORS,
+    decodeInput(value) {
+      const record = requireExactRecord(value, 'managed workspace rebaseline', [
+        'sessionId',
+        'rebaselineId',
+      ]);
+      const rebaselineId = requireEntityId(record.rebaselineId, 'managed rebaseline id');
+      if (!PUBLISH_ID_PATTERN.test(rebaselineId)) {
+        throw invalidProtocolFrame('Invalid managed rebaseline identity');
+      }
+      return {
+        sessionId: requireEntityId(record.sessionId, 'managed rebaseline Session id'),
+        rebaselineId,
+      };
+    },
+    decodeOutput: decodeManagedWorkspaceRebaselineResult,
+    assertOutputForInput(input, output) {
+      if (output.rebaselineId !== input.rebaselineId) {
+        throw invalidProtocolFrame('Managed rebaseline conflicts with its request');
+      }
+    },
+  }),
 } as const;
+
+export function decodeManagedWorkspaceRebaselineResult(
+  value: unknown,
+): ManagedWorkspaceRebaselineResult {
+  const record = requireExactRecord(value, 'managed workspace rebaseline result', [
+    'kind',
+    'rebaselineId',
+    'workspaceId',
+    'workspaceEpochId',
+    'baselineWorkspaceVersionId',
+    'sourceKind',
+  ]);
+  if (
+    record.kind !== 'managed_workspace_rebaselined' ||
+    typeof record.rebaselineId !== 'string' ||
+    !PUBLISH_ID_PATTERN.test(record.rebaselineId) ||
+    typeof record.workspaceId !== 'string' ||
+    !/^workspace_[a-f0-9]{32}$/u.test(record.workspaceId) ||
+    typeof record.workspaceEpochId !== 'string' ||
+    !/^epoch_[a-f0-9]{32}$/u.test(record.workspaceEpochId) ||
+    typeof record.baselineWorkspaceVersionId !== 'string' ||
+    !VERSION_ID_PATTERN.test(record.baselineWorkspaceVersionId) ||
+    (record.sourceKind !== 'git_repository_v1' && record.sourceKind !== 'filesystem_snapshot_v1')
+  ) {
+    throw invalidProtocolFrame('Invalid managed workspace rebaseline result');
+  }
+  return record as unknown as ManagedWorkspaceRebaselineResult;
+}
 
 export function decodeManagedWorkspacePublishResult(value: unknown): ManagedWorkspacePublishResult {
   const record = requireExactRecord(value, 'managed workspace publication result', [

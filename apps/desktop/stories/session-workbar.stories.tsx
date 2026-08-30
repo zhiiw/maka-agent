@@ -919,6 +919,14 @@ function bridge(options: {
         revision: 3,
         created: true,
       }),
+      rebaseline: async ({ rebaselineId }) => ({
+        kind: 'managed_workspace_rebaselined' as const,
+        rebaselineId,
+        workspaceId: `workspace_${'1'.repeat(32)}`,
+        workspaceEpochId: `epoch_${'4'.repeat(32)}`,
+        baselineWorkspaceVersionId: `version_${'4'.repeat(32)}`,
+        sourceKind: 'git_repository_v1' as const,
+      }),
       subscribeSessionEvents: unsubscribe,
     },
     terminal: {

@@ -35,6 +35,8 @@ interface Fixture {
   readonly sourceRoot: string;
   readonly sessionId: string;
   readonly helperPath: string;
+  readonly mode?: 'after_repository_import' | 'after_active_epoch_commit';
+  readonly rebaselineId?: string;
 }
 
 const fixturePath = process.argv[2];
@@ -72,10 +74,13 @@ const helperCapability = await admitGitoxideHelperArtifactInternal({
       'compare_accepted_trees',
       'materialize_accepted_tree',
       'publish_accepted_ref',
+      'create_history_candidate',
+      'promote_history_candidate',
     ],
   }),
 });
-await openGitoxideManagedSessionOwnerInternal({
+const mode = fixture.mode ?? 'after_repository_import';
+const session = await openGitoxideManagedSessionOwnerInternal({
   storageRootLease: rootOwner.lease,
   stores,
   invocationOwnerToken,
@@ -83,7 +88,13 @@ await openGitoxideManagedSessionOwnerInternal({
   sourceRoot: fixture.sourceRoot,
   sessionId: fixture.sessionId,
   failpoint(point) {
-    if (point === 'after_repository_import') process.exit(74);
+    if (point === 'after_repository_import' && mode === 'after_repository_import') process.exit(74);
+    if (point === 'after_active_epoch_commit' && mode === 'after_active_epoch_commit')
+      process.exit(75);
   },
 });
-throw new Error('Crash fixture did not stop after repository import');
+if (mode === 'after_active_epoch_commit') {
+  if (!fixture.rebaselineId) throw new Error('Crash fixture rebaseline id is unavailable');
+  await session.rebaseline(fixture.rebaselineId);
+}
+throw new Error(`Crash fixture did not stop at ${mode}`);
