@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { type RuntimeEvent } from '@maka/core/runtime-event';
 import {
   type WorkspaceBaselineAuthorityInput,
+  type WorkspaceEpochActivationAuthorityInput,
   type WorkspaceSuccessorAuthorityInput,
 } from '@maka/core/workspace-version-authority';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
@@ -46,6 +47,10 @@ import {
   type ManagedMutationNoEffectClaimV1,
   type WorkspaceSuccessorCommitInput,
 } from '../workspace-version-authority-internal.js';
+import {
+  commitWorkspaceActiveEpochInternal,
+  readWorkspaceActiveEpochInternal,
+} from '../workspace-active-epoch-authority-internal.js';
 
 const CRASH_READ_ARGS_HASH = canonicalToolArgsHash('Read', {
   path: '/workspace/README.md',
@@ -182,6 +187,40 @@ if (childMode) {
           (await store.readWorkspaceHead(`workspace_${'2'.repeat(32)}`, `epoch_${'3'.repeat(32)}`))
             ?.workspaceVersionId,
           `version_${'5'.repeat(32)}`,
+        );
+      });
+    });
+
+    it('keeps the prior active epoch when killed inside the activation transaction', {
+      timeout: 30_000,
+    }, async () => {
+      await withKilledChild('inside_workspace_active_epoch', async (store) => {
+        bindWorkspaceBaselineAuthorityStoreRootInternal(store, 'a'.repeat(64));
+        assert.equal(
+          (await readWorkspaceActiveEpochInternal(store, `workspace_${'2'.repeat(32)}`))
+            ?.workspaceEpochId,
+          `epoch_${'3'.repeat(32)}`,
+        );
+      });
+    });
+
+    it('reopens the new active epoch after the activation transaction commits', {
+      timeout: 30_000,
+    }, async () => {
+      await withKilledChild('after_workspace_active_epoch_commit', async (store) => {
+        bindWorkspaceBaselineAuthorityStoreRootInternal(store, 'a'.repeat(64));
+        const active = await readWorkspaceActiveEpochInternal(store, `workspace_${'2'.repeat(32)}`);
+        assert.equal(active?.workspaceEpochId, `epoch_${'8'.repeat(32)}`);
+        assert.equal(active?.revision, 2);
+        assert.equal(
+          (
+            await commitWorkspaceActiveEpochInternal(
+              store,
+              workspaceEpochActivationInput(),
+              'a'.repeat(64),
+            )
+          ).created,
+          false,
         );
       });
     });
@@ -358,6 +397,12 @@ async function runCrashChild(mode: string): Promise<void> {
     ) {
       blockUntilKilled();
     }
+    if (
+      point === 'after_workspace_active_epoch_event_insert' &&
+      mode === 'inside_workspace_active_epoch'
+    ) {
+      blockUntilKilled();
+    }
   };
   const store = createSqliteRuntimeStore(dbPath, { failpoint });
   registerCrashCandidateVerifier(store);
@@ -368,10 +413,24 @@ async function runCrashChild(mode: string): Promise<void> {
     mode === 'inside_workspace_successor' ||
     mode === 'after_workspace_successor_commit' ||
     mode === 'inside_workspace_terminal' ||
-    mode === 'after_workspace_terminal_commit'
+    mode === 'after_workspace_terminal_commit' ||
+    mode === 'inside_workspace_active_epoch' ||
+    mode === 'after_workspace_active_epoch_commit'
   ) {
     bindWorkspaceBaselineAuthorityStoreRootInternal(store, 'a'.repeat(64));
     await commitWorkspaceBaselineInternal(store, workspaceBaselineInput());
+    if (
+      mode === 'inside_workspace_active_epoch' ||
+      mode === 'after_workspace_active_epoch_commit'
+    ) {
+      await commitWorkspaceBaselineInternal(store, secondWorkspaceBaselineInput());
+      await commitWorkspaceActiveEpochInternal(
+        store,
+        workspaceEpochActivationInput(),
+        'a'.repeat(64),
+      );
+      if (mode === 'after_workspace_active_epoch_commit') blockUntilKilled();
+    }
     if (mode === 'after_workspace_baseline_commit') blockUntilKilled();
     if (mode === 'after_workspace_mutation_t1') {
       await store.commitToolPrepared(workspaceSuccessorPreparedCommit());
@@ -455,6 +514,45 @@ function workspaceBaselineInput(): WorkspaceBaselineAuthorityInput {
       treeDeltaDigest: `sha256:${'6'.repeat(64)}`,
       changedFileCount: 7,
       deletedFileCount: 0,
+    },
+  };
+}
+
+function secondWorkspaceBaselineInput(): WorkspaceBaselineAuthorityInput {
+  const first = workspaceBaselineInput();
+  return {
+    ...first,
+    epochOpenedEventId: 'workspace-epoch-event-2',
+    baselineAcceptedEventId: 'workspace-version-event-2',
+    committedAt: first.committedAt + 10,
+    epoch: {
+      ...first.epoch,
+      workspaceEpochId: `epoch_${'8'.repeat(32)}`,
+      workspaceInstanceId: `instance_${'9'.repeat(32)}`,
+      sourceCommitOid: '8'.repeat(40),
+      sourceTreeOid: '9'.repeat(40),
+    },
+    baseline: {
+      ...first.baseline,
+      workspaceVersionId: `version_${'8'.repeat(32)}`,
+      commitOid: '8'.repeat(40),
+      treeOid: '9'.repeat(40),
+    },
+  };
+}
+
+function workspaceEpochActivationInput(): WorkspaceEpochActivationAuthorityInput {
+  const first = workspaceBaselineInput();
+  const second = secondWorkspaceBaselineInput();
+  return {
+    activationEventId: 'workspace-activation-event-1',
+    committedAt: second.committedAt + 1,
+    activation: {
+      repositoryId: first.epoch.repositoryId,
+      workspaceId: first.epoch.workspaceId,
+      previousWorkspaceEpochId: first.epoch.workspaceEpochId,
+      workspaceEpochId: second.epoch.workspaceEpochId,
+      rebaselineId: 'crash-rebaseline-1',
     },
   };
 }

@@ -27,6 +27,8 @@ import type {
   WorkspaceHeadRecordV1,
   WorkspaceHistorySuccessorAuthorityInput,
   WorkspaceEpochRecordV1,
+  WorkspaceActiveEpochRecordV1,
+  WorkspaceEpochActivationAuthorityInput,
   WorkspaceSuccessorAuthorityInput,
   WorkspaceVersionRecordV1,
 } from '@maka/core/workspace-version-authority';
@@ -52,6 +54,10 @@ import {
   type WorkspaceSuccessorCommitResult,
   type WorkspaceHistorySuccessorCommitResult,
 } from './workspace-version-authority-internal.js';
+import {
+  commitWorkspaceActiveEpochInternal,
+  readWorkspaceActiveEpochInternal,
+} from './workspace-active-epoch-authority-internal.js';
 
 export interface ExecutionStoresWorkspaceMutationAuthorityCapabilityInternal {
   readonly kind: 'execution_stores_workspace_mutation_authority_v1';
@@ -67,6 +73,20 @@ export interface ExecutionStoresWorkspaceContinuationAuthorityCapabilityInternal
 
 export interface ExecutionStoresWorkspaceHistoryAuthorityCapabilityInternal {
   readonly kind: 'execution_stores_workspace_history_authority_v1';
+}
+
+export interface ExecutionStoresWorkspaceActiveEpochAuthorityCapabilityInternal {
+  readonly kind: 'execution_stores_workspace_active_epoch_authority_v1';
+}
+
+export interface ExecutionStoresWorkspaceActiveEpochAuthorityInternal {
+  readActiveEpoch(workspaceId: string): Promise<WorkspaceActiveEpochRecordV1 | undefined>;
+  commitActiveEpoch(activationProof: object): Promise<
+    Readonly<{
+      created: boolean;
+      activeEpoch: WorkspaceActiveEpochRecordV1;
+    }>
+  >;
 }
 
 export interface ExecutionStoresWorkspaceHistoryAuthorityInternal {
@@ -162,11 +182,17 @@ interface HistoryAuthorityCapabilityRecord extends AuthoritySource {
   readonly verifyCandidate: (candidateOutcome: object) => WorkspaceHistorySuccessorAuthorityInput;
 }
 
+interface ActiveEpochAuthorityCapabilityRecord extends AuthoritySource {
+  readonly ownerToken: object;
+  readonly verifyActivation: (activationProof: object) => WorkspaceEpochActivationAuthorityInput;
+}
+
 const sources = new WeakMap<object, AuthoritySource>();
 const capabilities = new WeakMap<object, AuthorityCapabilityRecord>();
 const noEffectCapabilities = new WeakMap<object, NoEffectCapabilityRecord>();
 const baselineCapabilities = new WeakMap<object, BaselineAuthorityCapabilityRecord>();
 const historyCapabilities = new WeakMap<object, HistoryAuthorityCapabilityRecord>();
+const activeEpochCapabilities = new WeakMap<object, ActiveEpochAuthorityCapabilityRecord>();
 const continuationCapabilities = new WeakMap<
   object,
   AuthoritySource & { readonly ownerToken: object }
@@ -292,6 +318,48 @@ export function issueExecutionStoresWorkspaceHistoryAuthorityInternal(input: {
     }),
   );
   return capability;
+}
+
+export function issueExecutionStoresWorkspaceActiveEpochAuthorityInternal(input: {
+  readonly ownerToken: object;
+  readonly stores: object;
+  readonly verifyActivation: (activationProof: object) => WorkspaceEpochActivationAuthorityInput;
+}): ExecutionStoresWorkspaceActiveEpochAuthorityCapabilityInternal {
+  const source = sources.get(input.stores);
+  if (!source) throw new Error('Execution stores workspace active-epoch source is unavailable');
+  adoptWorkspaceBaselineAuthorityStoreRootInternal(source.store, source.rootId);
+  const capability = Object.freeze({
+    kind: 'execution_stores_workspace_active_epoch_authority_v1' as const,
+  });
+  activeEpochCapabilities.set(
+    capability,
+    Object.freeze({
+      ...source,
+      ownerToken: input.ownerToken,
+      verifyActivation: input.verifyActivation,
+    }),
+  );
+  return capability;
+}
+
+export function requireExecutionStoresWorkspaceActiveEpochAuthorityInternal(
+  ownerToken: object,
+  capability: ExecutionStoresWorkspaceActiveEpochAuthorityCapabilityInternal,
+): ExecutionStoresWorkspaceActiveEpochAuthorityInternal {
+  const record = activeEpochCapabilities.get(capability);
+  if (!record || record.ownerToken !== ownerToken) {
+    throw new Error('Execution stores workspace active-epoch authority capability is invalid');
+  }
+  return Object.freeze({
+    readActiveEpoch: (workspaceId: string) =>
+      readWorkspaceActiveEpochInternal(record.store, workspaceId),
+    commitActiveEpoch: (activationProof: object) =>
+      commitWorkspaceActiveEpochInternal(
+        record.store,
+        record.verifyActivation(activationProof),
+        record.rootId,
+      ),
+  });
 }
 
 export function requireExecutionStoresWorkspaceHistoryAuthorityInternal(

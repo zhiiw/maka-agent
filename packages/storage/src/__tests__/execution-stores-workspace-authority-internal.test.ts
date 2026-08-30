@@ -26,8 +26,10 @@ import type { RuntimeEvent } from '@maka/core/runtime-event';
 import { openInteractiveExecutionStoresForWrite } from '../execution-stores.js';
 import {
   issueExecutionStoresWorkspaceBaselineAuthorityInternal,
+  issueExecutionStoresWorkspaceActiveEpochAuthorityInternal,
   issueExecutionStoresWorkspaceMutationAuthorityInternal,
   requireExecutionStoresWorkspaceBaselineAuthorityInternal,
+  requireExecutionStoresWorkspaceActiveEpochAuthorityInternal,
   requireExecutionStoresWorkspaceMutationAuthorityInternal,
 } from '../execution-stores-workspace-authority-internal.js';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '../root-authority.js';
@@ -41,6 +43,24 @@ test('binds each workspace mutation verifier to its execution-stores owner capab
   const stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
   try {
     const ownerToken = {};
+    const activeEpochCapability = issueExecutionStoresWorkspaceActiveEpochAuthorityInternal({
+      ownerToken,
+      stores,
+      verifyActivation: () => {
+        throw new Error('not used');
+      },
+    });
+    assert.throws(
+      () => requireExecutionStoresWorkspaceActiveEpochAuthorityInternal({}, activeEpochCapability),
+      /capability is invalid/i,
+    );
+    assert.equal(
+      await requireExecutionStoresWorkspaceActiveEpochAuthorityInternal(
+        ownerToken,
+        activeEpochCapability,
+      ).readActiveEpoch(`workspace_${'1'.repeat(32)}`),
+      undefined,
+    );
     const authorityCapability = issueExecutionStoresWorkspaceMutationAuthorityInternal({
       ownerToken,
       stores,

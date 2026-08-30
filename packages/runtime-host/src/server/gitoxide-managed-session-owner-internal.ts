@@ -26,12 +26,15 @@ import {
   WORKSPACE_MATERIALIZATION_SEMANTICS_V1,
   workspaceMutationPolicyHashV1,
   type WorkspaceBaselineAuthorityInput,
+  type WorkspaceEpochActivationAuthorityInput,
 } from '@maka/core/workspace-version-authority';
 import type { InteractiveExecutionStoresWriter } from '@maka/storage/execution-stores';
 import {
   issueExecutionStoresWorkspaceBaselineAuthorityInternal,
+  issueExecutionStoresWorkspaceActiveEpochAuthorityInternal,
   issueExecutionStoresWorkspaceContinuationAuthorityInternal,
   requireExecutionStoresWorkspaceBaselineAuthorityInternal,
+  requireExecutionStoresWorkspaceActiveEpochAuthorityInternal,
   requireExecutionStoresWorkspaceContinuationAuthorityInternal,
 } from '@maka/storage/execution-stores-workspace-authority-internal';
 import { runWithStorageRootLease, type StorageRootLease } from '@maka/storage/root-authority';
@@ -115,7 +118,9 @@ export interface GitoxideManagedSessionOwnerInternal {
   ): Promise<GitoxideManagedSessionOwnerInternal>;
 }
 
-export type GitoxideManagedSessionOwnerFailpoint = 'after_repository_import';
+export type GitoxideManagedSessionOwnerFailpoint =
+  | 'after_repository_import'
+  | 'after_active_epoch_commit';
 
 /**
  * Re-observes an existing managed workspace without gaining mutation authority.
@@ -147,11 +152,44 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
     sourceOwnerToken,
     sourceCapability,
   );
+  const baseIdentity = deriveManagedSessionIdentity(input.sessionId, sourceBinding.kind);
+  const activeEpochOwnerToken = {};
+  const verifiedActivations = new WeakMap<object, WorkspaceEpochActivationAuthorityInput>();
+  const activeEpochCapability = issueExecutionStoresWorkspaceActiveEpochAuthorityInternal({
+    ownerToken: activeEpochOwnerToken,
+    stores: input.stores,
+    verifyActivation(proof) {
+      const activation = verifiedActivations.get(proof);
+      if (!activation) throw new Error('Gitoxide managed active-epoch proof is invalid');
+      return activation;
+    },
+  });
+  const activeEpochAuthority = requireExecutionStoresWorkspaceActiveEpochAuthorityInternal(
+    activeEpochOwnerToken,
+    activeEpochCapability,
+  );
+  const persistedActiveEpoch = await activeEpochAuthority.readActiveEpoch(baseIdentity.workspaceId);
+  if (
+    persistedActiveEpoch &&
+    (persistedActiveEpoch.repositoryId !== baseIdentity.repositoryId ||
+      persistedActiveEpoch.workspaceId !== baseIdentity.workspaceId)
+  ) {
+    throw new Error('Gitoxide managed active epoch conflicts with the session identity');
+  }
+  const effectiveWorkspaceEpochSeed =
+    input.workspaceEpochSeed ?? persistedActiveEpoch?.rebaselineId ?? undefined;
   const identity = deriveManagedSessionIdentity(
     input.sessionId,
     sourceBinding.kind,
-    input.workspaceEpochSeed,
+    effectiveWorkspaceEpochSeed,
   );
+  if (
+    input.workspaceEpochSeed === undefined &&
+    persistedActiveEpoch &&
+    persistedActiveEpoch.workspaceEpochId !== identity.workspaceEpochId
+  ) {
+    throw new Error('Gitoxide managed active epoch identity cannot be derived');
+  }
   const continuationOwnerToken = {};
   const capability = issueExecutionStoresWorkspaceContinuationAuthorityInternal({
     ownerToken: continuationOwnerToken,
@@ -267,11 +305,44 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     sourceOwnerToken,
     sourceCapability,
   );
+  const baseIdentity = deriveManagedSessionIdentity(input.sessionId, sourceBinding.kind);
+  const activeEpochOwnerToken = {};
+  const verifiedActivations = new WeakMap<object, WorkspaceEpochActivationAuthorityInput>();
+  const activeEpochCapability = issueExecutionStoresWorkspaceActiveEpochAuthorityInternal({
+    ownerToken: activeEpochOwnerToken,
+    stores: input.stores,
+    verifyActivation(proof) {
+      const activation = verifiedActivations.get(proof);
+      if (!activation) throw new Error('Gitoxide managed active-epoch proof is invalid');
+      return activation;
+    },
+  });
+  const activeEpochAuthority = requireExecutionStoresWorkspaceActiveEpochAuthorityInternal(
+    activeEpochOwnerToken,
+    activeEpochCapability,
+  );
+  const persistedActiveEpoch = await activeEpochAuthority.readActiveEpoch(baseIdentity.workspaceId);
+  if (
+    persistedActiveEpoch &&
+    (persistedActiveEpoch.repositoryId !== baseIdentity.repositoryId ||
+      persistedActiveEpoch.workspaceId !== baseIdentity.workspaceId)
+  ) {
+    throw new Error('Gitoxide managed active epoch conflicts with the session identity');
+  }
+  const effectiveWorkspaceEpochSeed =
+    input.workspaceEpochSeed ?? persistedActiveEpoch?.rebaselineId ?? undefined;
   const identity = deriveManagedSessionIdentity(
     input.sessionId,
     sourceBinding.kind,
-    input.workspaceEpochSeed,
+    effectiveWorkspaceEpochSeed,
   );
+  if (
+    input.workspaceEpochSeed === undefined &&
+    persistedActiveEpoch &&
+    persistedActiveEpoch.workspaceEpochId !== identity.workspaceEpochId
+  ) {
+    throw new Error('Gitoxide managed active epoch identity cannot be derived');
+  }
   const repositoryPath = join(
     storageRoot,
     MANAGED_REPOSITORY_DIRECTORY,
@@ -670,11 +741,51 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(rebaselineId)) {
       throw new Error('Gitoxide managed rebaseline identity is invalid');
     }
-    return openGitoxideManagedSessionOwnerInternal({
+    const currentActiveEpoch = await activeEpochAuthority.readActiveEpoch(identity.workspaceId);
+    if (!currentActiveEpoch) {
+      throw new Error('Gitoxide managed active epoch is unavailable');
+    }
+    if (
+      currentActiveEpoch.workspaceEpochId === identity.workspaceEpochId &&
+      currentActiveEpoch.rebaselineId === rebaselineId
+    ) {
+      return openGitoxideManagedSessionOwnerInternal({
+        ...input,
+        workspaceEpochSeed: undefined,
+        ...(abortSignal ? { abortSignal } : {}),
+      });
+    }
+    if (currentActiveEpoch.workspaceEpochId !== identity.workspaceEpochId) {
+      throw new Error('Gitoxide managed session owner is no longer the active epoch');
+    }
+    const rebased = await openGitoxideManagedSessionOwnerInternal({
       ...input,
       workspaceEpochSeed: rebaselineId,
       ...(abortSignal ? { abortSignal } : {}),
     });
+    const targetEpoch = await baselineAuthority.readEpoch(
+      identity.workspaceId,
+      rebased.workspaceEpochId,
+    );
+    if (!targetEpoch) throw new Error('Gitoxide managed rebaseline target epoch is unavailable');
+    const activationProof = Object.freeze({});
+    verifiedActivations.set(
+      activationProof,
+      Object.freeze({
+        activationEventId: managedEpochActivationEventId(identity.workspaceId, rebaselineId),
+        committedAt: targetEpoch.committedAt + 1,
+        activation: Object.freeze({
+          repositoryId: identity.repositoryId,
+          workspaceId: identity.workspaceId,
+          previousWorkspaceEpochId: identity.workspaceEpochId,
+          workspaceEpochId: rebased.workspaceEpochId,
+          rebaselineId,
+        }),
+      }),
+    );
+    await activeEpochAuthority.commitActiveEpoch(activationProof);
+    await input.failpoint?.('after_active_epoch_commit');
+    return rebased;
   };
   return Object.freeze({
     sourceKind: sourceBinding.kind,
@@ -730,4 +841,14 @@ function deriveManagedSessionIdentity(
 
 function sha256(value: string): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(value, 'utf8').digest('hex')}`;
+}
+
+function managedEpochActivationEventId(workspaceId: string, rebaselineId: string): string {
+  return `workspace-activation-${createHash('sha256')
+    .update('maka-workspace-active-epoch-v1\0', 'utf8')
+    .update(workspaceId, 'utf8')
+    .update('\0')
+    .update(rebaselineId, 'utf8')
+    .digest('hex')
+    .slice(0, 32)}`;
 }

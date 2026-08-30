@@ -405,6 +405,19 @@ test('explicit rebaseline opens a new epoch and preserves the prior epoch', asyn
     kind: 'read',
     content: 'epoch one\n',
   });
+  const reopened = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-explicit-rebaseline',
+  });
+  assert.equal(reopened.workspaceEpochId, rebased.workspaceEpochId);
+  assert.deepEqual(await reopened.inspection.execute({ kind: 'read', path: 'notes.txt' }), {
+    kind: 'read',
+    content: 'epoch two\n',
+  });
+  await assert.rejects(original.rebaseline('source-head-3'), /no longer the active epoch/i);
 });
 
 test('reopens the same managed session after its source checkout moves', async (t) => {
