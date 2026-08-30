@@ -40,6 +40,7 @@ import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import {
   admitGitoxideHelperArtifactInternal,
+  GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../server/gitoxide-helper-artifact-authority-internal.js';
 import {
@@ -465,17 +466,7 @@ async function preparePackagedResources(base: string, helperInputPath: string): 
       executableRelativePath: `gitoxide/${executableName}`,
       bytes: info.size,
       sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
-      supportedOperations: [
-        'inspect_repository',
-        'import_source_head',
-        'import_filesystem_snapshot',
-        'create_candidate',
-        'promote_candidate',
-        'observe_accepted_ref',
-        'read_tree_file',
-        'list_tree_files',
-        'grep_tree_files',
-      ],
+      supportedOperations: GITOXIDE_HELPER_OPERATIONS_INTERNAL,
       distributionReady: true,
     })}\n`,
     'utf8',
@@ -495,17 +486,7 @@ async function admitRealHelper(helperInputPath: string) {
     platform: process.platform,
     arch: process.arch,
     protocolVersion: 1,
-    supportedOperations: [
-      'inspect_repository',
-      'import_source_head',
-      'import_filesystem_snapshot',
-      'create_candidate',
-      'promote_candidate',
-      'observe_accepted_ref',
-      'read_tree_file',
-      'list_tree_files',
-      'grep_tree_files',
-    ],
+    supportedOperations: GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   });
   const helperCapability = await admitGitoxideHelperArtifactInternal({
     releaseOwnerToken,

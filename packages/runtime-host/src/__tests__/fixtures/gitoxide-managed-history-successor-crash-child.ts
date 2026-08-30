@@ -26,6 +26,7 @@ import {
 } from '@maka/storage/root-authority';
 import {
   admitGitoxideHelperArtifactInternal,
+  GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../../server/gitoxide-helper-artifact-authority-internal.js';
 import { createGitoxideManagedHistorySuccessorOwnerInternal } from '../../server/gitoxide-managed-history-successor-owner-internal.js';
@@ -61,11 +62,7 @@ const claim = issueGitoxideHelperReleaseArtifactClaimInternal(releaseOwnerToken,
   platform: process.platform,
   arch: process.arch,
   protocolVersion: 1,
-  supportedOperations: [
-    'observe_accepted_ref',
-    'create_history_candidate',
-    'promote_history_candidate',
-  ],
+  supportedOperations: GITOXIDE_HELPER_OPERATIONS_INTERNAL,
 });
 const helperCapability = await admitGitoxideHelperArtifactInternal({
   releaseOwnerToken,
