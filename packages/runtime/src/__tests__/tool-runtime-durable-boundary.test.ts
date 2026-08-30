@@ -33,6 +33,7 @@ import {
   ToolRuntime,
   type MakaTool,
   type RuntimeManagedObservationAdmission,
+  type RuntimeManagedObservationExecution,
   type RuntimeManagedMutationAdmission,
   type RuntimeManagedMutationSettlement,
   type ToolRuntimeInput,
@@ -114,9 +115,13 @@ describe('ToolRuntime durable boundary', () => {
       {
         admitManagedObservation: async () => ({
           durableDispatch: managedObservationDispatch(),
-          execute: async (operation) => {
-            retained = operation;
-            await operation({ inputRoot: '/accepted', scratchRoot: '/scratch' });
+          execute: async <T>(
+            operation: (execution: RuntimeManagedObservationExecution) => Promise<T>,
+          ) => {
+            retained = async (execution) => {
+              await operation(execution);
+            };
+            return await operation({ inputRoot: '/accepted', scratchRoot: '/scratch' });
           },
           dispose: async () => undefined,
         }),

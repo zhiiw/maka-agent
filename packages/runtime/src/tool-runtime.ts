@@ -421,9 +421,7 @@ export interface RuntimeManagedObservationExecution {
 
 export interface RuntimeManagedObservationAdmission {
   readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceObservationV1>;
-  execute(
-    operation: (execution: RuntimeManagedObservationExecution) => Promise<void>,
-  ): Promise<void>;
+  execute<T>(operation: (execution: RuntimeManagedObservationExecution) => Promise<T>): Promise<T>;
   /** Idempotent for an unused, failed-T1, completed, or failed observation. */
   dispose(): Promise<void>;
 }

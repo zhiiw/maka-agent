@@ -59,12 +59,18 @@ export interface ManagedNodeTestObservationInternal {
 }
 
 export interface ManagedCommandSandboxOwnerInternal {
+  readToolchainIdentity(): Promise<ManagedCommandToolchainIdentityInternal>;
   inspectFile(
     input: ManagedCommandInspectFileInputInternal,
   ): Promise<ManagedFileObservationInternal>;
   runNodeTests(
     input: ManagedCommandRunNodeTestsInputInternal,
   ): Promise<ManagedNodeTestObservationInternal>;
+}
+
+export interface ManagedCommandToolchainIdentityInternal {
+  readonly identityDigest: `sha256:${string}`;
+  readonly nodeVersion: string;
 }
 
 export interface ManagedCommandInspectFileInputInternal {
@@ -158,6 +164,17 @@ export function createManagedCommandSandboxOwnerInternal(input: {
     return { stdout: result.stdout, nodeVersion: toolchain.nodeVersion };
   }
   return Object.freeze({
+    async readToolchainIdentity() {
+      const toolchain = await verifyManagedToolchainForInvocationInternal(
+        input.invocationOwnerToken,
+        input.toolchainCapability,
+        'hermetic_observation_v1',
+      );
+      return Object.freeze({
+        identityDigest: toolchain.identityDigest,
+        nodeVersion: toolchain.nodeVersion,
+      });
+    },
     async inspectFile(request: ManagedCommandInspectFileInputInternal) {
       if (!isPortableRelativePath(request.relativePath)) {
         throw new Error('Managed command observation path is invalid');
