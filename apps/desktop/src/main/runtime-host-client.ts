@@ -918,6 +918,18 @@ export class DesktopRuntimeHostClient {
     });
   }
 
+  undoManagedWorkspaceVersion(
+    sessionId: string,
+    workspaceVersionId: string,
+    restoreId: string,
+  ) {
+    return this.request('managed-workspace.history.undo.mutate', {
+      sessionId,
+      workspaceVersionId,
+      restoreId,
+    });
+  }
+
   async createSession(
     input: SessionCreateInput,
   ): Promise<SessionCatalogProjection> {

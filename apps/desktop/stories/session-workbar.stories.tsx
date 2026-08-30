@@ -909,6 +909,16 @@ function bridge(options: {
         filesMaterialized: 3,
         bytesMaterialized: 128,
       }),
+      undoVersion: async ({ workspaceVersionId, restoreId }) => ({
+        kind: 'accepted_history_successor' as const,
+        restoreId,
+        targetWorkspaceVersionId: workspaceVersionId,
+        workspaceVersionId: `version_${'3'.repeat(32)}`,
+        acceptedCommitOid: '3'.repeat(40),
+        acceptedTreeOid: '1'.repeat(40),
+        revision: 3,
+        created: true,
+      }),
       subscribeSessionEvents: unsubscribe,
     },
     terminal: {

@@ -66,6 +66,10 @@ import {
   type GitoxideManagedTimeTravelOwnerInternal,
 } from './gitoxide-managed-time-travel-owner-internal.js';
 import {
+  createGitoxideManagedHistorySuccessorOwnerInternal,
+  type GitoxideManagedHistorySuccessorOwnerInternal,
+} from './gitoxide-managed-history-successor-owner-internal.js';
+import {
   createGitoxideManagedHistoryOwnerInternal,
   type GitoxideManagedHistoryOwnerInternal,
 } from './gitoxide-managed-history-owner-internal.js';
@@ -96,6 +100,7 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly baselineWorkspaceVersionId: string;
   readonly gc: GitoxideManagedGcOwnerInternal;
   readonly history: GitoxideManagedHistoryOwnerInternal;
+  readonly historySuccessor: GitoxideManagedHistorySuccessorOwnerInternal;
   readonly workspaceId: string;
   readonly workspaceEpochId: string;
   readonly inspection: GitoxideManagedInspectionOwnerInternal;
@@ -279,6 +284,10 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     input.invocationOwnerToken,
     input.helperCapability,
   );
+  requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.helperCapability, [
+    'create_history_candidate',
+    'promote_history_candidate',
+  ]);
   const materializationProfileDigest = sha256(
     `maka-gitoxide-materialization-v4\0${sourceBinding.kind}\0${helperIdentity.sha256}\0`,
   );
@@ -640,6 +649,15 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     readHead: () => baselineAuthority.readHead(identity.workspaceId, identity.workspaceEpochId),
     readVersion: (workspaceVersionId) => baselineAuthority.readVersion(workspaceVersionId),
   });
+  const historySuccessor = createGitoxideManagedHistorySuccessorOwnerInternal({
+    stores: input.stores,
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    repositoryPath,
+    repositoryId: identity.repositoryId,
+    workspaceId: identity.workspaceId,
+    workspaceEpochId: identity.workspaceEpochId,
+  });
   const gc = createGitoxideManagedGcOwnerInternal({
     storageRoot,
     workspaceEpochId: identity.workspaceEpochId,
@@ -665,6 +683,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     baselineWorkspaceVersionId: identity.workspaceVersionId,
     gc,
     history,
+    historySuccessor,
     workspaceId: identity.workspaceId,
     workspaceEpochId: identity.workspaceEpochId,
     inspection,

@@ -56,6 +56,7 @@ import type {
   ManagedWorkspacePublishResult,
   ManagedWorkspaceHistoricalRestoreResult,
   ManagedWorkspaceHistoryResult,
+  ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspaceRestoreResult,
 } from '@maka/runtime-host/protocol';
 import type { PermissionMode } from '@maka/core/permission';
@@ -1301,6 +1302,11 @@ export interface MakaBridge {
       workspaceVersionId: string;
       restoreId: string;
     }): Promise<ManagedWorkspaceHistoricalRestoreResult>;
+    undoVersion(input: {
+      sessionId: string;
+      workspaceVersionId: string;
+      restoreId: string;
+    }): Promise<ManagedWorkspaceHistoryUndoResult>;
   };
   goal: {
     /** The session's current goal (null when none is set). */

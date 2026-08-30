@@ -33,6 +33,7 @@ import type {
   ManagedWorkspacePublishResult,
   ManagedWorkspaceHistoricalRestoreResult,
   ManagedWorkspaceHistoryResult,
+  ManagedWorkspaceHistoryUndoResult,
   ManagedWorkspaceRestoreResult,
 } from '@maka/runtime-host/protocol';
 import { DiffCodePreview, useUiLocale } from '@maka/ui';
@@ -78,10 +79,14 @@ export function SessionReviewPanel(props: {
   const [historyRestoreError, setHistoryRestoreError] = useState<string | null>(null);
   const [historicalRestore, setHistoricalRestore] =
     useState<ManagedWorkspaceHistoricalRestoreResult | null>(null);
+  const [historyUndoingVersion, setHistoryUndoingVersion] = useState<string | null>(null);
+  const [historyUndoError, setHistoryUndoError] = useState<string | null>(null);
+  const [historyUndo, setHistoryUndo] = useState<ManagedWorkspaceHistoryUndoResult | null>(null);
   const revisionRef = useRef(0);
   const publishIdRef = useRef<string | null>(null);
   const restoreIdRef = useRef<string | null>(null);
   const historyRestoreIdsRef = useRef(new Map<string, string>());
+  const historyUndoIdsRef = useRef(new Map<string, string>());
 
   const load = useCallback(async () => {
     const revision = ++revisionRef.current;
@@ -186,6 +191,9 @@ export function SessionReviewPanel(props: {
     setHistoricalRestore(null);
     setHistoryRestoreError(null);
     historyRestoreIdsRef.current.clear();
+    setHistoryUndo(null);
+    setHistoryUndoError(null);
+    historyUndoIdsRef.current.clear();
   }, [gitSnapshot?.revision]);
 
   const publishSnapshot = useCallback(async () => {
@@ -261,6 +269,35 @@ export function SessionReviewPanel(props: {
       }
     },
     [copy.historyRestoreFailed, historyRestoringVersion, locale, props.sessionId, review],
+  );
+
+  const undoHistoricalVersion = useCallback(
+    async (workspaceVersionId: string) => {
+      if (historyUndoingVersion !== null) return;
+      const restoreId =
+        historyUndoIdsRef.current.get(workspaceVersionId) ?? `desktop-${crypto.randomUUID()}`;
+      historyUndoIdsRef.current.set(workspaceVersionId, restoreId);
+      setHistoryUndoingVersion(workspaceVersionId);
+      setHistoryUndoError(null);
+      try {
+        const result = await review.undoVersion({
+          sessionId: props.sessionId,
+          workspaceVersionId,
+          restoreId,
+        });
+        setHistoryUndo(result);
+        await load();
+      } catch (nextError) {
+        setHistoryUndoError(
+          locale === 'zh'
+            ? generalizedErrorMessageChinese(nextError, copy.historyUndoFailed)
+            : generalizedErrorMessage(nextError, copy.historyUndoFailed),
+        );
+      } finally {
+        setHistoryUndoingVersion(null);
+      }
+    },
+    [copy.historyUndoFailed, historyUndoingVersion, load, locale, props.sessionId, review],
   );
 
   return (
@@ -367,6 +404,8 @@ export function SessionReviewPanel(props: {
           />
         ) : null}
         {historyRestoreError ? <Banner status="error" title={historyRestoreError} /> : null}
+        {historyUndo ? <Banner status="success" title={copy.historyUndone} /> : null}
+        {historyUndoError ? <Banner status="error" title={historyUndoError} /> : null}
         {publishError ? (
           <Banner
             status="error"
@@ -518,6 +557,7 @@ export function SessionReviewPanel(props: {
             {history.versions.map((version) => {
               const isHead = version.workspaceVersionId === history.headWorkspaceVersionId;
               const isRestoring = historyRestoringVersion === version.workspaceVersionId;
+              const isUndoing = historyUndoingVersion === version.workspaceVersionId;
               return (
                 <HStack
                   key={version.workspaceVersionId}
@@ -541,14 +581,24 @@ export function SessionReviewPanel(props: {
                     </Text>
                   </VStack>
                   {!isHead ? (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      label={isRestoring ? copy.restoring : copy.historyRestore}
-                      isLoading={isRestoring}
-                      isDisabled={historyRestoringVersion !== null}
-                      onClick={() => void restoreHistoricalVersion(version.workspaceVersionId)}
-                    />
+                    <HStack gap={1} align="center">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        label={isRestoring ? copy.restoring : copy.historyRestore}
+                        isLoading={isRestoring}
+                        isDisabled={historyRestoringVersion !== null || historyUndoingVersion !== null}
+                        onClick={() => void restoreHistoricalVersion(version.workspaceVersionId)}
+                      />
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        label={isUndoing ? copy.historyUndoing : copy.historyUndo}
+                        isLoading={isUndoing}
+                        isDisabled={historyRestoringVersion !== null || historyUndoingVersion !== null}
+                        onClick={() => void undoHistoricalVersion(version.workspaceVersionId)}
+                      />
+                    </HStack>
                   ) : null}
                 </HStack>
               );

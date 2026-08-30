@@ -34,6 +34,7 @@ type WorkspaceClient = Pick<
   | 'restoreManagedWorkspaceSnapshot'
   | 'readManagedWorkspaceHistory'
   | 'restoreManagedWorkspaceVersion'
+  | 'undoManagedWorkspaceVersion'
 >;
 
 export function registerRuntimeHostWorkspaceIpc(
@@ -91,6 +92,16 @@ export function registerRuntimeHostWorkspaceIpc(
     const request = historicalRestoreRequest(raw);
     await requireManagedSession(input.client, request.sessionId);
     return input.client.restoreManagedWorkspaceVersion(
+      request.sessionId,
+      request.workspaceVersionId,
+      request.restoreId,
+    );
+  });
+
+  input.ipcMain.handle('managed-workspace:undo-version', async (_event, raw: unknown) => {
+    const request = historicalRestoreRequest(raw);
+    await requireManagedSession(input.client, request.sessionId);
+    return input.client.undoManagedWorkspaceVersion(
       request.sessionId,
       request.workspaceVersionId,
       request.restoreId,

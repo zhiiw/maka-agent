@@ -22,9 +22,41 @@ import test from 'node:test';
 import {
   decodeManagedWorkspacePublishResult,
   decodeManagedWorkspaceHistoryResult,
+  decodeManagedWorkspaceHistoryUndoResult,
   decodeManagedWorkspaceReviewQueryResult,
   decodeManagedWorkspaceRestoreResult,
 } from '../protocol/managed-workspace-review.js';
+
+test('managed History Undo decodes one accepted successor', () => {
+  const result = {
+    kind: 'accepted_history_successor',
+    restoreId: 'desktop-undo-1',
+    targetWorkspaceVersionId: `version_${'1'.repeat(32)}`,
+    workspaceVersionId: `version_${'2'.repeat(32)}`,
+    acceptedCommitOid: '2'.repeat(40),
+    acceptedTreeOid: '1'.repeat(40),
+    revision: 4,
+    created: true,
+  } as const;
+  assert.deepEqual(decodeManagedWorkspaceHistoryUndoResult(result), result);
+});
+
+test('managed History Undo rejects a malformed accepted successor', () => {
+  assert.throws(
+    () =>
+      decodeManagedWorkspaceHistoryUndoResult({
+        kind: 'accepted_history_successor',
+        restoreId: 'desktop-undo-1',
+        targetWorkspaceVersionId: `version_${'1'.repeat(32)}`,
+        workspaceVersionId: `version_${'1'.repeat(32)}`,
+        acceptedCommitOid: '2'.repeat(40),
+        acceptedTreeOid: '1'.repeat(40),
+        revision: 0,
+        created: true,
+      }),
+    /history successor/u,
+  );
+});
 
 const valid = {
   kind: 'accepted_review',
