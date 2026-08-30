@@ -374,6 +374,16 @@ async function preparePackagedResources(
     })}\n`,
     'utf8',
   );
+  if (process.platform === 'win32') {
+    const sandboxInputPath = process.env.MAKA_WINDOWS_SANDBOX_PATH;
+    assert.ok(
+      sandboxInputPath,
+      'MAKA_WINDOWS_SANDBOX_PATH is required for the Windows packaged v2 crash gate',
+    );
+    const sandboxRoot = join(resourcesRoot, 'windows-sandbox');
+    await mkdir(sandboxRoot);
+    await copyFile(await realpath(sandboxInputPath), join(sandboxRoot, 'maka-windows-sandbox.exe'));
+  }
   return resourcesRoot;
 }
 
