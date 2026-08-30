@@ -788,7 +788,8 @@ flowchart LR
 - 启动：先 `recoverInterruptedSessions()`，再恢复 Graph；flag 开启时扫描可继续 Session；
 - 手动：中断横幅调用 `sessions:resumeLatest`；
 - main process：读取 authoritative safety facts，执行 plan/continue；
-- renderer：只发送 `sessionId`，展示 started 或 park diagnostics；
+- renderer：显式 Resume 只发送 `sessionId`；managed 自动恢复成功保持安静，park 时通过只读 plan 查询展示
+  stable diagnostics，查询本身不得 claim 或启动新 Turn；
 - 退出：先停止后台能力和 Shell/Graph，再关闭 runtime persistence。
 
 ### CLI/TUI

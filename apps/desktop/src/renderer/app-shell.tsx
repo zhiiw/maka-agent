@@ -796,11 +796,18 @@ function AppShellContent({
     commitRevisionDraft(null);
   }, [sessions, commitRevisionDraft]);
 
+  const activeSession = sessions.find((session) => session.id === activeId);
   const {
     resumePendingSessionId,
     resumeParkDescriptionBySession,
     resumeInterruptedSession,
-  } = useShellResume({ activeId, toastApi, shellCopy, uiLocale });
+  } = useShellResume({
+    activeId,
+    managed: activeSession?.toolProfile === 'managed-coding-v1',
+    toastApi,
+    shellCopy,
+    uiLocale,
+  });
   const rendererMountedRef = useRef(true);
   const goals = useGoalController({
     activeSessionId: activeId,
@@ -822,7 +829,6 @@ function AppShellContent({
   const activeSandboxBoundary =
     activeInteraction?.type === 'sandbox_boundary_request' ? activeInteraction : undefined;
   const activeQuestion = activeInteraction?.type === 'user_question_request' ? activeInteraction : undefined;
-  const activeSession = sessions.find((session) => session.id === activeId);
   const activeMessageQueue = activeId ? messageQueueBySession[activeId] : undefined;
   const activeMessageSubmitting = transientMessages.length > 0;
   const activeDesktopSession = activeSession;

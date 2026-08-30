@@ -1042,6 +1042,10 @@ export interface MakaBridge {
     listTurns(sessionId: string): Promise<TurnRecord[]>;
     listTurnLandmarks(sessionId: string): Promise<OperationOutput<'session.turn_landmarks.query'>>;
     compact(sessionId: string): Promise<OperationOutput<'context.compact'>>;
+    queryResumeLatest(sessionId: string): Promise<
+      | { disposition: 'ready' }
+      | { disposition: 'park'; rejectionReasons: readonly string[] }
+    >;
     resumeLatest(sessionId: string): Promise<
       | { disposition: 'started'; runId: string; turnId: string }
       | { disposition: 'park'; rejectionReasons: string[]; diagnostics: unknown[] }

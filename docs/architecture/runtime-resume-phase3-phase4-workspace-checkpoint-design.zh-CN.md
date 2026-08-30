@@ -723,7 +723,7 @@ claim，创建新 Run。不恢复旧 Promise、provider stream 或 JavaScript �
 
 ### M3.5 Desktop Resume
 
-当前产品仍以显式 Resume 和可见恢复状态为主；M3 的目标体验则是 evidence-complete 时无感继续。
+Managed Task 已以 automatic owner 为主、显式 Resume 为诊断和人工恢复入口；evidence-complete 时无感继续。
 Desktop 启动后应自动完成 committed-prefix repair、managed settlement reconciliation、accepted-head
 revalidation 与 continuation claim。只有全部条件通过时才创建新 Run；这条确定性路径不需要用户先理解
 T1/T2、candidate 或 checkpoint，也不需要额外点击 Resume。
@@ -755,8 +755,13 @@ Publish。所谓“无感 resume”是隐藏确定性的恢复仪式，不是把
 - admission 使用 planner 已签发的 target Turn/Run/Invocation 与 claim，启动后第二次 Host restart 只能读到
   existing continuation/claim，不能再次调用 provider。
 
-这完成了 automatic owner 的 Host 边界，但还不是 M3 产品完成态：quiet park UI、non-Git production-shaped
-crash lane 以及完整跨平台证据仍在后续切片。
+Desktop 现在只对 `managed-coding-v1` 读取现有 resume plan。ready/自动成功路径不产生 toast 或 modal；
+parked plan 复用失败 Turn banner 展示稳定原因，查询失败也不升级为用户错误。该 UI 是 continuation facts 的
+只读投影，不新增可变 resume 状态，也不会因查看任务而启动新 Turn。
+
+filesystem snapshot source 已进入真实 Host kill/restart lane：provider after-send 中断后，后继 Host 不会再次
+调用 provider，并把旧 claim 稳定 park 为 `continuation_started_indeterminate`。这完成了 non-Git 的一个关键
+崩溃边界，但完整 Linux/macOS/Windows crash matrix 与更多 failpoint 证据仍在后续切片。
 
 ### M3.6 Production-shaped crash proof
 

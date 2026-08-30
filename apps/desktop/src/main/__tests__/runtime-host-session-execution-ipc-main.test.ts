@@ -50,6 +50,33 @@ test('registers Session observation as one reconnectable operation', () => {
   assert.equal(ipc.reconnectableChannels.has('sessions:observe'), true);
 });
 
+test('projects a parked managed continuation without starting another Turn', async () => {
+  let starts = 0;
+  const ipc = ipcHarness();
+  registerExecutionIpc(
+    {
+      client: executionClient({
+        queryTurnResume: async ({ sessionId }) => ({
+          sessionId,
+          disposition: 'parked',
+          reason: 'continuation_started_indeterminate',
+        }),
+        startTurnResume: async () => {
+          starts += 1;
+          throw new Error('A quiet status query must not start a Turn');
+        },
+      }),
+    },
+    ipc,
+  );
+
+  assert.deepEqual(await ipc.invoke('sessions:queryResumeLatest', 'session-1'), {
+    disposition: 'park',
+    rejectionReasons: ['continuation_started_indeterminate'],
+  });
+  assert.equal(starts, 0);
+});
+
 test("keeps synthetic E2E interactions visible through Host hydration and retires their answer", async () => {
   const observer = observerWithSnapshot();
   const ipc = ipcHarness();
