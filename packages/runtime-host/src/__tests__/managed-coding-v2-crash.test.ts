@@ -122,7 +122,9 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
         () => undefined,
         () => undefined,
       );
-    await provider.waitForCompletedToolResult();
+    const completedToolResult = await provider.waitForCompletedToolResult();
+    assert.match(completedToolResult, /\"passed\":1/u);
+    assert.match(completedToolResult, /\"failed\":0/u);
     await fixture.killHost(firstHost);
     await withTimeout(start, PROCESS_TIMEOUT_MS, 'crashed hosted execution did not close');
     await firstClient.close().catch(() => undefined);
@@ -246,14 +248,14 @@ async function configureProvider(
 async function startManagedNodeTestProvider(): Promise<{
   readonly baseUrl: string;
   readonly requests: readonly unknown[];
-  waitForCompletedToolResult(): Promise<void>;
+  waitForCompletedToolResult(): Promise<string>;
   waitForResumedCompletion(): Promise<void>;
   close(): Promise<void>;
 }> {
   const requests: unknown[] = [];
-  let completedToolResult!: () => void;
+  let completedToolResult!: (request: string) => void;
   let resumedCompletion!: () => void;
-  const completedToolResultReached = new Promise<void>((resolve) => {
+  const completedToolResultReached = new Promise<string>((resolve) => {
     completedToolResult = resolve;
   });
   const resumedCompletionReached = new Promise<void>((resolve) => {
@@ -275,7 +277,7 @@ async function startManagedNodeTestProvider(): Promise<{
         return;
       }
       if (requests.length === 2) {
-        completedToolResult();
+        completedToolResult(JSON.stringify(body));
         return;
       }
       respondText(response, 'Managed Node test passed after recovery.');
@@ -295,7 +297,7 @@ async function startManagedNodeTestProvider(): Promise<{
     waitForCompletedToolResult: () =>
       withTimeout(
         completedToolResultReached,
-        PROCESS_TIMEOUT_MS * 3,
+        PROCESS_TIMEOUT_MS * 5,
         'provider did not observe the completed Node test result',
       ),
     waitForResumedCompletion: () =>
