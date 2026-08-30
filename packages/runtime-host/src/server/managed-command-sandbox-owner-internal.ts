@@ -158,7 +158,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       result.exitCode !== 0 ||
       !result.dispatched
     ) {
-      throw new Error('Managed command execution did not complete safely');
+      throw new Error(formatManagedCommandFailure(result));
     }
     return { stdout: result.stdout, nodeVersion: toolchain.nodeVersion };
   }
@@ -205,6 +205,30 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       return decodeNodeTestObservation(result.stdout, relativePaths, result.nodeVersion);
     },
   });
+}
+
+function formatManagedCommandFailure(input: {
+  readonly timedOut: boolean;
+  readonly aborted: boolean;
+  readonly responseOverflow: boolean;
+  readonly exitCode: number;
+  readonly dispatched: boolean;
+  readonly stderrTail: string;
+}): string {
+  const reason = input.timedOut
+    ? 'timeout'
+    : input.aborted
+      ? 'aborted'
+      : input.responseOverflow
+        ? 'response_overflow'
+        : !input.dispatched
+          ? 'not_dispatched'
+          : `exit_${input.exitCode}`;
+  const stderr = input.stderrTail
+    .replace(/[\u0000-\u001f\u007f]+/gu, ' ')
+    .trim()
+    .slice(-512);
+  return `Managed command execution did not complete safely (${reason}${stderr ? `: ${stderr}` : ''})`;
 }
 
 function hermeticObservationProfile(
