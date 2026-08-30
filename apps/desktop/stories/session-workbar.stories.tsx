@@ -863,6 +863,15 @@ function bridge(options: {
         publishedRef: `refs/maka/published/${publishId}`,
         replayed: false,
       }),
+      restore: async ({ restoreId }) => ({
+        kind: 'accepted_snapshot_restored' as const,
+        restoreId,
+        destinationPath: `C:\\maka\\restores\\${restoreId}\\workspace`,
+        acceptedCommitOid: '1'.repeat(40),
+        acceptedTreeOid: '2'.repeat(40),
+        filesMaterialized: 3,
+        bytesMaterialized: 128,
+      }),
       subscribeSessionEvents: unsubscribe,
     },
     terminal: {

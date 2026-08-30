@@ -27,6 +27,7 @@ const REVIEW_MAX_FILES = 200;
 const REVISION_PATTERN = /^[0-9a-f]{64}$/u;
 const SHA1_PATTERN = /^[0-9a-f]{40}$/u;
 const PUBLISH_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+const RESTORE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 
 export interface ManagedWorkspaceReviewQueryInput {
   readonly sessionId: string;
@@ -49,6 +50,21 @@ export interface ManagedWorkspacePublishResult {
   readonly acceptedTreeOid: string;
   readonly publishedRef: string;
   readonly replayed: boolean;
+}
+
+export interface ManagedWorkspaceRestoreInput {
+  readonly sessionId: string;
+  readonly restoreId: string;
+}
+
+export interface ManagedWorkspaceRestoreResult {
+  readonly kind: 'accepted_snapshot_restored';
+  readonly restoreId: string;
+  readonly destinationPath: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly filesMaterialized: number;
+  readonly bytesMaterialized: number;
 }
 
 const QUERY_ERRORS = [
@@ -108,6 +124,35 @@ export const MANAGED_WORKSPACE_REVIEW_OPERATION_SPECS = {
       }
     },
   }),
+  'managed-workspace.restore.mutate': defineOperation<
+    ManagedWorkspaceRestoreInput,
+    ManagedWorkspaceRestoreResult,
+    (typeof QUERY_ERRORS)[number]
+  >({
+    mode: 'command',
+    availability: 'ready',
+    errors: QUERY_ERRORS,
+    decodeInput(value) {
+      const record = requireExactRecord(value, 'managed workspace restore', [
+        'sessionId',
+        'restoreId',
+      ]);
+      const restoreId = requireEntityId(record.restoreId, 'managed restore id');
+      if (!RESTORE_ID_PATTERN.test(restoreId)) {
+        throw invalidProtocolFrame('Invalid managed restore id');
+      }
+      return {
+        sessionId: requireEntityId(record.sessionId, 'managed restore Session id'),
+        restoreId,
+      };
+    },
+    decodeOutput: decodeManagedWorkspaceRestoreResult,
+    assertOutputForInput(input, output) {
+      if (output.restoreId !== input.restoreId) {
+        throw invalidProtocolFrame('Managed workspace restore conflicts with its request');
+      }
+    },
+  }),
 } as const;
 
 export function decodeManagedWorkspacePublishResult(value: unknown): ManagedWorkspacePublishResult {
@@ -140,6 +185,44 @@ export function decodeManagedWorkspacePublishResult(value: unknown): ManagedWork
     acceptedTreeOid: record.acceptedTreeOid,
     publishedRef: record.publishedRef,
     replayed: record.replayed,
+  };
+}
+
+export function decodeManagedWorkspaceRestoreResult(value: unknown): ManagedWorkspaceRestoreResult {
+  const record = requireExactRecord(value, 'managed workspace restore result', [
+    'kind',
+    'restoreId',
+    'destinationPath',
+    'acceptedCommitOid',
+    'acceptedTreeOid',
+    'filesMaterialized',
+    'bytesMaterialized',
+  ]);
+  if (
+    record.kind !== 'accepted_snapshot_restored' ||
+    typeof record.restoreId !== 'string' ||
+    !RESTORE_ID_PATTERN.test(record.restoreId) ||
+    typeof record.destinationPath !== 'string' ||
+    record.destinationPath.length === 0 ||
+    Buffer.byteLength(record.destinationPath, 'utf8') > 4096 ||
+    record.destinationPath.includes('\0') ||
+    typeof record.acceptedCommitOid !== 'string' ||
+    !SHA1_PATTERN.test(record.acceptedCommitOid) ||
+    typeof record.acceptedTreeOid !== 'string' ||
+    !SHA1_PATTERN.test(record.acceptedTreeOid) ||
+    !isCount(record.filesMaterialized) ||
+    !isCount(record.bytesMaterialized)
+  ) {
+    throw invalidProtocolFrame('Invalid managed workspace restore result');
+  }
+  return {
+    kind: 'accepted_snapshot_restored',
+    restoreId: record.restoreId,
+    destinationPath: record.destinationPath,
+    acceptedCommitOid: record.acceptedCommitOid,
+    acceptedTreeOid: record.acceptedTreeOid,
+    filesMaterialized: record.filesMaterialized,
+    bytesMaterialized: record.bytesMaterialized,
   };
 }
 

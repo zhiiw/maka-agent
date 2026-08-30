@@ -28,7 +28,10 @@ import {
 
 type WorkspaceClient = Pick<
   DesktopRuntimeHostClient,
-  'getSession' | 'readManagedWorkspaceReview' | 'publishManagedWorkspaceSnapshot'
+  | 'getSession'
+  | 'readManagedWorkspaceReview'
+  | 'publishManagedWorkspaceSnapshot'
+  | 'restoreManagedWorkspaceSnapshot'
 >;
 
 export function registerRuntimeHostWorkspaceIpc(
@@ -65,6 +68,16 @@ export function registerRuntimeHostWorkspaceIpc(
     }
     return input.client.publishManagedWorkspaceSnapshot(request.sessionId, request.publishId);
   });
+
+  input.ipcMain.handle('managed-workspace:restore', async (_event, raw: unknown) => {
+    const request = restoreRequest(raw);
+    const session = await input.client.getSession(request.sessionId);
+    if (!session) throw new Error(`No such Session: ${request.sessionId}`);
+    if (session.toolProfile !== 'managed-coding-v1') {
+      throw new Error('Session does not own a managed workspace');
+    }
+    return input.client.restoreManagedWorkspaceSnapshot(request.sessionId, request.restoreId);
+  });
 }
 
 function publishRequest(value: unknown): { sessionId: string; publishId: string } {
@@ -76,6 +89,18 @@ function publishRequest(value: unknown): { sessionId: string; publishId: string 
   return {
     sessionId: requiredString(record.sessionId, 'Session id'),
     publishId,
+  };
+}
+
+function restoreRequest(value: unknown): { sessionId: string; restoreId: string } {
+  const record = requiredRecord(value, 'managed workspace restore');
+  const restoreId = requiredString(record.restoreId, 'Restore id');
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(restoreId)) {
+    throw new Error('Invalid Restore id');
+  }
+  return {
+    sessionId: requiredString(record.sessionId, 'Session id'),
+    restoreId,
   };
 }
 

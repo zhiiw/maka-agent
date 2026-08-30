@@ -22,6 +22,7 @@ import test from 'node:test';
 import {
   decodeManagedWorkspacePublishResult,
   decodeManagedWorkspaceReviewQueryResult,
+  decodeManagedWorkspaceRestoreResult,
 } from '../protocol/managed-workspace-review.js';
 
 const valid = {
@@ -88,5 +89,35 @@ test('managed Publish protocol rejects refs outside the immutable publication na
         replayed: false,
       }),
     /published ref/u,
+  );
+});
+
+test('managed Restore protocol accepts one bounded isolated materialization receipt', () => {
+  const restored = {
+    kind: 'accepted_snapshot_restored',
+    restoreId: 'desktop-restore-123',
+    destinationPath: 'C:\\maka\\restores\\desktop-restore-123\\workspace',
+    acceptedCommitOid: 'd'.repeat(40),
+    acceptedTreeOid: 'e'.repeat(40),
+    filesMaterialized: 12,
+    bytesMaterialized: 4096,
+  } as const;
+
+  assert.deepEqual(decodeManagedWorkspaceRestoreResult(restored), restored);
+});
+
+test('managed Restore protocol rejects unbounded materialization counters', () => {
+  assert.throws(
+    () =>
+      decodeManagedWorkspaceRestoreResult({
+        kind: 'accepted_snapshot_restored',
+        restoreId: 'desktop-restore-123',
+        destinationPath: '/tmp/restore',
+        acceptedCommitOid: 'd'.repeat(40),
+        acceptedTreeOid: 'e'.repeat(40),
+        filesMaterialized: Number.MAX_SAFE_INTEGER + 1,
+        bytesMaterialized: 4096,
+      }),
+    /restore result/u,
   );
 });

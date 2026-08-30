@@ -29,7 +29,10 @@ import { Text } from '@astryxdesign/core/Text';
 import { redactSecrets as displayRedactSecrets } from '@maka/core/display-redaction';
 import { generalizedErrorMessage, generalizedErrorMessageChinese } from '@maka/core/redaction';
 import { type GitReviewReadResult } from '@maka/core/git-review';
-import type { ManagedWorkspacePublishResult } from '@maka/runtime-host/protocol';
+import type {
+  ManagedWorkspacePublishResult,
+  ManagedWorkspaceRestoreResult,
+} from '@maka/runtime-host/protocol';
 import { DiffCodePreview, useUiLocale } from '@maka/ui';
 import { ICON_SIZE, GitBranch } from '@maka/ui/icons';
 import { getDesktopConversationCopy } from '../../../../locales/conversation-copy';
@@ -64,8 +67,12 @@ export function SessionReviewPanel(props: {
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
   const [published, setPublished] = useState<ManagedWorkspacePublishResult | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restored, setRestored] = useState<ManagedWorkspaceRestoreResult | null>(null);
   const revisionRef = useRef(0);
   const publishIdRef = useRef<string | null>(null);
+  const restoreIdRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     const revision = ++revisionRef.current;
@@ -144,7 +151,10 @@ export function SessionReviewPanel(props: {
     setVisibleFileCount(REVIEW_FILE_PAGE_SIZE);
     setPublished(null);
     setPublishError(null);
+    setRestored(null);
+    setRestoreError(null);
     publishIdRef.current = null;
+    restoreIdRef.current = null;
   }, [gitSnapshot?.revision]);
 
   const publishSnapshot = useCallback(async () => {
@@ -169,6 +179,29 @@ export function SessionReviewPanel(props: {
       setPublishing(false);
     }
   }, [copy.publishFailed, gitSnapshot, locale, props.sessionId, published, publishing, review]);
+
+  const restoreSnapshot = useCallback(async () => {
+    if (!gitSnapshot || restoring || restored) return;
+    const restoreId = restoreIdRef.current ?? `desktop-${crypto.randomUUID()}`;
+    restoreIdRef.current = restoreId;
+    setRestoring(true);
+    setRestoreError(null);
+    try {
+      const result = await review.restore({
+        sessionId: props.sessionId,
+        restoreId,
+      });
+      setRestored(result);
+    } catch (nextError) {
+      setRestoreError(
+        locale === 'zh'
+          ? generalizedErrorMessageChinese(nextError, copy.restoreFailed)
+          : generalizedErrorMessage(nextError, copy.restoreFailed),
+      );
+    } finally {
+      setRestoring(false);
+    }
+  }, [copy.restoreFailed, gitSnapshot, locale, props.sessionId, restored, restoring, review]);
 
   return (
     <Section
@@ -218,6 +251,14 @@ export function SessionReviewPanel(props: {
         {gitSnapshot ? (
           <HStack gap={2} align="center" justify="end">
             <Button
+              variant="ghost"
+              size="sm"
+              label={restoring ? copy.restoring : restored ? copy.restored : copy.restore}
+              isLoading={restoring}
+              isDisabled={restoring || restored !== null}
+              onClick={() => void restoreSnapshot()}
+            />
+            <Button
               variant="secondary"
               size="sm"
               label={publishing ? copy.publishing : published ? copy.published : copy.publish}
@@ -229,6 +270,31 @@ export function SessionReviewPanel(props: {
         ) : null}
         {published ? (
           <Banner status="success" title={copy.publishedDetail(published.publishedRef)} />
+        ) : null}
+        {restored ? (
+          <Banner
+            status="success"
+            title={copy.restoredDetail(
+              restored.destinationPath,
+              restored.filesMaterialized,
+              restored.bytesMaterialized,
+            )}
+          />
+        ) : null}
+        {restoreError ? (
+          <Banner
+            status="error"
+            title={restoreError}
+            endContent={
+              <Button
+                variant="ghost"
+                size="sm"
+                label={copy.retryRestore}
+                isLoading={restoring}
+                onClick={() => void restoreSnapshot()}
+              />
+            }
+          />
         ) : null}
         {publishError ? (
           <Banner

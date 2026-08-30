@@ -173,6 +173,12 @@ export interface DesktopConversationCopy {
     publishedDetail(ref: string): string;
     publishFailed: string;
     retryPublish: string;
+    restore: string;
+    restoring: string;
+    restored: string;
+    restoredDetail(path: string, files: number, bytes: number): string;
+    restoreFailed: string;
+    retryRestore: string;
   };
   terminalPanel: {
     ariaLabel: string;
@@ -541,6 +547,13 @@ const COPY = {
       publishedDetail: (ref) => `已将 accepted 快照发布到 ${ref}`,
       publishFailed: '无法发布 accepted 快照',
       retryPublish: '重试发布',
+      restore: '恢复隔离副本',
+      restoring: '正在恢复',
+      restored: '已恢复',
+      restoredDetail: (path, files, bytes) =>
+        `已在 ${path} 恢复 ${files} 个文件（${bytes} 字节）`,
+      restoreFailed: '无法恢复 accepted 快照',
+      retryRestore: '重试恢复',
     },
     terminalPanel: {
       ariaLabel: '任务终端',
@@ -778,6 +791,13 @@ const COPY = {
       publishedDetail: (ref) => `Published the accepted snapshot to ${ref}`,
       publishFailed: 'Could not publish the accepted snapshot',
       retryPublish: 'Retry publish',
+      restore: 'Restore isolated copy',
+      restoring: 'Restoring',
+      restored: 'Restored',
+      restoredDetail: (path, files, bytes) =>
+        `Restored ${files} file${files === 1 ? '' : 's'} (${bytes} bytes) to ${path}`,
+      restoreFailed: 'Could not restore the accepted snapshot',
+      retryRestore: 'Retry restore',
     },
     terminalPanel: {
       ariaLabel: 'Task terminal',
