@@ -140,6 +140,13 @@ budgets 与 cancellation。无法在某平台证明 profile 时，该 profile �
 build/test 默认属于 hermetic observation：从 accepted tree + dependency lease 运行，输出结构化 stdout/stderr、
 exit status、test summary 与 artifact digest。缓存是 projection；test outcome RuntimeEvent 才是恢复事实。
 
+落地分两步，避免在 M5.3 供应链未拍板前重新引入 bundled npm：
+
+1. `run_node_tests_v1` 先执行 accepted tree 内显式 Node tests，不安装依赖、不读取 PATH，也不借用 source checkout
+   的 `node_modules`；它证明 test runner、sandbox 与有界结构化 observation；
+2. 后续 durable settlement 在 T1 前绑定 accepted head、测试文件 identity、toolchain/profile 和 effect class，再把
+   outcome 写入 RuntimeEvent。需要外部包的项目在 M5.3 capability 可用前明确 unavailable，禁止静默降级。
+
 ### M5.5 External-effect fencing
 
 外部调用必须在 T1 前绑定 operation id/idempotency key、目标 authority 与 reconciliation contract。远端没有

@@ -41,14 +41,41 @@ export interface ManagedFileObservationInternal {
   readonly sha256: `sha256:${string}`;
 }
 
+export interface ManagedNodeTestFileIdentityInternal {
+  readonly relativePath: string;
+  readonly bytes: number;
+  readonly sha256: `sha256:${string}`;
+}
+
+export interface ManagedNodeTestObservationInternal {
+  readonly protocolVersion: 1;
+  readonly kind: 'node_test_observation';
+  readonly nodeVersion: string;
+  readonly files: readonly ManagedNodeTestFileIdentityInternal[];
+  readonly passed: number;
+  readonly failed: number;
+  readonly skipped: number;
+  readonly todo: number;
+}
+
 export interface ManagedCommandSandboxOwnerInternal {
   inspectFile(
     input: ManagedCommandInspectFileInputInternal,
   ): Promise<ManagedFileObservationInternal>;
+  runNodeTests(
+    input: ManagedCommandRunNodeTestsInputInternal,
+  ): Promise<ManagedNodeTestObservationInternal>;
 }
 
 export interface ManagedCommandInspectFileInputInternal {
   readonly relativePath: string;
+  readonly inputRoot: string;
+  readonly scratchRoot: string;
+  readonly abortSignal?: AbortSignal;
+}
+
+export interface ManagedCommandRunNodeTestsInputInternal {
+  readonly relativePaths: readonly string[];
   readonly inputRoot: string;
   readonly scratchRoot: string;
   readonly abortSignal?: AbortSignal;
@@ -61,75 +88,105 @@ export function createManagedCommandSandboxOwnerInternal(input: {
   readonly runProcess?: FilesystemWorkerProcessRunner;
 }): ManagedCommandSandboxOwnerInternal {
   const runProcess = input.runProcess ?? runFilesystemWorkerProcess;
+  async function execute(
+    request: {
+      readonly inputRoot: string;
+      readonly scratchRoot: string;
+      readonly abortSignal?: AbortSignal;
+    },
+    body: Readonly<Record<string, unknown>>,
+  ): Promise<{ readonly stdout: string; readonly nodeVersion: string }> {
+    request.abortSignal?.throwIfAborted();
+    const [inputRoot, scratchRoot] = await Promise.all([
+      requireRealDirectory(request.inputRoot, 'input'),
+      requireRealDirectory(request.scratchRoot, 'scratch'),
+    ]);
+    if (inputRoot === scratchRoot) {
+      throw new Error('Managed command input and scratch roots must be distinct');
+    }
+    const toolchain = await verifyManagedToolchainForInvocationInternal(
+      input.invocationOwnerToken,
+      input.toolchainCapability,
+      'hermetic_observation_v1',
+    );
+    request.abortSignal?.throwIfAborted();
+    const profile = hermeticObservationProfile(inputRoot, scratchRoot);
+    const transformed = input.sandboxManager.transform({
+      preference: 'require',
+      command: {
+        program: toolchain.executablePath,
+        args: [
+          '--permission',
+          `--allow-fs-read=${inputRoot}`,
+          `--allow-fs-write=${scratchRoot}`,
+          toolchain.entrypointPath,
+        ],
+        cwd: inputRoot,
+        env: hermeticEnvironment(scratchRoot),
+        profile,
+        pathContext: {
+          workspaceRoots: [inputRoot, scratchRoot],
+          runtimeReadableRoots: [dirname(toolchain.entrypointPath)],
+          executableRoots: [dirname(toolchain.executablePath)],
+          runtimeWritableRoots: [scratchRoot],
+        },
+      },
+    });
+    if (!transformed.ok || !transformed.requiresSandbox || transformed.sandboxType === 'none') {
+      throw new Error('Managed command sandbox profile is unavailable');
+    }
+    const result = await runProcess({
+      argv: transformed.exec.argv,
+      cwd: transformed.exec.cwd,
+      env: transformed.exec.env ?? {},
+      stdin: `${JSON.stringify(body)}\n`,
+      timeoutMs: 30_000,
+      maxResponseBytes: 64 * 1024,
+      maxStderrBytes: 64 * 1024,
+      ...(transformed.exec.fdInputs ? { fdInputs: transformed.exec.fdInputs } : {}),
+      ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
+    });
+    if (
+      result.timedOut ||
+      result.aborted ||
+      result.responseOverflow ||
+      result.exitCode !== 0 ||
+      !result.dispatched
+    ) {
+      throw new Error('Managed command execution did not complete safely');
+    }
+    return { stdout: result.stdout, nodeVersion: toolchain.nodeVersion };
+  }
   return Object.freeze({
     async inspectFile(request: ManagedCommandInspectFileInputInternal) {
       if (!isPortableRelativePath(request.relativePath)) {
         throw new Error('Managed command observation path is invalid');
       }
-      request.abortSignal?.throwIfAborted();
-      const [inputRoot, scratchRoot] = await Promise.all([
-        requireRealDirectory(request.inputRoot, 'input'),
-        requireRealDirectory(request.scratchRoot, 'scratch'),
-      ]);
-      if (inputRoot === scratchRoot) {
-        throw new Error('Managed command input and scratch roots must be distinct');
-      }
-      const toolchain = await verifyManagedToolchainForInvocationInternal(
-        input.invocationOwnerToken,
-        input.toolchainCapability,
-        'hermetic_observation_v1',
-      );
-      request.abortSignal?.throwIfAborted();
-      const profile = hermeticObservationProfile(inputRoot, scratchRoot);
-      const transformed = input.sandboxManager.transform({
-        preference: 'require',
-        command: {
-          program: toolchain.executablePath,
-          args: [
-            '--permission',
-            `--allow-fs-read=${inputRoot}`,
-            `--allow-fs-write=${scratchRoot}`,
-            toolchain.entrypointPath,
-          ],
-          cwd: inputRoot,
-          env: hermeticEnvironment(scratchRoot),
-          profile,
-          pathContext: {
-            workspaceRoots: [inputRoot, scratchRoot],
-            runtimeReadableRoots: [dirname(toolchain.entrypointPath)],
-            executableRoots: [dirname(toolchain.executablePath)],
-            runtimeWritableRoots: [scratchRoot],
-          },
-        },
+      const result = await execute(request, {
+        protocolVersion: 1,
+        operation: 'inspect_file_v1',
+        relativePath: request.relativePath,
       });
-      if (!transformed.ok || !transformed.requiresSandbox || transformed.sandboxType === 'none') {
-        throw new Error('Managed command sandbox profile is unavailable');
-      }
-      const result = await runProcess({
-        argv: transformed.exec.argv,
-        cwd: transformed.exec.cwd,
-        env: transformed.exec.env ?? {},
-        stdin: `${JSON.stringify({
-          protocolVersion: 1,
-          operation: 'inspect_file_v1',
-          relativePath: request.relativePath,
-        })}\n`,
-        timeoutMs: 30_000,
-        maxResponseBytes: 64 * 1024,
-        maxStderrBytes: 64 * 1024,
-        ...(transformed.exec.fdInputs ? { fdInputs: transformed.exec.fdInputs } : {}),
-        ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
-      });
+      return decodeObservation(result.stdout, request.relativePath, result.nodeVersion);
+    },
+    async runNodeTests(request: ManagedCommandRunNodeTestsInputInternal) {
+      const relativePaths = [...request.relativePaths].sort();
       if (
-        result.timedOut ||
-        result.aborted ||
-        result.responseOverflow ||
-        result.exitCode !== 0 ||
-        !result.dispatched
+        relativePaths.length === 0 ||
+        relativePaths.length > 64 ||
+        new Set(relativePaths).size !== relativePaths.length ||
+        !relativePaths.every(
+          (path) => isPortableRelativePath(path) && /\.(?:cjs|mjs|js)$/u.test(path),
+        )
       ) {
-        throw new Error('Managed command execution did not complete safely');
+        throw new Error('Managed Node test file list is invalid');
       }
-      return decodeObservation(result.stdout, request.relativePath, toolchain.nodeVersion);
+      const result = await execute(request, {
+        protocolVersion: 1,
+        operation: 'run_node_tests_v1',
+        relativePaths,
+      });
+      return decodeNodeTestObservation(result.stdout, relativePaths, result.nodeVersion);
     },
   });
 }
@@ -214,5 +271,70 @@ function decodeObservation(
     relativePath,
     bytes: value.bytes as number,
     sha256: value.sha256 as `sha256:${string}`,
+  });
+}
+
+function decodeNodeTestObservation(
+  raw: string,
+  relativePaths: readonly string[],
+  nodeVersion: string,
+): ManagedNodeTestObservationInternal {
+  const value = JSON.parse(raw) as Record<string, unknown>;
+  if (
+    Object.keys(value).sort().join('\0') !==
+      ['failed', 'files', 'kind', 'nodeVersion', 'passed', 'protocolVersion', 'skipped', 'todo']
+        .sort()
+        .join('\0') ||
+    value.protocolVersion !== 1 ||
+    value.kind !== 'node_test_observation' ||
+    value.nodeVersion !== nodeVersion ||
+    !Array.isArray(value.files) ||
+    value.files.length !== relativePaths.length ||
+    !['passed', 'failed', 'skipped', 'todo'].every(
+      (key) => Number.isSafeInteger(value[key]) && (value[key] as number) >= 0,
+    )
+  ) {
+    throw new Error('Managed Node test response is invalid');
+  }
+  const files = value.files.map((file, index) => {
+    if (!file || typeof file !== 'object' || Array.isArray(file)) {
+      throw new Error('Managed Node test response is invalid');
+    }
+    const record = file as Record<string, unknown>;
+    if (
+      Object.keys(record).sort().join('\0') !==
+        ['bytes', 'relativePath', 'sha256'].sort().join('\0') ||
+      record.relativePath !== relativePaths[index] ||
+      !Number.isSafeInteger(record.bytes) ||
+      (record.bytes as number) < 0 ||
+      (record.bytes as number) > 16 * 1024 * 1024 ||
+      typeof record.sha256 !== 'string' ||
+      !SHA256_PATTERN.test(record.sha256)
+    ) {
+      throw new Error('Managed Node test response is invalid');
+    }
+    return Object.freeze({
+      relativePath: record.relativePath,
+      bytes: record.bytes as number,
+      sha256: record.sha256 as `sha256:${string}`,
+    });
+  });
+  const terminalCount =
+    (value.passed as number) +
+    (value.failed as number) +
+    (value.skipped as number) +
+    (value.todo as number);
+  if (terminalCount === 0) {
+    throw new Error('Managed Node test run did not report any tests');
+  }
+  return Object.freeze({
+    protocolVersion: 1 as const,
+    kind: 'node_test_observation' as const,
+    nodeVersion,
+    files: Object.freeze(files),
+    passed: value.passed as number,
+    failed: value.failed as number,
+    skipped: value.skipped as number,
+    todo: value.todo as number,
   });
 }

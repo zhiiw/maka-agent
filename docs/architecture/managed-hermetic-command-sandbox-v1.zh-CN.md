@@ -2,7 +2,7 @@
 
 ## 范围
 
-本切片只建立 M5.2 的最窄命令 profile：读取一个 owner-provided accepted input tree，输出有界的文件 observation。它不是普通 Bash，不运行 package script，不允许 child process、worker、native addon、WASI、inspector、网络或凭据。
+本切片只建立 M5.2 的最窄命令 profile：读取一个 owner-provided accepted input tree，输出有界 observation。初始操作是单文件 identity；后续 `run_node_tests_v1` 在同一 profile 内运行显式、无 provisioning 的 Node tests。它不是普通 Bash，不运行 package script，不允许 child process、worker、native addon、WASI、inspector、网络或凭据。
 
 ## 主要不变量
 
@@ -14,7 +14,7 @@
 - Node 24 Permission Model 作为 defense-in-depth，不授予 child process/worker/addon/WASI；
 - environment 使用固定 allowlist，`PATH`、`NODE_OPTIONS`、HOME/TMP 不继承 Host；
 - timeout 30 秒、stdout/stderr 各有硬上限，abort/overflow/非零退出统一失败；
-- request/response 使用 exact JSON protocol，relative path 与 Node version 必须匹配。
+- request/response 使用 exact JSON protocol，relative path、显式测试文件集合与 Node version 必须匹配。
 
 Node 官方明确说明 Permission Model 是防止受信代码意外越权的 seat belt，不是对恶意代码的安全边界。因此本设计把 OS sandbox 作为必要 authority；Node flags 只做第二层限制，不能替代 platform sandbox。
 
