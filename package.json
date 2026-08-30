@@ -39,6 +39,7 @@
     "test:gitoxide-helper": "cargo +1.98.0 test --locked --manifest-path native/gitoxide-helper/Cargo.toml",
     "build:gitoxide-helper": "cargo +1.98.0 build --release --locked --manifest-path native/gitoxide-helper/Cargo.toml",
     "prepare:gitoxide-helper": "node scripts/prepare-gitoxide-helper.mjs",
+    "prepare:managed-command-toolchain": "node scripts/prepare-managed-command-toolchain.mjs",
     "generate:gitoxide-helper-notices": "node scripts/generate-gitoxide-helper-notices.mjs",
     "build:runtime-host-peer": "node native/runtime-host-peer/build.mjs",
     "lint:runtime-host-peer": "cargo clippy --locked --all-targets --manifest-path native/runtime-host-peer/Cargo.toml -- -D warnings",

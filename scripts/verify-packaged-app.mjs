@@ -1010,6 +1010,10 @@ export async function assertPackagedResources(
     // Current releases replace the retired Git distribution with one bounded,
     // short-lived Gitoxide helper. Historical upgrade baselines predate it.
     requireGitoxideHelper = bundledGitContract === 'forbidden',
+    // The hermetic command entrypoint arrived after the historical Windows
+    // upgrade baseline. It reuses the packaged Electron runtime and therefore
+    // carries no second Node distribution.
+    requireManagedCommandToolchain = requireGitoxideHelper,
     // The upgrade-lifecycle check runs this against a previously released
     // build, which predates the disclaimer being packaged. Requiring it there
     // would fail a release that was correct when it shipped.
@@ -1054,6 +1058,12 @@ export async function assertPackagedResources(
           ),
           'gitoxide-helper.json',
           join('licenses', 'gitoxide-helper', 'THIRD_PARTY_NOTICES.txt'),
+        ]
+      : []),
+    ...(requireManagedCommandToolchain
+      ? [
+          join('managed-command', 'managed-command-helper-main.js'),
+          'managed-command-toolchain.json',
         ]
       : []),
     ...(requireCanonicalIcon ? [join('assets', 'icon.png')] : []),

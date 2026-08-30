@@ -104,6 +104,14 @@ const baseDesktopBuilderConfig = {
       to: 'licenses/gitoxide-helper/THIRD_PARTY_NOTICES.txt',
     },
     {
+      from: '.generated/managed-command-toolchain/managed-command',
+      to: 'managed-command',
+    },
+    {
+      from: '.generated/managed-command-toolchain/managed-command-toolchain.json',
+      to: 'managed-command-toolchain.json',
+    },
+    {
       from: 'bundled-tools.json',
       to: 'bundled-tools.json',
     },

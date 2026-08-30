@@ -245,6 +245,27 @@ test('Desktop packaging includes only the admitted Gitoxide helper artifact', ()
   );
 });
 
+test('Desktop packaging includes the bounded managed-command entrypoint without another Node runtime', () => {
+  const resources = desktopBuilderConfig.extraResources.map(({ from, to }) => ({ from, to }));
+  assert.ok(
+    resources.some(
+      ({ from, to }) =>
+        from === '.generated/managed-command-toolchain/managed-command' && to === 'managed-command',
+    ),
+  );
+  assert.ok(
+    resources.some(
+      ({ from, to }) =>
+        from === '.generated/managed-command-toolchain/managed-command-toolchain.json' &&
+        to === 'managed-command-toolchain.json',
+    ),
+  );
+  assert.equal(
+    resources.some(({ to }) => to.startsWith('managed-command/node')),
+    false,
+  );
+});
+
 test('macOS DMG ships correctly sized background assets', async () => {
   const backgroundDirectory = join(repoRoot, 'apps', 'desktop', 'build');
   const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
