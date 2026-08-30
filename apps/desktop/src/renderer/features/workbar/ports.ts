@@ -47,6 +47,7 @@ import type { Result } from '@maka/core/result';
 import type {
   ContextDiagnosticsResult,
   ManagedWorkspacePublishResult,
+  ManagedWorkspaceRestoreResult,
 } from '@maka/runtime-host/protocol';
 import type { MergedUsageSummary } from '@maka/core/usage-ledger-merge';
 import type {
@@ -70,6 +71,10 @@ export interface WorkbarReviewService {
     sessionId: string;
     publishId: string;
   }): Promise<ManagedWorkspacePublishResult>;
+  restore(input: {
+    sessionId: string;
+    restoreId: string;
+  }): Promise<ManagedWorkspaceRestoreResult>;
   subscribeSessionEvents(
     sessionId: string,
     handler: (event: SessionEvent) => void,

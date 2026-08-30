@@ -898,6 +898,10 @@ export class DesktopRuntimeHostClient {
     return this.request('managed-workspace.publish.mutate', { sessionId, publishId });
   }
 
+  restoreManagedWorkspaceSnapshot(sessionId: string, restoreId: string) {
+    return this.request('managed-workspace.restore.mutate', { sessionId, restoreId });
+  }
+
   async createSession(
     input: SessionCreateInput,
   ): Promise<SessionCatalogProjection> {

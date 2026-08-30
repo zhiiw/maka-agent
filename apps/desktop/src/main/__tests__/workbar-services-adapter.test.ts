@@ -113,6 +113,7 @@ describe('createDesktopWorkbarServices', () => {
 
     await services.review.read({ sessionId: 's', source: 'unstaged' });
     await services.review.publish({ sessionId: 's', publishId: 'desktop-publish-1' });
+    await services.review.restore({ sessionId: 's', restoreId: 'desktop-restore-1' });
     services.review.subscribeSessionEvents('s', eventHandler)();
 
     await services.terminal.start('s');
@@ -188,6 +189,7 @@ describe('createDesktopWorkbarServices', () => {
       [
         'gitReview.read',
         'gitReview.publish',
+        'gitReview.restore',
         'sessions.subscribeEvents',
         'shellRuns.start',
         'shellRuns.stop',

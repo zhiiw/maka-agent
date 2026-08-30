@@ -189,6 +189,7 @@ import {
 import type {
   ContextDiagnosticsResult,
   ManagedWorkspacePublishResult,
+  ManagedWorkspaceRestoreResult,
 } from '@maka/runtime-host/protocol';
 import {
   DAILY_REVIEW_RANGES,
@@ -2515,6 +2516,12 @@ const makaBridge = {
       publishId: string;
     }): Promise<ManagedWorkspacePublishResult> {
       return invokeSessionInput('managed-workspace:publish', input);
+    },
+    restore(input: {
+      sessionId: string;
+      restoreId: string;
+    }): Promise<ManagedWorkspaceRestoreResult> {
+      return invokeSessionInput('managed-workspace:restore', input);
     },
   },
   goal: {

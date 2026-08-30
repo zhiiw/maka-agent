@@ -95,6 +95,9 @@ test('ordinary Review keeps reading the attached checkout', async (t) => {
       async publishManagedWorkspaceSnapshot() {
         throw new Error('not used');
       },
+      async restoreManagedWorkspaceSnapshot() {
+        throw new Error('not used');
+      },
     },
   });
 
@@ -120,6 +123,9 @@ test('managed Review fails closed instead of reading the attached checkout', asy
         throw new Error('accepted review unavailable');
       },
       async publishManagedWorkspaceSnapshot() {
+        throw new Error('not used');
+      },
+      async restoreManagedWorkspaceSnapshot() {
         throw new Error('not used');
       },
     },
@@ -200,6 +206,83 @@ test('ordinary workspace cannot enter managed immutable Publish', async () => {
     ipc.invoke('managed-workspace:publish', {
       sessionId: 'session-managed',
       publishId: 'desktop-123',
+    }),
+    /does not own a managed workspace/u,
+  );
+});
+
+test('managed workspace Restore delegates one isolated accepted snapshot to Runtime Host', async () => {
+  const ipc = ipcHarness();
+  let restoreCalls = 0;
+  registerRuntimeHostWorkspaceIpc({
+    ipcMain: ipc as never,
+    client: {
+      async getSession() {
+        return sessionProjection('managed-coding-v1');
+      },
+      async readManagedWorkspaceReview() {
+        throw new Error('not used');
+      },
+      async publishManagedWorkspaceSnapshot() {
+        throw new Error('not used');
+      },
+      async restoreManagedWorkspaceSnapshot(sessionId, restoreId) {
+        restoreCalls += 1;
+        assert.equal(sessionId, 'session-1');
+        assert.equal(restoreId, 'desktop-restore-123');
+        return {
+          kind: 'accepted_snapshot_restored' as const,
+          restoreId,
+          destinationPath: 'C:\\maka\\restores\\desktop-restore-123\\workspace',
+          acceptedCommitOid: 'd'.repeat(40),
+          acceptedTreeOid: 'e'.repeat(40),
+          filesMaterialized: 12,
+          bytesMaterialized: 4096,
+        };
+      },
+    },
+  });
+
+  const result = await ipc.invoke('managed-workspace:restore', {
+    sessionId: 'session-1',
+    restoreId: 'desktop-restore-123',
+  });
+  assert.deepEqual(result, {
+    kind: 'accepted_snapshot_restored',
+    restoreId: 'desktop-restore-123',
+    destinationPath: 'C:\\maka\\restores\\desktop-restore-123\\workspace',
+    acceptedCommitOid: 'd'.repeat(40),
+    acceptedTreeOid: 'e'.repeat(40),
+    filesMaterialized: 12,
+    bytesMaterialized: 4096,
+  });
+  assert.equal(restoreCalls, 1);
+});
+
+test('ordinary workspace cannot enter managed isolated Restore', async () => {
+  const ipc = ipcHarness();
+  registerRuntimeHostWorkspaceIpc({
+    ipcMain: ipc as never,
+    client: {
+      async getSession() {
+        return sessionProjection(undefined);
+      },
+      async readManagedWorkspaceReview() {
+        throw new Error('not used');
+      },
+      async publishManagedWorkspaceSnapshot() {
+        throw new Error('not used');
+      },
+      async restoreManagedWorkspaceSnapshot() {
+        throw new Error('must not restore an ordinary workspace');
+      },
+    },
+  });
+
+  await assert.rejects(
+    ipc.invoke('managed-workspace:restore', {
+      sessionId: 'session-1',
+      restoreId: 'desktop-restore-123',
     }),
     /does not own a managed workspace/u,
   );
