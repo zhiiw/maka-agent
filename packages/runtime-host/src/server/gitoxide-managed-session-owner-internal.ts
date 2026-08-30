@@ -66,6 +66,10 @@ import {
   type GitoxideManagedTimeTravelOwnerInternal,
 } from './gitoxide-managed-time-travel-owner-internal.js';
 import {
+  createGitoxideManagedGcOwnerInternal,
+  type GitoxideManagedGcOwnerInternal,
+} from './gitoxide-managed-gc-owner-internal.js';
+import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
   reopenGitoxideAcceptedRepositoryInternal,
@@ -86,6 +90,7 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly repositoryPath: string;
   readonly repositoryId: string;
   readonly baselineWorkspaceVersionId: string;
+  readonly gc: GitoxideManagedGcOwnerInternal;
   readonly workspaceId: string;
   readonly workspaceEpochId: string;
   readonly inspection: GitoxideManagedInspectionOwnerInternal;
@@ -94,6 +99,10 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly restore: GitoxideManagedRestoreOwnerInternal;
   readonly timeTravel: GitoxideManagedTimeTravelOwnerInternal;
   readonly writeEdit: GitoxideManagedWriteEditOwnerInternal;
+  rebaseline(
+    rebaselineId: string,
+    abortSignal?: AbortSignal,
+  ): Promise<GitoxideManagedSessionOwnerInternal>;
 }
 
 export type GitoxideManagedSessionOwnerFailpoint = 'after_repository_import';
@@ -110,6 +119,7 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
   readonly helperCapability: GitoxideHelperInvocationCapability;
   readonly sourceRoot: string;
   readonly sessionId: string;
+  readonly workspaceEpochSeed?: string;
   readonly abortSignal?: AbortSignal;
 }): Promise<ManagedWorkspaceContinuationBoundaryV1 | undefined> {
   input.abortSignal?.throwIfAborted();
@@ -127,7 +137,11 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
     sourceOwnerToken,
     sourceCapability,
   );
-  const identity = deriveManagedSessionIdentity(sourceRoot, input.sessionId, sourceBinding.kind);
+  const identity = deriveManagedSessionIdentity(
+    input.sessionId,
+    sourceBinding.kind,
+    input.workspaceEpochSeed,
+  );
   const continuationOwnerToken = {};
   const capability = issueExecutionStoresWorkspaceContinuationAuthorityInternal({
     ownerToken: continuationOwnerToken,
@@ -224,6 +238,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
   readonly helperCapability: GitoxideHelperInvocationCapability;
   readonly sourceRoot: string;
   readonly sessionId: string;
+  readonly workspaceEpochSeed?: string;
   readonly abortSignal?: AbortSignal;
   readonly failpoint?: (point: GitoxideManagedSessionOwnerFailpoint) => void | Promise<void>;
 }): Promise<GitoxideManagedSessionOwnerInternal> {
@@ -242,7 +257,11 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     sourceOwnerToken,
     sourceCapability,
   );
-  const identity = deriveManagedSessionIdentity(sourceRoot, input.sessionId, sourceBinding.kind);
+  const identity = deriveManagedSessionIdentity(
+    input.sessionId,
+    sourceBinding.kind,
+    input.workspaceEpochSeed,
+  );
   const repositoryPath = join(
     storageRoot,
     MANAGED_REPOSITORY_DIRECTORY,
@@ -609,12 +628,30 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       return Object.freeze({ commitOid: version.commitOid, treeOid: version.treeOid });
     },
   });
+  const gc = createGitoxideManagedGcOwnerInternal({
+    storageRoot,
+    workspaceEpochId: identity.workspaceEpochId,
+  });
   await writeEdit.reconcileAcceptedProjection(input.abortSignal);
+  const rebaseline = async (
+    rebaselineId: string,
+    abortSignal?: AbortSignal,
+  ): Promise<GitoxideManagedSessionOwnerInternal> => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(rebaselineId)) {
+      throw new Error('Gitoxide managed rebaseline identity is invalid');
+    }
+    return openGitoxideManagedSessionOwnerInternal({
+      ...input,
+      workspaceEpochSeed: rebaselineId,
+      ...(abortSignal ? { abortSignal } : {}),
+    });
+  };
   return Object.freeze({
     sourceKind: sourceBinding.kind,
     repositoryPath,
     repositoryId: identity.repositoryId,
     baselineWorkspaceVersionId: identity.workspaceVersionId,
+    gc,
     workspaceId: identity.workspaceId,
     workspaceEpochId: identity.workspaceEpochId,
     inspection,
@@ -623,28 +660,36 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     restore,
     timeTravel,
     writeEdit,
+    rebaseline,
   });
 }
 
 function deriveManagedSessionIdentity(
-  sourceRoot: string,
   sessionId: string,
   sourceKind: ResumableWorkspaceSourceKindInternal,
+  workspaceEpochSeed?: string,
 ) {
   if (!sessionId.trim()) throw new Error('Gitoxide managed session identity is invalid');
-  const digest = createHash('sha256')
-    .update('maka-resumable-managed-session-v2\0', 'utf8')
+  const workspaceDigest = createHash('sha256')
+    .update('maka-resumable-managed-session-v3\0', 'utf8')
     .update(sourceKind, 'utf8')
-    .update('\0')
-    .update(sourceRoot, 'utf8')
     .update('\0')
     .update(sessionId, 'utf8')
     .digest('hex')
     .slice(0, 32);
+  const digest = workspaceEpochSeed
+    ? createHash('sha256')
+        .update('maka-resumable-managed-rebaseline-v2\0', 'utf8')
+        .update(workspaceDigest, 'utf8')
+        .update('\0')
+        .update(workspaceEpochSeed, 'utf8')
+        .digest('hex')
+        .slice(0, 32)
+    : workspaceDigest;
   return Object.freeze({
     digest,
-    repositoryId: `repository_${digest}`,
-    workspaceId: `workspace_${digest}`,
+    repositoryId: `repository_${workspaceDigest}`,
+    workspaceId: `workspace_${workspaceDigest}`,
     workspaceEpochId: `epoch_${digest}`,
     workspaceInstanceId: `instance_${digest}`,
     workspaceVersionId: `version_${digest}`,
