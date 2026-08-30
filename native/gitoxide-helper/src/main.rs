@@ -59,6 +59,7 @@ const MAX_TOTAL_TREE_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_GITOXIDE_OBJECT_ALLOCATION_BYTES: &str = "gitoxide.objects.allocLimit=67108864";
 const MANAGED_IMPORT_OWNER_MARKER_NAME: &str = "maka-managed-import-owner-v1";
 const MANAGED_IMPORT_OWNER_MARKER_BYTES: &[u8] = b"maka-managed-import-owner-v1\n";
+const MANAGED_IMPORT_CLAIM_REF: &str = "refs/maka/import-claim";
 const MANAGED_TREE_POLICY_V3: ManagedTreePolicy = ManagedTreePolicy {
     max_depth: 64,
     max_tree_visits: 250_000,
@@ -1241,6 +1242,10 @@ fn import_source_head(
     if destination.object_hash() != gix::hash::Kind::Sha1 {
         return Err("import_destination_object_format_mismatch");
     }
+    let claim = format!(
+        "maka managed import claim v1\noperation import_source_head\nsource-head {expected_source_head}\nsource-tree {source_tree}\nbaseline-ref {baseline_ref}\npolicy {MANAGED_TREE_POLICY_VERSION}\n"
+    );
+    publish_exact_import_claim(&destination, claim.as_bytes())?;
 
     let mut copy_stats = ManagedTreeStats::default();
     walk_verified_source_tree(
@@ -1348,6 +1353,10 @@ fn import_filesystem_snapshot(
     if destination.object_hash() != gix::hash::Kind::Sha1 {
         return Err("import_destination_object_format_mismatch");
     }
+    let claim = format!(
+        "maka managed import claim v1\noperation import_filesystem_snapshot\nsource-tree {observed_tree}\nbaseline-ref {baseline_ref}\naccepted-ref {accepted_ref}\npolicy {MANAGED_TREE_POLICY_VERSION}\n"
+    );
+    publish_exact_import_claim(&destination, claim.as_bytes())?;
     let mut written_stats = ManagedTreeStats::default();
     let baseline_tree = write_filesystem_snapshot_tree(
         Some(&destination),
@@ -4093,6 +4102,53 @@ fn assert_managed_import_owner_marker(path: &Path) -> Result<(), &'static str> {
         return Err("import_destination_not_fresh");
     }
     Ok(())
+}
+
+fn publish_exact_import_claim(
+    repository: &gix::Repository,
+    claim: &[u8],
+) -> Result<(), &'static str> {
+    let claim_oid = repository
+        .write_blob(claim)
+        .map_err(|_| "import_destination_create_failed")?
+        .detach();
+    match repository
+        .try_find_reference(MANAGED_IMPORT_CLAIM_REF)
+        .map_err(|_| "import_destination_not_fresh")?
+    {
+        Some(reference) => {
+            let current = reference
+                .try_id()
+                .ok_or("import_destination_not_fresh")?
+                .detach();
+            if current != claim_oid {
+                return Err("import_destination_not_fresh");
+            }
+            Ok(())
+        }
+        None => match repository.reference(
+            MANAGED_IMPORT_CLAIM_REF,
+            claim_oid,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "maka managed import claim",
+        ) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let concurrent = repository
+                    .try_find_reference(MANAGED_IMPORT_CLAIM_REF)
+                    .map_err(|_| "import_destination_not_fresh")?
+                    .ok_or("import_destination_not_fresh")?;
+                let concurrent = concurrent
+                    .try_id()
+                    .ok_or("import_destination_not_fresh")?
+                    .detach();
+                if concurrent != claim_oid {
+                    return Err("import_destination_not_fresh");
+                }
+                Ok(())
+            }
+        },
+    }
 }
 
 fn publish_exact_baseline_reference(
