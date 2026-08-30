@@ -255,6 +255,35 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
   return Object.freeze(owner);
 }
 
+/**
+ * Tool-surface declaration used only while resolving continuation safety.
+ * The returned tool cannot execute; production execution still requires the
+ * session-bound admission owner above.
+ */
+export function createManagedNodeTestToolDeclarationInternal(): MakaTool<
+  ManagedNodeTestArgsInternal,
+  ManagedNodeTestObservationInternal
+> {
+  return Object.freeze({
+    name: 'ManagedNodeTest',
+    displayName: 'Managed Node Test',
+    description:
+      'Run explicit Node test files against the immutable accepted workspace. No package scripts, dependency installation, PATH tools, network, or child processes are available.',
+    parameters: MANAGED_NODE_TEST_PARAMETERS,
+    categoryHint: 'custom_tool',
+    recoveryMode: 'replay_safe',
+    durableExecutionProfile: 'managed_observation_v1',
+    executionSemantics: 'exclusive_step',
+    nesting: 'direct_only',
+    impl: async () => {
+      throw new Error('Managed Node test declaration cannot execute without session admission');
+    },
+    managedObservationImpl: async () => {
+      throw new Error('Managed Node test declaration cannot execute without session admission');
+    },
+  });
+}
+
 export function createManagedNodeTestExecutionRootOwnerInternal(input: {
   readonly storageRootLease: StorageRootLease<'interactive', 'write'>;
 }): ManagedNodeTestExecutionRootOwnerInternal {

@@ -108,10 +108,7 @@ export class HostHostedExecutionRunner {
             ? usage.summary.totalCostUsd
             : null,
       };
-    } catch (error) {
-      if (process.env.MAKA_TEST_HOSTED_EXECUTION_DIAGNOSTICS === '1') {
-        console.error('[hosted-execution-test]', error);
-      }
+    } catch {
       requestDrain();
       await this.input.waitForAllResidencies().catch(() => undefined);
       return indeterminate(input.executionId, 'Runtime Host could not settle execution');
