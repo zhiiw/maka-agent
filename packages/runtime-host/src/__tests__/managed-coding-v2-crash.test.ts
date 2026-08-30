@@ -99,6 +99,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
     const firstHost = await fixture.startHost(undefined, true, {
       packagedResourcesRoot: resourcesRoot,
       runtimeExecutablePath: electronExecutable,
+      useProductionBackend: true,
     });
     const firstClient = await connectClient(root);
     const startRequest = firstClient.request('hosted.execution.start', {
@@ -155,6 +156,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
     const secondHost = await fixture.startHost(undefined, true, {
       packagedResourcesRoot: resourcesRoot,
       runtimeExecutablePath: electronExecutable,
+      useProductionBackend: true,
     });
     const secondClient = await connectClient(root);
     try {

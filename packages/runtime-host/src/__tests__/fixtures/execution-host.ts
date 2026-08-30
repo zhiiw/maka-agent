@@ -59,6 +59,7 @@ if (packagedResourcesRoot) {
 const providerCallLogPath = process.env.MAKA_TEST_PROVIDER_CALL_LOG;
 const continuationFailpoint = process.env.MAKA_TEST_CONTINUATION_FAILPOINT;
 const providerFailpointAfterSend = process.env.MAKA_TEST_PROVIDER_FAILPOINT_AFTER_SEND === '1';
+const useProductionBackend = process.env.MAKA_TEST_USE_PRODUCTION_BACKEND === '1';
 
 class ObservedFakeBackend extends FakeBackend {
   override async *send(input: Parameters<FakeBackend['send']>[0]) {
@@ -87,11 +88,15 @@ const result = await startExecutionRuntimeHostCandidate(
   {
     createComposition: (context, compositionOptions) =>
       createExecutionRuntimeHostComposition(context, compositionOptions, {
-        primaryBackendFactory: (backendContext) => {
-          const backend = new ObservedFakeBackend(backendContext);
-          fakeBackends.add(backend);
-          return backend;
-        },
+        ...(useProductionBackend
+          ? {}
+          : {
+              primaryBackendFactory: (backendContext) => {
+                const backend = new ObservedFakeBackend(backendContext);
+                fakeBackends.add(backend);
+                return backend;
+              },
+            }),
         continuationFailpoint: continuationFailpoint
           ? async (point) => {
               if (point !== continuationFailpoint) return;

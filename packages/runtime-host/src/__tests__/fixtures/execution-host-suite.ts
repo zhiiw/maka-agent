@@ -137,6 +137,7 @@ export interface ExecutionHostTestOptions {
     | 'after_run_created'
     | 'after_continuation_start_committed';
   readonly providerFailpointAfterSend?: boolean;
+  readonly useProductionBackend?: boolean;
 }
 
 export interface TurnLedger {
@@ -1281,6 +1282,11 @@ export class ExecutionFixture {
       env.MAKA_TEST_PROVIDER_FAILPOINT_AFTER_SEND = '1';
     } else {
       delete env.MAKA_TEST_PROVIDER_FAILPOINT_AFTER_SEND;
+    }
+    if (testOptions.useProductionBackend) {
+      env.MAKA_TEST_USE_PRODUCTION_BACKEND = '1';
+    } else {
+      delete env.MAKA_TEST_USE_PRODUCTION_BACKEND;
     }
     const childArgs = [
       fileURLToPath(new URL('./execution-host.js', import.meta.url)),
