@@ -652,8 +652,9 @@ Durable source binding 必须在第一个工具 T1 前冻结。`git_repository_v
   控制路径和超出 file/tree/byte/depth 配额的输入；
 - `refs/maka/source-baseline` 冻结 source snapshot，`refs/maka/accepted` 独立承载后续 successor；
   source 改变后重开必须与 frozen source baseline 冲突，而不是重新覆盖 accepted history；
-- source kind 已进入 session identity 与 materialization profile；显式、可直接读取的 durable source
-  binding fact 仍由 continuation capsule 切片补齐，在它落地前不能把该 foundation 描述成完整产品能力。
+- source kind 已进入 repository/workspace/epoch identity 与 materialization profile；continuation claim v2
+  通过完整 `ManagedWorkspaceContinuationBoundaryV1` 持久化这些 digest、source commit/tree 与 accepted
+  commit/tree。source kind 不另设第二份可漂移的事实记录，而是由上述 owner identity 唯一推导；
 - 普通 Desktop workspace task 在 Main 的 `sessions:create` authority 内自动获得
   `managed-coding-v1`；renderer 不再发送 `productIntent`，Composer 也不再允许用户关闭 resumable
   workspace。Deep Research 等独立产品模式保持自己的 execution contract，不会仅因有 cwd 被改写成
@@ -684,6 +685,12 @@ Read、Glob 与 Grep 必须共享同一个 owner-bound accepted-tree read capabi
 commit/tree。Projection 可以加速读取，但漂移时只能回到 Gitoxide object graph 或 fail closed，
 不能改读用户 checkout。
 
+当前 `managed-coding-v1` production composer 已把 builtin filesystem worker 替换为 accepted-tree
+inspection owner：每次 Read/Glob/Grep 先从 SQLite 读取 canonical accepted commit/tree，再用 owner-bound
+Gitoxide capability reopen exact `refs/maka/accepted`，最后执行 object-graph read/list/grep。该 adapter 拒绝
+Write/Edit 之外的 mutation，也不存在 checkout fallback；source checkout 即使随后改变，也不会进入模型读取
+视图。Git 与 filesystem snapshot 共用这一条 accepted repository data plane。
+
 ### M3.3 ManagedContinuationBoundary
 
 Continuation boundary 同时绑定：
@@ -698,6 +705,15 @@ Continuation boundary 同时绑定：
 
 Planner 与执行前 revalidation 必须读取同一 boundary。Runtime history 或 Git history 任一漂移都
 park。
+
+当前 durable capsule 不新增平行表。它由三层现有权威共同组成：
+
+- immutable RuntimeEvent prefix 提供 high-water、provider replay manifest 与已完成工具 outcome；
+- `continuation_claim_v2` 原子占有 target Run/Invocation，并嵌入 workspace boundary；
+- `continuation_source_v3` 把新 Run 绑定回 source prefix、claim 与 composite boundary digest。
+
+因此 capsule 是 claim/replay/boundary 的组合视图，不是可由调用者另写的一份 JSON snapshot。相同 source
+boundary 的第二次规划只能读取已有 claim，不能产生第二个 provider execution。
 
 ### M3.4 Resume planner
 
@@ -723,6 +739,21 @@ T1/T2、candidate 或 checkpoint，也不需要额外点击 Resume。
 
 UI 可以把自动 repair/reconcile/continue 压缩为轻量状态提示，但不得隐藏 park、冲突或需要用户授权的
 Publish。所谓“无感 resume”是隐藏确定性的恢复仪式，不是把不确定性静默猜成成功。
+
+当前 automatic resume owner 已接入 Runtime Host startup recovery，合同刻意较窄：
+
+- 只处理 durable `managed-coding-v1` Session；普通 Session 仍服从显式 resume flag；
+- 只自动继续 strict recovery 已终结为 `failed/app_restarted`，或已有 durable proof 证明 provider 尚未
+  dispatch 的 `continuation_abandoned_before_provider_dispatch` source Run；用户取消、provider/tool
+  failure 不会形成自动重启循环；
+- 先完成既有 claim/Run repair 和 admitted-turn recovery，再规划新的 continuation；
+- 规划必须重验 accepted head、workspace epoch、source identity、tool availability 与 background
+  quiescence；任一 gate 不成立只 park，不创建 Run；
+- admission 使用 planner 已签发的 target Turn/Run/Invocation 与 claim，启动后第二次 Host restart 只能读到
+  existing continuation/claim，不能再次调用 provider。
+
+这完成了 automatic owner 的 Host 边界，但还不是 M3 产品完成态：quiet park UI、non-Git production-shaped
+crash lane 以及完整跨平台证据仍在后续切片。
 
 ### M3.6 Production-shaped crash proof
 

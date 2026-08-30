@@ -448,6 +448,108 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     this.#recoveryPlansBySession.clear();
   }
 
+  /**
+   * Start a fresh Run for a managed task whose last top-level Run was closed
+   * by Host recovery. The continuation claim remains the durable idempotency
+   * owner; this method only admits the already-authenticated capsule.
+   */
+  async resumeManagedContinuationsAfterRecovery(sessions: readonly SessionHeader[]): Promise<void> {
+    for (const session of [...sessions].sort((left, right) => left.id.localeCompare(right.id))) {
+      if (session.isArchived || session.toolProfile !== 'managed-coding-v1') continue;
+      await this.resumeManagedContinuationAfterRecovery(session.id);
+    }
+  }
+
+  private async resumeManagedContinuationAfterRecovery(sessionId: string): Promise<void> {
+    const reservation = this.reserveRootTurn(sessionId);
+    if (!reservation) return;
+    let automaticTurnId: string | undefined;
+    try {
+      const disposition = await this.sessionAdmission.run<TurnStartDisposition | undefined>(
+        sessionId,
+        async (lease) => {
+          const header = await this.stores.sessionStore.readHeaderSnapshot(sessionId);
+          if (
+            header.isArchived ||
+            header.toolProfile !== 'managed-coding-v1' ||
+            runtimeHostSafeBoundaryContinuationUnavailableReason(header) ||
+            this.#executions.has(sessionId)
+          ) {
+            return undefined;
+          }
+          const plan =
+            await this.manager.planLatestAuthoritativeSafeBoundaryContinuation(sessionId);
+          if (plan.disposition !== 'continue' || !plan.continuation) return undefined;
+
+          // Automatic recovery is deliberately narrower than manual Resume.
+          // It only continues a Run that strict startup recovery classified as
+          // interrupted by process loss; user cancellation and provider/tool
+          // failures remain visible terminal outcomes and cannot form a loop.
+          const sourceRun = await this.readRunIfPresent(sessionId, plan.continuation.sourceRunId);
+          if (
+            sourceRun?.status !== 'failed' ||
+            (sourceRun.failureClass !== 'app_restarted' &&
+              sourceRun.failureClass !== 'continuation_abandoned_before_provider_dispatch')
+          ) {
+            return undefined;
+          }
+          if (this.#admissions.get(sessionId) !== reservation) return undefined;
+
+          const continuation = plan.continuation;
+          automaticTurnId = continuation.turnId;
+          const execution = continuationExecutionDescriptor(continuation);
+          if (!this.beginRootAdmission(reservation)) return undefined;
+          const admitted = await this.rootAdmissionOwner.admitRootTurn({
+            sessionId,
+            turnId: continuation.turnId,
+            proposedRunId: continuation.runId,
+            proposedUserMessageId: null,
+            execution,
+            normalizedInput: null,
+            sourceMessages: [],
+            admittedAt: Date.now(),
+          });
+          if (
+            admitted.admission.runId !== continuation.runId ||
+            !isDeepStrictEqual(admitted.admission.execution, execution)
+          ) {
+            throw new RuntimeMessageAuthorityInvariantError(
+              'Automatic managed continuation admission changed identity',
+            );
+          }
+          return this.prepareAdmittedTurn(
+            continuationTurnInput(sessionId, continuation.turnId),
+            admitted.admission,
+            this.acquireRecoveryResidency,
+            lease,
+            undefined,
+            undefined,
+            reservation,
+            continuation,
+          );
+        },
+      );
+      if (disposition) {
+        if (!automaticTurnId) {
+          throw new RuntimeMessageAuthorityInvariantError(
+            'Automatic managed continuation omitted its Turn identity',
+          );
+        }
+        const outcome = await this.resolveStartDisposition(
+          { sessionId, turnId: automaticTurnId },
+          disposition,
+        );
+        if (!outcome.ok) {
+          throw new RuntimeMessageAuthorityInvariantError(
+            `Automatic managed continuation did not start: ${outcome.error.code}`,
+          );
+        }
+      }
+    } finally {
+      this.releaseRootReservation(reservation);
+    }
+  }
+
   async close(): Promise<void> {
     this.beginDrain();
     await this.#admissions.waitForSettledAdmissions();

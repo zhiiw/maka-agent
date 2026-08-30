@@ -1763,6 +1763,7 @@ export async function createExecutionRuntimeHostComposition(
             await messages.recoverPendingAfterHostRestart(
               recoverySessions.map((session) => session.id),
             );
+            await coordinator.resumeManagedContinuationsAfterRecovery(recoverySessions);
             rootRecoveryCompleted = true;
           },
         },
@@ -1976,11 +1977,7 @@ function adaptManagedInspectionFilesystemWorker(
   return {
     async execute(input) {
       const operation = input.operation;
-      if (
-        operation.kind !== 'read' &&
-        operation.kind !== 'glob' &&
-        operation.kind !== 'grep'
-      ) {
+      if (operation.kind !== 'read' && operation.kind !== 'glob' && operation.kind !== 'grep') {
         throw new RuntimeHostWorkspaceExecutionError(
           'workspace_operation_denied',
           'Managed coding filesystem execution permits only accepted-tree inspection',
