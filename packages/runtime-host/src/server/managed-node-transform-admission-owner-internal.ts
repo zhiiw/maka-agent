@@ -241,6 +241,29 @@ export function createManagedNodeTransformOwnerInternal(input: {
   return Object.freeze({ tool, admission });
 }
 
+export function createManagedNodeTransformToolDeclarationInternal(): MakaTool<
+  ManagedNodeTransformArgsInternal,
+  unknown
+> {
+  const unavailable = async (): Promise<never> => {
+    throw new Error('Managed Node transform declaration cannot execute without session admission');
+  };
+  return Object.freeze({
+    name: 'ManagedNodeTransform',
+    displayName: 'Managed Node Transform',
+    description:
+      'Run one accepted-tree JavaScript transformer and publish exactly one bounded UTF-8 output through Gitoxide and the durable workspace successor authority.',
+    parameters: PARAMETERS,
+    categoryHint: 'custom_tool',
+    recoveryMode: 'reconcile',
+    durableExecutionProfile: 'managed_mutation_v2',
+    executionSemantics: 'exclusive_step',
+    nesting: 'direct_only',
+    impl: unavailable,
+    managedWorkspaceTransform: unavailable,
+  });
+}
+
 interface PreparedTransform {
   readonly inputRoot: string;
   readonly scratchRoot: string;

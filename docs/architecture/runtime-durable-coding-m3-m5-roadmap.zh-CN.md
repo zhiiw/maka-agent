@@ -196,5 +196,6 @@ Host 后，新的 Run 只采用 durable outcome/candidate/evidence；已完成�
 
 当前 workspace-transform kernel 已采用 `managed_mutation_v3`：受限 Node 进程只产生一个 owner-selected UTF-8
 输出，Gitoxide candidate 与 SQLite successor 才能把它纳入 accepted history。它不直接写 worktree，也不让
-caller 选择 executable/environment。下一切片才加入 packaged profile v4、Desktop negotiation 与 Host crash
-gate；之后再推进 external-effect fencing。详见 `managed-node-transform-kernel-v1.zh-CN.md`。
+caller 选择 executable/environment。packaged profile v4、Desktop negotiation 与 Host crash gate 已形成独立
+产品组合切片；下一步推进 external-effect fencing。详见 `managed-node-transform-kernel-v1.zh-CN.md` 与
+`managed-coding-v4-product-composition.zh-CN.md`。

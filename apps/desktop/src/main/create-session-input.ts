@@ -136,6 +136,7 @@ export function resolveAutomaticWorkspaceToolProfile(
   switch (workspace.kind) {
     case 'project':
     case 'host_path': {
+      if (availableProfiles.includes('managed-coding-v4')) return 'managed-coding-v4';
       if (availableProfiles.includes('managed-coding-v3')) return 'managed-coding-v3';
       if (availableProfiles.includes('managed-coding-v2')) return 'managed-coding-v2';
       if (availableProfiles.includes('managed-coding-v1')) return 'managed-coding-v1';

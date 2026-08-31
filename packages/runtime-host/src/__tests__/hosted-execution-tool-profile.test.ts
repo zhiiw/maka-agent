@@ -247,3 +247,31 @@ test('managed coding v3 adds only an explicit hermetic accepted-world Node entry
   assert.equal(selected.at(-1)?.recoveryMode, 'replay_safe');
   assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_observation_v3');
 });
+
+test('managed coding v4 adds one owner-controlled accepted-world workspace transform', () => {
+  const profile = hostedExecutionRunProfile('managed-coding-v4');
+  assert.ok(profile);
+  assert.deepEqual(profile.toolNames, [
+    'Read',
+    'Glob',
+    'Grep',
+    'Write',
+    'Edit',
+    'ManagedNodeTest',
+    'ManagedNodeRun',
+    'ManagedNodeTransform',
+  ]);
+  assert.match(profile.systemPrompt, /one bounded UTF-8 workspace file/u);
+  const tools = [...profile.toolNames, 'Bash'].map(
+    (name): MakaTool => ({
+      name,
+      description: name,
+      parameters: z.object({}),
+      impl: async () => 'not used',
+    }),
+  );
+  const selected = projectHostedExecutionTools(tools, 'managed-coding-v4');
+  assert.equal(selected.at(-1)?.name, 'ManagedNodeTransform');
+  assert.equal(selected.at(-1)?.recoveryMode, 'reconcile');
+  assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_mutation_v2');
+});

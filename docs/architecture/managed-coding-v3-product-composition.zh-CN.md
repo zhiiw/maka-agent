@@ -17,7 +17,9 @@ enforcing command sandbox、`ManagedNodeTest` owner 与 `ManagedNodeRun` owner �
 
 ## 2. Owner 与权限边界
 
-- release owner：生成 `maka_managed_command_toolchain_release_v3`，同时绑定 v2 test 与 v3 command effect class；
+- release owner：v3 首次使用 `maka_managed_command_toolchain_release_v3` 绑定 test/command effect class；
+  后续 v4 release manifest 是严格 superset。旧 v3 Session 仍只获得 v3 工具集合，不会因为读取新 manifest 而获得
+  workspace transform 权限；
 - current-process toolchain owner：严格验证 manifest、Node 版本、entry bytes/hash 后签发 opaque capability；
 - Gitoxide session owner：提供 immutable accepted tree 与 workspace boundary；
 - sandbox/process owner：提供 read-only input、disposable scratch、空 `PATH`、无 child process 和受限网络；

@@ -72,8 +72,8 @@ export async function prepareManagedCommandToolchain({
     manifestTempPath,
     `${JSON.stringify(
       {
-        schemaVersion: 3,
-        protocol: 'maka_managed_command_toolchain_release_v3',
+        schemaVersion: 4,
+        protocol: 'maka_managed_command_toolchain_release_v4',
         provider: 'maka/managed-command-toolchain',
         platform,
         arch,
@@ -82,7 +82,11 @@ export async function prepareManagedCommandToolchain({
         entrypointRelativePath: ENTRYPOINT_RELATIVE_PATH,
         entrypointBytes: copiedInfo.size,
         entrypointSha256,
-        allowedEffectClasses: ['hermetic_observation_v2', 'hermetic_observation_v3'],
+        allowedEffectClasses: [
+          'hermetic_observation_v2',
+          'hermetic_observation_v3',
+          'workspace_transform_v1',
+        ],
         distributionReady: true,
       },
       null,

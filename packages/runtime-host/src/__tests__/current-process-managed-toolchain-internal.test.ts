@@ -55,7 +55,7 @@ test('rejects a command entrypoint changed after its release manifest was writte
   await assert.rejects(runElectronChild(fixture.resourcesRoot), /failed release admission/u);
 });
 
-test('rejects the superseded v2 release envelope instead of silently weakening v3', {
+test('rejects the superseded v3 release envelope instead of silently weakening v4', {
   skip:
     process.platform === 'win32'
       ? 'Windows does not admit Electron as the managed Node runtime'
@@ -68,9 +68,9 @@ test('rejects the superseded v2 release envelope instead of silently weakening v
     manifestPath,
     `${JSON.stringify({
       ...manifest,
-      schemaVersion: 2,
-      protocol: 'maka_managed_command_toolchain_release_v2',
-      allowedEffectClasses: ['hermetic_observation_v2'],
+      schemaVersion: 3,
+      protocol: 'maka_managed_command_toolchain_release_v3',
+      allowedEffectClasses: ['hermetic_observation_v2', 'hermetic_observation_v3'],
     })}\n`,
     'utf8',
   );
@@ -95,8 +95,8 @@ async function createFixture(t: test.TestContext) {
   await writeFile(
     join(resourcesRoot, 'managed-command-toolchain.json'),
     `${JSON.stringify({
-      schemaVersion: 3,
-      protocol: 'maka_managed_command_toolchain_release_v3',
+      schemaVersion: 4,
+      protocol: 'maka_managed_command_toolchain_release_v4',
       provider: 'maka/managed-command-toolchain',
       platform: process.platform,
       arch: process.arch,
@@ -105,7 +105,11 @@ async function createFixture(t: test.TestContext) {
       entrypointRelativePath: 'managed-command/managed-command-helper-main.js',
       entrypointBytes: (await stat(entrypointPath)).size,
       entrypointSha256: `sha256:${createHash('sha256').update(entrypoint).digest('hex')}`,
-      allowedEffectClasses: ['hermetic_observation_v2', 'hermetic_observation_v3'],
+      allowedEffectClasses: [
+        'hermetic_observation_v2',
+        'hermetic_observation_v3',
+        'workspace_transform_v1',
+      ],
       distributionReady: true,
     })}\n`,
     'utf8',

@@ -185,6 +185,7 @@ import {
   createManagedNodeTestToolDeclarationInternal,
   createManagedNodeTestExecutionRootOwnerInternal,
 } from './managed-node-test-admission-owner-internal.js';
+import { createManagedNodeTransformToolDeclarationInternal } from './managed-node-transform-admission-owner-internal.js';
 import {
   HostProjectDirectoryAuthority,
   type PublishedProjectDirectoryRoot,
@@ -473,6 +474,10 @@ export async function createExecutionRuntimeHostComposition(
     const managedNodeCommandToolDeclaration =
       managedCommandOwner && gitoxideHelperCapability
         ? createManagedNodeCommandToolDeclarationInternal()
+        : undefined;
+    const managedNodeTransformToolDeclaration =
+      managedCommandOwner && gitoxideHelperCapability
+        ? createManagedNodeTransformToolDeclarationInternal()
         : undefined;
     const filesystemWorkerLaunchSpecProvider =
       sandboxManager && isBuiltinFilesystemWorkerSandboxAvailable()
@@ -833,12 +838,22 @@ export async function createExecutionRuntimeHostComposition(
                   sourceRoot: backendContext.header.cwd,
                   sessionId: backendContext.sessionId,
                   abortSignal: backendContext.abortSignal,
+                  ...(backendContext.header.toolProfile === 'managed-coding-v4' &&
+                  managedCommandOwner
+                    ? {
+                        managedNodeTransform: {
+                          executionRootOwner: managedNodeTestExecutionRootOwner,
+                          commandOwner: managedCommandOwner,
+                        },
+                      }
+                    : {}),
                 });
               })()
             : undefined;
           const managedNodeTestAdmission =
             backendContext.header.toolProfile === 'managed-coding-v2' ||
-            backendContext.header.toolProfile === 'managed-coding-v3'
+            backendContext.header.toolProfile === 'managed-coding-v3' ||
+            backendContext.header.toolProfile === 'managed-coding-v4'
               ? await (async () => {
                   const dependencySnapshotAuthority =
                     await openManagedDependencySnapshotAuthority?.();
@@ -859,7 +874,8 @@ export async function createExecutionRuntimeHostComposition(
                 })()
               : undefined;
           const managedNodeCommandAdmission =
-            backendContext.header.toolProfile === 'managed-coding-v3'
+            backendContext.header.toolProfile === 'managed-coding-v3' ||
+            backendContext.header.toolProfile === 'managed-coding-v4'
               ? await (async () => {
                   if (!managedCommandOwner || !managedSession) {
                     throw new Error(
@@ -902,6 +918,7 @@ export async function createExecutionRuntimeHostComposition(
                 ...hostTools,
                 ...(managedNodeTestAdmission ? [managedNodeTestAdmission.tool] : []),
                 ...(managedNodeCommandAdmission ? [managedNodeCommandAdmission.tool] : []),
+                ...(managedSession?.nodeTransform ? [managedSession.nodeTransform.tool] : []),
               ],
               resolveRootTools: (sessionId) =>
                 requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId),
@@ -1030,12 +1047,18 @@ export async function createExecutionRuntimeHostComposition(
           hostTools: [
             ...hostTools,
             ...((header.toolProfile === 'managed-coding-v2' ||
-              header.toolProfile === 'managed-coding-v3') &&
+              header.toolProfile === 'managed-coding-v3' ||
+              header.toolProfile === 'managed-coding-v4') &&
             managedNodeTestToolDeclaration
               ? [managedNodeTestToolDeclaration]
               : []),
-            ...(header.toolProfile === 'managed-coding-v3' && managedNodeCommandToolDeclaration
+            ...((header.toolProfile === 'managed-coding-v3' ||
+              header.toolProfile === 'managed-coding-v4') &&
+            managedNodeCommandToolDeclaration
               ? [managedNodeCommandToolDeclaration]
+              : []),
+            ...(header.toolProfile === 'managed-coding-v4' && managedNodeTransformToolDeclaration
+              ? [managedNodeTransformToolDeclaration]
               : []),
             ...graphTools,
           ],
@@ -2081,6 +2104,12 @@ export async function createExecutionRuntimeHostComposition(
         managedNodeTestToolDeclaration &&
         managedNodeCommandToolDeclaration
           ? (['managed-coding-v3'] as const)
+          : []),
+        ...(gitoxideHelperCapability &&
+        managedNodeTestToolDeclaration &&
+        managedNodeCommandToolDeclaration &&
+        managedNodeTransformToolDeclaration
+          ? (['managed-coding-v4'] as const)
           : []),
       ]),
       workspaceExecution: requireWorkspaceExecution(workspaceExecution),
