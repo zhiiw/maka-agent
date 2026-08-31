@@ -152,9 +152,9 @@ export async function resolveCurrentProcessManagedToolchainInternal(input: {
   }
 }
 
-interface ManagedCommandToolchainManifestV2 {
-  readonly schemaVersion: 2;
-  readonly protocol: 'maka_managed_command_toolchain_release_v2';
+interface ManagedCommandToolchainManifestV3 {
+  readonly schemaVersion: 3;
+  readonly protocol: 'maka_managed_command_toolchain_release_v3';
   readonly provider: 'maka/managed-command-toolchain';
   readonly platform: NodeJS.Platform;
   readonly arch: string;
@@ -163,19 +163,19 @@ interface ManagedCommandToolchainManifestV2 {
   readonly entrypointRelativePath: 'managed-command/managed-command-helper-main.js';
   readonly entrypointBytes: number;
   readonly entrypointSha256: `sha256:${string}`;
-  readonly allowedEffectClasses: readonly ['hermetic_observation_v2'];
+  readonly allowedEffectClasses: readonly ['hermetic_observation_v2', 'hermetic_observation_v3'];
   readonly distributionReady: true;
 }
 
-function decodeManifest(input: unknown): ManagedCommandToolchainManifestV2 {
+function decodeManifest(input: unknown): ManagedCommandToolchainManifestV3 {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw invalidManifest('Managed command toolchain manifest must be an object');
   }
   const value = input as Record<string, unknown>;
   if (
     Object.keys(value).sort().join('\0') !== [...MANIFEST_KEYS].sort().join('\0') ||
-    value.schemaVersion !== 2 ||
-    value.protocol !== 'maka_managed_command_toolchain_release_v2' ||
+    value.schemaVersion !== 3 ||
+    value.protocol !== 'maka_managed_command_toolchain_release_v3' ||
     value.provider !== 'maka/managed-command-toolchain' ||
     !['win32', 'darwin', 'linux'].includes(value.platform as string) ||
     typeof value.arch !== 'string' ||
@@ -190,13 +190,14 @@ function decodeManifest(input: unknown): ManagedCommandToolchainManifestV2 {
     typeof value.entrypointSha256 !== 'string' ||
     !SHA256_PATTERN.test(value.entrypointSha256) ||
     !Array.isArray(value.allowedEffectClasses) ||
-    value.allowedEffectClasses.length !== 1 ||
+    value.allowedEffectClasses.length !== 2 ||
     value.allowedEffectClasses[0] !== 'hermetic_observation_v2' ||
+    value.allowedEffectClasses[1] !== 'hermetic_observation_v3' ||
     value.distributionReady !== true
   ) {
     throw invalidManifest('Managed command toolchain manifest is invalid');
   }
-  return value as unknown as ManagedCommandToolchainManifestV2;
+  return value as unknown as ManagedCommandToolchainManifestV3;
 }
 
 async function fileIdentity(

@@ -176,6 +176,10 @@ import {
 } from './current-process-managed-toolchain-internal.js';
 import { createManagedCommandSandboxOwnerInternal } from './managed-command-sandbox-owner-internal.js';
 import {
+  createManagedNodeCommandAdmissionOwnerInternal,
+  createManagedNodeCommandToolDeclarationInternal,
+} from './managed-node-command-admission-owner-internal.js';
+import {
   createManagedNodeTestAdmissionOwnerInternal,
   createManagedNodeTestDependencyOwnerInternal,
   createManagedNodeTestToolDeclarationInternal,
@@ -465,6 +469,10 @@ export async function createExecutionRuntimeHostComposition(
     const managedNodeTestToolDeclaration =
       managedCommandOwner && gitoxideHelperCapability
         ? createManagedNodeTestToolDeclarationInternal()
+        : undefined;
+    const managedNodeCommandToolDeclaration =
+      managedCommandOwner && gitoxideHelperCapability
+        ? createManagedNodeCommandToolDeclarationInternal()
         : undefined;
     const filesystemWorkerLaunchSpecProvider =
       sandboxManager && isBuiltinFilesystemWorkerSandboxAvailable()
@@ -829,7 +837,8 @@ export async function createExecutionRuntimeHostComposition(
               })()
             : undefined;
           const managedNodeTestAdmission =
-            backendContext.header.toolProfile === 'managed-coding-v2'
+            backendContext.header.toolProfile === 'managed-coding-v2' ||
+            backendContext.header.toolProfile === 'managed-coding-v3'
               ? await (async () => {
                   const dependencySnapshotAuthority =
                     await openManagedDependencySnapshotAuthority?.();
@@ -846,6 +855,21 @@ export async function createExecutionRuntimeHostComposition(
                       sourceRoot: backendContext.header.cwd,
                       snapshotAuthority: dependencySnapshotAuthority,
                     }),
+                  });
+                })()
+              : undefined;
+          const managedNodeCommandAdmission =
+            backendContext.header.toolProfile === 'managed-coding-v3'
+              ? await (async () => {
+                  if (!managedCommandOwner || !managedSession) {
+                    throw new Error(
+                      'managed_workspace_profile_unavailable: hermetic Node command authority is unavailable',
+                    );
+                  }
+                  return createManagedNodeCommandAdmissionOwnerInternal({
+                    executionRootOwner: managedNodeTestExecutionRootOwner,
+                    sourceOwner: managedSession.nodeTestSource,
+                    commandOwner: managedCommandOwner,
                   });
                 })()
               : undefined;
@@ -874,9 +898,11 @@ export async function createExecutionRuntimeHostComposition(
               ),
               goalTools: requireGoal(goal).tools,
               builtinTools: runBuiltinTools,
-              hostTools: managedNodeTestAdmission
-                ? [...hostTools, managedNodeTestAdmission.tool]
-                : hostTools,
+              hostTools: [
+                ...hostTools,
+                ...(managedNodeTestAdmission ? [managedNodeTestAdmission.tool] : []),
+                ...(managedNodeCommandAdmission ? [managedNodeCommandAdmission.tool] : []),
+              ],
               resolveRootTools: (sessionId) =>
                 requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId),
               parentAgentTools: childAgentTools.parentTools,
@@ -900,8 +926,15 @@ export async function createExecutionRuntimeHostComposition(
             ...(managedSession
               ? { admitManagedMutation: managedSession.writeEdit.admitManagedMutation }
               : {}),
-            ...(managedNodeTestAdmission
-              ? { admitManagedObservation: managedNodeTestAdmission.admit }
+            ...(managedNodeTestAdmission || managedNodeCommandAdmission
+              ? {
+                  admitManagedObservation: (input) =>
+                    input.toolName === 'ManagedNodeRun'
+                      ? (managedNodeCommandAdmission?.admit(input) ??
+                        Promise.reject(new Error('Managed Node command admission is unavailable')))
+                      : (managedNodeTestAdmission?.admit(input) ??
+                        Promise.reject(new Error('Managed Node test admission is unavailable'))),
+                }
               : {}),
             requestDrain: context.requestDrain,
           });
@@ -996,8 +1029,13 @@ export async function createExecutionRuntimeHostComposition(
           modelId: header.model,
           hostTools: [
             ...hostTools,
-            ...(header.toolProfile === 'managed-coding-v2' && managedNodeTestToolDeclaration
+            ...((header.toolProfile === 'managed-coding-v2' ||
+              header.toolProfile === 'managed-coding-v3') &&
+            managedNodeTestToolDeclaration
               ? [managedNodeTestToolDeclaration]
+              : []),
+            ...(header.toolProfile === 'managed-coding-v3' && managedNodeCommandToolDeclaration
+              ? [managedNodeCommandToolDeclaration]
               : []),
             ...graphTools,
           ],
@@ -2038,6 +2076,11 @@ export async function createExecutionRuntimeHostComposition(
         ...(gitoxideHelperCapability ? (['managed-coding-v1'] as const) : []),
         ...(gitoxideHelperCapability && managedNodeTestToolDeclaration
           ? (['managed-coding-v2'] as const)
+          : []),
+        ...(gitoxideHelperCapability &&
+        managedNodeTestToolDeclaration &&
+        managedNodeCommandToolDeclaration
+          ? (['managed-coding-v3'] as const)
           : []),
       ]),
       workspaceExecution: requireWorkspaceExecution(workspaceExecution),
