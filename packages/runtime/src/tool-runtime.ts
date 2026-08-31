@@ -533,6 +533,16 @@ class RuntimeManagedMutationUnsettledError extends Error {
   }
 }
 
+class RuntimeManagedObservationUnsettledError extends Error {
+  constructor(cause: unknown) {
+    super(
+      `Managed observation remains unsettled: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+    this.name = 'RuntimeManagedObservationUnsettledError';
+  }
+}
+
 class ToolResultLimitError extends Error {
   constructor() {
     super('Tool result byte limit exceeded');
@@ -1834,6 +1844,9 @@ export class ToolRuntime {
           };
           let operationPromise: Promise<void> | undefined;
           let runtimeOwnedValue: RuntimeManagedMutationOperationValue<unknown> | undefined;
+          let committedObservationOutcome:
+            | { id: string; operationId: string; ts: number }
+            | undefined;
           const executeManagedObservationOperation = (
             execution: RuntimeManagedObservationExecution,
           ): Promise<void> => {
@@ -1863,6 +1876,14 @@ export class ToolRuntime {
                     durationMs: this.input.now() - startedAt,
                   }),
                 });
+                if (!durableAttempt) {
+                  throw new Error('Managed observation operation has no durable T1 attempt');
+                }
+                committedObservationOutcome = await durableAttempt.commitOutcome(
+                  runtimeOwnedValue.outcome.content,
+                  runtimeOwnedValue.outcome.isError,
+                  runtimeOwnedValue.outcome.durationMs,
+                );
               } finally {
                 if (lifecycle.state === 'running') lifecycle.state = 'settled';
               }
@@ -1877,19 +1898,27 @@ export class ToolRuntime {
             ownerError = error;
           }
           if (lifecycle.state === 'running') {
+            let operationError: unknown;
             try {
               await operationPromise;
-            } catch {
+            } catch (error) {
+              operationError = error;
               // Join the short-lived observation before publishing any terminal.
             } finally {
               lifecycle.state = 'closed';
             }
-            throw new Error('Managed observation owner settled before the operation completed', {
-              ...(ownerError !== undefined ? { cause: ownerError } : {}),
-            });
+            if (!committedObservationOutcome || !runtimeOwnedValue) {
+              throw new Error('Managed observation owner settled before the operation completed', {
+                ...(operationError !== undefined
+                  ? { cause: operationError }
+                  : ownerError !== undefined
+                    ? { cause: ownerError }
+                    : {}),
+              });
+            }
           }
           lifecycle.state = 'closed';
-          if (ownerError !== undefined) throw ownerError;
+          if (ownerError !== undefined && !committedObservationOutcome) throw ownerError;
           if (!runtimeOwnedValue) {
             throw new Error('Managed observation owner settled without executing the operation');
           }
@@ -2035,7 +2064,8 @@ export class ToolRuntime {
     } catch (err) {
       if (
         err instanceof RuntimeCommitBoundaryError ||
-        err instanceof RuntimeManagedMutationUnsettledError
+        err instanceof RuntimeManagedMutationUnsettledError ||
+        err instanceof RuntimeManagedObservationUnsettledError
       ) {
         throw err;
       }
@@ -2045,6 +2075,9 @@ export class ToolRuntime {
       // is recovery-owned. It may never fall through to generic synthetic T2.
       if (managedMutationAdmission) {
         throw new RuntimeManagedMutationUnsettledError(err);
+      }
+      if (managedObservationAdmission) {
+        throw new RuntimeManagedObservationUnsettledError(err);
       }
       if (isInteractionControlError(err)) throw err;
       output.flush();

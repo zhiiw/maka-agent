@@ -40,7 +40,7 @@ import {
 } from '../tool-runtime.js';
 
 describe('ToolRuntime durable boundary', () => {
-  it('freezes one managed observation before T1 and commits its result through generic T2', async () => {
+  it('freezes one managed observation before T1 and commits exact T2 before admission returns', async () => {
     const order: string[] = [];
     const prepared: ToolPreparedCommit[] = [];
     const outcomes: ToolOutcomeCommit[] = [];
@@ -64,7 +64,9 @@ describe('ToolRuntime durable boundary', () => {
           order.push('admit');
           return managedObservationAdmission(async (operation) => {
             order.push('observation-enter');
-            return await operation({ inputRoot: '/accepted', scratchRoot: '/scratch' });
+            const result = await operation({ inputRoot: '/accepted', scratchRoot: '/scratch' });
+            order.push('observation-exit');
+            return result;
           }, order);
         },
       },
@@ -90,6 +92,7 @@ describe('ToolRuntime durable boundary', () => {
       'observation-enter',
       'observe',
       't2',
+      'observation-exit',
       'published-result',
       'dispose-observation',
     ]);
@@ -98,6 +101,130 @@ describe('ToolRuntime durable boundary', () => {
       managedObservationDispatch(),
     );
     assert.equal(outcomes.length, 1);
+  });
+
+  it('adopts a managed observation result committed before the owner response is lost', async () => {
+    const outcomes: ToolOutcomeCommit[] = [];
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async (input) => {
+          outcomes.push(input);
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedObservation: async () => ({
+          durableDispatch: managedObservationDispatchV2(),
+          execute: async (operation) => {
+            await operation({ inputRoot: '/accepted', scratchRoot: '/scratch' });
+            throw new Error('owner response lost after durable result');
+          },
+          dispose: async () => undefined,
+        }),
+      },
+    );
+    const managedTest = tool(() => {
+      throw new Error('ordinary implementation must not execute');
+    });
+    managedTest.name = 'ManagedNodeTest';
+    managedTest.durableExecutionProfile = 'managed_observation_v2';
+    managedTest.managedObservationImpl = async () => ({ passed: 1, failed: 0 });
+
+    assert.deepEqual(
+      await harness.executeWithInput(managedTest, { relativePaths: ['src/a.test.mjs'] }),
+      { passed: 1, failed: 0 },
+    );
+    assert.equal(outcomes.length, 1);
+  });
+
+  it('joins an early owner return and adopts the completed durable observation', async () => {
+    const outcomes: ToolOutcomeCommit[] = [];
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async (input) => {
+          outcomes.push(input);
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedObservation: async () => ({
+          durableDispatch: managedObservationDispatchV2(),
+          execute: async <T>(
+            operation: (execution: RuntimeManagedObservationExecution) => Promise<T>,
+          ) => {
+            void operation({ inputRoot: '/accepted', scratchRoot: '/scratch' });
+            return undefined as T;
+          },
+          dispose: async () => undefined,
+        }),
+      },
+    );
+    const managedTest = tool(() => {
+      throw new Error('ordinary implementation must not execute');
+    });
+    managedTest.name = 'ManagedNodeTest';
+    managedTest.durableExecutionProfile = 'managed_observation_v2';
+    managedTest.managedObservationImpl = async () => {
+      await Promise.resolve();
+      return { passed: 1, failed: 0 };
+    };
+
+    assert.deepEqual(
+      await harness.executeWithInput(managedTest, { relativePaths: ['src/a.test.mjs'] }),
+      { passed: 1, failed: 0 },
+    );
+    assert.equal(outcomes.length, 1);
+  });
+
+  it('never replaces a committed managed observation with a synthetic publication error', async () => {
+    const outcomes: ToolOutcomeCommit[] = [];
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async (input) => {
+          outcomes.push(input);
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        appendMessage: async (message) => {
+          if (message.type === 'tool_result') {
+            throw new Error('live publication unavailable');
+          }
+        },
+        admitManagedObservation: async () => ({
+          durableDispatch: managedObservationDispatchV2(),
+          execute: async (operation) =>
+            await operation({ inputRoot: '/accepted', scratchRoot: '/scratch' }),
+          dispose: async () => undefined,
+        }),
+      },
+    );
+    const managedTest = tool(() => {
+      throw new Error('ordinary implementation must not execute');
+    });
+    managedTest.name = 'ManagedNodeTest';
+    managedTest.durableExecutionProfile = 'managed_observation_v2';
+    managedTest.managedObservationImpl = async () => ({ passed: 1, failed: 0 });
+
+    await assert.rejects(
+      harness.executeWithInput(managedTest, { relativePaths: ['src/a.test.mjs'] }),
+      /Managed observation remains unsettled: live publication unavailable/u,
+    );
+    assert.equal(outcomes.length, 1);
+    const response = outcomes[0]?.runtimeEvent.content;
+    assert.deepEqual(response?.kind === 'function_response' ? response.result : undefined, {
+      kind: 'json',
+      value: { passed: 1, failed: 0 },
+    });
   });
 
   it('freezes an exact dependency identity in managed observation v2 before T1', async () => {
