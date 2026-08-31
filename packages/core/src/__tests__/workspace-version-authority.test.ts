@@ -75,7 +75,7 @@ describe('workspace version authority contract', () => {
             changedFileCount: 1,
             deletedFileCount: 0,
             executionProfileDigest:
-              'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825' as const,
+              'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
           },
         },
       },
@@ -440,7 +440,7 @@ function historySuccessorInput(): WorkspaceHistorySuccessorAuthorityInput {
       changedFileCount: 1,
       deletedFileCount: 0,
       executionProfileDigest:
-        'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825',
+        'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92',
     },
     origin: {
       restoreId: 'restore_77777777777777777777777777777777',
@@ -496,7 +496,7 @@ function successorInput(): WorkspaceSuccessorAuthorityInput {
       changedFileCount: 1,
       deletedFileCount: 0,
       executionProfileDigest:
-        'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825' as const,
+        'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
     },
     origin: {
       operationId: 'operation-successor-1',

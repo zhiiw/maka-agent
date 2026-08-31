@@ -17,7 +17,9 @@
  * under the License.
  */
 
-import { lstat, realpath } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { lstat, open, realpath } from 'node:fs/promises';
 import { dirname, join, win32 } from 'node:path';
 import type { PermissionProfileManaged } from '@maka/core/permission-profile';
 import {
@@ -72,9 +74,22 @@ export interface ManagedNodeCommandObservationInternal {
   readonly stderr: string;
 }
 
+export interface ManagedNodeTransformResultInternal {
+  readonly protocolVersion: 1;
+  readonly kind: 'workspace_transform';
+  readonly nodeVersion: string;
+  readonly entry: ManagedNodeTestFileIdentityInternal;
+  readonly path: string;
+  readonly content: string;
+  readonly bytes: number;
+  readonly sha256: `sha256:${string}`;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
 export interface ManagedCommandSandboxOwnerInternal {
   readToolchainIdentity(
-    effectClass?: 'hermetic_observation_v2' | 'hermetic_observation_v3',
+    effectClass?: 'hermetic_observation_v2' | 'hermetic_observation_v3' | 'workspace_transform_v1',
   ): Promise<ManagedCommandToolchainIdentityInternal>;
   readDependencyIdentity(
     lease: ManagedDependencySnapshotLease,
@@ -88,6 +103,9 @@ export interface ManagedCommandSandboxOwnerInternal {
   runNodeEntrypoint?(
     input: ManagedCommandRunNodeEntrypointInputInternal,
   ): Promise<ManagedNodeCommandObservationInternal>;
+  runNodeTransform?(
+    input: ManagedCommandRunNodeTransformInputInternal,
+  ): Promise<ManagedNodeTransformResultInternal>;
 }
 
 export interface ManagedCommandDependencyIdentityInternal {
@@ -110,7 +128,10 @@ export interface ManagedCommandInspectFileInputInternal {
   readonly relativePath: string;
   readonly inputRoot: string;
   readonly scratchRoot: string;
-  readonly effectClass?: 'hermetic_observation_v2' | 'hermetic_observation_v3';
+  readonly effectClass?:
+    | 'hermetic_observation_v2'
+    | 'hermetic_observation_v3'
+    | 'workspace_transform_v1';
   readonly abortSignal?: AbortSignal;
 }
 
@@ -128,6 +149,11 @@ export interface ManagedCommandRunNodeEntrypointInputInternal {
   readonly inputRoot: string;
   readonly scratchRoot: string;
   readonly abortSignal?: AbortSignal;
+}
+
+export interface ManagedCommandRunNodeTransformInputInternal
+  extends ManagedCommandRunNodeEntrypointInputInternal {
+  readonly outputPath: string;
 }
 
 export function createManagedCommandSandboxOwnerInternal(input: {
@@ -150,7 +176,10 @@ export function createManagedCommandSandboxOwnerInternal(input: {
           readonly kind: 'helper';
           readonly operation: 'inspect_file_v1' | 'inspect_files_v1';
           readonly relativePaths: readonly string[];
-          readonly effectClass?: 'hermetic_observation_v2' | 'hermetic_observation_v3';
+          readonly effectClass?:
+            | 'hermetic_observation_v2'
+            | 'hermetic_observation_v3'
+            | 'workspace_transform_v1';
         }
       | {
           readonly kind: 'node_tests';
@@ -160,6 +189,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
           readonly kind: 'node_entrypoint';
           readonly entryPath: string;
           readonly args: readonly string[];
+          readonly outputPath?: string;
         },
   ): Promise<{
     readonly stdout: string;
@@ -184,10 +214,14 @@ export function createManagedCommandSandboxOwnerInternal(input: {
     const toolchain = await verifyManagedToolchainForInvocationInternal(
       input.invocationOwnerToken,
       input.toolchainCapability,
-      invocation.kind === 'node_entrypoint' ||
-        (invocation.kind === 'helper' && invocation.effectClass === 'hermetic_observation_v3')
-        ? 'hermetic_observation_v3'
-        : 'hermetic_observation_v2',
+      invocation.kind === 'node_entrypoint' && invocation.outputPath !== undefined
+        ? 'workspace_transform_v1'
+        : invocation.kind === 'helper' && invocation.effectClass === 'workspace_transform_v1'
+          ? 'workspace_transform_v1'
+          : invocation.kind === 'node_entrypoint' ||
+              (invocation.kind === 'helper' && invocation.effectClass === 'hermetic_observation_v3')
+            ? 'hermetic_observation_v3'
+            : 'hermetic_observation_v2',
     );
     request.abortSignal?.throwIfAborted();
     const profile = hermeticObservationProfile(inputRoot, scratchRoot, dependency?.dependencyRoot);
@@ -223,7 +257,10 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         program: toolchain.executablePath,
         args: runtimeArgs,
         cwd: inputRoot,
-        env: hermeticEnvironment(scratchRoot),
+        env: hermeticEnvironment(
+          scratchRoot,
+          invocation.kind === 'node_entrypoint' ? invocation.outputPath : undefined,
+        ),
         profile,
         pathContext: {
           workspaceRoots: [
@@ -272,7 +309,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         ? result.exitCode !== 0
         : invocation.kind === 'node_tests'
           ? result.exitCode !== 0 && result.exitCode !== 1
-          : false) ||
+          : invocation.outputPath !== undefined && result.exitCode !== 0) ||
       !result.dispatched
     ) {
       throw new Error(formatManagedCommandFailure(result, invocationLabel(invocation)));
@@ -288,7 +325,8 @@ export function createManagedCommandSandboxOwnerInternal(input: {
     async readToolchainIdentity(
       effectClass:
         | 'hermetic_observation_v2'
-        | 'hermetic_observation_v3' = 'hermetic_observation_v2',
+        | 'hermetic_observation_v3'
+        | 'workspace_transform_v1' = 'hermetic_observation_v2',
     ) {
       const toolchain = await verifyManagedToolchainForInvocationInternal(
         input.invocationOwnerToken,
@@ -433,7 +471,115 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         stderr: result.stderr,
       });
     },
+    async runNodeTransform(request: ManagedCommandRunNodeTransformInputInternal) {
+      if (
+        !isPortableRelativePath(request.entryPath) ||
+        !/\.(?:cjs|mjs|js)$/u.test(request.entryPath) ||
+        !isPortableRelativePath(request.outputPath) ||
+        !areManagedNodeCommandArgs(request.args)
+      ) {
+        throw new Error('Managed Node transform arguments are invalid');
+      }
+      const physicalOutputPath = join(request.scratchRoot, 'maka-transform-output');
+      if (await lstat(physicalOutputPath).catch(() => undefined)) {
+        throw new Error('Managed Node transform output root is not empty');
+      }
+      const observationRequest = {
+        inputRoot: request.inputRoot,
+        scratchRoot: request.scratchRoot,
+        ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
+      };
+      const before = await execute(observationRequest, {
+        kind: 'helper',
+        operation: 'inspect_file_v1',
+        relativePaths: [request.entryPath],
+        effectClass: 'hermetic_observation_v3',
+      });
+      const entry = decodeObservation(before.stdout, request.entryPath, before.nodeVersion);
+      const result = await execute(request, {
+        kind: 'node_entrypoint',
+        entryPath: request.entryPath,
+        args: Object.freeze([...request.args]),
+        outputPath: physicalOutputPath,
+      });
+      const after = await execute(observationRequest, {
+        kind: 'helper',
+        operation: 'inspect_file_v1',
+        relativePaths: [request.entryPath],
+        effectClass: 'hermetic_observation_v3',
+      });
+      const afterEntry = decodeObservation(after.stdout, request.entryPath, after.nodeVersion);
+      if (
+        entry.relativePath !== afterEntry.relativePath ||
+        entry.bytes !== afterEntry.bytes ||
+        entry.sha256 !== afterEntry.sha256
+      ) {
+        throw new Error('Managed Node transform entry changed during execution');
+      }
+      const output = await readExactTransformOutput(physicalOutputPath);
+      return Object.freeze({
+        protocolVersion: 1 as const,
+        kind: 'workspace_transform' as const,
+        nodeVersion: result.nodeVersion,
+        entry: Object.freeze({
+          relativePath: entry.relativePath,
+          bytes: entry.bytes,
+          sha256: entry.sha256,
+        }),
+        path: request.outputPath,
+        content: output.content,
+        bytes: output.bytes,
+        sha256: output.sha256,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      });
+    },
   });
+}
+
+async function readExactTransformOutput(path: string): Promise<
+  Readonly<{
+    content: string;
+    bytes: number;
+    sha256: `sha256:${string}`;
+  }>
+> {
+  const before = await lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.size > 1_048_576) {
+    throw new Error('Managed Node transform output must be one bounded regular file');
+  }
+  const flags = constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW);
+  const handle = await open(path, flags);
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.size !== before.size || opened.size > 1_048_576) {
+      throw new Error('Managed Node transform output identity changed before read');
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (
+      bytes.byteLength !== opened.size ||
+      after.size !== opened.size ||
+      after.mtimeMs !== opened.mtimeMs
+    ) {
+      throw new Error('Managed Node transform output changed while read');
+    }
+    let content: string;
+    try {
+      content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch (error) {
+      throw new Error('Managed Node transform output is not canonical UTF-8 text', {
+        cause: error,
+      });
+    }
+    return Object.freeze({
+      content,
+      bytes: bytes.byteLength,
+      sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+    });
+  } finally {
+    await handle.close();
+  }
 }
 
 function uniqueWindowsVolumeRoots(paths: readonly string[]): readonly string[] {
@@ -453,7 +599,10 @@ function invocationLabel(
         readonly kind: 'helper';
         readonly operation: 'inspect_file_v1' | 'inspect_files_v1';
         readonly relativePaths: readonly string[];
-        readonly effectClass?: 'hermetic_observation_v2' | 'hermetic_observation_v3';
+        readonly effectClass?:
+          | 'hermetic_observation_v2'
+          | 'hermetic_observation_v3'
+          | 'workspace_transform_v1';
       }
     | { readonly kind: 'node_tests'; readonly relativePaths: readonly string[] }
     | {
@@ -525,7 +674,10 @@ function hermeticObservationProfile(
   };
 }
 
-function hermeticEnvironment(scratchRoot: string): Readonly<Record<string, string>> {
+function hermeticEnvironment(
+  scratchRoot: string,
+  outputPath?: string,
+): Readonly<Record<string, string>> {
   return Object.freeze({
     ELECTRON_RUN_AS_NODE: '1',
     HOME: scratchRoot,
@@ -536,6 +688,7 @@ function hermeticEnvironment(scratchRoot: string): Readonly<Record<string, strin
     NODE_OPTIONS: '',
     NO_COLOR: '1',
     CI: '1',
+    ...(outputPath ? { MAKA_OUTPUT_PATH: outputPath } : {}),
     ...(process.platform === 'win32'
       ? Object.fromEntries(
           (['SystemRoot', 'SystemDrive', 'LOCALAPPDATA'] as const).flatMap((name) => {

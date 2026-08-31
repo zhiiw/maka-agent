@@ -255,7 +255,7 @@ export interface RuntimeEventToolDispatch {
   canonicalArgsHash: string;
   recoveryMode: ToolRecoveryMode;
   /** T1-frozen managed workspace mutation identity. */
-  managedMutation?: RuntimeEventManagedWorkspaceMutationV2;
+  managedMutation?: RuntimeEventManagedWorkspaceMutation;
   /** T1-frozen immutable accepted-world observation identity. */
   managedObservation?: RuntimeEventManagedWorkspaceObservation;
 }
@@ -455,10 +455,28 @@ export type RuntimeEventManagedWorkspaceObservation =
  * Runtime consumes these limits directly, so changing the execution contract
  * requires changing this representation and its digest together.
  */
-export const MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC = Object.freeze({
-  protocol: 'managed_mutation_execution_profile_v1',
-  toolNames: Object.freeze(['Write', 'Edit'] as const),
-  transform: 'pure_frozen_args_only_v1',
+export const MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC = Object.freeze({
+  protocol: 'managed_mutation_execution_profile_v2',
+  toolNames: Object.freeze(['Write', 'Edit', 'ManagedNodeTransform'] as const),
+  transforms: Object.freeze({
+    writeEdit: 'pure_frozen_args_only_v1',
+    nodeTransform: Object.freeze({
+      kind: 'sandboxed_accepted_tree_to_single_file_v1',
+      acceptedInput: 'read_only_accepted_tree_v1',
+      output: Object.freeze({
+        owner: 'disposable_single_file_v1',
+        maxBytes: 1_048_576,
+        symlink: 'forbidden',
+        specialFile: 'forbidden',
+      }),
+      sandbox: Object.freeze({
+        required: true,
+        network: 'restricted',
+        childProcess: 'forbidden',
+        processPath: 'empty',
+      }),
+    }),
+  }),
   objectFormat: 'sha1',
   pathPolicyVersion: 3,
   resultSnapshot: Object.freeze({
@@ -473,8 +491,8 @@ export const MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC = Object.freeze({
   genericFallback: 'forbidden',
 } as const);
 
-export const MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST =
-  'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825' as const;
+export const MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST =
+  'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const;
 
 export interface RuntimeEventManagedWorkspaceMutationV2 {
   protocol: 'managed_mutation_v2';
@@ -490,8 +508,33 @@ export interface RuntimeEventManagedWorkspaceMutationV2 {
   baseTreeOid: string;
   expectedPath: string;
   pathPolicyVersion: 3;
-  executionProfileDigest: typeof MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST;
+  executionProfileDigest: typeof MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST;
 }
+
+export interface RuntimeEventManagedWorkspaceMutationV3 {
+  protocol: 'managed_mutation_v3';
+  repositoryId: string;
+  workspaceId: string;
+  workspaceEpochId: string;
+  workspaceInstanceId: string;
+  objectFormat: 'sha1';
+  baseWorkspaceVersionId: string;
+  baseAcceptedEventId: string;
+  baseHeadRevision: number;
+  baseCommitOid: string;
+  baseTreeOid: string;
+  expectedPath: string;
+  pathPolicyVersion: 3;
+  operationKind: 'node_transform_v1';
+  executionProfileDigest: typeof MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST;
+  toolchainIdentityDigest: `sha256:${string}`;
+  entry: RuntimeEventManagedObservationFileV1;
+  args: readonly string[];
+}
+
+export type RuntimeEventManagedWorkspaceMutation =
+  | RuntimeEventManagedWorkspaceMutationV2
+  | RuntimeEventManagedWorkspaceMutationV3;
 
 export interface RuntimeEventManagedMutationTerminalV1 {
   protocol: 'managed_mutation_terminal_v1';
@@ -892,6 +935,30 @@ const RUNTIME_MANAGED_WORKSPACE_MUTATION_SHAPE =
       'expectedPath',
       'pathPolicyVersion',
       'executionProfileDigest',
+    ],
+    [],
+  );
+const RUNTIME_MANAGED_WORKSPACE_MUTATION_V3_SHAPE =
+  defineObjectShape<RuntimeEventManagedWorkspaceMutationV3>()(
+    [
+      'protocol',
+      'repositoryId',
+      'workspaceId',
+      'workspaceEpochId',
+      'workspaceInstanceId',
+      'objectFormat',
+      'baseWorkspaceVersionId',
+      'baseAcceptedEventId',
+      'baseHeadRevision',
+      'baseCommitOid',
+      'baseTreeOid',
+      'expectedPath',
+      'pathPolicyVersion',
+      'operationKind',
+      'executionProfileDigest',
+      'toolchainIdentityDigest',
+      'entry',
+      'args',
     ],
     [],
   );
@@ -1369,38 +1436,59 @@ function areRuntimeManagedObservationFiles(value: readonly unknown[]): boolean {
 
 function isRuntimeManagedWorkspaceMutation(
   value: unknown,
-): value is RuntimeEventManagedWorkspaceMutationV2 {
+): value is RuntimeEventManagedWorkspaceMutation {
+  if (!isRecord(value)) return false;
+  if (value.protocol === 'managed_mutation_v3') {
+    return (
+      hasExactShape(value, RUNTIME_MANAGED_WORKSPACE_MUTATION_V3_SHAPE) &&
+      hasManagedMutationBaseIdentity(value) &&
+      value.operationKind === 'node_transform_v1' &&
+      value.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST &&
+      isSha256Digest(value.toolchainIdentityDigest) &&
+      isRecord(value.entry) &&
+      hasExactShape(value.entry, RUNTIME_MANAGED_OBSERVATION_FILE_SHAPE) &&
+      areRuntimeManagedObservationFiles([value.entry]) &&
+      Array.isArray(value.args) &&
+      isRuntimeManagedNodeCommandArgs(value.args)
+    );
+  }
   if (
-    !isRecord(value) ||
     !hasExactShape(value, RUNTIME_MANAGED_WORKSPACE_MUTATION_SHAPE) ||
     value.protocol !== 'managed_mutation_v2' ||
-    typeof value.repositoryId !== 'string' ||
-    !/^repository_[0-9a-f]{32}$/u.test(value.repositoryId) ||
-    typeof value.workspaceId !== 'string' ||
-    !/^workspace_[0-9a-f]{32}$/u.test(value.workspaceId) ||
-    typeof value.workspaceEpochId !== 'string' ||
-    !/^epoch_[0-9a-f]{32}$/u.test(value.workspaceEpochId) ||
-    typeof value.workspaceInstanceId !== 'string' ||
-    !/^instance_[0-9a-f]{32}$/u.test(value.workspaceInstanceId) ||
-    value.objectFormat !== 'sha1' ||
-    typeof value.baseWorkspaceVersionId !== 'string' ||
-    !/^version_[0-9a-f]{32}$/u.test(value.baseWorkspaceVersionId) ||
-    typeof value.baseAcceptedEventId !== 'string' ||
-    !/^[A-Za-z0-9_-]{1,128}$/u.test(value.baseAcceptedEventId) ||
-    typeof value.baseHeadRevision !== 'number' ||
-    !Number.isSafeInteger(value.baseHeadRevision) ||
-    value.baseHeadRevision < 1 ||
-    typeof value.baseCommitOid !== 'string' ||
-    typeof value.baseTreeOid !== 'string' ||
-    value.pathPolicyVersion !== 3 ||
-    value.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST ||
-    !isCanonicalManagedMutationPathV1(value.expectedPath)
+    !hasManagedMutationBaseIdentity(value) ||
+    value.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST
   ) {
     return false;
   }
-  const oidPattern = /^[0-9a-f]{40}$/u;
-  if (!oidPattern.test(value.baseCommitOid) || !oidPattern.test(value.baseTreeOid)) return false;
   return true;
+}
+
+function hasManagedMutationBaseIdentity(value: Record<string, unknown>): boolean {
+  const oidPattern = /^[0-9a-f]{40}$/u;
+  return (
+    typeof value.repositoryId === 'string' &&
+    /^repository_[0-9a-f]{32}$/u.test(value.repositoryId) &&
+    typeof value.workspaceId === 'string' &&
+    /^workspace_[0-9a-f]{32}$/u.test(value.workspaceId) &&
+    typeof value.workspaceEpochId === 'string' &&
+    /^epoch_[0-9a-f]{32}$/u.test(value.workspaceEpochId) &&
+    typeof value.workspaceInstanceId === 'string' &&
+    /^instance_[0-9a-f]{32}$/u.test(value.workspaceInstanceId) &&
+    value.objectFormat === 'sha1' &&
+    typeof value.baseWorkspaceVersionId === 'string' &&
+    /^version_[0-9a-f]{32}$/u.test(value.baseWorkspaceVersionId) &&
+    typeof value.baseAcceptedEventId === 'string' &&
+    /^[A-Za-z0-9_-]{1,128}$/u.test(value.baseAcceptedEventId) &&
+    typeof value.baseHeadRevision === 'number' &&
+    Number.isSafeInteger(value.baseHeadRevision) &&
+    value.baseHeadRevision >= 1 &&
+    typeof value.baseCommitOid === 'string' &&
+    oidPattern.test(value.baseCommitOid) &&
+    typeof value.baseTreeOid === 'string' &&
+    oidPattern.test(value.baseTreeOid) &&
+    value.pathPolicyVersion === 3 &&
+    isCanonicalManagedMutationPathV1(value.expectedPath)
+  );
 }
 
 /** Platform-independent canonical Git path syntax used by durable mutation facts. */

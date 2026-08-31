@@ -165,7 +165,7 @@ export function projectHostedExecutionTools(
       return {
         ...tool,
         recoveryMode: 'reconcile',
-        durableExecutionProfile: 'managed_mutation_v1',
+        durableExecutionProfile: 'managed_mutation_v2',
       };
     }
     return tool.name === 'Bash'

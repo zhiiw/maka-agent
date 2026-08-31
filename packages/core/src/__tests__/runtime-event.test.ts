@@ -38,8 +38,8 @@ import {
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_SPEC,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V3_DIGEST,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V3_SPEC,
-  MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
-  MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC,
+  MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
+  MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC,
   runtimeEventHasModelVisibleContent,
   type RuntimeEvent,
   type RuntimeEventActions,
@@ -750,30 +750,17 @@ describe('RuntimeEvent actions', () => {
     );
   });
 
-  test('binds the managed mutation digest to its canonical execution semantics', () => {
-    const canonicalProfile = JSON.stringify({
-      protocol: 'managed_mutation_execution_profile_v1',
-      toolNames: ['Write', 'Edit'],
-      transform: 'pure_frozen_args_only_v1',
-      objectFormat: 'sha1',
-      pathPolicyVersion: 3,
-      resultSnapshot: {
-        maxBytes: 1_048_576,
-        maxDepth: 64,
-        maxNodes: 65_536,
-        maxProperties: 65_536,
-        maxArrayLength: 65_536,
-        format: 'strict_json_v1',
-      },
-      terminalAuthority: 'owner_committed_exact_outcome_v1',
-      genericFallback: 'forbidden',
-    });
-
+  test('binds every managed mutation to one canonical v2 execution profile', () => {
+    const canonicalProfile = JSON.stringify(MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC);
     assert.equal(
-      MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+      MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
       `sha256:${createHash('sha256').update(canonicalProfile).digest('hex')}`,
     );
-    assert.equal(JSON.stringify(MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC), canonicalProfile);
+    assert.deepEqual(MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC.toolNames, [
+      'Write',
+      'Edit',
+      'ManagedNodeTransform',
+    ]);
   });
 
   test('decodes only a platform-independent T1-frozen managed mutation identity', () => {
@@ -791,7 +778,7 @@ describe('RuntimeEvent actions', () => {
       baseTreeOid: '2'.repeat(40),
       expectedPath: 'src/a.ts',
       pathPolicyVersion: 3,
-      executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+      executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
     } as const;
     const toolDispatch = {
       protocol: 't1_after_preflight_v1',
@@ -818,6 +805,72 @@ describe('RuntimeEvent actions', () => {
       { ...managedMutation, baseAcceptedEventId: 'event id with spaces' },
       { ...managedMutation, baseHeadRevision: 0 },
       { ...managedMutation, baseTreeOid: 'not-an-oid' },
+      { ...managedMutation, extra: true },
+    ]) {
+      assert.throws(() =>
+        decodeRuntimeEvent(
+          baseEvent({
+            role: 'system',
+            author: 'system',
+            actions: { toolDispatch: { ...toolDispatch, managedMutation: invalid } as never },
+          }),
+        ),
+      );
+    }
+  });
+
+  test('binds one sandboxed Node transform and its output path before T1', () => {
+    const canonicalProfile = JSON.stringify(MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC);
+    assert.equal(
+      MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
+      `sha256:${createHash('sha256').update(canonicalProfile).digest('hex')}`,
+    );
+    const managedMutation = {
+      protocol: 'managed_mutation_v3',
+      repositoryId: 'repository_11111111111111111111111111111111',
+      workspaceId: 'workspace_22222222222222222222222222222222',
+      workspaceEpochId: 'epoch_33333333333333333333333333333333',
+      workspaceInstanceId: 'instance_44444444444444444444444444444444',
+      objectFormat: 'sha1',
+      baseWorkspaceVersionId: 'version_55555555555555555555555555555555',
+      baseAcceptedEventId: 'baseline-event-1',
+      baseHeadRevision: 1,
+      baseCommitOid: '1'.repeat(40),
+      baseTreeOid: '2'.repeat(40),
+      expectedPath: 'generated/output.json',
+      pathPolicyVersion: 3,
+      operationKind: 'node_transform_v1',
+      executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
+      toolchainIdentityDigest: `sha256:${'a'.repeat(64)}`,
+      entry: {
+        relativePath: 'scripts/generate.mjs',
+        bytes: 42,
+        sha256: `sha256:${'b'.repeat(64)}`,
+      },
+      args: ['--format', 'json'],
+    } as const;
+    const toolDispatch = {
+      protocol: 't1_after_preflight_v1',
+      operationId: 'operation-transform-1',
+      providerToolCallId: 'call-transform-1',
+      toolName: 'ManagedNodeTransform',
+      canonicalArgsHash: `sha256:${'c'.repeat(64)}`,
+      recoveryMode: 'reconcile',
+      managedMutation,
+    } as const;
+    assert.deepEqual(
+      decodeRuntimeEvent(baseEvent({ role: 'system', author: 'system', actions: { toolDispatch } }))
+        .actions?.toolDispatch?.managedMutation,
+      managedMutation,
+    );
+    for (const invalid of [
+      { ...managedMutation, operationKind: 'node_command_v3' },
+      {
+        ...managedMutation,
+        executionProfileDigest: `sha256:${'d'.repeat(64)}`,
+      },
+      { ...managedMutation, entry: { ...managedMutation.entry, relativePath: 'README.md' } },
+      { ...managedMutation, args: ['x'.repeat(4097)] },
       { ...managedMutation, extra: true },
     ]) {
       assert.throws(() =>
