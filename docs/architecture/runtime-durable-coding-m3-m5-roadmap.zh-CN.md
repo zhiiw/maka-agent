@@ -29,8 +29,8 @@ workspace content；materialized directory、Desktop UI 和缓存都只是可重
 | Write/Edit successor | 已实现 | 已实现 | managed tool profile 已接入 | candidate + Host kill/reopen 已建立 |
 | automatic continuation | 已实现 | 已实现 | quiet resume 已接入 | Git/非 Git indeterminate matrix 已建立 |
 | accepted-tree Review | 不写 durable state | 已实现 | 已接入 Desktop Review | helper exact-tree + IPC fail-closed test 已建立 |
-| immutable Publish | artifact/ref protocol 已实现 | 已实现 | accepted ref 与 source branch publish 已接入 Desktop Review | helper ref-CAS + IPC fail-closed test 已建立；packaged Desktop crash proof 缺失 |
-| isolated Restore | artifact protocol 已实现 | 已实现 | 已接入 Desktop Review | helper materialization + IPC fail-closed test 已建立；packaged Desktop crash proof 缺失 |
+| immutable Publish | artifact/ref protocol 已实现 | 已实现 | accepted ref 与 source branch publish 已接入 Desktop Review | real-helper process response-loss/reopen 已建立；packaged Desktop matrix 待 CI |
+| isolated Restore | artifact protocol 已实现 | 已实现 | 已接入 Desktop Review | real-helper process response-loss/reopen 已建立；packaged Desktop matrix 待 CI |
 | time travel | historical read/restore/undo successor 已实现 | 已实现 | 最近 50 个版本、隔离恢复与 Undo 已接入 Desktop | lineage 与 history-successor crash tests 已建立 |
 | rebaseline / relocation | epoch activation identity 已实现 | 已实现 | Rebaseline 已接入 Desktop | Host crash cases 已建立，packaged evidence 待 CI |
 | GC | restore-orphan tombstone 与维护 owner 已实现 | 已实现 | Desktop maintenance 入口已接入 | restore-orphan crash test 已建立；完整 candidate/ref/object roots 待补齐 |
