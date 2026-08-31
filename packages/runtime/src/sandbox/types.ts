@@ -42,6 +42,8 @@ export interface SandboxPathContext {
   minimalRoots?: readonly string[];
   /** Runtime files needed only to launch a sandboxed helper process. */
   runtimeReadableRoots?: readonly string[];
+  /** Exact directory metadata anchors needed only to launch a runtime on Windows. */
+  runtimeExactReadableRoots?: readonly string[];
   /** Runtime binaries/frameworks that the helper process may map and execute. */
   executableRoots?: readonly string[];
   /** Host directories a trusted helper needs writable to materialize an exact result. */

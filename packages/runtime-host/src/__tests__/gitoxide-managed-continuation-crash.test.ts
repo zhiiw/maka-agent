@@ -38,8 +38,10 @@ import { test } from 'node:test';
 import { createSqliteRuntimeStore } from '@maka/storage/sqlite-runtime-store';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
+import { resolveWorkspaceIdentity } from '@maka/storage/workspace-identity';
 import {
   admitGitoxideHelperArtifactInternal,
+  GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../server/gitoxide-helper-artifact-authority-internal.js';
 import {
@@ -53,6 +55,8 @@ import {
   withTimeout,
 } from './fixtures/execution-host-suite.js';
 
+const FAKE_CONNECTION_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
 test('a started workspace-bound continuation survives Host death without provider replay', async (t) => {
   const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
   if (!helperPath) {
@@ -62,7 +66,9 @@ test('a started workspace-bound continuation survives Host death without provide
   await withManagedContinuationFixture(
     helperPath,
     async ({ fixture, resourcesRoot, callLog, boundary }) => {
-      const source = await fixture.seedSafeBoundaryContinuationSource();
+      const source = await fixture.seedSafeBoundaryContinuationSource(undefined, {
+        failureClass: 'test_manual_resume',
+      });
       const crashHost = await fixture.startHost(undefined, true, {
         packagedResourcesRoot: resourcesRoot,
         providerCallLogPath: callLog,
@@ -175,7 +181,9 @@ test('an accepted-head continuation never calls the provider twice after Host de
     helperPath,
     async ({ fixture, resourcesRoot, callLog, boundary }) => {
       assert.equal(boundary.revision, 1);
-      const source = await fixture.seedSafeBoundaryContinuationSource();
+      const source = await fixture.seedSafeBoundaryContinuationSource(undefined, {
+        failureClass: 'test_manual_resume',
+      });
       const crashHost = await fixture.startHost(undefined, true, {
         packagedResourcesRoot: resourcesRoot,
         providerCallLogPath: callLog,
@@ -373,14 +381,15 @@ async function withManagedContinuationFixture(
 ): Promise<void> {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-continuation-')));
   const root = join(base, 'root');
+  const sourceRoot = join(base, 'source');
   const callLog = join(base, 'provider-calls.log');
-  await mkdir(root);
+  await Promise.all([mkdir(root), mkdir(sourceRoot)]);
   await writeFile(callLog, '', 'utf8');
-  await writeFile(join(root, 'notes.txt'), 'baseline\n', 'utf8');
+  await writeFile(join(sourceRoot, 'notes.txt'), 'baseline\n', 'utf8');
   if (options.sourceKind !== 'filesystem_snapshot_v1') {
-    git(root, ['init', '--quiet', '--object-format=sha1']);
-    git(root, ['add', 'notes.txt']);
-    git(root, [
+    git(sourceRoot, ['init', '--quiet', '--object-format=sha1']);
+    git(sourceRoot, ['add', 'notes.txt']);
+    git(sourceRoot, [
       '-c',
       'user.name=Maka Test',
       '-c',
@@ -391,6 +400,7 @@ async function withManagedContinuationFixture(
       'baseline',
     ]);
   }
+  await resolveWorkspaceIdentity({ path: sourceRoot });
 
   const resourcesRoot = await preparePackagedResources(base, helperInputPath);
   const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
@@ -404,7 +414,8 @@ async function withManagedContinuationFixture(
   >;
   try {
     const session = await stores.sessionStore.create({
-      cwd: root,
+      cwd: sourceRoot,
+      llmConnectionId: FAKE_CONNECTION_ID,
       llmConnectionSlug: 'fake',
       model: 'fake-model',
       permissionMode: 'ask',
@@ -415,7 +426,7 @@ async function withManagedContinuationFixture(
     const sessionInput = {
       storageRootLease: owner.lease,
       stores,
-      sourceRoot: root,
+      sourceRoot,
       sessionId,
       ...helper,
     };
@@ -429,7 +440,7 @@ async function withManagedContinuationFixture(
     await owner.close();
   }
 
-  const fixture = new ExecutionFixture(base, root, capability, sessionId);
+  const fixture = new ExecutionFixture(base, root, capability, sessionId, sourceRoot);
   try {
     await run({
       fixture,
@@ -465,17 +476,7 @@ async function preparePackagedResources(base: string, helperInputPath: string): 
       executableRelativePath: `gitoxide/${executableName}`,
       bytes: info.size,
       sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
-      supportedOperations: [
-        'inspect_repository',
-        'import_source_head',
-        'import_filesystem_snapshot',
-        'create_candidate',
-        'promote_candidate',
-        'observe_accepted_ref',
-        'read_tree_file',
-        'list_tree_files',
-        'grep_tree_files',
-      ],
+      supportedOperations: GITOXIDE_HELPER_OPERATIONS_INTERNAL,
       distributionReady: true,
     })}\n`,
     'utf8',
@@ -495,17 +496,7 @@ async function admitRealHelper(helperInputPath: string) {
     platform: process.platform,
     arch: process.arch,
     protocolVersion: 1,
-    supportedOperations: [
-      'inspect_repository',
-      'import_source_head',
-      'import_filesystem_snapshot',
-      'create_candidate',
-      'promote_candidate',
-      'observe_accepted_ref',
-      'read_tree_file',
-      'list_tree_files',
-      'grep_tree_files',
-    ],
+    supportedOperations: GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   });
   const helperCapability = await admitGitoxideHelperArtifactInternal({
     releaseOwnerToken,

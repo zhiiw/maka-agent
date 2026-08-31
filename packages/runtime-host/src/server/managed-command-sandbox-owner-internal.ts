@@ -18,7 +18,7 @@
  */
 
 import { lstat, realpath } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, win32 } from 'node:path';
 import type { PermissionProfileManaged } from '@maka/core/permission-profile';
 import {
   runFilesystemWorkerProcess,
@@ -100,8 +100,21 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       readonly scratchRoot: string;
       readonly abortSignal?: AbortSignal;
     },
-    body: Readonly<Record<string, unknown>>,
-  ): Promise<{ readonly stdout: string; readonly nodeVersion: string }> {
+    invocation:
+      | {
+          readonly kind: 'helper';
+          readonly operation: 'inspect_file_v1' | 'inspect_files_v1';
+          readonly relativePaths: readonly string[];
+        }
+      | {
+          readonly kind: 'node_tests';
+          readonly relativePaths: readonly string[];
+        },
+  ): Promise<{
+    readonly stdout: string;
+    readonly nodeVersion: string;
+    readonly exitCode: number;
+  }> {
     request.abortSignal?.throwIfAborted();
     const [inputRoot, scratchRoot] = await Promise.all([
       requireRealDirectory(request.inputRoot, 'input'),
@@ -117,24 +130,52 @@ export function createManagedCommandSandboxOwnerInternal(input: {
     );
     request.abortSignal?.throwIfAborted();
     const profile = hermeticObservationProfile(inputRoot, scratchRoot);
+    const runtimeArgs = [
+      ...(process.platform === 'win32' ? ['--no-stdio-init'] : []),
+      '--permission',
+      `--allow-fs-read=${inputRoot}`,
+      `--allow-fs-write=${scratchRoot}`,
+      ...(invocation.kind === 'helper'
+        ? [
+            toolchain.entrypointPath,
+            invocation.operation === 'inspect_file_v1'
+              ? 'maka-observe-file-v1'
+              : 'maka-observe-files-v1',
+            ...invocation.relativePaths,
+          ]
+        : [
+            '--test-force-exit',
+            '--test-reporter=tap',
+            toolchain.entrypointPath,
+            'maka-node-tests-v1',
+            ...invocation.relativePaths,
+          ]),
+    ];
     const transformed = input.sandboxManager.transform({
       preference: 'require',
       command: {
         program: toolchain.executablePath,
-        args: [
-          '--permission',
-          `--allow-fs-read=${inputRoot}`,
-          `--allow-fs-write=${scratchRoot}`,
-          toolchain.entrypointPath,
-        ],
+        args: runtimeArgs,
         cwd: inputRoot,
         env: hermeticEnvironment(scratchRoot),
         profile,
         pathContext: {
           workspaceRoots: [inputRoot, scratchRoot],
-          runtimeReadableRoots: [dirname(toolchain.entrypointPath)],
+          runtimeReadableRoots: [
+            dirname(toolchain.entrypointPath),
+            ...(process.platform === 'darwin' ? [dirname(dirname(toolchain.executablePath))] : []),
+          ],
+          ...(process.platform === 'win32'
+            ? {
+                runtimeExactReadableRoots: uniqueWindowsVolumeRoots([
+                  inputRoot,
+                  scratchRoot,
+                  toolchain.executablePath,
+                  toolchain.entrypointPath,
+                ]),
+              }
+            : {}),
           executableRoots: [dirname(toolchain.executablePath)],
-          runtimeWritableRoots: [scratchRoot],
         },
       },
     });
@@ -145,7 +186,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       argv: transformed.exec.argv,
       cwd: transformed.exec.cwd,
       env: transformed.exec.env ?? {},
-      stdin: `${JSON.stringify(body)}\n`,
+      stdin: '',
       timeoutMs: 30_000,
       maxResponseBytes: 64 * 1024,
       maxStderrBytes: 64 * 1024,
@@ -156,12 +197,18 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       result.timedOut ||
       result.aborted ||
       result.responseOverflow ||
-      result.exitCode !== 0 ||
+      (invocation.kind === 'helper'
+        ? result.exitCode !== 0
+        : result.exitCode !== 0 && result.exitCode !== 1) ||
       !result.dispatched
     ) {
-      throw new Error('Managed command execution did not complete safely');
+      throw new Error(formatManagedCommandFailure(result, invocationLabel(invocation)));
     }
-    return { stdout: result.stdout, nodeVersion: toolchain.nodeVersion };
+    return {
+      stdout: result.stdout,
+      nodeVersion: toolchain.nodeVersion,
+      exitCode: result.exitCode,
+    };
   }
   return Object.freeze({
     async readToolchainIdentity() {
@@ -180,9 +227,9 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         throw new Error('Managed command observation path is invalid');
       }
       const result = await execute(request, {
-        protocolVersion: 1,
+        kind: 'helper',
         operation: 'inspect_file_v1',
-        relativePath: request.relativePath,
+        relativePaths: [request.relativePath],
       });
       return decodeObservation(result.stdout, request.relativePath, result.nodeVersion);
     },
@@ -198,14 +245,85 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       ) {
         throw new Error('Managed Node test file list is invalid');
       }
-      const result = await execute(request, {
-        protocolVersion: 1,
-        operation: 'run_node_tests_v1',
+      const before = await execute(request, {
+        kind: 'helper',
+        operation: 'inspect_files_v1',
         relativePaths,
       });
-      return decodeNodeTestObservation(result.stdout, relativePaths, result.nodeVersion);
+      const files = decodeFileObservations(before.stdout, relativePaths, before.nodeVersion);
+      const result = await execute(request, {
+        kind: 'node_tests',
+        relativePaths,
+      });
+      const after = await execute(request, {
+        kind: 'helper',
+        operation: 'inspect_files_v1',
+        relativePaths,
+      });
+      const afterFiles = decodeFileObservations(after.stdout, relativePaths, after.nodeVersion);
+      assertSameFileObservations(files, afterFiles);
+      return decodeNodeTestTap(result.stdout, files, result.nodeVersion, result.exitCode);
     },
   });
+}
+
+function uniqueWindowsVolumeRoots(paths: readonly string[]): readonly string[] {
+  const roots: string[] = [];
+  for (const path of paths) {
+    const root = win32.parse(path).root;
+    if (root && !roots.some((existing) => existing.toLowerCase() === root.toLowerCase())) {
+      roots.push(root);
+    }
+  }
+  return roots;
+}
+
+function invocationLabel(
+  invocation:
+    | {
+        readonly kind: 'helper';
+        readonly operation: 'inspect_file_v1' | 'inspect_files_v1';
+        readonly relativePaths: readonly string[];
+      }
+    | { readonly kind: 'node_tests'; readonly relativePaths: readonly string[] },
+): string {
+  if (invocation.kind === 'node_tests') return 'node_tests';
+  return invocation.operation;
+}
+
+function formatManagedCommandFailure(
+  input: {
+    readonly timedOut: boolean;
+    readonly aborted: boolean;
+    readonly responseOverflow: boolean;
+    readonly exitCode: number;
+    readonly dispatched: boolean;
+    readonly stdout: string;
+    readonly stderrTail: string;
+  },
+  phase: string,
+): string {
+  const reason = input.timedOut
+    ? 'timeout'
+    : input.aborted
+      ? 'aborted'
+      : input.responseOverflow
+        ? 'response_overflow'
+        : !input.dispatched
+          ? 'not_dispatched'
+          : `exit_${input.exitCode}`;
+  const stderr = input.stderrTail
+    .replace(/[\u0000-\u001f\u007f]+/gu, ' ')
+    .trim()
+    .slice(-512);
+  const stdout = input.stdout
+    .replace(/[\u0000-\u001f\u007f]+/gu, ' ')
+    .trim()
+    .slice(-512);
+  const detail = [stderr && `stderr=${stderr}`, stdout && `stdout=${stdout}`]
+    .filter(Boolean)
+    .join('; ');
+  return `Managed command execution did not complete safely (${phase}:${reason}${detail ? `: ${detail}` : ''})`;
 }
 
 function hermeticObservationProfile(
@@ -238,6 +356,14 @@ function hermeticEnvironment(scratchRoot: string): Readonly<Record<string, strin
     NODE_OPTIONS: '',
     NO_COLOR: '1',
     CI: '1',
+    ...(process.platform === 'win32'
+      ? Object.fromEntries(
+          (['SystemRoot', 'SystemDrive', 'LOCALAPPDATA'] as const).flatMap((name) => {
+            const value = process.env[name];
+            return value ? [[name, value] as const] : [];
+          }),
+        )
+      : {}),
   });
 }
 
@@ -291,31 +417,26 @@ function decodeObservation(
   });
 }
 
-function decodeNodeTestObservation(
+function decodeFileObservations(
   raw: string,
   relativePaths: readonly string[],
   nodeVersion: string,
-): ManagedNodeTestObservationInternal {
+): readonly ManagedNodeTestFileIdentityInternal[] {
   const value = JSON.parse(raw) as Record<string, unknown>;
   if (
     Object.keys(value).sort().join('\0') !==
-      ['failed', 'files', 'kind', 'nodeVersion', 'passed', 'protocolVersion', 'skipped', 'todo']
-        .sort()
-        .join('\0') ||
+      ['files', 'kind', 'nodeVersion', 'protocolVersion'].sort().join('\0') ||
     value.protocolVersion !== 1 ||
-    value.kind !== 'node_test_observation' ||
+    value.kind !== 'file_observations' ||
     value.nodeVersion !== nodeVersion ||
     !Array.isArray(value.files) ||
-    value.files.length !== relativePaths.length ||
-    !['passed', 'failed', 'skipped', 'todo'].every(
-      (key) => Number.isSafeInteger(value[key]) && (value[key] as number) >= 0,
-    )
+    value.files.length !== relativePaths.length
   ) {
-    throw new Error('Managed Node test response is invalid');
+    throw new Error('Managed command file observation response is invalid');
   }
   const files = value.files.map((file, index) => {
     if (!file || typeof file !== 'object' || Array.isArray(file)) {
-      throw new Error('Managed Node test response is invalid');
+      throw new Error('Managed command file observation response is invalid');
     }
     const record = file as Record<string, unknown>;
     if (
@@ -328,7 +449,7 @@ function decodeNodeTestObservation(
       typeof record.sha256 !== 'string' ||
       !SHA256_PATTERN.test(record.sha256)
     ) {
-      throw new Error('Managed Node test response is invalid');
+      throw new Error('Managed command file observation response is invalid');
     }
     return Object.freeze({
       relativePath: record.relativePath,
@@ -336,11 +457,73 @@ function decodeNodeTestObservation(
       sha256: record.sha256 as `sha256:${string}`,
     });
   });
-  const terminalCount =
-    (value.passed as number) +
-    (value.failed as number) +
-    (value.skipped as number) +
-    (value.todo as number);
+  return Object.freeze(files);
+}
+
+function assertSameFileObservations(
+  before: readonly ManagedNodeTestFileIdentityInternal[],
+  after: readonly ManagedNodeTestFileIdentityInternal[],
+): void {
+  if (
+    before.length !== after.length ||
+    !before.every(
+      (file, index) =>
+        file.relativePath === after[index]?.relativePath &&
+        file.bytes === after[index]?.bytes &&
+        file.sha256 === after[index]?.sha256,
+    )
+  ) {
+    throw new Error('Managed Node test input changed during execution');
+  }
+}
+
+function decodeNodeTestTap(
+  raw: string,
+  files: readonly ManagedNodeTestFileIdentityInternal[],
+  nodeVersion: string,
+  exitCode: number,
+): ManagedNodeTestObservationInternal {
+  if (raw.trim().length === 0 && exitCode === 0) {
+    throw new Error('Managed Node test run did not report any tests');
+  }
+  const summaries = new Map<string, number>();
+  let observedDeclaredTest = false;
+  for (const line of raw.split(/\r?\n/gu)) {
+    const subtest = /^# Subtest: (.+)$/u.exec(line);
+    if (subtest && !files.some((file) => file.relativePath === subtest[1])) {
+      observedDeclaredTest = true;
+    }
+    const match = /^# (tests|pass|fail|cancelled|skipped|todo) ([0-9]+)$/u.exec(line);
+    if (!match) continue;
+    const key = match[1] as string;
+    if (summaries.has(key)) throw new Error('Managed Node test TAP summary is ambiguous');
+    const count = Number(match[2]);
+    if (!Number.isSafeInteger(count)) throw new Error('Managed Node test TAP summary is invalid');
+    summaries.set(key, count);
+  }
+  const tests = summaries.get('tests');
+  const passed = summaries.get('pass');
+  const failed = summaries.get('fail');
+  const cancelled = summaries.get('cancelled');
+  const skipped = summaries.get('skipped');
+  const todo = summaries.get('todo');
+  if (
+    tests === undefined ||
+    passed === undefined ||
+    failed === undefined ||
+    cancelled === undefined ||
+    skipped === undefined ||
+    todo === undefined ||
+    cancelled !== 0 ||
+    tests !== passed + failed + skipped + todo ||
+    exitCode !== (failed > 0 ? 1 : 0)
+  ) {
+    throw new Error('Managed Node test TAP summary is invalid');
+  }
+  if (tests === 0 || !observedDeclaredTest) {
+    throw new Error('Managed Node test run did not report any tests');
+  }
+  const terminalCount = passed + failed + skipped + todo;
   if (terminalCount === 0) {
     throw new Error('Managed Node test run did not report any tests');
   }
@@ -348,10 +531,10 @@ function decodeNodeTestObservation(
     protocolVersion: 1 as const,
     kind: 'node_test_observation' as const,
     nodeVersion,
-    files: Object.freeze(files),
-    passed: value.passed as number,
-    failed: value.failed as number,
-    skipped: value.skipped as number,
-    todo: value.todo as number,
+    files: Object.freeze([...files]),
+    passed,
+    failed,
+    skipped,
+    todo,
   });
 }

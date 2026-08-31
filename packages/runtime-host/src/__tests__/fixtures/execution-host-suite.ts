@@ -18,7 +18,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { fork, type ChildProcess } from 'node:child_process';
+import { fork, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   appendFile,
@@ -36,6 +36,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { TOOL_BOUNDARY_PROTOCOL_V1 } from '@maka/core/runtime-event';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import type { AgentRunHeader } from '@maka/core/agent-run';
@@ -66,6 +67,7 @@ import { type MakaTool, type MakaToolContext } from '@maka/runtime/tool-runtime'
 import {
   openInteractiveExecutionStoresForRead,
   openInteractiveExecutionStoresForWrite,
+  type RootTurnAdmission,
 } from '@maka/storage/execution-stores';
 import { OPERATIONAL_STATE_DATABASE_NAME } from '@maka/storage/operational-state-store';
 import { openInteractiveRuntimePolicyStoresForWrite } from '@maka/storage/runtime-policy-stores';
@@ -128,12 +130,14 @@ export interface ExecutionHostHandle {
 
 export interface ExecutionHostTestOptions {
   readonly packagedResourcesRoot?: string;
+  readonly runtimeExecutablePath?: string;
   readonly providerCallLogPath?: string;
   readonly continuationFailpoint?:
     | 'after_continuation_claim_committed'
     | 'after_run_created'
     | 'after_continuation_start_committed';
   readonly providerFailpointAfterSend?: boolean;
+  readonly useProductionBackend?: boolean;
 }
 
 export interface TurnLedger {
@@ -152,6 +156,7 @@ export class ExecutionFixture {
     readonly root: string,
     readonly capability: StorageRootCapability<'interactive'>,
     readonly sessionId: string,
+    readonly workspaceRoot: string = root,
   ) {}
 
   async seedSession(): Promise<string> {
@@ -162,7 +167,7 @@ export class ExecutionFixture {
     try {
       stores = await openInteractiveExecutionStoresForWrite(owner.lease);
       const session = await stores.sessionStore.create({
-        cwd: this.root,
+        cwd: this.workspaceRoot,
         llmConnectionId: FAKE_CONNECTION_ID,
         llmConnectionSlug: 'fake',
         model: 'fake-model',
@@ -175,7 +180,10 @@ export class ExecutionFixture {
     }
   }
 
-  async seedSafeBoundaryContinuationSource(requiredToolName?: string): Promise<{
+  async seedSafeBoundaryContinuationSource(
+    requiredToolName?: string,
+    options: { readonly failureClass?: string } = {},
+  ): Promise<{
     sourceInvocationId: string;
     sourceRunId: string;
     sourceTurnId: string;
@@ -191,7 +199,7 @@ export class ExecutionFixture {
       const sourceRunId = randomUUID();
       const sourceTurnId = randomUUID();
       const createdAt = Date.now();
-      const workspace = await resolveWorkspaceIdentity({ path: this.root });
+      const workspace = await resolveWorkspaceIdentity({ path: this.workspaceRoot });
       const sourceRun: AgentRunHeader = {
         runId: sourceRunId,
         invocationId: sourceInvocationId,
@@ -202,7 +210,7 @@ export class ExecutionFixture {
         llmConnectionId: FAKE_CONNECTION_ID,
         llmConnectionSlug: 'fake',
         modelId: 'fake-model',
-        cwd: this.root,
+        cwd: this.workspaceRoot,
         workspaceIdentity: workspace.workspaceIdentity,
         permissionMode: 'ask',
         collaborationMode: 'agent',
@@ -258,12 +266,13 @@ export class ExecutionFixture {
         });
       }
       const terminalAt = createdAt + (requiredToolName ? 3 : 1);
+      const failureClass = options.failureClass ?? 'app_restarted';
       const terminal = buildRecoveredTerminalRuntimeEvent({
         id: randomUUID(),
         run: sourceRun,
         status: 'failed',
         ts: terminalAt,
-        failureClass: 'app_restarted',
+        failureClass,
         recoveryReason: 'test_safe_boundary_source',
       });
       await commitTerminalRunWithRuntimeFact({
@@ -276,7 +285,7 @@ export class ExecutionFixture {
         status: 'failed',
         ts: terminalAt,
         terminalEvent: terminal,
-        failureClass: 'app_restarted',
+        failureClass,
       });
       return {
         sourceInvocationId,
@@ -319,7 +328,7 @@ export class ExecutionFixture {
             appendMessage: ctx.appendMessage,
           }),
       );
-      const workspace = await resolveWorkspaceIdentity({ path: this.root });
+      const workspace = await resolveWorkspaceIdentity({ path: this.workspaceRoot });
       let markReached!: () => void;
       const reached = new Promise<void>((resolve) => {
         markReached = resolve;
@@ -411,7 +420,7 @@ export class ExecutionFixture {
     let stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>> | undefined;
     try {
       stores = await openInteractiveExecutionStoresForWrite(owner.lease);
-      const workspace = await resolveWorkspaceIdentity({ path: this.root });
+      const workspace = await resolveWorkspaceIdentity({ path: this.workspaceRoot });
       const manager = new SessionManager({
         store: stores.sessionStore,
         runStore: stores.agentRunStore,
@@ -510,7 +519,7 @@ export class ExecutionFixture {
       const agentId = 'local-read';
       const agentName = 'Local Read';
       const child = await stores.sessionStore.createSubagent({
-        cwd: this.root,
+        cwd: this.workspaceRoot,
         name: `${agentName} ${kind}`,
         llmConnectionId: FAKE_CONNECTION_ID,
         llmConnectionSlug: 'fake',
@@ -571,7 +580,7 @@ export class ExecutionFixture {
           llmConnectionId: FAKE_CONNECTION_ID,
           llmConnectionSlug: 'fake',
           modelId: 'fake-model',
-          cwd: this.root,
+          cwd: this.workspaceRoot,
           permissionMode: 'explore',
           collaborationMode: 'agent',
           createdAt: sourceTs,
@@ -672,7 +681,7 @@ export class ExecutionFixture {
           llmConnectionId: FAKE_CONNECTION_ID,
           llmConnectionSlug: 'fake',
           modelId: 'fake-model',
-          cwd: this.root,
+          cwd: this.workspaceRoot,
           permissionMode: 'explore',
           collaborationMode: 'agent',
           createdAt: ts,
@@ -818,7 +827,7 @@ export class ExecutionFixture {
         backendKind: 'fake',
         llmConnectionSlug: 'fake',
         modelId: 'fake-model',
-        cwd: this.root,
+        cwd: this.workspaceRoot,
         permissionMode: 'ask',
         createdAt: admittedAt,
         updatedAt: admittedAt,
@@ -1023,7 +1032,7 @@ export class ExecutionFixture {
           llmConnectionId: FAKE_CONNECTION_ID,
           llmConnectionSlug: 'fake',
           modelId: 'fake-model',
-          cwd: this.root,
+          cwd: this.workspaceRoot,
           permissionMode: 'ask',
           createdAt: admittedAt,
           updatedAt: admittedAt,
@@ -1185,16 +1194,21 @@ export class ExecutionFixture {
   }
 
   async readAdmissionChain() {
-    const owner = await tryAcquireInteractiveRootOwner(this.capability);
-    assert.ok(owner);
-    if (!owner) throw new Error('Unable to acquire execution root for admission inspection');
-    let stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>> | undefined;
+    const database = new DatabaseSync(join(this.root, OPERATIONAL_STATE_DATABASE_NAME), {
+      readOnly: true,
+    });
     try {
-      stores = await openInteractiveExecutionStoresForWrite(owner.lease);
-      return await stores.agentRunStore.listRootTurnAdmissionsForRecovery(this.sessionId);
+      return database
+        .prepare(`
+          SELECT record_json AS recordJson
+          FROM core_root_turn_admissions
+          WHERE session_id = ?
+          ORDER BY admitted_at, turn_id
+        `)
+        .all(this.sessionId)
+        .map(({ recordJson }) => JSON.parse(recordJson as string) as RootTurnAdmission);
     } finally {
-      await stores?.sessionStore.close?.();
-      await owner.close();
+      database.close();
     }
   }
 
@@ -1269,16 +1283,28 @@ export class ExecutionFixture {
     } else {
       delete env.MAKA_TEST_PROVIDER_FAILPOINT_AFTER_SEND;
     }
-    const child = fork(
-      new URL('./execution-host.js', import.meta.url),
-      [
-        this.root,
-        this.capability.rootId,
-        '60000',
-        ...(recoveryProbe ? [recoveryProbe.sessionId, recoveryProbe.runId] : []),
-      ],
-      { stdio: ['ignore', 'ignore', stderr, 'ipc'], env },
-    );
+    if (testOptions.useProductionBackend) {
+      env.MAKA_TEST_USE_PRODUCTION_BACKEND = '1';
+    } else {
+      delete env.MAKA_TEST_USE_PRODUCTION_BACKEND;
+    }
+    const childArgs = [
+      fileURLToPath(new URL('./execution-host.js', import.meta.url)),
+      this.root,
+      this.capability.rootId,
+      '60000',
+      ...(recoveryProbe ? [recoveryProbe.sessionId, recoveryProbe.runId] : []),
+    ];
+    const child = testOptions.runtimeExecutablePath
+      ? spawn(testOptions.runtimeExecutablePath, childArgs, {
+          stdio: ['ignore', 'ignore', stderr, 'ipc'],
+          env: { ...env, ELECTRON_RUN_AS_NODE: '1' },
+          windowsHide: true,
+        })
+      : fork(new URL('./execution-host.js', import.meta.url), childArgs.slice(1), {
+          stdio: ['ignore', 'ignore', stderr, 'ipc'],
+          env,
+        });
     this.#children.add(child);
     return child;
   }

@@ -121,6 +121,19 @@ test('compiles an exact file grant as a non-recursive broker root', () => {
   assert.deepEqual(policy.exactWriteRoots, []);
 });
 
+test('grants runtime volume anchors exactly without exposing their subtrees', () => {
+  const withAnchors = command(createReadOnlyPermissionProfile());
+  withAnchors.pathContext = {
+    ...withAnchors.pathContext,
+    runtimeExactReadableRoots: ['C:\\', 'D:\\'],
+  };
+  const policy = compileWindowsSandboxPolicy(withAnchors);
+  assert.ok(policy.readRoots.includes('C:\\'));
+  assert.ok(policy.readRoots.includes('D:\\'));
+  assert.ok(policy.exactReadRoots.includes('C:\\'));
+  assert.ok(policy.exactReadRoots.includes('D:\\'));
+});
+
 test('rejects noncanonical paths and case-insensitive duplicate environment names', () => {
   const invalidPath = command(createWorkspaceWritePermissionProfile());
   invalidPath.pathContext = { workspaceRoots: ['C:/work/repo'] };

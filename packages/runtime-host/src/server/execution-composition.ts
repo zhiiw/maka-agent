@@ -171,6 +171,7 @@ import {
 import { createManagedCommandSandboxOwnerInternal } from './managed-command-sandbox-owner-internal.js';
 import {
   createManagedNodeTestAdmissionOwnerInternal,
+  createManagedNodeTestToolDeclarationInternal,
   createManagedNodeTestExecutionRootOwnerInternal,
 } from './managed-node-test-admission-owner-internal.js';
 import {
@@ -404,6 +405,10 @@ export async function createExecutionRuntimeHostComposition(
     const managedNodeTestExecutionRootOwner = createManagedNodeTestExecutionRootOwnerInternal({
       storageRootLease: context.owner.lease,
     });
+    const managedNodeTestToolDeclaration =
+      managedCommandOwner && gitoxideHelperCapability
+        ? createManagedNodeTestToolDeclarationInternal()
+        : undefined;
     const filesystemWorkerLaunchSpecProvider =
       sandboxManager && isBuiltinFilesystemWorkerSandboxAvailable()
         ? createFilesystemWorkerLaunchSpecProvider({
@@ -926,7 +931,13 @@ export async function createExecutionRuntimeHostComposition(
         const { runtimePolicy, surface } = await resolveInteractiveToolSurface({
           connectionRef: sessionExecutionConnectionRef(header),
           modelId: header.model,
-          hostTools: [...hostTools, ...graphTools],
+          hostTools: [
+            ...hostTools,
+            ...(header.toolProfile === 'managed-coding-v2' && managedNodeTestToolDeclaration
+              ? [managedNodeTestToolDeclaration]
+              : []),
+            ...graphTools,
+          ],
           childTools: childAgentTools.childTools,
           parentAgentTools: childAgentTools.parentTools,
         });

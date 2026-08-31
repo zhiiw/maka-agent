@@ -18,124 +18,85 @@
  */
 
 import { createHash } from 'node:crypto';
+import { writeSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { join } from 'node:path';
-import { run } from 'node:test';
+import { pathToFileURL } from 'node:url';
 
-const MAX_REQUEST_BYTES = 16 * 1024;
 const MAX_OBSERVED_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_TEST_FILES = 64;
 const PORTABLE_PATH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/u;
 
-interface InspectRequest {
-  readonly protocolVersion: 1;
-  readonly operation: 'inspect_file_v1';
-  readonly relativePath: string;
-}
-
-interface RunNodeTestsRequest {
-  readonly protocolVersion: 1;
-  readonly operation: 'run_node_tests_v1';
-  readonly relativePaths: readonly string[];
-}
-
-type ManagedCommandRequest = InspectRequest | RunNodeTestsRequest;
-
-const raw = await readBoundedStdin();
-const request = decodeRequest(JSON.parse(raw) as unknown);
-if (request.operation === 'inspect_file_v1') {
-  const observation = await observeFile(request.relativePath);
-  process.stdout.write(
-    `${JSON.stringify({
-      protocolVersion: 1,
-      kind: 'file_observation',
-      nodeVersion: process.versions.node,
-      ...observation,
-    })}\n`,
-  );
+if (process.argv[2] === 'maka-node-tests-v1') {
+  const relativePaths = decodeNodeTestPaths(process.argv.slice(3));
+  for (const relativePath of relativePaths) {
+    await import(pathToFileURL(join(process.cwd(), ...relativePath.split('/'))).href);
+  }
+} else if (process.argv[2] === 'maka-observe-file-v1') {
+  const relativePath = decodeObservationPaths(process.argv.slice(3), 1)[0];
+  if (!relativePath) throw new Error('Managed command observation path is missing');
+  const observation = await observeFile(relativePath);
+  writeJsonResponseAndExit({
+    protocolVersion: 1,
+    kind: 'file_observation',
+    nodeVersion: process.versions.node,
+    ...observation,
+  });
+} else if (process.argv[2] === 'maka-observe-files-v1') {
+  const relativePaths = decodeObservationPaths(process.argv.slice(3), MAX_TEST_FILES);
+  const files = await Promise.all(relativePaths.map(observeFile));
+  writeJsonResponseAndExit({
+    protocolVersion: 1,
+    kind: 'file_observations',
+    nodeVersion: process.versions.node,
+    files,
+  });
 } else {
-  const files = await Promise.all(request.relativePaths.map(observeFile));
-  const counts = { passed: 0, failed: 0, skipped: 0, todo: 0 };
-  const responseWrite = process.stdout.write.bind(process.stdout);
-  const originalStdoutWrite = process.stdout.write;
-  process.stdout.write = process.stderr.write.bind(process.stderr) as typeof process.stdout.write;
-  try {
-    const stream = run({
-      cwd: process.cwd(),
-      files: [...request.relativePaths],
-      isolation: 'none',
-      concurrency: false,
-      timeout: 25_000,
-    });
-    for await (const event of stream) {
-      if (event.type !== 'test:pass' && event.type !== 'test:fail') continue;
-      if (event.data.details.type === 'suite') continue;
-      if (
-        event.data.nesting === 0 &&
-        event.data.line === 1 &&
-        event.data.column === 1 &&
-        request.relativePaths.includes(event.data.name)
-      ) {
-        continue;
-      }
-      if (event.type === 'test:fail') {
-        counts.failed += 1;
-      } else if (event.data.skip !== undefined) {
-        counts.skipped += 1;
-      } else if (event.data.todo !== undefined) {
-        counts.todo += 1;
-      } else {
-        counts.passed += 1;
-      }
-    }
-  } finally {
-    process.stdout.write = originalStdoutWrite;
-  }
-  process.exitCode = 0;
-  responseWrite(
-    `${JSON.stringify({
-      protocolVersion: 1,
-      kind: 'node_test_observation',
-      nodeVersion: process.versions.node,
-      files,
-      ...counts,
-    })}\n`,
-  );
+  throw new Error('Managed command helper invocation is invalid');
 }
 
-function decodeRequest(value: unknown): ManagedCommandRequest {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('Managed command request must be an object');
-  }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort().join('\0');
-  const relativePaths = record.relativePaths;
+function decodeNodeTestPaths(values: readonly string[]): readonly string[] {
   if (
-    keys === ['operation', 'protocolVersion', 'relativePaths'].sort().join('\0') &&
-    record.protocolVersion === 1 &&
-    record.operation === 'run_node_tests_v1' &&
-    Array.isArray(relativePaths) &&
-    relativePaths.length > 0 &&
-    relativePaths.length <= MAX_TEST_FILES &&
-    relativePaths.every(
-      (path): path is string =>
-        typeof path === 'string' && isPortableRelativePath(path) && /\.(?:cjs|mjs|js)$/u.test(path),
-    ) &&
-    new Set(relativePaths).size === relativePaths.length &&
-    [...relativePaths].sort().every((path, index) => path === relativePaths[index])
+    values.length === 0 ||
+    values.length > MAX_TEST_FILES ||
+    !values.every((path) => isPortableRelativePath(path) && /\.(?:cjs|mjs|js)$/u.test(path)) ||
+    new Set(values).size !== values.length ||
+    [...values].sort().some((path, index) => path !== values[index])
   ) {
-    return record as unknown as RunNodeTestsRequest;
+    throw new Error('Managed Node test file list is invalid');
   }
+  return values;
+}
+
+function decodeObservationPaths(
+  values: readonly string[],
+  maximumPaths: number,
+): readonly string[] {
   if (
-    keys !== ['operation', 'protocolVersion', 'relativePath'].sort().join('\0') ||
-    record.protocolVersion !== 1 ||
-    record.operation !== 'inspect_file_v1' ||
-    typeof record.relativePath !== 'string' ||
-    !isPortableRelativePath(record.relativePath)
+    values.length === 0 ||
+    values.length > maximumPaths ||
+    !values.every(isPortableRelativePath) ||
+    new Set(values).size !== values.length ||
+    [...values].sort().some((path, index) => path !== values[index])
   ) {
-    throw new Error('Managed command request is invalid');
+    throw new Error('Managed command observation path list is invalid');
   }
-  return record as unknown as InspectRequest;
+  return values;
+}
+
+function writeJsonResponseAndExit(value: Readonly<Record<string, unknown>>): never {
+  const response = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8');
+  try {
+    let offset = 0;
+    while (offset < response.length) {
+      const written = writeSync(1, response, offset, response.length - offset);
+      if (written <= 0) return process.exit(1);
+      offset += written;
+    }
+  } catch {
+    return process.exit(1);
+  }
+  return process.exit(0);
 }
 
 async function observeFile(relativePath: string): Promise<{
@@ -188,16 +149,4 @@ function isPortableRelativePath(value: string): boolean {
     !value.includes('\\') &&
     value.split('/').every((segment) => PORTABLE_PATH_SEGMENT.test(segment) && segment !== '..')
   );
-}
-
-async function readBoundedStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of process.stdin) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    bytes += buffer.length;
-    if (bytes > MAX_REQUEST_BYTES) throw new Error('Managed command request is too large');
-    chunks.push(buffer);
-  }
-  return Buffer.concat(chunks).toString('utf8');
 }

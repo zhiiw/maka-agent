@@ -70,6 +70,12 @@ export async function resolveCurrentProcessManagedToolchainInternal(input: {
   readonly resourcesRoot?: string;
 }): Promise<ManagedToolchainInvocationCapabilityInternal> {
   try {
+    if (process.platform === 'win32') {
+      throw new CurrentProcessManagedToolchainError(
+        'current_process_managed_toolchain_unavailable',
+        'Managed command toolchain requires an independently admitted standalone Node runtime on Windows',
+      );
+    }
     if (typeof process.versions.electron !== 'string') {
       throw new CurrentProcessManagedToolchainError(
         'current_process_managed_toolchain_unavailable',

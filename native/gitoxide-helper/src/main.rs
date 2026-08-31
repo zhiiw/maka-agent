@@ -59,6 +59,7 @@ const MAX_TOTAL_TREE_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_GITOXIDE_OBJECT_ALLOCATION_BYTES: &str = "gitoxide.objects.allocLimit=67108864";
 const MANAGED_IMPORT_OWNER_MARKER_NAME: &str = "maka-managed-import-owner-v1";
 const MANAGED_IMPORT_OWNER_MARKER_BYTES: &[u8] = b"maka-managed-import-owner-v1\n";
+const MANAGED_IMPORT_CLAIM_REF: &str = "refs/maka/import-claim";
 const MANAGED_TREE_POLICY_V3: ManagedTreePolicy = ManagedTreePolicy {
     max_depth: 64,
     max_tree_visits: 250_000,
@@ -1241,6 +1242,10 @@ fn import_source_head(
     if destination.object_hash() != gix::hash::Kind::Sha1 {
         return Err("import_destination_object_format_mismatch");
     }
+    let claim = format!(
+        "maka managed import claim v1\noperation import_source_head\nsource-head {expected_source_head}\nsource-tree {source_tree}\nbaseline-ref {baseline_ref}\npolicy {MANAGED_TREE_POLICY_VERSION}\n"
+    );
+    publish_exact_import_claim(&destination, claim.as_bytes())?;
 
     let mut copy_stats = ManagedTreeStats::default();
     walk_verified_source_tree(
@@ -1319,6 +1324,12 @@ fn import_filesystem_snapshot(
     {
         return Err("invalid_source_snapshot_root");
     }
+    let source_handle = source_path_handle(&source_root_path)?;
+    let source_confirmed =
+        fs::symlink_metadata(&source_root_path).map_err(|_| "source_file_observation_mismatch")?;
+    if !same_source_metadata(&source_metadata, &source_confirmed) {
+        return Err("source_file_observation_mismatch");
+    }
 
     let mut observed_stats = ManagedTreeStats::default();
     let observed_tree = write_filesystem_snapshot_tree(
@@ -1331,7 +1342,10 @@ fn import_filesystem_snapshot(
     )?;
     let source_after =
         fs::symlink_metadata(&source_root_path).map_err(|_| "source_file_observation_mismatch")?;
-    if !same_source_identity(&source_metadata, &source_after) {
+    let source_after_handle = source_path_handle(&source_root_path)?;
+    if source_handle != source_after_handle
+        || !same_source_metadata(&source_metadata, &source_after)
+    {
         return Err("source_file_observation_mismatch");
     }
     assert_import_destination_parent(&destination_repository_path)?;
@@ -1339,6 +1353,10 @@ fn import_filesystem_snapshot(
     if destination.object_hash() != gix::hash::Kind::Sha1 {
         return Err("import_destination_object_format_mismatch");
     }
+    let claim = format!(
+        "maka managed import claim v1\noperation import_filesystem_snapshot\nsource-tree {observed_tree}\nbaseline-ref {baseline_ref}\naccepted-ref {accepted_ref}\npolicy {MANAGED_TREE_POLICY_VERSION}\n"
+    );
+    publish_exact_import_claim(&destination, claim.as_bytes())?;
     let mut written_stats = ManagedTreeStats::default();
     let baseline_tree = write_filesystem_snapshot_tree(
         Some(&destination),
@@ -1412,6 +1430,12 @@ fn write_filesystem_snapshot_tree(
     let before = fs::symlink_metadata(directory).map_err(|_| "source_file_observation_mismatch")?;
     if !before.is_dir() || before.file_type().is_symlink() || is_windows_reparse_point(&before) {
         return Err("unsupported_source_entry_kind");
+    }
+    let before_handle = source_path_handle(directory)?;
+    let before_confirmed =
+        fs::symlink_metadata(directory).map_err(|_| "source_file_observation_mismatch")?;
+    if !same_source_metadata(&before, &before_confirmed) {
+        return Err("source_file_observation_mismatch");
     }
     stats.enter_tree(depth, 0, policy)?;
     let mut entries = fs::read_dir(directory)
@@ -1498,7 +1522,8 @@ fn write_filesystem_snapshot_tree(
         }
     };
     let after = fs::symlink_metadata(directory).map_err(|_| "source_file_observation_mismatch")?;
-    if !same_source_identity(&before, &after) {
+    let after_handle = source_path_handle(directory)?;
+    if before_handle != after_handle || !same_source_metadata(&before, &after) {
         return Err("source_file_observation_mismatch");
     }
     Ok(tree_oid)
@@ -1512,13 +1537,16 @@ fn read_bounded_source_file(
     if before.len() > policy.max_file_bytes {
         return Err("source_file_limit_exceeded");
     }
+    let before_handle = source_path_handle(path)?;
     let mut file = open_source_file_no_follow(path)?;
+    let opened_handle = source_file_handle(&file)?;
     let opened = file
         .metadata()
         .map_err(|_| "source_file_observation_mismatch")?;
     if !opened.is_file()
         || is_windows_reparse_point(&opened)
-        || !same_source_identity(before, &opened)
+        || before_handle != opened_handle
+        || !same_source_metadata(before, &opened)
     {
         return Err("source_file_observation_mismatch");
     }
@@ -1534,8 +1562,10 @@ fn read_bounded_source_file(
         .metadata()
         .map_err(|_| "source_file_observation_mismatch")?;
     let path_after = fs::symlink_metadata(path).map_err(|_| "source_file_observation_mismatch")?;
-    if !same_source_identity(before, &opened_after)
-        || !same_source_identity(before, &path_after)
+    let path_after_handle = source_path_handle(path)?;
+    if before_handle != path_after_handle
+        || !same_source_metadata(before, &opened_after)
+        || !same_source_metadata(before, &path_after)
         || bytes.len() as u64 != before.len()
     {
         return Err("source_file_observation_mismatch");
@@ -1573,7 +1603,7 @@ fn open_source_file_no_follow(path: &Path) -> Result<File, &'static str> {
 }
 
 #[cfg(unix)]
-fn same_source_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+fn same_source_metadata(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     left.dev() == right.dev()
         && left.ino() == right.ino()
@@ -1584,18 +1614,28 @@ fn same_source_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 }
 
 #[cfg(windows)]
-fn same_source_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+fn same_source_metadata(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
-    left.volume_serial_number() == right.volume_serial_number()
-        && left.file_index() == right.file_index()
+    left.creation_time() == right.creation_time()
         && left.file_size() == right.file_size()
         && left.last_write_time() == right.last_write_time()
         && left.file_attributes() == right.file_attributes()
 }
 
 #[cfg(not(any(unix, windows)))]
-fn same_source_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+fn same_source_metadata(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.len() == right.len() && left.modified().ok() == right.modified().ok()
+}
+
+fn source_path_handle(path: &Path) -> Result<same_file::Handle, &'static str> {
+    same_file::Handle::from_path(path).map_err(|_| "source_file_observation_mismatch")
+}
+
+fn source_file_handle(file: &File) -> Result<same_file::Handle, &'static str> {
+    let cloned = file
+        .try_clone()
+        .map_err(|_| "source_file_observation_mismatch")?;
+    same_file::Handle::from_file(cloned).map_err(|_| "source_file_observation_mismatch")
 }
 
 #[cfg(unix)]
@@ -4017,7 +4057,13 @@ fn claim_or_reopen_import_destination(path: &Path) -> Result<gix::Repository, &'
             Ok(repository)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(path).map_err(|_| "import_destination_create_failed")?;
+            match fs::create_dir(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    return Err("import_destination_not_fresh");
+                }
+                Err(_) => return Err("import_destination_create_failed"),
+            }
             let repository = gix::ThreadSafeRepository::init_opts(
                 path,
                 gix::create::Kind::Bare,
@@ -4056,6 +4102,53 @@ fn assert_managed_import_owner_marker(path: &Path) -> Result<(), &'static str> {
         return Err("import_destination_not_fresh");
     }
     Ok(())
+}
+
+fn publish_exact_import_claim(
+    repository: &gix::Repository,
+    claim: &[u8],
+) -> Result<(), &'static str> {
+    let claim_oid = repository
+        .write_blob(claim)
+        .map_err(|_| "import_destination_create_failed")?
+        .detach();
+    match repository
+        .try_find_reference(MANAGED_IMPORT_CLAIM_REF)
+        .map_err(|_| "import_destination_not_fresh")?
+    {
+        Some(reference) => {
+            let current = reference
+                .try_id()
+                .ok_or("import_destination_not_fresh")?
+                .detach();
+            if current != claim_oid {
+                return Err("import_destination_not_fresh");
+            }
+            Ok(())
+        }
+        None => match repository.reference(
+            MANAGED_IMPORT_CLAIM_REF,
+            claim_oid,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "maka managed import claim",
+        ) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let concurrent = repository
+                    .try_find_reference(MANAGED_IMPORT_CLAIM_REF)
+                    .map_err(|_| "import_destination_not_fresh")?
+                    .ok_or("import_destination_not_fresh")?;
+                let concurrent = concurrent
+                    .try_id()
+                    .ok_or("import_destination_not_fresh")?
+                    .detach();
+                if concurrent != claim_oid {
+                    return Err("import_destination_not_fresh");
+                }
+                Ok(())
+            }
+        },
+    }
 }
 
 fn publish_exact_baseline_reference(

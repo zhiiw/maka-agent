@@ -21,6 +21,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { BackendStopMode } from '@maka/core/backend-types';
 import type { AgentRunHeader, RootExecutionDescriptor } from '@maka/core/agent-run';
+import { digestWorkspaceBoundContinuationBoundary } from '@maka/core/runtime-boundary';
 import {
   INLINE_REFERENCE_MAX_COUNT,
   messageContentDigest,
@@ -2086,7 +2087,9 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       planned.sourceRunId !== execution.sourceRunId ||
       planned.sourceTurnId !== execution.sourceTurnId ||
       planned.sourceRuntimeEventHighWater !== execution.sourceRuntimeEventHighWater ||
-      planned.boundary?.manifestDigest !== execution.boundaryDigest ||
+      continuationBoundaryDigest(planned) !== execution.boundaryDigest ||
+      planned.boundary?.manifestDigest !==
+        (execution.replayManifestDigest ?? execution.boundaryDigest) ||
       planned.providerReplayDigest !== execution.providerReplayDigest
     ) {
       throw new RuntimeMessageAuthorityInvariantError(
@@ -3036,7 +3039,7 @@ function requirePlannedContinuation(plan: SafeBoundaryContinuationPlan): Runtime
 function continuationExecutionDescriptor(
   continuation: RuntimeContinuation,
 ): Extract<RootExecutionDescriptor, { kind: 'safe_boundary_continuation' }> {
-  const boundaryDigest = continuation.boundary?.manifestDigest;
+  const boundaryDigest = continuationBoundaryDigest(continuation);
   if (!continuation.claimId || !boundaryDigest || !continuation.providerReplayDigest) {
     throw new RuntimeMessageAuthorityInvariantError(
       'Authoritative continuation plan omitted its durable replay proof',
@@ -3050,10 +3053,23 @@ function continuationExecutionDescriptor(
     sourceRuntimeEventHighWater: continuation.sourceRuntimeEventHighWater,
     claimId: continuation.claimId,
     boundaryDigest,
+    ...(continuation.workspaceBoundary
+      ? { replayManifestDigest: continuation.boundary!.manifestDigest }
+      : {}),
     providerReplayDigest: continuation.providerReplayDigest,
     safetyDigest: continuationSafetyDigest(continuation),
     targetInvocationId: continuation.invocationId,
   };
+}
+
+function continuationBoundaryDigest(
+  continuation: RuntimeContinuation,
+): `sha256:${string}` | undefined {
+  const boundary = continuation.boundary;
+  if (!boundary) return undefined;
+  return continuation.workspaceBoundary
+    ? digestWorkspaceBoundContinuationBoundary(boundary, continuation.workspaceBoundary)
+    : boundary.manifestDigest;
 }
 
 export function continuationSafetyDigest(continuation: RuntimeContinuation): `sha256:${string}` {

@@ -19,7 +19,7 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -94,9 +94,10 @@ async function createFixture() {
   await mkdir(runtimeRoot, { recursive: true });
   const executableName =
     process.platform === 'win32' ? 'maka-gitoxide-helper.exe' : 'maka-gitoxide-helper';
-  const executablePath = join(runtimeRoot, executableName);
+  const unresolvedExecutablePath = join(runtimeRoot, executableName);
   const bytes = Buffer.from('packaged-helper');
-  await writeFile(executablePath, bytes, { mode: 0o755 });
+  await writeFile(unresolvedExecutablePath, bytes, { mode: 0o755 });
+  const executablePath = await realpath(unresolvedExecutablePath);
   await writeFile(
     join(root, 'gitoxide-helper.json'),
     `${JSON.stringify({

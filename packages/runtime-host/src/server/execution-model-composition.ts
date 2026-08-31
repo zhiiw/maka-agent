@@ -83,6 +83,7 @@ export interface HostAiSdkBackendInput {
   readonly requestDrain: () => void;
   readonly runtimeCommitSink?: RuntimeCommitSink;
   readonly admitManagedMutation?: ToolRuntimeInput['admitManagedMutation'];
+  readonly admitManagedObservation?: ToolRuntimeInput['admitManagedObservation'];
   readonly childAgents?: HostChildAgentBackendCapabilities;
   readonly createFetchTransport?: (proxy: ProxiedFetchProxy | null) => ProxiedFetchTransport;
 }
@@ -452,6 +453,9 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
         recordToolInvocation: (event) => recordToolInvocation({ repo: telemetry }, event),
         ...(input.runtimeCommitSink ? { runtimeCommitSink: input.runtimeCommitSink } : {}),
         ...(input.admitManagedMutation ? { admitManagedMutation: input.admitManagedMutation } : {}),
+        ...(input.admitManagedObservation
+          ? { admitManagedObservation: input.admitManagedObservation }
+          : {}),
         ...(providerRequestCapture
           ? {
               recordProviderRequestCapture: providerRequestCapture,

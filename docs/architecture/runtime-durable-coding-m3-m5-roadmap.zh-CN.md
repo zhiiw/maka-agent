@@ -149,8 +149,8 @@ exit status、test summary 与 artifact digest。缓存是 projection；test out
    T2；
 3. Host admission owner 已只从 Gitoxide accepted-world 与 toolchain opaque capability 签发 envelope，并用一次性
    input/scratch roots 执行显式 Node tests；它尚未改变现有 `managed-coding-v1` 产品 profile；
-4. `managed-coding-v2` Host composition 已定义版本化工具集合，并保持 v1 不变；Desktop 默认仍停在 v1，直到
-   真实 Host/helper kill/reopen 与三平台 enforcing sandbox smoke 通过；
+4. `managed-coding-v2` Host composition 已定义版本化工具集合，并保持 v1 不变；真实 Electron Host/helper
+   kill-reopen 已进入 Gitoxide 三平台 gate，但 Desktop 默认仍停在 v1，直到 gate 实际通过并确认 enforcing sandbox；
 5. 需要外部包的项目在 M5.3 capability 可用前明确 unavailable，禁止静默降级。
 
 ### M5.5 External-effect fencing

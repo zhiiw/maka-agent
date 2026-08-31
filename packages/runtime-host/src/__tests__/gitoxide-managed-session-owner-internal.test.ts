@@ -24,11 +24,12 @@ import { once } from 'node:events';
 import { mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test, { type TestContext } from 'node:test';
+import test, { after, type TestContext } from 'node:test';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import {
   admitGitoxideHelperArtifactInternal,
+  GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   type GitoxideHelperInvocationCapability,
   issueGitoxideHelperReleaseArtifactClaimInternal,
 } from '../server/gitoxide-helper-artifact-authority-internal.js';
@@ -36,6 +37,18 @@ import {
   inspectGitoxideManagedContinuationBoundaryInternal,
   openGitoxideManagedSessionOwnerInternal,
 } from '../server/gitoxide-managed-session-owner-internal.js';
+
+const deferredTemporaryPaths = new Set<string>();
+
+after(async () => {
+  for (const path of deferredTemporaryPaths) {
+    await rm(path, { recursive: true, force: true });
+  }
+});
+
+function deferTemporaryPathRemoval(path: string): void {
+  deferredTemporaryPaths.add(path);
+}
 
 test('opens one durable Gitoxide baseline and reuses it for the same session', async (t) => {
   const helper = await admittedHelper();
@@ -48,7 +61,7 @@ test('opens one durable Gitoxide baseline and reuses it for the same session', a
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'baseline');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-session-owner-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -77,7 +90,7 @@ test('opens one durable Gitoxide baseline and reuses it for the same session', a
   const materializationRoot = await realpath(
     await mkdtemp(join(tmpdir(), 'maka-gitoxide-node-test-source-')),
   );
-  t.after(() => rm(materializationRoot, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(materializationRoot));
   const materialized = await retry.nodeTestSource.materializeAcceptedTree({
     destinationPath: join(materializationRoot, 'input'),
     acceptedCommitOid: acceptedBoundary.acceptedCommitOid,
@@ -106,10 +119,10 @@ test('imports a non-Git directory as one durable synthetic baseline', async (t) 
   const sourceRoot = await realpath(
     await mkdtemp(join(tmpdir(), 'maka-gitoxide-snapshot-source-')),
   );
-  t.after(() => rm(sourceRoot, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(sourceRoot));
   await writeFile(join(sourceRoot, 'notes.txt'), 'snapshot baseline\n', 'utf8');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-snapshot-owner-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -143,7 +156,7 @@ test('Read, Glob, and Grep observe only the accepted managed tree', async (t) =>
   git(sourceRoot, ['add', 'notes.txt', 'worker.ts']);
   commit(sourceRoot, 'accepted inspection baseline');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-inspection-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -200,7 +213,7 @@ test('Review compares the durable baseline with the accepted tree, not the attac
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'accepted review baseline');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-review-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -239,7 +252,7 @@ test('Restore materializes an accepted tree without touching the attached checko
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'accepted restore baseline');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-restore-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -281,7 +294,7 @@ test('Publish pins the exact durable accepted head without modifying the source 
   commit(sourceRoot, 'publication baseline');
   const sourceHead = git(sourceRoot, ['rev-parse', 'HEAD']);
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-publish-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -320,7 +333,7 @@ test('Source branch publish creates one replayable branch without touching the c
   const sourceHead = git(sourceRoot, ['rev-parse', 'HEAD']);
   const sourceStatus = git(sourceRoot, ['status', '--porcelain=v1']);
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-source-branch-owner-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -363,7 +376,7 @@ test('Time travel restores a historical accepted version without rewinding the c
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'time travel baseline');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-time-travel-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -401,7 +414,7 @@ test('fails closed when the source advances after its managed epoch opens', asyn
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'baseline');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-session-drift-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -436,7 +449,7 @@ test('explicit rebaseline opens a new epoch and preserves the prior epoch', asyn
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'epoch one');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-rebaseline-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -492,7 +505,7 @@ test('reopens the same managed session after its source checkout moves', async (
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'relocation baseline');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-relocation-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -508,7 +521,7 @@ test('reopens the same managed session after its source checkout moves', async (
   const opened = await openGitoxideManagedSessionOwnerInternal({ ...common, sourceRoot });
   const relocatedRoot = `${sourceRoot}-relocated`;
   await rename(sourceRoot, relocatedRoot);
-  t.after(() => rm(relocatedRoot, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(relocatedRoot));
 
   const reopened = await openGitoxideManagedSessionOwnerInternal({
     ...common,
@@ -535,7 +548,7 @@ test('reopens the activated epoch after the rebaseline response process exits', 
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'epoch one');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-rebaseline-crash-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const initialCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const initialRootOwner = await tryAcquireInteractiveRootOwner(initialCapability);
   assert.ok(initialRootOwner);
@@ -551,9 +564,6 @@ test('reopens the activated epoch after the rebaseline response process exits', 
   await initialStores.sessionStore.close?.();
   await initialRootOwner.close();
 
-  await writeFile(join(sourceRoot, 'notes.txt'), 'epoch two\n', 'utf8');
-  git(sourceRoot, ['add', 'notes.txt']);
-  commit(sourceRoot, 'epoch two');
   const fixturePath = join(root, 'managed-rebaseline-crash-fixture.json');
   await writeFile(
     fixturePath,
@@ -564,6 +574,7 @@ test('reopens the activated epoch after the rebaseline response process exits', 
       helperPath: helper.helperPath,
       mode: 'after_active_epoch_commit',
       rebaselineId: 'source-head-2',
+      rebaselineContent: 'epoch two\n',
     })}\n`,
     'utf8',
   );
@@ -615,7 +626,7 @@ test('issues a continuation boundary only for the exact source and accepted Gito
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'baseline');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-continuation-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   const rootCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const rootOwner = await tryAcquireInteractiveRootOwner(rootCapability);
   assert.ok(rootOwner);
@@ -657,7 +668,7 @@ test('retries an exact import after the publishing process exits before baseline
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'baseline');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-session-crash-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(root));
   await resolveStorageRoot({ path: root, kind: 'interactive' });
   const fixturePath = join(root, 'managed-session-crash-fixture.json');
   await writeFile(
@@ -728,22 +739,7 @@ async function admittedHelper(): Promise<
     platform: process.platform,
     arch: process.arch,
     protocolVersion: 1,
-    supportedOperations: [
-      'inspect_repository',
-      'import_source_head',
-      'create_candidate',
-      'promote_candidate',
-      'create_history_candidate',
-      'promote_history_candidate',
-      'observe_accepted_ref',
-      'read_tree_file',
-      'list_tree_files',
-      'grep_tree_files',
-      'compare_accepted_trees',
-      'materialize_accepted_tree',
-      'publish_accepted_ref',
-      'publish_accepted_tree_to_source_branch',
-    ],
+    supportedOperations: GITOXIDE_HELPER_OPERATIONS_INTERNAL,
   });
   return {
     invocationOwnerToken,
@@ -758,7 +754,7 @@ async function admittedHelper(): Promise<
 
 async function createRepository(t: TestContext): Promise<string> {
   const path = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-session-source-')));
-  t.after(() => rm(path, { recursive: true, force: true }));
+  t.after(() => deferTemporaryPathRemoval(path));
   git(path, ['init', '--quiet', '--object-format=sha1']);
   return path;
 }

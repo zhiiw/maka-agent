@@ -762,6 +762,8 @@ export interface AiSdkBackendInput extends AiSdkCompactionCapabilities {
   runtimeCommitSink?: RuntimeCommitSink;
   /** Owner-issued admission for managed Write/Edit execution. */
   admitManagedMutation?: ToolRuntimeInput['admitManagedMutation'];
+  /** Owner-issued admission for an accepted-world managed observation. */
+  admitManagedObservation?: ToolRuntimeInput['admitManagedObservation'];
   /** Durable session-lifetime cumulative usage checkpoint after each completed provider step. */
   recordUsageCheckpoint?: (
     usage: NormalizedAiSdkUsage & { costUsd?: number },
@@ -1352,6 +1354,7 @@ export class AiSdkBackend implements AgentBackend {
       recordToolInvocation: input.recordToolInvocation,
       runtimeCommitSink: input.runtimeCommitSink,
       admitManagedMutation: input.admitManagedMutation,
+      admitManagedObservation: input.admitManagedObservation,
       recordToolArtifacts: input.recordToolArtifacts,
     });
   }

@@ -14,7 +14,9 @@
 - Node 24 Permission Model 作为 defense-in-depth，不授予 child process/worker/addon/WASI；
 - environment 使用固定 allowlist，`PATH`、`NODE_OPTIONS`、HOME/TMP 不继承 Host；
 - timeout 30 秒、stdout/stderr 各有硬上限，abort/overflow/非零退出统一失败；
-- request/response 使用 exact JSON protocol，relative path、显式测试文件集合与 Node version 必须匹配。
+- identity helper 使用 owner 固定的 positional operation 与 portable paths，并只在 stdout 返回 exact JSON
+  response；Node test 由同一个沙箱根进程中的固定 helper import profile 执行，Host 只接受有界、完整的 TAP
+  terminal summary，relative path、显式测试文件集合与 Node version 必须匹配。
 
 Node 官方明确说明 Permission Model 是防止受信代码意外越权的 seat belt，不是对恶意代码的安全边界。因此本设计把 OS sandbox 作为必要 authority；Node flags 只做第二层限制，不能替代 platform sandbox。
 
@@ -22,16 +24,19 @@ Node 官方明确说明 Permission Model 是防止受信代码意外越权的 se
 
 - Toolchain authority 拥有 executable/entrypoint identity。
 - Command sandbox owner 拥有 profile、environment、预算、spawn 与 process-tree lifecycle。
-- Helper 只拥有本次 request；调用者不能传 executable、argv、cwd、environment 或 sandbox preference。
+- Identity helper 只拥有本次文件观察 request；Node test runner 只拥有本次显式测试文件集合。调用者不能传 executable、argv、cwd、environment、Node flags 或 sandbox preference。
 
 在 command T1 接入以前，本切片没有 durable operation，也不声称可 Resume。spawn 前失败是 clean unavailable；spawn 后 timeout、abort、输出溢出或协议错误属于本次 observation 失败。后续 M5.4 在把 test/build 接入 durable ledger 时必须在 T1 前冻结 exact profile，并为 post-dispatch unknown outcome 定义 settlement。
 
 ## 平台矩阵
 
-| 平台 | 当前状态 |
-| --- | --- |
-| Linux | 设计要求 Bubblewrap enforcing backend；production smoke 待补 |
-| macOS | 设计要求 Seatbelt enforcing backend；production smoke 待补 |
-| Windows | 设计要求 packaged AppContainer/Job broker；production smoke 待补 |
+- Linux：以 bubblewrap + 当前发布 Electron Node-mode runtime 证明 `hermetic_observation_v1`。
+- macOS：以 Seatbelt + 当前发布 Electron Node-mode runtime 证明 `hermetic_observation_v1`。
+- Windows：v1 明确不可用。Electron.exe 在 AppContainer 内无法形成已证明的短生命周期 Node
+  command owner；Host 因而不签发 capability，并在 T1 前返回
+  `managed_workspace_profile_unavailable`。后续支持必须引入独立校验的 standalone Node artifact，禁止从
+  `PATH` 借用系统 Node 或退化成非沙箱执行。
 
-当前真实子进程测试证明 toolchain、Node permission flags、bounded protocol 和 process lifecycle 能组合运行；它使用注入的 enforcing-plan fixture，不替代三平台 OS sandbox 验收。因此该切片保持 Draft，直到 platform smoke 闭环。
+Linux/macOS 的 production-shaped Host gate 已使用真实 OS sandbox、发布形态 runtime 与 helper 执行并在 Host
+kill/reopen 后收敛。Windows gate只证明 fail-closed availability，不把缺少 standalone Node authority 误报成测试
+能力。
