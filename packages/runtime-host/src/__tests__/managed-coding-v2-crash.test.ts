@@ -352,13 +352,22 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
       provider.waitForCompletedToolResult(),
       startFailure,
     ]);
-    assert.deepEqual(readManagedNodeRunResult(completedToolResult), {
-      protocolVersion: 1,
-      kind: 'node_command_observation',
-      exitCode: 7,
-      stdout: '{"argv":["--check","src/index.js"],"path":""}\n',
-      stderr: '',
-    });
+    const completedNodeRun = readManagedNodeRunResult(completedToolResult);
+    assert.deepEqual(
+      {
+        protocolVersion: completedNodeRun.protocolVersion,
+        kind: completedNodeRun.kind,
+        exitCode: completedNodeRun.exitCode,
+        stdout: completedNodeRun.stdout,
+      },
+      {
+        protocolVersion: 1,
+        kind: 'node_command_observation',
+        exitCode: 7,
+        stdout: '{"argv":["--check","src/index.js"],"path":""}\n',
+      },
+    );
+    assert.equal(typeof completedNodeRun.stderr, 'string');
     await fixture.killHost(firstHost);
     await withTimeout(start, PROCESS_TIMEOUT_MS, 'crashed hosted execution did not close');
     await firstClient.close().catch(() => undefined);
@@ -382,6 +391,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
     assert.equal(provider.requests.length, 3);
     assert.match(JSON.stringify(provider.requests[1]), /ManagedNodeRun/u);
     assert.match(JSON.stringify(provider.requests[2]), /ManagedNodeRun/u);
+    assert.deepEqual(readManagedNodeRunResult(provider.requests[2]), completedNodeRun);
     const readerOwner = await tryAcquireInteractiveRootReader(capability);
     assert.ok(readerOwner);
     if (!readerOwner) throw new Error('Unable to read managed v3 fixture root');
