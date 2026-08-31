@@ -34,6 +34,8 @@ import {
   isTerminalRuntimeEvent,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_SPEC,
+  MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
+  MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_SPEC,
   MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC,
   runtimeEventHasModelVisibleContent,
@@ -574,6 +576,92 @@ describe('RuntimeEvent actions', () => {
     const canonical = JSON.stringify(MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_SPEC);
     assert.equal(
       MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+      `sha256:${createHash('sha256').update(canonical).digest('hex')}`,
+    );
+  });
+
+  test('binds one exact dependency lease into managed observation v2', () => {
+    const managedObservation = {
+      protocol: 'managed_observation_v2',
+      repositoryId: 'repository_11111111111111111111111111111111',
+      workspaceId: 'workspace_22222222222222222222222222222222',
+      workspaceEpochId: 'epoch_33333333333333333333333333333333',
+      workspaceInstanceId: 'instance_44444444444444444444444444444444',
+      objectFormat: 'sha1',
+      acceptedWorkspaceVersionId: 'version_55555555555555555555555555555555',
+      acceptedEventId: 'accepted-event-1',
+      acceptedHeadRevision: 2,
+      acceptedCommitOid: '1'.repeat(40),
+      acceptedTreeOid: '2'.repeat(40),
+      operationKind: 'node_test_v2',
+      effectClass: 'hermetic_observation_v2',
+      executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
+      toolchainIdentityDigest: `sha256:${'3'.repeat(64)}`,
+      dependency: {
+        kind: 'managed_dependency_snapshot_v1',
+        environmentId: `sha256:${'5'.repeat(64)}`,
+        contentTreeSha256: `sha256:${'6'.repeat(64)}`,
+        nodeVersion: '24.18.1',
+        nodeAbi: '137',
+        platform: 'linux',
+        arch: 'x64',
+      },
+      files: [
+        {
+          relativePath: 'src/a.test.mjs',
+          bytes: 123,
+          sha256: `sha256:${'4'.repeat(64)}`,
+        },
+      ],
+    } as const;
+    const toolDispatch = {
+      protocol: 't1_after_preflight_v1',
+      operationId: 'operation-1',
+      providerToolCallId: 'call-1',
+      toolName: 'ManagedNodeTest',
+      canonicalArgsHash: `sha256:${'b'.repeat(64)}`,
+      recoveryMode: 'replay_safe',
+      managedObservation,
+    } as const;
+
+    assert.deepEqual(
+      decodeRuntimeEvent(baseEvent({ role: 'system', author: 'system', actions: { toolDispatch } }))
+        .actions?.toolDispatch?.managedObservation,
+      managedObservation,
+    );
+    for (const invalid of [
+      { ...managedObservation, dependency: { kind: 'none', extra: true } },
+      {
+        ...managedObservation,
+        dependency: { ...managedObservation.dependency, environmentId: 'not-a-digest' },
+      },
+      {
+        ...managedObservation,
+        dependency: { ...managedObservation.dependency, platform: 'freebsd' },
+      },
+      {
+        ...managedObservation,
+        dependency: { ...managedObservation.dependency, nodeVersion: '25.0.0' },
+      },
+      { ...managedObservation, executionProfileDigest: `sha256:${'0'.repeat(64)}` },
+      { ...managedObservation, protocol: 'managed_observation_v1' },
+    ]) {
+      assert.throws(() =>
+        decodeRuntimeEvent(
+          baseEvent({
+            role: 'system',
+            author: 'system',
+            actions: { toolDispatch: { ...toolDispatch, managedObservation: invalid } as never },
+          }),
+        ),
+      );
+    }
+  });
+
+  test('binds managed observation v2 to its canonical dependency semantics', () => {
+    const canonical = JSON.stringify(MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_SPEC);
+    assert.equal(
+      MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
       `sha256:${createHash('sha256').update(canonical).digest('hex')}`,
     );
   });

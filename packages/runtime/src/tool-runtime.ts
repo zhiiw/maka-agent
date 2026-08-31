@@ -67,11 +67,14 @@ import { redactSecrets } from '@maka/core/redaction';
 import {
   decodeRuntimeEvent,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+  MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
   MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC,
   TOOL_BOUNDARY_PROTOCOL_V1,
   type RuntimeEvent,
+  type RuntimeEventManagedWorkspaceObservation,
   type RuntimeEventManagedWorkspaceObservationV1,
+  type RuntimeEventManagedWorkspaceObservationV2,
   type RuntimeEventManagedWorkspaceMutationV2,
 } from '@maka/core/runtime-event';
 import { isDeepStrictEqual } from 'node:util';
@@ -176,7 +179,10 @@ export interface MakaTool<P = any, R = unknown> {
   /** Crash-recovery contract used by the durable tool boundary. */
   recoveryMode?: ToolRecoveryMode;
   /** Durable execution profile selected by the Host before T1. */
-  durableExecutionProfile?: 'managed_mutation_v1' | 'managed_observation_v1';
+  durableExecutionProfile?:
+    | 'managed_mutation_v1'
+    | 'managed_observation_v1'
+    | 'managed_observation_v2';
   /**
    * Pure Write/Edit transform for managed mutation mode. It receives only the
    * frozen arguments and must not read or mutate the live workspace.
@@ -420,7 +426,7 @@ export interface RuntimeManagedObservationExecution {
 }
 
 export interface RuntimeManagedObservationAdmission {
-  readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceObservationV1>;
+  readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceObservation>;
   execute<T>(operation: (execution: RuntimeManagedObservationExecution) => Promise<T>): Promise<T>;
   /** Idempotent for an unused, failed-T1, completed, or failed observation. */
   dispose(): Promise<void>;
@@ -1447,7 +1453,10 @@ export class ToolRuntime {
         return this.errorReturn(reason);
       }
     }
-    if (tool.durableExecutionProfile === 'managed_observation_v1') {
+    if (
+      tool.durableExecutionProfile === 'managed_observation_v1' ||
+      tool.durableExecutionProfile === 'managed_observation_v2'
+    ) {
       if (
         tool.name !== 'ManagedNodeTest' ||
         tool.recoveryMode !== 'replay_safe' ||
@@ -2198,7 +2207,7 @@ export class ToolRuntime {
     modelFacingArgs: unknown;
     abortSignal: AbortSignal;
     managedMutation?: Readonly<RuntimeEventManagedWorkspaceMutationV2>;
-    managedObservation?: Readonly<RuntimeEventManagedWorkspaceObservationV1>;
+    managedObservation?: Readonly<RuntimeEventManagedWorkspaceObservation>;
     invocationId?: string;
     runId?: string;
   }): Promise<DurableToolAttempt | undefined> {
@@ -2327,14 +2336,15 @@ export class ToolRuntime {
             ? (input.persistedArgs as { relativePaths: unknown[] }).relativePaths
             : undefined;
         const frozenPaths = input.managedObservation.files.map((file) => file.relativePath);
+        const profileMatches =
+          (input.tool.durableExecutionProfile === 'managed_observation_v1' &&
+            isManagedObservationV1(input.managedObservation)) ||
+          (input.tool.durableExecutionProfile === 'managed_observation_v2' &&
+            isManagedObservationV2(input.managedObservation));
         if (
           input.tool.name !== 'ManagedNodeTest' ||
           input.tool.recoveryMode !== 'replay_safe' ||
-          input.tool.durableExecutionProfile !== 'managed_observation_v1' ||
-          input.managedObservation.operationKind !== 'node_test_v1' ||
-          input.managedObservation.effectClass !== 'hermetic_observation_v1' ||
-          input.managedObservation.executionProfileDigest !==
-            MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST ||
+          !profileMatches ||
           !persistedRelativePaths ||
           persistedRelativePaths.length !== frozenPaths.length ||
           !persistedRelativePaths.every(
@@ -3978,6 +3988,28 @@ async function disposeManagedObservationAdmission(
   } catch {
     // Cleanup is best-effort and must not obscure the durable tool result.
   }
+}
+
+function isManagedObservationV1(
+  value: RuntimeEventManagedWorkspaceObservation,
+): value is RuntimeEventManagedWorkspaceObservationV1 {
+  return (
+    value.protocol === 'managed_observation_v1' &&
+    value.operationKind === 'node_test_v1' &&
+    value.effectClass === 'hermetic_observation_v1' &&
+    value.executionProfileDigest === MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST
+  );
+}
+
+function isManagedObservationV2(
+  value: RuntimeEventManagedWorkspaceObservation,
+): value is RuntimeEventManagedWorkspaceObservationV2 {
+  return (
+    value.protocol === 'managed_observation_v2' &&
+    value.operationKind === 'node_test_v2' &&
+    value.effectClass === 'hermetic_observation_v2' &&
+    value.executionProfileDigest === MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST
+  );
 }
 
 function providerToolErrorMessage(output: unknown): string | undefined {
