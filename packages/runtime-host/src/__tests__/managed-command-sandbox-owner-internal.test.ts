@@ -124,6 +124,10 @@ test('runs one bounded file observation through an enforcing sandbox plan', asyn
     assert.equal(transformedRequest?.command.env?.LOCALAPPDATA, process.env.LOCALAPPDATA);
   }
   assert.equal(dirname(transformedRequest?.command.program ?? ''), dirname(executablePath));
+  assert.equal(
+    transformedRequest?.command.args[0],
+    process.platform === 'win32' ? '--no-stdio-init' : '--permission',
+  );
 });
 
 test('runs explicit dependency-free Node tests in one sandboxed helper process', async (t) => {

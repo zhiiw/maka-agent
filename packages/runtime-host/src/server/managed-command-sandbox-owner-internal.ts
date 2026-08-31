@@ -122,6 +122,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       command: {
         program: toolchain.executablePath,
         args: [
+          ...(process.platform === 'win32' ? ['--no-stdio-init'] : []),
           '--permission',
           `--allow-fs-read=${inputRoot}`,
           `--allow-fs-write=${scratchRoot}`,
