@@ -43,10 +43,12 @@ on:
       - 'packages/runtime-host/src/server/current-process-managed-toolchain-internal.ts'
       - 'packages/runtime-host/src/server/managed-command-*.ts'
       - 'packages/runtime-host/src/server/managed-node-test-*.ts'
+      - 'packages/runtime-host/src/server/managed-node-transform-*.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/execution-host*.ts'
       - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
       - 'packages/runtime-host/src/__tests__/hosted-execution-tool-profile.test.ts'
       - 'scripts/prepare-gitoxide-helper*'
+      - 'scripts/prepare-managed-command-toolchain*'
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-candidate-receipt-crash-child.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-write-edit-owner-crash-child.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-session-owner-crash-child.ts'
@@ -83,10 +85,12 @@ on:
       - 'packages/runtime-host/src/server/current-process-managed-toolchain-internal.ts'
       - 'packages/runtime-host/src/server/managed-command-*.ts'
       - 'packages/runtime-host/src/server/managed-node-test-*.ts'
+      - 'packages/runtime-host/src/server/managed-node-transform-*.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/execution-host*.ts'
       - 'packages/runtime-host/src/__tests__/packaged-gitoxide-helper.test.ts'
       - 'packages/runtime-host/src/__tests__/hosted-execution-tool-profile.test.ts'
       - 'scripts/prepare-gitoxide-helper*'
+      - 'scripts/prepare-managed-command-toolchain*'
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-candidate-receipt-crash-child.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-write-edit-owner-crash-child.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-session-owner-crash-child.ts'
@@ -173,7 +177,7 @@ jobs:
         env:
           MAKA_GITOXIDE_HELPER_PATH: ${{ github.workspace }}/native/gitoxide-helper/target/debug/maka-gitoxide-helper${{ runner.os == 'Windows' && '.exe' || '' }}
         run: node --test packages/runtime-host/dist/__tests__/gitoxide-managed-continuation-crash.test.js
-      - name: Test packaged managed-coding-v2/v3 Host crash convergence
+      - name: Test packaged managed-coding-v2/v3/v4 Host crash convergence
         env:
           MAKA_GITOXIDE_HELPER_PATH: ${{ github.workspace }}/native/gitoxide-helper/target/debug/maka-gitoxide-helper${{ runner.os == 'Windows' && '.exe' || '' }}
           MAKA_WINDOWS_SANDBOX_PATH: ${{ github.workspace }}/experiments/windows-sandbox/launcher/target/debug/maka-windows-sandbox.exe

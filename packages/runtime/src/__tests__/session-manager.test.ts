@@ -4727,6 +4727,7 @@ describe('SessionManager permission mode updates', () => {
     'managed-coding-v1',
     'managed-coding-v2',
     'managed-coding-v3',
+    'managed-coding-v4',
   ] as const) {
     test(`never downgrades a ${toolProfile} session when its workspace boundary is unavailable`, async () => {
       const store = new MemorySessionStore();

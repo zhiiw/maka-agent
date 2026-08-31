@@ -34,6 +34,10 @@ const HEADLESS_CODING_V1_TOOL_NAMES = [
 const MANAGED_CODING_V1_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Write', 'Edit'] as const;
 const MANAGED_CODING_V2_TOOL_NAMES = [...MANAGED_CODING_V1_TOOL_NAMES, 'ManagedNodeTest'] as const;
 const MANAGED_CODING_V3_TOOL_NAMES = [...MANAGED_CODING_V2_TOOL_NAMES, 'ManagedNodeRun'] as const;
+const MANAGED_CODING_V4_TOOL_NAMES = [
+  ...MANAGED_CODING_V3_TOOL_NAMES,
+  'ManagedNodeTransform',
+] as const;
 const MANAGED_CODING_V1_SYSTEM_PROMPT = [
   'Inspect the managed Git workspace with Read, Glob, and Grep.',
   'Modify it with Write and Edit.',
@@ -51,6 +55,11 @@ const MANAGED_CODING_V3_SYSTEM_PROMPT = [
   MANAGED_CODING_V2_SYSTEM_PROMPT,
   'Run an explicit accepted-workspace Node entrypoint with ManagedNodeRun only when a direct script check is useful.',
   'ManagedNodeRun has no PATH, network, child-process, package-script, dependency-installation, or attached-checkout authority. Its writes are limited to disposable scratch.',
+].join('\n');
+const MANAGED_CODING_V4_SYSTEM_PROMPT = [
+  MANAGED_CODING_V3_SYSTEM_PROMPT,
+  'Use ManagedNodeTransform only when one accepted-tree JavaScript transformer should produce one bounded UTF-8 workspace file.',
+  'ManagedNodeTransform cannot write the managed worktree directly; Gitoxide and SQLite must accept its exact output as a new successor.',
 ].join('\n');
 
 const HEADLESS_CODING_V1_SYSTEM_PROMPT = [
@@ -116,6 +125,13 @@ export function hostedExecutionRunProfile(
       memoryExtraction: false,
     };
   }
+  if (profile === 'managed-coding-v4') {
+    return {
+      toolNames: MANAGED_CODING_V4_TOOL_NAMES,
+      systemPrompt: MANAGED_CODING_V4_SYSTEM_PROMPT,
+      memoryExtraction: false,
+    };
+  }
   if (profile === 'workhub-coordination-v1') {
     return {
       toolNames: [],
@@ -143,7 +159,8 @@ export function projectHostedExecutionTools(
     if (
       profile === 'managed-coding-v1' ||
       profile === 'managed-coding-v2' ||
-      profile === 'managed-coding-v3'
+      profile === 'managed-coding-v3' ||
+      profile === 'managed-coding-v4'
     ) {
       if (tool.name === 'Read' || tool.name === 'Glob' || tool.name === 'Grep') {
         return { ...tool, recoveryMode: 'replay_safe' };
@@ -160,6 +177,13 @@ export function projectHostedExecutionTools(
           ...tool,
           recoveryMode: 'replay_safe',
           durableExecutionProfile: 'managed_observation_v3',
+        };
+      }
+      if (tool.name === 'ManagedNodeTransform') {
+        return {
+          ...tool,
+          recoveryMode: 'reconcile',
+          durableExecutionProfile: 'managed_mutation_v2',
         };
       }
       return {

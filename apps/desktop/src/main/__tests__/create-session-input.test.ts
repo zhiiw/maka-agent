@@ -99,9 +99,14 @@ describe('resolveCreateSessionRequest', () => {
       resolveAutomaticWorkspaceToolProfile(
         ordinary,
         { kind: 'project', projectId: 'project-1' },
-        ['managed-coding-v1', 'managed-coding-v2', 'managed-coding-v3'],
+        [
+          'managed-coding-v1',
+          'managed-coding-v2',
+          'managed-coding-v3',
+          'managed-coding-v4',
+        ],
       ),
-      'managed-coding-v3',
+      'managed-coding-v4',
     );
     assert.throws(
       () =>
