@@ -1298,6 +1298,10 @@ export class DesktopRuntimeHostClient {
     return this.connection.request('host.diagnostics.query', {}, 2_000);
   }
 
+  queryHostExecutionProfiles(): Promise<OperationOutput<'host.execution-profiles.query'>> {
+    return this.connection.request('host.execution-profiles.query', {}, 2_000);
+  }
+
   prepareHostRetirement(
     mode: RuntimeHostRetirementMode,
   ): Promise<RuntimeHostRetirementPreparation> {

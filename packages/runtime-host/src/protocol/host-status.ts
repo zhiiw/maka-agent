@@ -28,10 +28,15 @@ import {
   requireUtf8String,
 } from './codec.js';
 import { defineOperation } from './operation-spec.js';
+import type { SessionToolProfile } from '@maka/core/session';
 
 export type HostLifecycleState = 'starting' | 'containing' | 'recovering' | 'ready' | 'draining';
 export type HostStatusInput = Record<string, never>;
 export type HostDiagnosticsInput = Record<string, never>;
+export type HostExecutionProfilesInput = Record<string, never>;
+export interface HostExecutionProfilesResult {
+  readonly profiles: readonly SessionToolProfile[];
+}
 export interface HostActivitySnapshot {
   readonly connections: number;
   readonly activeOperations: number;
@@ -91,6 +96,13 @@ export const HOST_BOOTSTRAP_OPERATION_SPECS = {
     decodeInput: (value) => decodeEmptyHostInput(value, 'host.diagnostics.query input'),
     decodeOutput: decodeHostDiagnosticsResult,
   }),
+  'host.execution-profiles.query': defineOperation({
+    mode: 'query',
+    availability: 'ready',
+    errors: ['host_not_ready', 'host_draining', 'internal_failure'] as const,
+    decodeInput: (value) => decodeEmptyHostInput(value, 'host.execution-profiles.query input'),
+    decodeOutput: decodeHostExecutionProfilesResult,
+  }),
   'host.upgrade.prepare': defineOperation({
     mode: 'command',
     availability: 'ready',
@@ -99,6 +111,30 @@ export const HOST_BOOTSTRAP_OPERATION_SPECS = {
     decodeOutput: decodeHostUpgradePrepareResult,
   }),
 } as const;
+
+function decodeHostExecutionProfilesResult(value: unknown): HostExecutionProfilesResult {
+  const record = requireExactRecord(value, 'host.execution-profiles.query result', ['profiles']);
+  if (!Array.isArray(record.profiles)) {
+    throw invalidProtocolFrame('Invalid Runtime Host execution profiles');
+  }
+  const profiles = record.profiles.map((profile) => {
+    if (profile !== 'managed-coding-v1' && profile !== 'managed-coding-v2') {
+      throw invalidProtocolFrame('Invalid Runtime Host execution profile');
+    }
+    return profile;
+  });
+  const canonical = ['managed-coding-v1', 'managed-coding-v2'].filter((profile) =>
+    profiles.includes(profile as SessionToolProfile),
+  );
+  if (
+    new Set(profiles).size !== profiles.length ||
+    canonical.length !== profiles.length ||
+    !canonical.every((profile, index) => profile === profiles[index])
+  ) {
+    throw invalidProtocolFrame('Runtime Host execution profiles are not canonical');
+  }
+  return { profiles: Object.freeze(profiles) };
+}
 
 function decodeEmptyHostInput(value: unknown, label: string): HostStatusInput {
   requireExactRecord(value, label, []);

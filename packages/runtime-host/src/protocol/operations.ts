@@ -69,6 +69,8 @@ import { WORKHUB_COORDINATION_OPERATION_SPECS } from './workhub-coordination.js'
 export type {
   HostDiagnosticsInput,
   HostDiagnosticsResult,
+  HostExecutionProfilesInput,
+  HostExecutionProfilesResult,
   HostActivitySnapshot,
   HostLifecycleState,
   HostStatusInput,
@@ -273,6 +275,7 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'goal.control',
   'goal.query',
   'host.diagnostics.query',
+  'host.execution-profiles.query',
   'host.status',
   'interaction.answer',
   'interaction.query',

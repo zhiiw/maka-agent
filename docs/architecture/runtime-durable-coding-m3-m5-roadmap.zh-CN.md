@@ -29,12 +29,13 @@ workspace content；materialized directory、Desktop UI 和缓存都只是可重
 | Write/Edit successor | 已实现 | 已实现 | managed tool profile 已接入 | candidate + Host kill/reopen 已建立 |
 | automatic continuation | 已实现 | 已实现 | quiet resume 已接入 | Git/非 Git indeterminate matrix 已建立 |
 | accepted-tree Review | 不写 durable state | 已实现 | 已接入 Desktop Review | helper exact-tree + IPC fail-closed test 已建立 |
-| immutable Publish | artifact/ref protocol 已实现 | 已实现 | 已接入 Desktop Review | helper ref-CAS + IPC fail-closed test 已建立；packaged Desktop crash proof 缺失 |
+| immutable Publish | artifact/ref protocol 已实现 | 已实现 | accepted ref 与 source branch publish 已接入 Desktop Review | helper ref-CAS + IPC fail-closed test 已建立；packaged Desktop crash proof 缺失 |
 | isolated Restore | artifact protocol 已实现 | 已实现 | 已接入 Desktop Review | helper materialization + IPC fail-closed test 已建立；packaged Desktop crash proof 缺失 |
-| time travel | historical read/restore 已实现 | 已实现 | 最近 50 个版本与隔离恢复已接入 Desktop | lineage tests 已建立；undo-as-successor 尚未实现 |
-| rebaseline / relocation | epoch identity 已实现 | 已实现 | **缺失** | Host cases 已建立，packaged evidence 待 CI |
-| GC | restore-orphan tombstone 已实现 | 已实现 | 无需直接 UI | candidate/ref/object roots 尚未纳入 |
-| Bash / dependency / tests | 仅有旧 storage authority 与通用 shell 基础 | **缺失** | **缺失** | **缺失** |
+| time travel | historical read/restore/undo successor 已实现 | 已实现 | 最近 50 个版本、隔离恢复与 Undo 已接入 Desktop | lineage 与 history-successor crash tests 已建立 |
+| rebaseline / relocation | epoch activation identity 已实现 | 已实现 | Rebaseline 已接入 Desktop | Host crash cases 已建立，packaged evidence 待 CI |
+| GC | restore-orphan tombstone 与维护 owner 已实现 | 已实现 | Desktop maintenance 入口已接入 | restore-orphan crash test 已建立；完整 candidate/ref/object roots 待补齐 |
+| dependency snapshot / Node tests | immutable snapshot、sandbox、T1/T2 settlement 已实现 | 已实现 | Host profile 协商后普通 workspace task 自动选择最高可用 profile | Linux/macOS Host kill/reopen 已建立；Windows 明确只提供 v1 |
+| general Bash / external effects | shell correlation/recovery kernel 已实现 | 组合入口尚未闭合 | **缺失** | 外部 acceptance/fencing matrix **缺失** |
 
 表中的“已实现”指当前 fork stack 的代码状态，不表示相关 PR 已经合并或发布。
 
@@ -45,7 +46,8 @@ workspace content；materialized directory、Desktop UI 和缓存都只是可重
 > 一个 Desktop coding task 的模型输入、工具读取、工具写入和 continuation 必须属于同一个 accepted
 > workspace causal boundary；Host 退出后只能从 durable facts 创建一个新 Run，不能重放已经完成的副作用。
 
-M3 已完成主要实现，剩余交付是产品形状闭环而不是再造协议：
+M3 的 Git/非 Git自动 admission、accepted-world tools、automatic continuation 与 quiet park UI 已在当前 stack
+闭合。剩余交付门槛是把产品形状证据持续放入发布矩阵，而不是再造协议：
 
 1. 用 packaged Desktop + Runtime Host 发起真实 managed task；
 2. 分别以 Git repository 和普通目录为 source；
@@ -89,12 +91,12 @@ accepted commit 是仅有的两种可收敛状态。这个动作不接触 source
 
 当前 Desktop 已接入 isolated restore：Review 面板签发稳定 `restoreId`，Runtime Host 只从 managed session 的
 durable accepted identity 物化到 Maka-owned restore root。响应丢失后复用同一 ID；已有 staging/workspace 会先转成
-orphan，再从 accepted tree 重建。它不读取或覆盖 source checkout。Undo-as-successor 与可分页完整 timeline 仍属于
-后续能力。
+orphan，再从 accepted tree 重建。它不读取或覆盖 source checkout。Undo-as-successor 已实现；可分页完整
+timeline 仍属于后续能力。
 
 Desktop 也已接入 bounded accepted history：Host 从一次 captured head 沿 immutable parent records 反向读取，最多
 返回 50 个版本；任一 repository/workspace/epoch mismatch、断链或循环都 fail closed。用户可以选择旧版本恢复到
-隔离目录，但该操作不 rewind accepted head。Undo-as-successor 与可分页完整 timeline 仍属于后续能力。
+隔离目录，或以旧 tree 创建新的 accepted successor；两者都不 rewind 历史。可分页完整 timeline 仍属于后续能力。
 
 ### M4.4 Epoch lifecycle
 
@@ -150,9 +152,10 @@ exit status、test summary 与 artifact digest。缓存是 projection；test out
    toolchain/profile 和 effect class；Runtime 以线性 operation capability 和单一 immutable result snapshot 写入
    T2；
 3. Host admission owner 已只从 Gitoxide accepted-world 与 toolchain opaque capability 签发 envelope，并用一次性
-   input/scratch roots 执行显式 Node tests；它尚未改变现有 `managed-coding-v1` 产品 profile；
+   input/scratch roots 执行显式 Node tests；
 4. `managed-coding-v2` Host composition 已定义版本化工具集合，并保持 v1 不变；真实 Electron Host/helper
-   kill-reopen 已进入 Gitoxide 三平台 gate，但 Desktop 默认仍停在 v1，直到 gate 实际通过并确认 enforcing sandbox；
+   kill-reopen 已进入平台 gate；Desktop 在 Session/T1 前查询 resident Host capability，Linux/macOS 选择 v2，
+   Windows 当前只获得 v1，禁止执行时降级；
 5. 需要外部包的项目在 M5.3 capability 可用前明确 unavailable，禁止静默降级。
 
 ### M5.5 External-effect fencing
@@ -171,15 +174,17 @@ Host 后，新的 Run 只采用 durable outcome/candidate/evidence；已完成�
 
 ## 6. 推荐后续 PR 顺序
 
-1. **M3 closure**：packaged Desktop Git/非 Git quiet-resume crash matrix；
-2. **M4 Desktop Review**：结构化 accepted diff 的 IPC 与 UI consumer（已实现，等待三平台 packaged 证据）；
-3. **M4 Apply/Publish**：immutable publish Desktop consumer 已实现；下一步是 drift-aware checkout apply receipt；
-4. **M4 Restore/Undo**：isolated restore 与 bounded history Desktop consumer 已实现；下一步是 Undo-as-successor 与可分页 timeline；
-5. **M4 Lifecycle**：Desktop rebaseline/relocation、完整 durable-root GC；
-6. **M5 Toolchain/Sandbox**：能力证明与 hermetic command worker；
-7. **M5 Dependencies/Tests**：受权 dependency artifact 与 durable test outcome；
-8. **M5 External effects**：idempotency/fencing/reconciliation；
-9. **M5 Full loop**：Desktop product composition 与跨平台 crash matrix。
+1. **M3 release evidence**：packaged Desktop Git/非 Git quiet-resume crash matrix；
+2. **M4 lifecycle proof**：为 Publish/source-branch publish、Restore、Undo、Rebaseline 与 maintenance 统一补齐真实
+   Host kill/reopen matrix；
+3. **M4 durable-root GC**：完整枚举 active epoch、pending continuation、accepted/published/history refs、restore/apply
+   receipts 与审计保留 roots；
+4. **M5 profile negotiation**：Host capability set 与 Desktop pre-Session selection（当前切片）；
+5. **M5 foreground command loop**：把 accepted tree、dependency snapshot、sandbox command 与 shell recovery 组合成
+   可由产品调用的 build/test loop；
+6. **M5 workspace transform**：只写 owner output tree，经 candidate + SQLite acceptance 进入 accepted history；
+7. **M5 external effects**：idempotency/fencing/reconciliation；
+8. **M5 full loop**：Desktop product composition 与跨平台 crash matrix。
 
 每个 PR 必须列出 owner、原子性边界、失败状态、回滚/收敛方式和平台矩阵。CI 全绿只表示已布置用例通过；
 并发、崩溃与数据安全仍需单独论证。

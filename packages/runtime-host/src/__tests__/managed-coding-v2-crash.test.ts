@@ -124,6 +124,12 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
       useProductionBackend: true,
     });
     const firstClient = await connectClient(root);
+    assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
+      profiles:
+        process.platform === 'win32'
+          ? ['managed-coding-v1']
+          : ['managed-coding-v1', 'managed-coding-v2'],
+    });
     const startRequest = firstClient.request('hosted.execution.start', {
       executionId,
       session: {

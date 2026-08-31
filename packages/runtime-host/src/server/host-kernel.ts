@@ -20,6 +20,7 @@
 import { randomUUID } from 'node:crypto';
 import { arch as osArch, homedir, release as osRelease } from 'node:os';
 import { collapseHomePath } from '@maka/core/diagnostic-log';
+import type { SessionToolProfile } from '@maka/core/session';
 import {
   assertInteractiveRootOwner,
   authenticateInteractiveRootOwner,
@@ -139,6 +140,7 @@ export interface RuntimeHostCompositionContext {
 export interface RuntimeHostComposition {
   readonly handlers: DomainOperationHandlerMap;
   readonly moduleIds?: readonly string[];
+  readonly executionProfiles?: readonly SessionToolProfile[];
   readonly continuity?: SessionContinuityService;
   readonly clientCapabilities?: ClientCapabilityService;
   readonly hostChanges?: HostChangeFeed;
@@ -681,6 +683,12 @@ export class RuntimeHostKernel {
             logs: runtimeHostLogBuffer
               .snapshot()
               .map((entry) => collapseHomePath(entry, homedir(), process.platform)),
+          },
+        }),
+        'host.execution-profiles.query': async () => ({
+          ok: true,
+          result: {
+            profiles: this.#composition?.executionProfiles ?? [],
           },
         }),
         'host.upgrade.prepare': async (input) => {

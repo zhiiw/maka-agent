@@ -30,6 +30,11 @@ test('Desktop main automatically admits ordinary project sessions to managed cod
   registerRuntimeHostSessionCatalogIpc(
     {
       client: {
+        async queryHostExecutionProfiles() {
+          return {
+            profiles: ['managed-coding-v1', 'managed-coding-v2'] as const,
+          };
+        },
         async createSession(input: SessionCreateInput) {
           creates.push(input);
           return sessionProjection(input);
@@ -55,7 +60,7 @@ test('Desktop main automatically admits ordinary project sessions to managed cod
   await create({} as never, { projectId: 'project-1' });
 
   assert.equal(creates.length, 1);
-  assert.equal(creates[0]?.toolProfile, 'managed-coding-v1');
+  assert.equal(creates[0]?.toolProfile, 'managed-coding-v2');
   assert.deepEqual(creates[0]?.workspace, { kind: 'project', projectId: 'project-1' });
 });
 

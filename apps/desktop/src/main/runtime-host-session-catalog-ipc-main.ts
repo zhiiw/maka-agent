@@ -53,6 +53,7 @@ import {
 
 type RuntimeHostSessionCatalogClient = Pick<
   DesktopRuntimeHostClient,
+  | 'queryHostExecutionProfiles'
   | 'createSession'
   | 'listSessions'
   | 'removeSession'
@@ -130,7 +131,15 @@ export function registerRuntimeHostSessionCatalogIpc(
       ...(input?.cwd === undefined ? {} : { cwd: input.cwd }),
       ...(input?.projectId === undefined ? {} : { projectId: input.projectId }),
     });
-    const toolProfile = resolveAutomaticWorkspaceToolProfile(request, workspace);
+    const availableProfiles =
+      request.mode === undefined
+        ? (await deps.client.queryHostExecutionProfiles()).profiles
+        : [];
+    const toolProfile = resolveAutomaticWorkspaceToolProfile(
+      request,
+      workspace,
+      availableProfiles,
+    );
     const session = await deps.client.createSession({
       sessionId: newId(),
       workspace,

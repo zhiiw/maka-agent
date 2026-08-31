@@ -69,13 +69,12 @@ describe('resolveCreateSessionRequest', () => {
     });
   });
 
-  it('maps the managed task product intent to the only managed tool profile', () => {
+  it('leaves the managed profile choice to the Host capability owner', () => {
     assert.deepEqual(resolve({ productIntent: 'managed_coding' }), {
       collaborationMode: 'agent',
       orchestrationMode: 'default',
       name: DEFAULT_SESSION_NAME,
       labels: undefined,
-      toolProfile: 'managed-coding-v1',
     });
   });
 
@@ -96,6 +95,23 @@ describe('resolveCreateSessionRequest', () => {
       }),
       'managed-coding-v1',
     );
+    assert.equal(
+      resolveAutomaticWorkspaceToolProfile(
+        ordinary,
+        { kind: 'project', projectId: 'project-1' },
+        ['managed-coding-v1', 'managed-coding-v2'],
+      ),
+      'managed-coding-v2',
+    );
+    assert.throws(
+      () =>
+        resolveAutomaticWorkspaceToolProfile(
+          ordinary,
+          { kind: 'project', projectId: 'project-1' },
+          [],
+        ),
+      /Managed coding is unavailable/u,
+    );
   });
 
   it('does not reinterpret a distinct product mode as managed coding', () => {
@@ -110,7 +126,7 @@ describe('resolveCreateSessionRequest', () => {
 
   it('does not let the renderer mint an internal tool profile', () => {
     const resolved = resolve({ toolProfile: 'managed-coding-v1' });
-    assert.equal(resolved.toolProfile, undefined);
+    assert.equal('toolProfile' in resolved, false);
   });
 
   it('rejects invalid or conflicting managed task product intents', () => {
