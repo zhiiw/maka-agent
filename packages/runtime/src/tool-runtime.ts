@@ -68,6 +68,7 @@ import {
   decodeRuntimeEvent,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
+  MANAGED_OBSERVATION_EXECUTION_PROFILE_V3_DIGEST,
   MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
   MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC,
   TOOL_BOUNDARY_PROTOCOL_V1,
@@ -75,6 +76,7 @@ import {
   type RuntimeEventManagedWorkspaceObservation,
   type RuntimeEventManagedWorkspaceObservationV1,
   type RuntimeEventManagedWorkspaceObservationV2,
+  type RuntimeEventManagedWorkspaceObservationV3,
   type RuntimeEventManagedWorkspaceMutationV2,
 } from '@maka/core/runtime-event';
 import { isDeepStrictEqual } from 'node:util';
@@ -182,7 +184,8 @@ export interface MakaTool<P = any, R = unknown> {
   durableExecutionProfile?:
     | 'managed_mutation_v1'
     | 'managed_observation_v1'
-    | 'managed_observation_v2';
+    | 'managed_observation_v2'
+    | 'managed_observation_v3';
   /**
    * Pure Write/Edit transform for managed mutation mode. It receives only the
    * frozen arguments and must not read or mutate the live workspace.
@@ -1468,10 +1471,15 @@ export class ToolRuntime {
     }
     if (
       tool.durableExecutionProfile === 'managed_observation_v1' ||
-      tool.durableExecutionProfile === 'managed_observation_v2'
+      tool.durableExecutionProfile === 'managed_observation_v2' ||
+      tool.durableExecutionProfile === 'managed_observation_v3'
     ) {
+      const expectedToolName =
+        tool.durableExecutionProfile === 'managed_observation_v3'
+          ? 'ManagedNodeRun'
+          : 'ManagedNodeTest';
       if (
-        tool.name !== 'ManagedNodeTest' ||
+        tool.name !== expectedToolName ||
         tool.recoveryMode !== 'replay_safe' ||
         !tool.managedObservationImpl ||
         !dispatchOperationId ||
@@ -2365,29 +2373,19 @@ export class ToolRuntime {
         }
       }
       if (input.managedObservation) {
-        const persistedRelativePaths =
-          input.persistedArgs &&
-          typeof input.persistedArgs === 'object' &&
-          !Array.isArray(input.persistedArgs) &&
-          Array.isArray((input.persistedArgs as { relativePaths?: unknown }).relativePaths)
-            ? (input.persistedArgs as { relativePaths: unknown[] }).relativePaths
-            : undefined;
-        const frozenPaths = input.managedObservation.files.map((file) => file.relativePath);
         const profileMatches =
           (input.tool.durableExecutionProfile === 'managed_observation_v1' &&
             isManagedObservationV1(input.managedObservation)) ||
           (input.tool.durableExecutionProfile === 'managed_observation_v2' &&
-            isManagedObservationV2(input.managedObservation));
-        if (
-          input.tool.name !== 'ManagedNodeTest' ||
-          input.tool.recoveryMode !== 'replay_safe' ||
-          !profileMatches ||
-          !persistedRelativePaths ||
-          persistedRelativePaths.length !== frozenPaths.length ||
-          !persistedRelativePaths.every(
-            (path, index) => typeof path === 'string' && path === frozenPaths[index],
-          )
-        ) {
+            isManagedObservationV2(input.managedObservation)) ||
+          (input.tool.durableExecutionProfile === 'managed_observation_v3' &&
+            isManagedObservationV3(input.managedObservation));
+        const callMatches = isManagedObservationCallMatch(
+          input.tool.name,
+          input.persistedArgs,
+          input.managedObservation,
+        );
+        if (input.tool.recoveryMode !== 'replay_safe' || !profileMatches || !callMatches) {
           throw new Error('Managed observation admission does not match the durable tool call');
         }
       }
@@ -4047,6 +4045,46 @@ function isManagedObservationV2(
     value.operationKind === 'node_test_v2' &&
     value.effectClass === 'hermetic_observation_v2' &&
     value.executionProfileDigest === MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST
+  );
+}
+
+function isManagedObservationV3(
+  value: RuntimeEventManagedWorkspaceObservation,
+): value is RuntimeEventManagedWorkspaceObservationV3 {
+  return (
+    value.protocol === 'managed_observation_v3' &&
+    value.operationKind === 'node_command_v3' &&
+    value.effectClass === 'hermetic_observation_v3' &&
+    value.executionProfileDigest === MANAGED_OBSERVATION_EXECUTION_PROFILE_V3_DIGEST
+  );
+}
+
+function isManagedObservationCallMatch(
+  toolName: string,
+  persistedArgs: unknown,
+  observation: RuntimeEventManagedWorkspaceObservation,
+): boolean {
+  if (!persistedArgs || typeof persistedArgs !== 'object' || Array.isArray(persistedArgs)) {
+    return false;
+  }
+  if (isManagedObservationV3(observation)) {
+    const record = persistedArgs as { entryPath?: unknown; args?: unknown };
+    const args = record.args === undefined ? [] : record.args;
+    return (
+      toolName === 'ManagedNodeRun' &&
+      record.entryPath === observation.entry.relativePath &&
+      Array.isArray(args) &&
+      args.length === observation.args.length &&
+      args.every((value, index) => value === observation.args[index])
+    );
+  }
+  const relativePaths = (persistedArgs as { relativePaths?: unknown }).relativePaths;
+  const frozenPaths = observation.files.map((file) => file.relativePath);
+  return (
+    toolName === 'ManagedNodeTest' &&
+    Array.isArray(relativePaths) &&
+    relativePaths.length === frozenPaths.length &&
+    relativePaths.every((path, index) => typeof path === 'string' && path === frozenPaths[index])
   );
 }
 

@@ -18,7 +18,7 @@
  */
 
 import { lstat, realpath } from 'node:fs/promises';
-import { dirname, win32 } from 'node:path';
+import { dirname, join, win32 } from 'node:path';
 import type { PermissionProfileManaged } from '@maka/core/permission-profile';
 import {
   runFilesystemWorkerProcess,
@@ -62,8 +62,20 @@ export interface ManagedNodeTestObservationInternal {
   readonly todo: number;
 }
 
+export interface ManagedNodeCommandObservationInternal {
+  readonly protocolVersion: 1;
+  readonly kind: 'node_command_observation';
+  readonly nodeVersion: string;
+  readonly entry: ManagedNodeTestFileIdentityInternal;
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
 export interface ManagedCommandSandboxOwnerInternal {
-  readToolchainIdentity(): Promise<ManagedCommandToolchainIdentityInternal>;
+  readToolchainIdentity(
+    effectClass?: 'hermetic_observation_v2' | 'hermetic_observation_v3',
+  ): Promise<ManagedCommandToolchainIdentityInternal>;
   readDependencyIdentity(
     lease: ManagedDependencySnapshotLease,
   ): Promise<ManagedCommandDependencyIdentityInternal>;
@@ -73,6 +85,9 @@ export interface ManagedCommandSandboxOwnerInternal {
   runNodeTests(
     input: ManagedCommandRunNodeTestsInputInternal,
   ): Promise<ManagedNodeTestObservationInternal>;
+  runNodeEntrypoint?(
+    input: ManagedCommandRunNodeEntrypointInputInternal,
+  ): Promise<ManagedNodeCommandObservationInternal>;
 }
 
 export interface ManagedCommandDependencyIdentityInternal {
@@ -95,6 +110,7 @@ export interface ManagedCommandInspectFileInputInternal {
   readonly relativePath: string;
   readonly inputRoot: string;
   readonly scratchRoot: string;
+  readonly effectClass?: 'hermetic_observation_v2' | 'hermetic_observation_v3';
   readonly abortSignal?: AbortSignal;
 }
 
@@ -103,6 +119,14 @@ export interface ManagedCommandRunNodeTestsInputInternal {
   readonly inputRoot: string;
   readonly scratchRoot: string;
   readonly dependencyLease?: ManagedDependencySnapshotLease;
+  readonly abortSignal?: AbortSignal;
+}
+
+export interface ManagedCommandRunNodeEntrypointInputInternal {
+  readonly entryPath: string;
+  readonly args: readonly string[];
+  readonly inputRoot: string;
+  readonly scratchRoot: string;
   readonly abortSignal?: AbortSignal;
 }
 
@@ -126,13 +150,20 @@ export function createManagedCommandSandboxOwnerInternal(input: {
           readonly kind: 'helper';
           readonly operation: 'inspect_file_v1' | 'inspect_files_v1';
           readonly relativePaths: readonly string[];
+          readonly effectClass?: 'hermetic_observation_v2' | 'hermetic_observation_v3';
         }
       | {
           readonly kind: 'node_tests';
           readonly relativePaths: readonly string[];
+        }
+      | {
+          readonly kind: 'node_entrypoint';
+          readonly entryPath: string;
+          readonly args: readonly string[];
         },
   ): Promise<{
     readonly stdout: string;
+    readonly stderr: string;
     readonly nodeVersion: string;
     readonly exitCode: number;
   }> {
@@ -153,7 +184,10 @@ export function createManagedCommandSandboxOwnerInternal(input: {
     const toolchain = await verifyManagedToolchainForInvocationInternal(
       input.invocationOwnerToken,
       input.toolchainCapability,
-      'hermetic_observation_v2',
+      invocation.kind === 'node_entrypoint' ||
+        (invocation.kind === 'helper' && invocation.effectClass === 'hermetic_observation_v3')
+        ? 'hermetic_observation_v3'
+        : 'hermetic_observation_v2',
     );
     request.abortSignal?.throwIfAborted();
     const profile = hermeticObservationProfile(inputRoot, scratchRoot, dependency?.dependencyRoot);
@@ -171,15 +205,17 @@ export function createManagedCommandSandboxOwnerInternal(input: {
               : 'maka-observe-files-v1',
             ...invocation.relativePaths,
           ]
-        : [
-            '--test-force-exit',
-            '--test-reporter=tap',
-            toolchain.entrypointPath,
-            'maka-node-tests-v1',
-            ...(dependency ? ['--dependency-root', dependency.dependencyRoot] : []),
-            '--',
-            ...invocation.relativePaths,
-          ]),
+        : invocation.kind === 'node_tests'
+          ? [
+              '--test-force-exit',
+              '--test-reporter=tap',
+              toolchain.entrypointPath,
+              'maka-node-tests-v1',
+              ...(dependency ? ['--dependency-root', dependency.dependencyRoot] : []),
+              '--',
+              ...invocation.relativePaths,
+            ]
+          : [join(inputRoot, ...invocation.entryPath.split('/')), ...invocation.args]),
     ];
     const transformed = input.sandboxManager.transform({
       preference: 'require',
@@ -223,8 +259,8 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       env: transformed.exec.env ?? {},
       stdin: '',
       timeoutMs: 30_000,
-      maxResponseBytes: 64 * 1024,
-      maxStderrBytes: 64 * 1024,
+      maxResponseBytes: invocation.kind === 'node_entrypoint' ? 32_769 : 64 * 1024,
+      maxStderrBytes: invocation.kind === 'node_entrypoint' ? 32_769 : 64 * 1024,
       ...(transformed.exec.fdInputs ? { fdInputs: transformed.exec.fdInputs } : {}),
       ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
     });
@@ -234,23 +270,30 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       result.responseOverflow ||
       (invocation.kind === 'helper'
         ? result.exitCode !== 0
-        : result.exitCode !== 0 && result.exitCode !== 1) ||
+        : invocation.kind === 'node_tests'
+          ? result.exitCode !== 0 && result.exitCode !== 1
+          : false) ||
       !result.dispatched
     ) {
       throw new Error(formatManagedCommandFailure(result, invocationLabel(invocation)));
     }
     return {
       stdout: result.stdout,
+      stderr: result.stderrTail,
       nodeVersion: toolchain.nodeVersion,
       exitCode: result.exitCode,
     };
   }
   return Object.freeze({
-    async readToolchainIdentity() {
+    async readToolchainIdentity(
+      effectClass:
+        | 'hermetic_observation_v2'
+        | 'hermetic_observation_v3' = 'hermetic_observation_v2',
+    ) {
       const toolchain = await verifyManagedToolchainForInvocationInternal(
         input.invocationOwnerToken,
         input.toolchainCapability,
-        'hermetic_observation_v2',
+        effectClass,
       );
       return Object.freeze({
         identityDigest: toolchain.identityDigest,
@@ -296,6 +339,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         kind: 'helper',
         operation: 'inspect_file_v1',
         relativePaths: [request.relativePath],
+        ...(request.effectClass ? { effectClass: request.effectClass } : {}),
       });
       return decodeObservation(result.stdout, request.relativePath, result.nodeVersion);
     },
@@ -330,6 +374,65 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       assertSameFileObservations(files, afterFiles);
       return decodeNodeTestTap(result.stdout, files, result.nodeVersion, result.exitCode);
     },
+    async runNodeEntrypoint(request: ManagedCommandRunNodeEntrypointInputInternal) {
+      if (
+        !isPortableRelativePath(request.entryPath) ||
+        !/\.(?:cjs|mjs|js)$/u.test(request.entryPath) ||
+        !areManagedNodeCommandArgs(request.args)
+      ) {
+        throw new Error('Managed Node command arguments are invalid');
+      }
+      const observationRequest = {
+        inputRoot: request.inputRoot,
+        scratchRoot: request.scratchRoot,
+        ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
+      };
+      const before = await execute(observationRequest, {
+        kind: 'helper',
+        operation: 'inspect_file_v1',
+        relativePaths: [request.entryPath],
+        effectClass: 'hermetic_observation_v3',
+      });
+      const entry = decodeObservation(before.stdout, request.entryPath, before.nodeVersion);
+      const result = await execute(request, {
+        kind: 'node_entrypoint',
+        entryPath: request.entryPath,
+        args: Object.freeze([...request.args]),
+      });
+      const after = await execute(observationRequest, {
+        kind: 'helper',
+        operation: 'inspect_file_v1',
+        relativePaths: [request.entryPath],
+        effectClass: 'hermetic_observation_v3',
+      });
+      const afterEntry = decodeObservation(after.stdout, request.entryPath, after.nodeVersion);
+      if (
+        entry.relativePath !== afterEntry.relativePath ||
+        entry.bytes !== afterEntry.bytes ||
+        entry.sha256 !== afterEntry.sha256
+      ) {
+        throw new Error('Managed Node command entry changed during execution');
+      }
+      if (
+        Buffer.byteLength(result.stdout, 'utf8') > 32_768 ||
+        Buffer.byteLength(result.stderr, 'utf8') > 32_768
+      ) {
+        throw new Error('Managed Node command output is too large');
+      }
+      return Object.freeze({
+        protocolVersion: 1 as const,
+        kind: 'node_command_observation' as const,
+        nodeVersion: result.nodeVersion,
+        entry: Object.freeze({
+          relativePath: entry.relativePath,
+          bytes: entry.bytes,
+          sha256: entry.sha256,
+        }),
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      });
+    },
   });
 }
 
@@ -350,10 +453,17 @@ function invocationLabel(
         readonly kind: 'helper';
         readonly operation: 'inspect_file_v1' | 'inspect_files_v1';
         readonly relativePaths: readonly string[];
+        readonly effectClass?: 'hermetic_observation_v2' | 'hermetic_observation_v3';
       }
-    | { readonly kind: 'node_tests'; readonly relativePaths: readonly string[] },
+    | { readonly kind: 'node_tests'; readonly relativePaths: readonly string[] }
+    | {
+        readonly kind: 'node_entrypoint';
+        readonly entryPath: string;
+        readonly args: readonly string[];
+      },
 ): string {
   if (invocation.kind === 'node_tests') return 'node_tests';
+  if (invocation.kind === 'node_entrypoint') return 'node_entrypoint';
   return invocation.operation;
 }
 
@@ -453,6 +563,19 @@ function isPortableRelativePath(value: string): boolean {
     !value.includes('\\') &&
     value.split('/').every((segment) => PORTABLE_PATH_SEGMENT.test(segment) && segment !== '..')
   );
+}
+
+function areManagedNodeCommandArgs(value: readonly string[]): boolean {
+  if (!Array.isArray(value) || value.length > 64) return false;
+  let totalBytes = 0;
+  for (const argument of value) {
+    if (typeof argument !== 'string') return false;
+    const bytes = Buffer.byteLength(argument, 'utf8');
+    if (bytes > 4096) return false;
+    totalBytes += bytes;
+    if (totalBytes > 32_768) return false;
+  }
+  return true;
 }
 
 function decodeObservation(

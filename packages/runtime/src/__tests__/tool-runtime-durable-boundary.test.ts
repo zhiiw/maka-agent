@@ -103,6 +103,50 @@ describe('ToolRuntime durable boundary', () => {
     assert.equal(outcomes.length, 1);
   });
 
+  it('binds an explicit Node entrypoint and arguments before managed observation v3 T1', async () => {
+    const prepared: ToolPreparedCommit[] = [];
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async (input) => {
+          prepared.push(input);
+          return { created: true, runtimeEventSeq: 1 };
+        },
+        commitToolOutcome: async () => ({ created: true, runtimeEventSeq: 2 }),
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedObservation: async () => ({
+          durableDispatch: managedObservationDispatchV3(),
+          execute: async (operation) =>
+            await operation({ inputRoot: '/accepted', scratchRoot: '/scratch' }),
+          dispose: async () => undefined,
+        }),
+      },
+    );
+    const managedRun = tool(() => {
+      throw new Error('ordinary implementation must not execute');
+    });
+    managedRun.name = 'ManagedNodeRun';
+    managedRun.durableExecutionProfile = 'managed_observation_v3';
+    managedRun.managedObservationImpl = async (_args, _ctx, execution) => {
+      assert.deepEqual(execution, { inputRoot: '/accepted', scratchRoot: '/scratch' });
+      return { exitCode: 0, stdout: 'ok\n', stderr: '' };
+    };
+
+    assert.deepEqual(
+      await harness.executeWithInput(managedRun, {
+        entryPath: 'scripts/check.mjs',
+        args: ['--check', 'src/index.js'],
+      }),
+      { exitCode: 0, stdout: 'ok\n', stderr: '' },
+    );
+    assert.deepEqual(
+      prepared[0]?.dispatchRuntimeEvent.actions?.toolDispatch?.managedObservation,
+      managedObservationDispatchV3(),
+    );
+  });
+
   it('adopts a managed observation result committed before the owner response is lost', async () => {
     const outcomes: ToolOutcomeCommit[] = [];
     const harness = makeHarness(
@@ -2099,6 +2143,24 @@ function managedObservationDispatchV2() {
       platform: 'linux' as const,
       arch: 'x64',
     },
+  };
+}
+
+function managedObservationDispatchV3() {
+  const { files: _files, ...base } = managedObservationDispatch();
+  return {
+    ...base,
+    protocol: 'managed_observation_v3' as const,
+    operationKind: 'node_command_v3' as const,
+    effectClass: 'hermetic_observation_v3' as const,
+    executionProfileDigest:
+      'sha256:8cde26b9e1b475fac75f0980baf04d09baed94184757bf02c3cc12fc5df2b50e' as const,
+    entry: {
+      relativePath: 'scripts/check.mjs',
+      bytes: 123,
+      sha256: `sha256:${'4'.repeat(64)}` as const,
+    },
+    args: ['--check', 'src/index.js'],
   };
 }
 

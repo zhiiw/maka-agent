@@ -209,12 +209,13 @@ export const SESSION_TOOL_PROFILES = [
   'headless-coding-v1',
   'managed-coding-v1',
   'managed-coding-v2',
+  'managed-coding-v3',
   'workhub-coordination-v1',
 ] as const;
 export type SessionToolProfile = (typeof SESSION_TOOL_PROFILES)[number];
 export type ManagedCodingSessionToolProfile = Extract<
   SessionToolProfile,
-  'managed-coding-v1' | 'managed-coding-v2'
+  'managed-coding-v1' | 'managed-coding-v2' | 'managed-coding-v3'
 >;
 
 export function isSessionToolProfile(value: unknown): value is SessionToolProfile {
@@ -224,7 +225,9 @@ export function isSessionToolProfile(value: unknown): value is SessionToolProfil
 export function isManagedCodingSessionToolProfile(
   value: unknown,
 ): value is ManagedCodingSessionToolProfile {
-  return value === 'managed-coding-v1' || value === 'managed-coding-v2';
+  return (
+    value === 'managed-coding-v1' || value === 'managed-coding-v2' || value === 'managed-coding-v3'
+  );
 }
 
 export interface SessionExternalOrigin {

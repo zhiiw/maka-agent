@@ -458,6 +458,13 @@ function requireManagedNodeTestExecutionRootInternal(
   return record;
 }
 
+export function readManagedObservationExecutionRootInternal(
+  lease: ManagedNodeTestExecutionRootLeaseInternal,
+): Readonly<{ inputRoot: string; scratchRoot: string }> {
+  const record = requireManagedNodeTestExecutionRootInternal(lease);
+  return Object.freeze({ inputRoot: record.inputRoot, scratchRoot: record.scratchRoot });
+}
+
 function samePath(left: string, right: string): boolean {
   return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }

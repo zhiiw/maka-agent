@@ -391,6 +391,114 @@ test('runs explicit dependency-free Node tests as one sandboxed root process', a
   }
 });
 
+test('runs one explicit accepted-tree Node entrypoint without PATH, network, or child authority', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-managed-node-run-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const inputRoot = join(root, 'input');
+  const scratchRoot = join(root, 'scratch');
+  await Promise.all([mkdir(join(inputRoot, 'scripts'), { recursive: true }), mkdir(scratchRoot)]);
+  await writeFile(
+    join(inputRoot, 'scripts', 'check.mjs'),
+    [
+      "import { writeFile } from 'node:fs/promises';",
+      "import { spawnSync } from 'node:child_process';",
+      "let inputWrite = 'allowed';",
+      "try { await writeFile(new URL('./tampered.txt', import.meta.url), 'bad'); } catch { inputWrite = 'blocked'; }",
+      "let child = 'allowed';",
+      "try { spawnSync(process.execPath, ['--version']); } catch { child = 'blocked'; }",
+      "await writeFile(process.env.TMP + '/scratch.txt', 'ok');",
+      'console.log(JSON.stringify({ argv: process.argv.slice(2), path: process.env.PATH, inputWrite, child }));',
+      'process.exitCode = 7;',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  const executablePath = resolve(
+    process.cwd(),
+    'node_modules',
+    'electron',
+    'dist',
+    process.platform === 'win32' ? 'electron.exe' : 'electron',
+  );
+  const entrypointPath = resolve(
+    import.meta.dirname,
+    '..',
+    'server',
+    'managed-command-helper-main.js',
+  );
+  const executable = await fileIdentity(executablePath);
+  const entrypoint = await fileIdentity(entrypointPath);
+  const releaseOwnerToken = {};
+  const invocationOwnerToken = {};
+  const capability = await admitManagedToolchainArtifactInternal({
+    releaseOwnerToken,
+    invocationOwnerToken,
+    claim: issueManagedToolchainReleaseClaimInternal(releaseOwnerToken, {
+      executablePath,
+      executableSha256: executable.sha256,
+      executableBytes: executable.bytes,
+      entrypointPath,
+      entrypointSha256: entrypoint.sha256,
+      entrypointBytes: entrypoint.bytes,
+      nodeVersion: '24.18.1',
+      platform: process.platform,
+      arch: process.arch,
+      profileVersion: 1,
+      allowedEffectClasses: ['hermetic_observation_v3'],
+    }),
+  });
+  let transformedRequest: SandboxTransformRequest | undefined;
+  const owner = createManagedCommandSandboxOwnerInternal({
+    invocationOwnerToken,
+    dependencyLeaseConsumerOwnerToken: {},
+    toolchainCapability: capability,
+    sandboxManager: {
+      transform(request): SandboxTransformResult {
+        transformedRequest = request;
+        return {
+          ok: true,
+          exec: {
+            argv: [request.command.program, ...request.command.args],
+            cwd: request.command.cwd,
+            env: request.command.env,
+            sandboxType: 'windows',
+            effectiveProfile: request.command.profile,
+          },
+          sandboxType: 'windows',
+          requiresSandbox: true,
+          preference: 'require',
+        };
+      },
+    },
+  });
+
+  const result = await owner.runNodeEntrypoint!({
+    inputRoot,
+    scratchRoot,
+    entryPath: 'scripts/check.mjs',
+    args: ['--check', 'src/index.js'],
+  });
+  assert.equal(result.protocolVersion, 1);
+  assert.equal(result.kind, 'node_command_observation');
+  assert.equal(result.entry.relativePath, 'scripts/check.mjs');
+  assert.equal(result.exitCode, 7);
+  assert.equal(result.stderr, '');
+  assert.deepEqual(JSON.parse(result.stdout.trim()), {
+    argv: ['--check', 'src/index.js'],
+    path: '',
+    inputWrite: 'blocked',
+    child: 'blocked',
+  });
+  assert.equal(
+    transformedRequest?.command.profile.type === 'managed'
+      ? transformedRequest.command.profile.network.kind
+      : undefined,
+    'restricted',
+  );
+  assert.equal(await stat(join(scratchRoot, 'scratch.txt')).then((value) => value.size), 2);
+  await assert.rejects(stat(join(inputRoot, 'scripts', 'tampered.txt')));
+});
+
 async function fileIdentity(path: string) {
   const digest = createHash('sha256');
   for await (const chunk of createReadStream(path)) digest.update(chunk);
