@@ -173,6 +173,9 @@ function registerDependencyResolution(dependencyRoot: string): void {
 }
 
 function isBarePackageSpecifier(specifier: string): boolean {
+  if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('\\')) {
+    return false;
+  }
   return /^(?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+(?:\/[^\\]*)?$/u.test(specifier);
 }
 async function observeFile(relativePath: string): Promise<{

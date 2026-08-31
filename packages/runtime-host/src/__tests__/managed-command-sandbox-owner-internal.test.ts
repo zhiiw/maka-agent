@@ -400,7 +400,11 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
   });
   const inputRoot = join(root, 'input');
   const scratchRoot = join(root, 'scratch');
-  await Promise.all([mkdir(join(inputRoot, 'scripts'), { recursive: true }), mkdir(scratchRoot)]);
+  await Promise.all([
+    mkdir(join(inputRoot, 'scripts'), { recursive: true }),
+    mkdir(join(inputRoot, 'src'), { recursive: true }),
+    mkdir(scratchRoot),
+  ]);
   const dependencySourceRoot = join(root, 'dependency-source', 'node_modules');
   await mkdir(join(dependencySourceRoot, 'fixture-dependency'), { recursive: true });
   await writeFile(
@@ -413,10 +417,12 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
     'export const answer = 42;\n',
     'utf8',
   );
+  await writeFile(join(inputRoot, 'src', 'local.js'), 'export const local = 8;\n', 'utf8');
   await writeFile(
     join(inputRoot, 'scripts', 'check.mjs'),
     [
       "import { answer } from 'fixture-dependency';",
+      "import { local } from '../src/local.js';",
       "import { writeFile } from 'node:fs/promises';",
       "import { spawnSync } from 'node:child_process';",
       "let inputWrite = 'allowed';",
@@ -424,7 +430,7 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
       "let child = 'allowed';",
       "try { spawnSync(process.execPath, ['--version']); } catch { child = 'blocked'; }",
       "await writeFile(process.env.TMP + '/scratch.txt', 'ok');",
-      'console.log(JSON.stringify({ argv: process.argv.slice(2), path: process.env.PATH, inputWrite, child, answer }));',
+      'console.log(JSON.stringify({ argv: process.argv.slice(2), path: process.env.PATH, inputWrite, child, answer, local }));',
       'process.exitCode = 7;',
       '',
     ].join('\n'),
@@ -524,6 +530,7 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
     inputWrite: 'blocked',
     child: 'blocked',
     answer: 42,
+    local: 8,
   });
   assert.equal(
     transformedRequest?.command.profile.type === 'managed'
