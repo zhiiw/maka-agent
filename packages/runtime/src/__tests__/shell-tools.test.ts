@@ -163,6 +163,7 @@ describe('Bash tool shell is threaded through to execution, not just the descrip
       runBackgroundBash: () => Promise.reject(new Error('not used')),
     };
     const tool = buildManagedBashTool(controller);
+    assert.equal(tool.recoveryMode, 'reattach');
 
     await tool.impl(
       { command: 'true' },
