@@ -20,7 +20,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, realpath } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST } from '@maka/core/runtime-event';
+import { MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST } from '@maka/core/runtime-event';
 import type { ManagedWorkspaceContinuationBoundaryV1 } from '@maka/core/runtime-boundary';
 import {
   WORKSPACE_MATERIALIZATION_SEMANTICS_V1,
@@ -100,8 +100,14 @@ import {
 } from './resumable-workspace-source-admission-internal.js';
 import type {
   ManagedNodeTestAcceptedBoundaryInternal,
+  ManagedNodeTestExecutionRootOwnerInternal,
   ManagedNodeTestSourceOwnerInternal,
 } from './managed-node-test-admission-owner-internal.js';
+import type { ManagedCommandSandboxOwnerInternal } from './managed-command-sandbox-owner-internal.js';
+import {
+  createManagedNodeTransformOwnerInternal,
+  type ManagedNodeTransformOwnerInternal,
+} from './managed-node-transform-admission-owner-internal.js';
 
 const MANAGED_REPOSITORY_DIRECTORY = 'gitoxide-managed-repositories';
 const ACCEPTED_REF = 'refs/maka/accepted';
@@ -119,6 +125,7 @@ export interface GitoxideManagedSessionOwnerInternal {
   readonly workspaceEpochId: string;
   readonly inspection: GitoxideManagedInspectionOwnerInternal;
   readonly nodeTestSource: ManagedNodeTestSourceOwnerInternal;
+  readonly nodeTransform: ManagedNodeTransformOwnerInternal | undefined;
   readonly publish: GitoxideManagedPublishOwnerInternal;
   readonly sourceBranchPublish: GitoxideManagedSourceBranchPublishOwnerInternal | undefined;
   readonly review: GitoxideManagedReviewOwnerInternal;
@@ -215,7 +222,7 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
   const boundary = await authority.readContinuationBoundary(
     identity.workspaceId,
     identity.workspaceEpochId,
-    MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+    MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
   );
   if (!boundary) return undefined;
   if (
@@ -301,6 +308,10 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
   readonly sessionId: string;
   readonly workspaceEpochSeed?: string;
   readonly abortSignal?: AbortSignal;
+  readonly managedNodeTransform?: Readonly<{
+    executionRootOwner: ManagedNodeTestExecutionRootOwnerInternal;
+    commandOwner: ManagedCommandSandboxOwnerInternal;
+  }>;
   readonly failpoint?: (point: GitoxideManagedSessionOwnerFailpoint) => void | Promise<void>;
 }): Promise<GitoxideManagedSessionOwnerInternal> {
   input.abortSignal?.throwIfAborted();
@@ -377,7 +388,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
   );
   const policyHash = workspaceMutationPolicyHashV1(
     materializationProfileDigest,
-    MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+    MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
   );
   const baselineOwnerToken = {};
   const verifiedBaselines = new WeakMap<object, WorkspaceBaselineAuthorityInput>();
@@ -543,16 +554,6 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     await baselineAuthority.commitBaseline(imported.proof);
   }
 
-  const writeEdit = createGitoxideManagedWriteEditOwnerInternal({
-    storageRootLease: input.storageRootLease,
-    stores: input.stores,
-    invocationOwnerToken: input.invocationOwnerToken,
-    helperCapability: input.helperCapability,
-    repositoryPath,
-    workspaceId: identity.workspaceId,
-    workspaceEpochId: identity.workspaceEpochId,
-    workspaceInstanceId: identity.workspaceInstanceId,
-  });
   const inspection = createGitoxideManagedInspectionOwnerInternal({
     invocationOwnerToken: input.invocationOwnerToken,
     helperCapability: input.helperCapability,
@@ -671,6 +672,24 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
         acceptedTreeOid: materialized.acceptedTreeOid,
       });
     },
+  });
+  const nodeTransform = input.managedNodeTransform
+    ? createManagedNodeTransformOwnerInternal({
+        executionRootOwner: input.managedNodeTransform.executionRootOwner,
+        sourceOwner: nodeTestSource,
+        commandOwner: input.managedNodeTransform.commandOwner,
+      })
+    : undefined;
+  const writeEdit = createGitoxideManagedWriteEditOwnerInternal({
+    storageRootLease: input.storageRootLease,
+    stores: input.stores,
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    repositoryPath,
+    workspaceId: identity.workspaceId,
+    workspaceEpochId: identity.workspaceEpochId,
+    workspaceInstanceId: identity.workspaceInstanceId,
+    ...(nodeTransform ? { managedNodeTransform: nodeTransform.admission } : {}),
   });
   const review = createGitoxideManagedReviewOwnerInternal({
     invocationOwnerToken: input.invocationOwnerToken,
@@ -943,6 +962,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     workspaceEpochId: identity.workspaceEpochId,
     inspection,
     nodeTestSource,
+    nodeTransform,
     publish,
     sourceBranchPublish,
     review,

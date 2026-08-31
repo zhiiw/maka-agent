@@ -26,7 +26,7 @@ Read / Glob / Grep / Write / Edit / ManagedNodeTest
 ```
 
 - Read/Glob/Grep：`replay_safe`，读取 accepted tree；
-- Write/Edit：`reconcile + managed_mutation_v1`；
+- Write/Edit：`reconcile + managed_mutation_v2`；
 - ManagedNodeTest：`replay_safe + managed_observation_v2`；dependency 输入只能是显式 `none` 或 owner-bound
   immutable snapshot lease，禁止从 checkout `node_modules` 回退；
 - Bash、npm、package script、PATH executable 与 attached checkout 均不在 profile 内。

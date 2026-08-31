@@ -181,7 +181,7 @@ test('the managed coding profile reads and mutates only the accepted Git tree', 
   }
   for (const tool of selected.slice(3)) {
     assert.equal(tool.recoveryMode, 'reconcile');
-    assert.equal(tool.durableExecutionProfile, 'managed_mutation_v1');
+    assert.equal(tool.durableExecutionProfile, 'managed_mutation_v2');
   }
 });
 

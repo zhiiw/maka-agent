@@ -290,6 +290,40 @@ describe('workspace version persistence authority', () => {
     });
   });
 
+  it('rebuilds one managed Node transform reservation from its immutable v3 T1', async () => {
+    await withDatabase(async ({ dbPath, store }) => {
+      const baseline = baselineInput();
+      const opened = await commitWorkspaceBaselineInternal(store, baseline);
+      const prepared = managedTransformPreparedCommit(
+        baseline,
+        opened.head,
+        'operation-transform-reservation-1',
+      );
+      await store.commitToolPrepared(prepared);
+      assert.equal(
+        (await readActiveManagedMutationInternal(store, baseline.epoch.workspaceInstanceId))
+          ?.operationId,
+        prepared.operationId,
+      );
+      const raw = new DatabaseSync(dbPath);
+      try {
+        raw.exec('DELETE FROM runtime_managed_mutation_reservations');
+      } finally {
+        raw.close();
+      }
+      await assert.rejects(
+        store.readWorkspaceHead(baseline.epoch.workspaceId, baseline.epoch.workspaceEpochId),
+        /mutation reservation projection is incomplete/i,
+      );
+      await store.rebuildWorkspaceVersionProjections();
+      assert.equal(
+        (await readActiveManagedMutationInternal(store, baseline.epoch.workspaceInstanceId))
+          ?.operationId,
+        prepared.operationId,
+      );
+    });
+  });
+
   it('rejects a managed T1 whose authorized path differs from the durable tool call', async () => {
     await withDatabase(async ({ store }) => {
       const baseline = baselineInput();
@@ -556,7 +590,7 @@ describe('workspace version persistence authority', () => {
           changedFileCount: 1,
           deletedFileCount: 0,
           executionProfileDigest:
-            'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825',
+            'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92',
         },
         origin: {
           restoreId: 'restore-history-1',
@@ -1270,7 +1304,7 @@ async function prepareSuccessorCommit(
             expectedPath: 'notes.txt',
             pathPolicyVersion: 3 as const,
             executionProfileDigest:
-              'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825' as const,
+              'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
           },
         },
       },
@@ -1303,7 +1337,7 @@ async function prepareSuccessorCommit(
       changedFileCount: 1,
       deletedFileCount: 0,
       executionProfileDigest:
-        'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825' as const,
+        'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
     },
     origin: {
       operationId,
@@ -1400,7 +1434,7 @@ function managedPreparedCommit(
             expectedPath: 'notes.txt',
             pathPolicyVersion: 3 as const,
             executionProfileDigest:
-              'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825' as const,
+              'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
           },
         },
       },
@@ -1408,6 +1442,94 @@ function managedPreparedCommit(
     },
     providerToolCallId: toolCallId,
     toolName: 'Write',
+    canonicalArgsHash: argsHash,
+    recoveryMode: 'reconcile' as const,
+    committedAt: baseline.committedAt + 1,
+  };
+}
+
+function managedTransformPreparedCommit(
+  baseline: WorkspaceBaselineAuthorityInput,
+  head: Awaited<ReturnType<typeof commitWorkspaceBaselineInternal>>['head'],
+  operationId: string,
+) {
+  const toolCallId = `${operationId}-call`;
+  const args = {
+    entryPath: 'scripts/generate.mjs',
+    path: 'generated/output.txt',
+    args: ['stable'],
+  };
+  const argsHash = canonicalToolArgsHash('ManagedNodeTransform', args);
+  const identity = {
+    sessionId: 'session-managed-transform-reservation',
+    invocationId: `invocation-${operationId}`,
+    runId: `run-${operationId}`,
+    turnId: `turn-${operationId}`,
+  };
+  return {
+    operationId,
+    journalEventId: `${operationId}_prepared`,
+    runtimeEvent: {
+      id: `${operationId}-call-event`,
+      ...identity,
+      ts: baseline.committedAt + 1,
+      partial: false,
+      role: 'model' as const,
+      author: 'agent' as const,
+      content: {
+        kind: 'function_call' as const,
+        id: toolCallId,
+        name: 'ManagedNodeTransform',
+        args,
+      },
+      refs: { operationId, toolCallId },
+    },
+    dispatchRuntimeEvent: {
+      id: `${operationId}-dispatch-event`,
+      ...identity,
+      ts: baseline.committedAt + 1,
+      partial: false,
+      role: 'system' as const,
+      author: 'system' as const,
+      actions: {
+        toolDispatch: {
+          protocol: 't1_after_preflight_v1' as const,
+          operationId,
+          providerToolCallId: toolCallId,
+          toolName: 'ManagedNodeTransform',
+          canonicalArgsHash: argsHash,
+          recoveryMode: 'reconcile' as const,
+          managedMutation: {
+            protocol: 'managed_mutation_v3' as const,
+            repositoryId: baseline.epoch.repositoryId,
+            workspaceId: baseline.epoch.workspaceId,
+            workspaceEpochId: baseline.epoch.workspaceEpochId,
+            workspaceInstanceId: baseline.epoch.workspaceInstanceId,
+            objectFormat: 'sha1' as const,
+            baseWorkspaceVersionId: head.workspaceVersionId,
+            baseAcceptedEventId: head.acceptedEventId,
+            baseHeadRevision: head.revision,
+            baseCommitOid: head.commitOid,
+            baseTreeOid: head.treeOid,
+            expectedPath: 'generated/output.txt',
+            pathPolicyVersion: 3 as const,
+            operationKind: 'node_transform_v1' as const,
+            executionProfileDigest:
+              'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
+            toolchainIdentityDigest: `sha256:${'3'.repeat(64)}` as const,
+            entry: {
+              relativePath: 'scripts/generate.mjs',
+              bytes: 123,
+              sha256: `sha256:${'4'.repeat(64)}` as const,
+            },
+            args: ['stable'],
+          },
+        },
+      },
+      refs: { operationId, toolCallId },
+    },
+    providerToolCallId: toolCallId,
+    toolName: 'ManagedNodeTransform',
     canonicalArgsHash: argsHash,
     recoveryMode: 'reconcile' as const,
     committedAt: baseline.committedAt + 1,

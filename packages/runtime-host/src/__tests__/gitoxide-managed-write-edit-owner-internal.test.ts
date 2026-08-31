@@ -25,7 +25,7 @@ import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after, type TestContext } from 'node:test';
-import { MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST } from '@maka/core/runtime-event';
+import { MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST } from '@maka/core/runtime-event';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import { WORKSPACE_MATERIALIZATION_SEMANTICS_V1 } from '@maka/core/workspace-version-authority';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
@@ -222,7 +222,7 @@ test('does not report a current projection while a durable mutation reservation 
               baseTreeOid: treeOid,
               expectedPath: args.path,
               pathPolicyVersion: 3,
-              executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+              executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
             },
           },
         },

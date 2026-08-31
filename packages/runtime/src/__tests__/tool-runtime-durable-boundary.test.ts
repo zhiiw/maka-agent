@@ -568,7 +568,7 @@ describe('ToolRuntime durable boundary', () => {
     };
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     assert.deepEqual(await harness.execute(managedTool), { ok: true });
     assert.deepEqual(order, [
@@ -583,6 +583,78 @@ describe('ToolRuntime durable boundary', () => {
     assert.deepEqual(
       prepared[0]?.dispatchRuntimeEvent.actions?.toolDispatch?.managedMutation,
       managedMutationDispatch(),
+    );
+  });
+
+  it('adopts one owner-committed managed Node transform without invoking generic T2', async () => {
+    const prepared: ToolPreparedCommit[] = [];
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async (input) => {
+          prepared.push(input);
+          return { created: true, runtimeEventSeq: 1 };
+        },
+        commitToolOutcome: async () => {
+          throw new Error('generic T2 must not settle a managed Node transform');
+        },
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedMutation: async (input) => {
+          assert.equal(input.toolName, 'ManagedNodeTransform');
+          assert.deepEqual(input.persistedArgs, {
+            entryPath: 'scripts/generate.mjs',
+            path: 'generated/output.txt',
+            args: ['stable'],
+          });
+          return {
+            durableDispatch: managedMutationDispatchV3(),
+            execute: async (operation) => {
+              const proof = await operation();
+              assert.deepEqual(proof.mutationResult, {
+                path: 'generated/output.txt',
+                content: 'generated\n',
+                changed: true,
+              });
+              assert.equal(proof.durableOutcome.content?.kind, 'function_response');
+              assert.equal(proof.durableOutcome.content?.name, 'ManagedNodeTransform');
+              return {
+                kind: 'workspace_successor_committed',
+                durableOutcome: proof.durableOutcome,
+              };
+            },
+            dispose: async () => undefined,
+          };
+        },
+      },
+    );
+    const managedTool = tool(() => {
+      throw new Error('ordinary mutable implementation must not run');
+    });
+    managedTool.name = 'ManagedNodeTransform';
+    managedTool.recoveryMode = 'reconcile';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
+    managedTool.managedWorkspaceTransform = async () => ({
+      result: { ok: true, path: 'generated/output.txt' },
+      mutationResult: {
+        path: 'generated/output.txt',
+        content: 'generated\n',
+        changed: true,
+      },
+    });
+
+    assert.deepEqual(
+      await harness.executeWithInput(managedTool, {
+        entryPath: 'scripts/generate.mjs',
+        path: 'generated/output.txt',
+        args: ['stable'],
+      }),
+      { ok: true, path: 'generated/output.txt' },
+    );
+    assert.deepEqual(
+      prepared[0]?.dispatchRuntimeEvent.actions?.toolDispatch?.managedMutation,
+      managedMutationDispatchV3(),
     );
   });
 
@@ -621,7 +693,7 @@ describe('ToolRuntime durable boundary', () => {
     });
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     await harness.executeWithInput(managedTool, { path: 'notes.txt', content: 'after\n' });
     assert.ok(observedOutcome);
@@ -674,7 +746,7 @@ describe('ToolRuntime durable boundary', () => {
     });
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     const result = await harness.executeWithInput(managedTool, {
       path: 'notes.txt',
@@ -729,7 +801,7 @@ describe('ToolRuntime durable boundary', () => {
     });
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
     managedTool.managedMutationTransform = () => {
       throw new Error('Host-owned immutable base must select the Runtime transform');
     };
@@ -781,7 +853,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ ok: true }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     assert.deepEqual(await harness.execute(managedTool), { ok: true });
   });
@@ -809,7 +881,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ ok: true }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     await assert.rejects(harness.execute(managedTool), /candidate state is unknown/i);
     assert.equal(genericOutcomeCalls, 0);
@@ -846,7 +918,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ ok: true }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     await assert.rejects(harness.execute(managedTool), /owner settlement channel failed/i);
     assert.equal(genericOutcomeCalls, 0);
@@ -881,7 +953,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ ok: true }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     await assert.rejects(harness.execute(managedTool), /durable outcome/i);
     assert.equal(genericOutcomeCalls, 0);
@@ -934,7 +1006,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ source: 'runtime-original' }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     await assert.rejects(harness.execute(managedTool), /mismatched durable outcome/i);
     assert.equal(genericOutcomeCalls, 0);
@@ -979,7 +1051,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => mutableResult);
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     const result = await harness.execute(managedTool);
     const storedResult = appendedMessages.find((message) => message.type === 'tool_result');
@@ -1032,7 +1104,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => resultWithProtoKey);
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     const result = (await harness.execute(managedTool)) as Record<string, unknown>;
 
@@ -1072,7 +1144,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ error: 'candidate was safely discarded' }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     assert.deepEqual(await harness.execute(managedTool), {
       error: 'candidate was safely discarded',
@@ -1114,7 +1186,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ ignored: true }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     assert.deepEqual(
       await harness.executeWithInput(managedTool, { path: 'notes.txt', content: 'same' }),
@@ -1160,7 +1232,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ error: 'runtime-owned-A' }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     const result = await harness.execute(managedTool);
     const storedResult = appendedMessages.find((message) => message.type === 'tool_result');
@@ -1208,7 +1280,7 @@ describe('ToolRuntime durable boundary', () => {
     });
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     assert.deepEqual(await harness.execute(managedTool), {
       error: 'candidate was safely discarded',
@@ -1257,7 +1329,7 @@ describe('ToolRuntime durable boundary', () => {
     });
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     const execution = harness.execute(managedTool);
     const settledBeforeRelease = await Promise.race([
@@ -1308,7 +1380,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ ok: true }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     await assert.rejects(harness.execute(managedTool), /mismatched durable outcome/i);
     assert.equal(
@@ -1349,7 +1421,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => oversizedResult);
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     await assert.rejects(
       harness.executeNested(managedTool, 32),
@@ -1380,7 +1452,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ payload: 'x'.repeat(1024 * 1024 + 1) }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     await assert.rejects(harness.execute(managedTool), /tool result byte limit exceeded/i);
   });
@@ -1408,7 +1480,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => result);
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     await assert.rejects(harness.execute(managedTool), /tool result byte limit exceeded/i);
   });
@@ -1442,7 +1514,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ ok: true, missing: undefined }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     await assert.rejects(harness.execute(managedTool), /strict JSON.*undefined/i);
     assert.equal(
@@ -1485,7 +1557,7 @@ describe('ToolRuntime durable boundary', () => {
       const managedTool = tool(() => makeResult());
       managedTool.name = 'Write';
       managedTool.recoveryMode = 'reconcile';
-      managedTool.durableExecutionProfile = 'managed_mutation_v1';
+      managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
       await assert.rejects(harness.execute(managedTool), expectedError);
       assert.equal(
@@ -1531,7 +1603,7 @@ describe('ToolRuntime durable boundary', () => {
     const managedTool = tool(() => ({ ok: true }));
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     await assert.rejects(harness.executeNested(managedTool), /mismatched durable outcome/i);
     assert.equal(
@@ -1556,7 +1628,7 @@ describe('ToolRuntime durable boundary', () => {
     });
     managedTool.name = 'Write';
     managedTool.recoveryMode = 'reconcile';
-    managedTool.durableExecutionProfile = 'managed_mutation_v1';
+    managedTool.durableExecutionProfile = 'managed_mutation_v2';
 
     assert.deepEqual(await harness.execute(managedTool), {
       error: 'Managed workspace mutation admission is unavailable before T1',
@@ -2094,7 +2166,35 @@ function managedMutationDispatch(expectedPath = 'notes.txt') {
     expectedPath,
     pathPolicyVersion: 3 as const,
     executionProfileDigest:
-      'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825' as const,
+      'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
+  };
+}
+
+function managedMutationDispatchV3() {
+  return {
+    protocol: 'managed_mutation_v3' as const,
+    repositoryId: 'repository_11111111111111111111111111111111',
+    workspaceId: 'workspace_22222222222222222222222222222222',
+    workspaceEpochId: 'epoch_33333333333333333333333333333333',
+    workspaceInstanceId: 'instance_44444444444444444444444444444444',
+    objectFormat: 'sha1' as const,
+    baseWorkspaceVersionId: 'version_55555555555555555555555555555555',
+    baseAcceptedEventId: 'baseline-event-1',
+    baseHeadRevision: 1,
+    baseCommitOid: '1'.repeat(40),
+    baseTreeOid: '2'.repeat(40),
+    expectedPath: 'generated/output.txt',
+    pathPolicyVersion: 3 as const,
+    operationKind: 'node_transform_v1' as const,
+    executionProfileDigest:
+      'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
+    toolchainIdentityDigest: `sha256:${'3'.repeat(64)}` as const,
+    entry: {
+      relativePath: 'scripts/generate.mjs',
+      bytes: 123,
+      sha256: `sha256:${'4'.repeat(64)}` as const,
+    },
+    args: ['stable'],
   };
 }
 

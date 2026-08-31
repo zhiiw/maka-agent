@@ -69,15 +69,15 @@ import {
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V3_DIGEST,
-  MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
-  MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC,
+  MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
+  MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC,
   TOOL_BOUNDARY_PROTOCOL_V1,
   type RuntimeEvent,
   type RuntimeEventManagedWorkspaceObservation,
   type RuntimeEventManagedWorkspaceObservationV1,
   type RuntimeEventManagedWorkspaceObservationV2,
   type RuntimeEventManagedWorkspaceObservationV3,
-  type RuntimeEventManagedWorkspaceMutationV2,
+  type RuntimeEventManagedWorkspaceMutation,
 } from '@maka/core/runtime-event';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -182,7 +182,7 @@ export interface MakaTool<P = any, R = unknown> {
   recoveryMode?: ToolRecoveryMode;
   /** Durable execution profile selected by the Host before T1. */
   durableExecutionProfile?:
-    | 'managed_mutation_v1'
+    | 'managed_mutation_v2'
     | 'managed_observation_v1'
     | 'managed_observation_v2'
     | 'managed_observation_v3';
@@ -191,6 +191,13 @@ export interface MakaTool<P = any, R = unknown> {
    * frozen arguments and must not read or mutate the live workspace.
    */
   managedMutationTransform?: (args: P) => Promise<R> | R;
+  /** Sandboxed transform whose only durable effect is one owner-verified output file. */
+  managedWorkspaceTransform?: (
+    args: P,
+    ctx: MakaToolContext,
+  ) =>
+    | Promise<Readonly<{ result: R; mutationResult: RuntimeManagedMutationResultProof }>>
+    | Readonly<{ result: R; mutationResult: RuntimeManagedMutationResultProof }>;
   /** Accepted-world observation implementation; roots are issued by its admission owner. */
   managedObservationImpl?: (
     args: P,
@@ -484,7 +491,7 @@ export type RuntimeManagedMutationSettlement =
   | { readonly kind: 'unsettled'; readonly error: unknown };
 
 export interface RuntimeManagedMutationAdmission {
-  readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceMutationV2>;
+  readonly durableDispatch: Readonly<RuntimeEventManagedWorkspaceMutation>;
   /** Immutable accepted-tree input. It grants no permission to rewrite tool arguments. */
   readonly immutableBase?: Readonly<{ content: string | null }>;
   execute(
@@ -1431,9 +1438,11 @@ export class ToolRuntime {
 
     let managedMutationAdmission: RuntimeManagedMutationAdmission | undefined;
     let managedObservationAdmission: RuntimeManagedObservationAdmission | undefined;
-    if (tool.durableExecutionProfile === 'managed_mutation_v1') {
+    if (tool.durableExecutionProfile === 'managed_mutation_v2') {
+      const mutationToolMatches =
+        tool.name === 'Write' || tool.name === 'Edit' || tool.name === 'ManagedNodeTransform';
       if (
-        (tool.name !== 'Write' && tool.name !== 'Edit') ||
+        !mutationToolMatches ||
         tool.recoveryMode !== 'reconcile' ||
         !dispatchOperationId ||
         !this.input.runtimeCommitSink ||
@@ -1459,7 +1468,11 @@ export class ToolRuntime {
         ) {
           throw new Error('Managed workspace mutation immutable base is invalid');
         }
-        if (!managedMutationAdmission.immutableBase && !tool.managedMutationTransform) {
+        if (
+          !managedMutationAdmission.immutableBase &&
+          !tool.managedMutationTransform &&
+          !tool.managedWorkspaceTransform
+        ) {
           throw new Error('Managed workspace mutation has no immutable transform input');
         }
       } catch (error) {
@@ -1687,6 +1700,25 @@ export class ToolRuntime {
             } catch (error) {
               rawResult = this.errorReturn(formatSyntheticToolErrorText(error));
             }
+          } else if (immutableSnapshot && tool.managedWorkspaceTransform) {
+            const transformed = await tool.managedWorkspaceTransform(
+              structuredClone(executionArgs) as never,
+              toolContext,
+            );
+            if (
+              typeof transformed.mutationResult.content !== 'string' ||
+              transformed.mutationResult.path !==
+                managedMutationAdmission?.durableDispatch.expectedPath ||
+              Buffer.byteLength(transformed.mutationResult.content, 'utf8') > 1_048_576
+            ) {
+              throw new Error('Managed workspace transform output proof is invalid');
+            }
+            rawResult = transformed.result;
+            mutationResult = Object.freeze({
+              path: transformed.mutationResult.path,
+              content: transformed.mutationResult.content,
+              changed: transformed.mutationResult.changed,
+            });
           } else {
             rawResult = await (immutableSnapshot
               ? tool.managedMutationTransform!(structuredClone(executionArgs) as never)
@@ -2251,7 +2283,7 @@ export class ToolRuntime {
     /** The projection the model replays as its own call. */
     modelFacingArgs: unknown;
     abortSignal: AbortSignal;
-    managedMutation?: Readonly<RuntimeEventManagedWorkspaceMutationV2>;
+    managedMutation?: Readonly<RuntimeEventManagedWorkspaceMutation>;
     managedObservation?: Readonly<RuntimeEventManagedWorkspaceObservation>;
     invocationId?: string;
     runId?: string;
@@ -2355,19 +2387,12 @@ export class ToolRuntime {
     try {
       if (input.managedMutation) {
         decodeRuntimeEvent(dispatchEvent);
-        const persistedPath =
-          input.persistedArgs &&
-          typeof input.persistedArgs === 'object' &&
-          !Array.isArray(input.persistedArgs)
-            ? (input.persistedArgs as { path?: unknown }).path
-            : undefined;
         if (
-          (input.tool.name !== 'Write' && input.tool.name !== 'Edit') ||
-          typeof persistedPath !== 'string' ||
-          input.managedMutation.expectedPath !== persistedPath ||
-          input.managedMutation.pathPolicyVersion !== 3 ||
-          input.managedMutation.executionProfileDigest !==
-            MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST
+          !managedMutationDispatchMatchesToolCall(
+            input.tool,
+            input.persistedArgs,
+            input.managedMutation,
+          )
         ) {
           throw new Error('Managed mutation admission does not match the durable tool call');
         }
@@ -3319,6 +3344,39 @@ function loopGateArgsKey(args: unknown, callId: string): string {
   }
 }
 
+function managedMutationDispatchMatchesToolCall(
+  tool: MakaTool,
+  persistedArgs: unknown,
+  mutation: RuntimeEventManagedWorkspaceMutation,
+): boolean {
+  if (!persistedArgs || typeof persistedArgs !== 'object' || Array.isArray(persistedArgs)) {
+    return false;
+  }
+  const args = persistedArgs as Record<string, unknown>;
+  if (
+    typeof args.path !== 'string' ||
+    mutation.expectedPath !== args.path ||
+    mutation.pathPolicyVersion !== 3
+  ) {
+    return false;
+  }
+  if (mutation.protocol === 'managed_mutation_v2') {
+    return (
+      tool.durableExecutionProfile === 'managed_mutation_v2' &&
+      (tool.name === 'Write' || tool.name === 'Edit') &&
+      mutation.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST
+    );
+  }
+  return (
+    tool.durableExecutionProfile === 'managed_mutation_v2' &&
+    tool.name === 'ManagedNodeTransform' &&
+    mutation.operationKind === 'node_transform_v1' &&
+    mutation.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST &&
+    args.entryPath === mutation.entry.relativePath &&
+    isDeepStrictEqual(args.args ?? [], mutation.args)
+  );
+}
+
 function computerUseSemanticSignature(args: unknown): string | undefined {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return undefined;
   const record = args as Record<string, unknown>;
@@ -3614,13 +3672,13 @@ function coerceResultContent(raw: unknown): ToolResultContent {
  * The walk stops at the first over-budget token and never retains a mutable
  * tool/owner-owned object alias.
  */
-const MANAGED_RESULT_MAX_BYTES = MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC.resultSnapshot.maxBytes;
-const MANAGED_RESULT_MAX_DEPTH = MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC.resultSnapshot.maxDepth;
-const MANAGED_RESULT_MAX_NODES = MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC.resultSnapshot.maxNodes;
+const MANAGED_RESULT_MAX_BYTES = MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC.resultSnapshot.maxBytes;
+const MANAGED_RESULT_MAX_DEPTH = MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC.resultSnapshot.maxDepth;
+const MANAGED_RESULT_MAX_NODES = MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC.resultSnapshot.maxNodes;
 const MANAGED_RESULT_MAX_PROPERTIES =
-  MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC.resultSnapshot.maxProperties;
+  MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC.resultSnapshot.maxProperties;
 const MANAGED_RESULT_MAX_ARRAY_LENGTH =
-  MANAGED_MUTATION_EXECUTION_PROFILE_V1_SPEC.resultSnapshot.maxArrayLength;
+  MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC.resultSnapshot.maxArrayLength;
 
 function snapshotManagedToolResult(value: unknown, maxBytes: number | undefined): unknown {
   const budget: ManagedResultSnapshotBudget = {

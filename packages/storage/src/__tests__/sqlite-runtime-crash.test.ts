@@ -623,7 +623,7 @@ function workspaceSuccessorPreparedCommit(operationId = 'workspace-successor-ope
             expectedPath: 'notes.txt',
             pathPolicyVersion: 3 as const,
             executionProfileDigest:
-              'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825' as const,
+              'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
           },
         },
       },
@@ -661,7 +661,7 @@ function workspaceSuccessorCommit(): WorkspaceSuccessorCommitInput {
       changedFileCount: 1,
       deletedFileCount: 0,
       executionProfileDigest:
-        'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825' as const,
+        'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
     },
     origin: {
       operationId: 'workspace-successor-operation',

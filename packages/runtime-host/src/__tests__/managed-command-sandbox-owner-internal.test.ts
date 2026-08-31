@@ -20,7 +20,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -497,6 +497,119 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
   );
   assert.equal(await stat(join(scratchRoot, 'scratch.txt')).then((value) => value.size), 2);
   await assert.rejects(stat(join(inputRoot, 'scripts', 'tampered.txt')));
+});
+
+test('runs one accepted-tree transform into the owner-selected single output file', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-managed-node-transform-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const inputRoot = join(root, 'input');
+  const scratchRoot = join(root, 'scratch');
+  await Promise.all([mkdir(join(inputRoot, 'scripts'), { recursive: true }), mkdir(scratchRoot)]);
+  await writeFile(join(inputRoot, 'source.txt'), 'accepted world\n', 'utf8');
+  await writeFile(
+    join(inputRoot, 'scripts', 'generate.mjs'),
+    [
+      "import { readFile, writeFile } from 'node:fs/promises';",
+      "import { spawnSync } from 'node:child_process';",
+      "const source = await readFile(new URL('../source.txt', import.meta.url), 'utf8');",
+      "let inputWrite = 'allowed';",
+      "try { await writeFile(new URL('../tampered.txt', import.meta.url), 'bad'); } catch { inputWrite = 'blocked'; }",
+      "let child = 'allowed';",
+      "try { spawnSync(process.execPath, ['--version']); } catch { child = 'blocked'; }",
+      'await writeFile(process.env.MAKA_OUTPUT_PATH, `${source.trim()}|${process.argv[2]}|${inputWrite}|${child}\\n`);',
+      "console.log('generated one bounded output');",
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  const executablePath = resolve(
+    process.cwd(),
+    'node_modules',
+    'electron',
+    'dist',
+    process.platform === 'win32' ? 'electron.exe' : 'electron',
+  );
+  const entrypointPath = resolve(
+    import.meta.dirname,
+    '..',
+    'server',
+    'managed-command-helper-main.js',
+  );
+  const executable = await fileIdentity(executablePath);
+  const entrypoint = await fileIdentity(entrypointPath);
+  const releaseOwnerToken = {};
+  const invocationOwnerToken = {};
+  const capability = await admitManagedToolchainArtifactInternal({
+    releaseOwnerToken,
+    invocationOwnerToken,
+    claim: issueManagedToolchainReleaseClaimInternal(releaseOwnerToken, {
+      executablePath,
+      executableSha256: executable.sha256,
+      executableBytes: executable.bytes,
+      entrypointPath,
+      entrypointSha256: entrypoint.sha256,
+      entrypointBytes: entrypoint.bytes,
+      nodeVersion: '24.18.1',
+      platform: process.platform,
+      arch: process.arch,
+      profileVersion: 1,
+      allowedEffectClasses: ['hermetic_observation_v3', 'workspace_transform_v1'],
+    }),
+  });
+  const transformedRequests: SandboxTransformRequest[] = [];
+  const owner = createManagedCommandSandboxOwnerInternal({
+    invocationOwnerToken,
+    dependencyLeaseConsumerOwnerToken: {},
+    toolchainCapability: capability,
+    sandboxManager: {
+      transform(request): SandboxTransformResult {
+        transformedRequests.push(request);
+        return {
+          ok: true,
+          exec: {
+            argv: [request.command.program, ...request.command.args],
+            cwd: request.command.cwd,
+            env: request.command.env,
+            sandboxType: 'windows',
+            effectiveProfile: request.command.profile,
+          },
+          sandboxType: 'windows',
+          requiresSandbox: true,
+          preference: 'require',
+        };
+      },
+    },
+  });
+
+  const result = await owner.runNodeTransform!({
+    inputRoot,
+    scratchRoot,
+    entryPath: 'scripts/generate.mjs',
+    outputPath: 'generated/output.txt',
+    args: ['stable'],
+  });
+  assert.equal(result.path, 'generated/output.txt');
+  assert.equal(result.content, 'accepted world|stable|blocked|blocked\n');
+  assert.equal(result.bytes, Buffer.byteLength(result.content));
+  assert.equal(
+    result.sha256,
+    `sha256:${createHash('sha256').update(result.content).digest('hex')}`,
+  );
+  assert.equal(result.stdout, 'generated one bounded output\n');
+  assert.equal(result.stderr, '');
+  assert.equal(
+    await stat(join(scratchRoot, 'maka-transform-output')).then((value) => value.size),
+    result.bytes,
+  );
+  await assert.rejects(stat(join(inputRoot, 'tampered.txt')), /ENOENT/u);
+  assert.equal(await readFile(join(inputRoot, 'source.txt'), 'utf8'), 'accepted world\n');
+  assert.ok(
+    transformedRequests.some(
+      (request) =>
+        request.command.env?.MAKA_OUTPUT_PATH === join(scratchRoot, 'maka-transform-output'),
+    ),
+  );
+  assert.ok(transformedRequests.every((request) => request.command.env?.PATH === ''));
 });
 
 async function fileIdentity(path: string) {

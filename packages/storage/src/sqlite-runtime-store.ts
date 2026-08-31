@@ -56,7 +56,7 @@ import {
   isTerminalRuntimeEvent,
   TOOL_BOUNDARY_PROTOCOL_V1,
   type RuntimeEvent,
-  type RuntimeEventManagedWorkspaceMutationV2,
+  type RuntimeEventManagedWorkspaceMutation,
   type ToolRecoveryMode,
 } from '@maka/core/runtime-event';
 import {
@@ -1492,10 +1492,9 @@ export class SqliteRuntimeStore
         operation.currentState !== 'prepared' ||
         operation.resultEventId !== undefined ||
         operation.dispatchEventId !== input.successor.origin.dispatchEventId ||
-        operation.recoveryMode !== 'reconcile' ||
-        (operation.toolName !== 'Write' && operation.toolName !== 'Edit')
+        operation.recoveryMode !== 'reconcile'
       ) {
-        throw new Error('Workspace successor requires one prepared Write/Edit reconcile operation');
+        throw new Error('Workspace successor requires one prepared managed reconcile operation');
       }
       if (!operation.dispatchEventId) {
         throw new Error('Workspace successor operation is missing its dispatch event');
@@ -1518,6 +1517,7 @@ export class SqliteRuntimeStore
         .get(operation.operationId) as ManagedMutationReservationProjectionRow | undefined;
       if (
         !mutation ||
+        !managedMutationMatchesToolName(operation.toolName, mutation) ||
         !reservation ||
         reservation.workspace_instance_id !== mutation.workspaceInstanceId ||
         reservation.repository_id !== mutation.repositoryId ||
@@ -1767,8 +1767,7 @@ export class SqliteRuntimeStore
         !operation.dispatchEventId ||
         operation.dispatchEventId !== terminal.dispatchEventId ||
         terminal.operationId !== operation.operationId ||
-        operation.recoveryMode !== 'reconcile' ||
-        (operation.toolName !== 'Write' && operation.toolName !== 'Edit')
+        operation.recoveryMode !== 'reconcile'
       ) {
         throw new Error('Managed mutation terminal requires its exact prepared operation');
       }
@@ -1777,7 +1776,11 @@ export class SqliteRuntimeStore
         ? decodeRuntimeEvent(JSON.parse(dispatchJson) as unknown)
         : undefined;
       const mutation = dispatchEvent?.actions?.toolDispatch?.managedMutation;
-      if (!mutation || mutation.workspaceInstanceId !== terminal.workspaceInstanceId) {
+      if (
+        !mutation ||
+        !managedMutationMatchesToolName(operation.toolName, mutation) ||
+        mutation.workspaceInstanceId !== terminal.workspaceInstanceId
+      ) {
         throw new Error('Managed mutation terminal requires its exact durable reservation');
       }
       const response = toolOutcome.runtimeEvent.content;
@@ -2278,7 +2281,7 @@ export class SqliteRuntimeStore
         !dispatch ||
         dispatch.operationId !== origin.operationId ||
         dispatch.recoveryMode !== 'reconcile' ||
-        (dispatch.toolName !== 'Write' && dispatch.toolName !== 'Edit') ||
+        !managedMutationMatchesToolName(dispatch.toolName, dispatch.managedMutation) ||
         !epoch ||
         !baseHead ||
         !managedMutationMatchesAcceptedSuccessor(
@@ -2328,7 +2331,7 @@ export class SqliteRuntimeStore
         !dispatchEvent ||
         dispatch.operationId !== operation.operationId ||
         dispatch.recoveryMode !== 'reconcile' ||
-        (dispatch.toolName !== 'Write' && dispatch.toolName !== 'Edit')
+        !managedMutationMatchesToolName(dispatch.toolName, mutation)
       ) {
         throw new Error(
           `Corrupt managed mutation reservation: identity_conflict at ${dispatchEvent?.id ?? operation.operationId}`,
@@ -2925,13 +2928,17 @@ export class SqliteRuntimeStore
         ? (callArgs as { path?: unknown }).path
         : undefined;
     if (
-      (input.toolName !== 'Write' && input.toolName !== 'Edit') ||
+      !managedMutationMatchesToolName(input.toolName, mutation) ||
       input.recoveryMode !== 'reconcile' ||
       input.dispatchRuntimeEvent.actions?.toolDispatch?.toolName !== input.toolName
     ) {
-      throw new Error('Managed mutation reservation requires a reconcile Write operation');
+      throw new Error('Managed mutation reservation requires a matching reconcile operation');
     }
-    if (typeof callPath !== 'string' || mutation.expectedPath !== callPath) {
+    if (
+      typeof callPath !== 'string' ||
+      mutation.expectedPath !== callPath ||
+      !managedMutationMatchesCallArgs(mutation, callArgs)
+    ) {
       throw new Error('Managed mutation path does not match its durable tool call');
     }
     if (!this.#readWorkspaceStorageRootBinding()) {
@@ -4959,13 +4966,13 @@ function workspaceHeadBeforeSuccessor(
 }
 
 function managedMutationMatchesAcceptedSuccessor(
-  mutation: RuntimeEventManagedWorkspaceMutationV2 | undefined,
+  mutation: RuntimeEventManagedWorkspaceMutation | undefined,
   successor: WorkspaceVersionAcceptedV1,
   baseHead: WorkspaceHeadRecordV1,
   workspaceInstanceId: string,
 ): boolean {
   return (
-    mutation?.protocol === 'managed_mutation_v2' &&
+    mutation !== undefined &&
     mutation.repositoryId === successor.repositoryId &&
     mutation.workspaceId === successor.workspaceId &&
     mutation.workspaceEpochId === successor.workspaceEpochId &&
@@ -4978,6 +4985,29 @@ function managedMutationMatchesAcceptedSuccessor(
     mutation.baseTreeOid === baseHead.treeOid &&
     mutation.executionProfileDigest === successor.executionProfileDigest &&
     isDeepStrictEqual([mutation.expectedPath], successor.changedPaths)
+  );
+}
+
+function managedMutationMatchesToolName(
+  toolName: string,
+  mutation: RuntimeEventManagedWorkspaceMutation | undefined,
+): boolean {
+  return mutation?.protocol === 'managed_mutation_v2'
+    ? toolName === 'Write' || toolName === 'Edit'
+    : mutation?.protocol === 'managed_mutation_v3' && toolName === 'ManagedNodeTransform';
+}
+
+function managedMutationMatchesCallArgs(
+  mutation: RuntimeEventManagedWorkspaceMutation,
+  value: unknown,
+): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const args = value as Record<string, unknown>;
+  if (args.path !== mutation.expectedPath) return false;
+  if (mutation.protocol === 'managed_mutation_v2') return true;
+  return (
+    args.entryPath === mutation.entry.relativePath &&
+    isDeepStrictEqual(args.args ?? [], mutation.args)
   );
 }
 

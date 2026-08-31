@@ -21,9 +21,11 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
   isCanonicalManagedMutationPathV1,
-  MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+  MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
   type RuntimeEvent,
+  type RuntimeEventManagedWorkspaceMutation,
   type RuntimeEventManagedWorkspaceMutationV2,
+  type RuntimeEventManagedWorkspaceMutationV3,
 } from '@maka/core/runtime-event';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import type {
@@ -93,7 +95,21 @@ export interface GitoxideManagedWriteEditOwnerInputInternal {
   readonly workspaceId: string;
   readonly workspaceEpochId: string;
   readonly workspaceInstanceId: string;
+  readonly managedNodeTransform?: GitoxideManagedNodeTransformAdmissionInternal;
   readonly failpoint?: (point: GitoxideManagedWriteEditOwnerFailpoint) => void | Promise<void>;
+}
+
+export interface GitoxideManagedNodeTransformAdmissionInternal {
+  prepare(input: {
+    readonly request: Parameters<NonNullable<ToolRuntimeInput['admitManagedMutation']>>[0];
+    readonly head: WorkspaceHeadRecordV1;
+    readonly epoch: WorkspaceEpochRecordV1;
+  }): Promise<
+    Readonly<{
+      durableDispatch: RuntimeEventManagedWorkspaceMutationV3;
+      dispose(): Promise<void>;
+    }>
+  >;
 }
 
 export function createGitoxideManagedWriteEditOwnerInternal(
@@ -120,8 +136,10 @@ export function createGitoxideManagedWriteEditOwnerInternal(
   const admitManagedMutation: NonNullable<ToolRuntimeInput['admitManagedMutation']> = async (
     request,
   ) => {
-    if (request.toolName !== 'Write' && request.toolName !== 'Edit') {
-      throw new Error('Gitoxide managed mutation admits only Write and Edit');
+    const isWriteEdit = request.toolName === 'Write' || request.toolName === 'Edit';
+    const isNodeTransform = request.toolName === 'ManagedNodeTransform';
+    if (!isWriteEdit && (!isNodeTransform || !input.managedNodeTransform)) {
+      throw new Error('Gitoxide managed mutation tool authority is unavailable');
     }
     const path = requireCanonicalPath(request.persistedArgs);
     const epoch = await persistence.readEpoch(input.workspaceId, input.workspaceEpochId);
@@ -148,12 +166,14 @@ export function createGitoxideManagedWriteEditOwnerInternal(
       managedTreePolicyVersion: 3,
       abortSignal: request.abortSignal,
     });
-    const baseContent = await readAcceptedFile({
-      acceptedRepositoryOwnerToken,
-      acceptedRepositoryCapability: accepted.acceptedRepositoryCapability,
-      path,
-      abortSignal: request.abortSignal,
-    });
+    const baseContent = isWriteEdit
+      ? await readAcceptedFile({
+          acceptedRepositoryOwnerToken,
+          acceptedRepositoryCapability: accepted.acceptedRepositoryCapability,
+          path,
+          abortSignal: request.abortSignal,
+        })
+      : undefined;
     const candidateAuthority = await createGitoxideMutationCandidateAuthorityInternal({
       storageRootLease: input.storageRootLease,
       baseHead: head,
@@ -161,15 +181,15 @@ export function createGitoxideManagedWriteEditOwnerInternal(
       acceptedRepositoryCapability: accepted.acceptedRepositoryCapability,
       projectionOwnerToken: ownerToken,
     });
-    const durableDispatch = freezeManagedDispatch({
-      epoch,
-      head,
-      expectedPath: path,
-    });
+    const transform = isNodeTransform
+      ? await input.managedNodeTransform!.prepare({ request, head, epoch })
+      : undefined;
+    const durableDispatch =
+      transform?.durableDispatch ?? freezeManagedDispatch({ epoch, head, expectedPath: path });
 
     const admission: RuntimeManagedMutationAdmission = Object.freeze({
       durableDispatch,
-      immutableBase: Object.freeze({ content: baseContent }),
+      ...(isWriteEdit ? { immutableBase: Object.freeze({ content: baseContent ?? null }) } : {}),
       execute: async (operation: () => Promise<RuntimeManagedMutationOperationProof>) =>
         settleManagedMutation({
           request,
@@ -182,9 +202,10 @@ export function createGitoxideManagedWriteEditOwnerInternal(
           candidateAuthority,
           issuedSuccessors,
           ownerToken,
+          durableDispatch,
           failpoint: input.failpoint,
         }),
-      dispose: async () => undefined,
+      dispose: async () => transform?.dispose(),
     });
     return admission;
   };
@@ -291,7 +312,7 @@ export function createGitoxideManagedWriteEditOwnerInternal(
         expectedCandidateCommitOid: version.commitOid,
         expectedCandidateTreeOid: version.treeOid,
         expectedPath: path,
-        expectedExecutionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+        expectedExecutionProfileDigest: version.executionProfileDigest,
       });
       const successor = buildSuccessor({
         operationId: version.origin.operationId,
@@ -374,6 +395,7 @@ async function settleManagedMutation(input: {
   >;
   readonly issuedSuccessors: WeakMap<object, WorkspaceSuccessorAuthorityInput>;
   readonly ownerToken: object;
+  readonly durableDispatch: RuntimeEventManagedWorkspaceMutation;
   readonly failpoint?: (point: GitoxideManagedWriteEditOwnerFailpoint) => void | Promise<void>;
 }): Promise<RuntimeManagedMutationSettlement> {
   const proof = await input.operation();
@@ -399,10 +421,16 @@ async function settleManagedMutation(input: {
       operationId: input.request.operationId,
       path: input.path,
       content: mutation.content,
-      executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+      executionProfileDigest: input.durableDispatch.executionProfileDigest,
       abortSignal: input.request.abortSignal,
     });
-    assertCandidateProof(candidate, input.head, input.path, mutation.content);
+    assertCandidateProof(
+      candidate,
+      input.head,
+      input.path,
+      mutation.content,
+      input.durableDispatch.executionProfileDigest,
+    );
   } catch (error) {
     return Object.freeze({ kind: 'unsettled' as const, error });
   }
@@ -525,7 +553,7 @@ function freezeManagedDispatch(input: {
     baseTreeOid: input.head.treeOid,
     expectedPath: input.expectedPath,
     pathPolicyVersion: 3 as const,
-    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+    executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
   });
 }
 
@@ -567,7 +595,10 @@ function reservationMatchesAdmission(
   reservation: Awaited<
     ReturnType<ExecutionStoresWorkspaceMutationAuthorityInternal['readActiveMutation']>
   >,
-  input: Pick<Parameters<typeof settleManagedMutation>[0], 'request' | 'path' | 'head' | 'epoch'>,
+  input: Pick<
+    Parameters<typeof settleManagedMutation>[0],
+    'request' | 'path' | 'head' | 'epoch' | 'durableDispatch'
+  >,
 ): boolean {
   return Boolean(
     reservation &&
@@ -582,7 +613,7 @@ function reservationMatchesAdmission(
       reservation.baseCommitOid === input.head.commitOid &&
       reservation.baseTreeOid === input.head.treeOid &&
       reservation.expectedPath === input.path &&
-      reservation.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+      reservation.executionProfileDigest === input.durableDispatch.executionProfileDigest,
   );
 }
 
@@ -591,6 +622,7 @@ function assertCandidateProof(
   head: WorkspaceHeadRecordV1,
   path: string,
   content: string,
+  executionProfileDigest: string,
 ): void {
   const receipt = proof.receipt;
   if (
@@ -605,7 +637,7 @@ function assertCandidateProof(
     receipt.baseTreeOid !== head.treeOid ||
     receipt.path !== path ||
     receipt.contentSha256 !== sha256(content) ||
-    receipt.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST ||
+    receipt.executionProfileDigest !== executionProfileDigest ||
     !SHA1_PATTERN.test(receipt.candidateCommitOid) ||
     !SHA1_PATTERN.test(receipt.candidateTreeOid) ||
     !SHA1_PATTERN.test(receipt.resultBlobOid)
@@ -645,7 +677,7 @@ function buildSuccessor(input: {
       changedPaths: Object.freeze([receipt.path]),
       changedFileCount: 1,
       deletedFileCount: 0,
-      executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+      executionProfileDigest: receipt.executionProfileDigest,
     }),
     origin: Object.freeze({
       operationId: input.operationId,
@@ -728,7 +760,7 @@ function validateAcceptedSuccessorEvidence(input: {
   const outcomeContent = outcome.content;
   if (
     callContent?.kind !== 'function_call' ||
-    (callContent.name !== 'Write' && callContent.name !== 'Edit') ||
+    !managedMutationMatchesToolName(callContent.name, managed) ||
     call.refs?.operationId !== input.successorVersion.origin.operationId ||
     dispatch.id !== input.successorVersion.origin.dispatchEventId ||
     dispatch.refs?.operationId !== input.successorVersion.origin.operationId ||
@@ -752,7 +784,7 @@ function validateAcceptedSuccessorEvidence(input: {
     path !== managed.expectedPath ||
     input.successorVersion.changedPaths.length !== 1 ||
     input.successorVersion.changedPaths[0] !== path ||
-    input.successorVersion.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST
+    input.successorVersion.executionProfileDigest !== managed.executionProfileDigest
   ) {
     throw new Error('Gitoxide projection recovery path authority is invalid');
   }
@@ -768,13 +800,12 @@ function isAcceptedRefTargetMismatch(error: unknown): error is GitoxideHelperInv
 }
 
 function managedMutationMatchesParent(
-  managed: RuntimeEventManagedWorkspaceMutationV2 | undefined,
+  managed: RuntimeEventManagedWorkspaceMutation | undefined,
   epoch: WorkspaceEpochRecordV1,
   parent: WorkspaceHeadRecordV1,
-): managed is RuntimeEventManagedWorkspaceMutationV2 {
+): managed is RuntimeEventManagedWorkspaceMutation {
   return Boolean(
     managed &&
-      managed.protocol === 'managed_mutation_v2' &&
       managed.repositoryId === parent.repositoryId &&
       managed.workspaceId === parent.workspaceId &&
       managed.workspaceEpochId === parent.workspaceEpochId &&
@@ -786,8 +817,17 @@ function managedMutationMatchesParent(
       managed.baseCommitOid === parent.commitOid &&
       managed.baseTreeOid === parent.treeOid &&
       managed.pathPolicyVersion === 3 &&
-      managed.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+      managed.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
   );
+}
+
+function managedMutationMatchesToolName(
+  toolName: string,
+  managed: RuntimeEventManagedWorkspaceMutation | undefined,
+): boolean {
+  return managed?.protocol === 'managed_mutation_v2'
+    ? toolName === 'Write' || toolName === 'Edit'
+    : managed?.protocol === 'managed_mutation_v3' && toolName === 'ManagedNodeTransform';
 }
 
 function parentMatchesSuccessor(
