@@ -988,7 +988,14 @@ function readManagedNodeRunResult(request: unknown): Readonly<Record<string, unk
       typeof (message as { readonly content?: unknown }).content === 'string',
   );
   if (!toolMessage) throw new Error('Provider request has no tool result');
-  const value = JSON.parse(toolMessage.content) as Record<string, unknown>;
+  const envelope = JSON.parse(toolMessage.content) as Record<string, unknown>;
+  const value =
+    envelope.kind === 'json' &&
+    envelope.value &&
+    typeof envelope.value === 'object' &&
+    !Array.isArray(envelope.value)
+      ? (envelope.value as Record<string, unknown>)
+      : envelope;
   return Object.freeze({
     protocolVersion: value.protocolVersion,
     kind: value.kind,
