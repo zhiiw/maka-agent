@@ -100,6 +100,44 @@ describe('ToolRuntime durable boundary', () => {
     assert.equal(outcomes.length, 1);
   });
 
+  it('freezes an exact dependency identity in managed observation v2 before T1', async () => {
+    const prepared: ToolPreparedCommit[] = [];
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async (input) => {
+          prepared.push(input);
+          return { created: true, runtimeEventSeq: 1 };
+        },
+        commitToolOutcome: async () => ({ created: true, runtimeEventSeq: 2 }),
+      },
+      undefined,
+      'run-1',
+      {
+        admitManagedObservation: async () => ({
+          durableDispatch: managedObservationDispatchV2(),
+          execute: async (operation) =>
+            await operation({ inputRoot: '/accepted', scratchRoot: '/scratch' }),
+          dispose: async () => undefined,
+        }),
+      },
+    );
+    const managedTest = tool(() => {
+      throw new Error('ordinary implementation must not execute');
+    });
+    managedTest.name = 'ManagedNodeTest';
+    managedTest.durableExecutionProfile = 'managed_observation_v2';
+    managedTest.managedObservationImpl = async () => ({ passed: 1, failed: 0 });
+
+    assert.deepEqual(
+      await harness.executeWithInput(managedTest, { relativePaths: ['src/a.test.mjs'] }),
+      { passed: 1, failed: 0 },
+    );
+    assert.deepEqual(
+      prepared[0]?.dispatchRuntimeEvent.actions?.toolDispatch?.managedObservation,
+      managedObservationDispatchV2(),
+    );
+  });
+
   it('revokes a retained managed observation operation after durable settlement', async () => {
     let retained:
       | ((execution: { inputRoot: string; scratchRoot: string }) => Promise<void>)
@@ -1911,6 +1949,26 @@ function managedObservationDispatch() {
         sha256: `sha256:${'4'.repeat(64)}` as const,
       },
     ],
+  };
+}
+
+function managedObservationDispatchV2() {
+  return {
+    ...managedObservationDispatch(),
+    protocol: 'managed_observation_v2' as const,
+    operationKind: 'node_test_v2' as const,
+    effectClass: 'hermetic_observation_v2' as const,
+    executionProfileDigest:
+      'sha256:be3ca7af72a0d35cda471a6de71eed7dd260890624f11c8b5d71cccb2067c333' as const,
+    dependency: {
+      kind: 'managed_dependency_snapshot_v1' as const,
+      environmentId: `sha256:${'5'.repeat(64)}` as const,
+      contentTreeSha256: `sha256:${'6'.repeat(64)}` as const,
+      nodeVersion: '24.18.1',
+      nodeAbi: '137',
+      platform: 'linux' as const,
+      arch: 'x64',
+    },
   };
 }
 

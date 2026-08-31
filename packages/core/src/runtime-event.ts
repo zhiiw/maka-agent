@@ -257,7 +257,7 @@ export interface RuntimeEventToolDispatch {
   /** T1-frozen managed workspace mutation identity. */
   managedMutation?: RuntimeEventManagedWorkspaceMutationV2;
   /** T1-frozen immutable accepted-world observation identity. */
-  managedObservation?: RuntimeEventManagedWorkspaceObservationV1;
+  managedObservation?: RuntimeEventManagedWorkspaceObservation;
 }
 
 export const MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_SPEC = Object.freeze({
@@ -292,6 +292,46 @@ export const MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_SPEC = Object.freeze({
 export const MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST =
   'sha256:816111c078084a460fad2d6d78a545d127b158d8089237e3a238878936d86e6e' as const;
 
+export const MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_SPEC = Object.freeze({
+  protocol: 'managed_observation_execution_profile_v2',
+  operationKind: 'node_test_v2',
+  effectClass: 'hermetic_observation_v2',
+  objectFormat: 'sha1',
+  acceptedInput: 'read_only_accepted_tree_v1',
+  dependencyInput: Object.freeze({
+    authority: 'opaque_snapshot_lease_v1',
+    modes: Object.freeze(['none', 'managed_dependency_snapshot_v1'] as const),
+    fallback: 'forbidden',
+    pathTransport: 'forbidden',
+  }),
+  testRunner: Object.freeze({
+    runtime: 'node_24',
+    api: 'node_test_run_v1',
+    isolation: 'none',
+    concurrency: false,
+    maxFiles: 64,
+    maxFileBytes: 16_777_216,
+  }),
+  sandbox: Object.freeze({
+    required: true,
+    network: 'restricted',
+    acceptedTree: 'read_only',
+    dependencyTree: 'read_only_when_bound',
+    scratch: 'disposable_write_v1',
+    childProcess: 'forbidden',
+  }),
+  result: Object.freeze({
+    format: 'strict_json_v1',
+    maxBytes: 65_536,
+    nondeterministicFields: 'forbidden',
+  }),
+  replay: 'same_accepted_tree_and_dependency_replay_safe_v1',
+  executionFallback: 'forbidden',
+} as const);
+
+export const MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST =
+  'sha256:be3ca7af72a0d35cda471a6de71eed7dd260890624f11c8b5d71cccb2067c333' as const;
+
 export interface RuntimeEventManagedObservationFileV1 {
   readonly relativePath: string;
   readonly bytes: number;
@@ -316,6 +356,42 @@ export interface RuntimeEventManagedWorkspaceObservationV1 {
   readonly toolchainIdentityDigest: `sha256:${string}`;
   readonly files: readonly RuntimeEventManagedObservationFileV1[];
 }
+
+export type RuntimeEventManagedDependencyObservationV1 =
+  | Readonly<{ kind: 'none' }>
+  | Readonly<{
+      kind: 'managed_dependency_snapshot_v1';
+      environmentId: `sha256:${string}`;
+      contentTreeSha256: `sha256:${string}`;
+      nodeVersion: string;
+      nodeAbi: string;
+      platform: 'linux' | 'darwin' | 'win32';
+      arch: string;
+    }>;
+
+export interface RuntimeEventManagedWorkspaceObservationV2 {
+  readonly protocol: 'managed_observation_v2';
+  readonly repositoryId: string;
+  readonly workspaceId: string;
+  readonly workspaceEpochId: string;
+  readonly workspaceInstanceId: string;
+  readonly objectFormat: 'sha1';
+  readonly acceptedWorkspaceVersionId: string;
+  readonly acceptedEventId: string;
+  readonly acceptedHeadRevision: number;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly operationKind: 'node_test_v2';
+  readonly effectClass: 'hermetic_observation_v2';
+  readonly executionProfileDigest: typeof MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST;
+  readonly toolchainIdentityDigest: `sha256:${string}`;
+  readonly dependency: RuntimeEventManagedDependencyObservationV1;
+  readonly files: readonly RuntimeEventManagedObservationFileV1[];
+}
+
+export type RuntimeEventManagedWorkspaceObservation =
+  | RuntimeEventManagedWorkspaceObservationV1
+  | RuntimeEventManagedWorkspaceObservationV2;
 
 /**
  * Canonical semantics bound by the managed mutation execution-profile digest.
@@ -684,6 +760,36 @@ const RUNTIME_MANAGED_WORKSPACE_OBSERVATION_SHAPE =
     ],
     [],
   );
+const RUNTIME_MANAGED_WORKSPACE_OBSERVATION_V2_SHAPE =
+  defineObjectShape<RuntimeEventManagedWorkspaceObservationV2>()(
+    [
+      'protocol',
+      'repositoryId',
+      'workspaceId',
+      'workspaceEpochId',
+      'workspaceInstanceId',
+      'objectFormat',
+      'acceptedWorkspaceVersionId',
+      'acceptedEventId',
+      'acceptedHeadRevision',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'operationKind',
+      'effectClass',
+      'executionProfileDigest',
+      'toolchainIdentityDigest',
+      'dependency',
+      'files',
+    ],
+    [],
+  );
+const RUNTIME_MANAGED_DEPENDENCY_NONE_SHAPE = defineObjectShape<{ kind: 'none' }>()(['kind'], []);
+const RUNTIME_MANAGED_DEPENDENCY_SNAPSHOT_SHAPE = defineObjectShape<
+  Extract<RuntimeEventManagedDependencyObservationV1, { kind: 'managed_dependency_snapshot_v1' }>
+>()(
+  ['kind', 'environmentId', 'contentTreeSha256', 'nodeVersion', 'nodeAbi', 'platform', 'arch'],
+  [],
+);
 const RUNTIME_MANAGED_OBSERVATION_FILE_SHAPE =
   defineObjectShape<RuntimeEventManagedObservationFileV1>()(
     ['relativePath', 'bytes', 'sha256'],
@@ -1004,7 +1110,10 @@ function isRuntimeToolDispatch(value: unknown): value is RuntimeEventToolDispatc
 
 function isRuntimeManagedWorkspaceObservation(
   value: unknown,
-): value is RuntimeEventManagedWorkspaceObservationV1 {
+): value is RuntimeEventManagedWorkspaceObservation {
+  if (isRecord(value) && value.protocol === 'managed_observation_v2') {
+    return isRuntimeManagedWorkspaceObservationV2(value);
+  }
   if (
     !isRecord(value) ||
     !hasExactShape(value, RUNTIME_MANAGED_WORKSPACE_OBSERVATION_SHAPE) ||
@@ -1038,8 +1147,72 @@ function isRuntimeManagedWorkspaceObservation(
   ) {
     return false;
   }
+  return areRuntimeManagedObservationFiles(value.files);
+}
+
+function isRuntimeManagedWorkspaceObservationV2(
+  value: unknown,
+): value is RuntimeEventManagedWorkspaceObservationV2 {
+  if (!isRecord(value)) return false;
+  return (
+    hasExactShape(value, RUNTIME_MANAGED_WORKSPACE_OBSERVATION_V2_SHAPE) &&
+    value.protocol === 'managed_observation_v2' &&
+    typeof value.repositoryId === 'string' &&
+    /^repository_[0-9a-f]{32}$/u.test(value.repositoryId) &&
+    typeof value.workspaceId === 'string' &&
+    /^workspace_[0-9a-f]{32}$/u.test(value.workspaceId) &&
+    typeof value.workspaceEpochId === 'string' &&
+    /^epoch_[0-9a-f]{32}$/u.test(value.workspaceEpochId) &&
+    typeof value.workspaceInstanceId === 'string' &&
+    /^instance_[0-9a-f]{32}$/u.test(value.workspaceInstanceId) &&
+    value.objectFormat === 'sha1' &&
+    typeof value.acceptedWorkspaceVersionId === 'string' &&
+    /^version_[0-9a-f]{32}$/u.test(value.acceptedWorkspaceVersionId) &&
+    typeof value.acceptedEventId === 'string' &&
+    /^[A-Za-z0-9_-]{1,128}$/u.test(value.acceptedEventId) &&
+    Number.isSafeInteger(value.acceptedHeadRevision) &&
+    (value.acceptedHeadRevision as number) >= 1 &&
+    typeof value.acceptedCommitOid === 'string' &&
+    /^[0-9a-f]{40}$/u.test(value.acceptedCommitOid) &&
+    typeof value.acceptedTreeOid === 'string' &&
+    /^[0-9a-f]{40}$/u.test(value.acceptedTreeOid) &&
+    value.operationKind === 'node_test_v2' &&
+    value.effectClass === 'hermetic_observation_v2' &&
+    value.executionProfileDigest === MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST &&
+    isSha256Digest(value.toolchainIdentityDigest) &&
+    isRuntimeManagedDependencyObservation(value.dependency) &&
+    Array.isArray(value.files) &&
+    value.files.length > 0 &&
+    value.files.length <= 64 &&
+    areRuntimeManagedObservationFiles(value.files)
+  );
+}
+
+function isRuntimeManagedDependencyObservation(
+  value: unknown,
+): value is RuntimeEventManagedDependencyObservationV1 {
+  if (!isRecord(value)) return false;
+  if (value.kind === 'none') {
+    return hasExactShape(value, RUNTIME_MANAGED_DEPENDENCY_NONE_SHAPE);
+  }
+  return (
+    value.kind === 'managed_dependency_snapshot_v1' &&
+    hasExactShape(value, RUNTIME_MANAGED_DEPENDENCY_SNAPSHOT_SHAPE) &&
+    isSha256Digest(value.environmentId) &&
+    isSha256Digest(value.contentTreeSha256) &&
+    typeof value.nodeVersion === 'string' &&
+    /^24\.[0-9]+\.[0-9]+$/u.test(value.nodeVersion) &&
+    typeof value.nodeAbi === 'string' &&
+    /^[0-9]{1,8}$/u.test(value.nodeAbi) &&
+    (value.platform === 'linux' || value.platform === 'darwin' || value.platform === 'win32') &&
+    typeof value.arch === 'string' &&
+    /^(?:x64|arm64)$/u.test(value.arch)
+  );
+}
+
+function areRuntimeManagedObservationFiles(value: readonly unknown[]): boolean {
   let previousPath: string | undefined;
-  for (const file of value.files) {
+  for (const file of value) {
     if (
       !isRecord(file) ||
       !hasExactShape(file, RUNTIME_MANAGED_OBSERVATION_FILE_SHAPE) ||
