@@ -33,7 +33,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { createSqliteRuntimeStore } from '@maka/storage/sqlite-runtime-store';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
@@ -65,12 +65,13 @@ test('a started workspace-bound continuation survives Host death without provide
   }
   await withManagedContinuationFixture(
     helperPath,
-    async ({ fixture, resourcesRoot, callLog, boundary }) => {
+    async ({ fixture, resourcesRoot, runtimeExecutablePath, callLog, boundary }) => {
       const source = await fixture.seedSafeBoundaryContinuationSource(undefined, {
         failureClass: 'test_manual_resume',
       });
       const crashHost = await fixture.startHost(undefined, true, {
         packagedResourcesRoot: resourcesRoot,
+        runtimeExecutablePath,
         providerCallLogPath: callLog,
         continuationFailpoint: 'after_continuation_start_committed',
       });
@@ -111,6 +112,7 @@ test('a started workspace-bound continuation survives Host death without provide
 
       const successorHost = await fixture.startHost(undefined, true, {
         packagedResourcesRoot: resourcesRoot,
+        runtimeExecutablePath,
         providerCallLogPath: callLog,
       });
       const successorClient = await connectClient(fixture.root);
@@ -179,13 +181,14 @@ test('an accepted-head continuation never calls the provider twice after Host de
   }
   await withManagedContinuationFixture(
     helperPath,
-    async ({ fixture, resourcesRoot, callLog, boundary }) => {
+    async ({ fixture, resourcesRoot, runtimeExecutablePath, callLog, boundary }) => {
       assert.equal(boundary.revision, 1);
       const source = await fixture.seedSafeBoundaryContinuationSource(undefined, {
         failureClass: 'test_manual_resume',
       });
       const crashHost = await fixture.startHost(undefined, true, {
         packagedResourcesRoot: resourcesRoot,
+        runtimeExecutablePath,
         providerCallLogPath: callLog,
         providerFailpointAfterSend: true,
       });
@@ -218,6 +221,7 @@ test('an accepted-head continuation never calls the provider twice after Host de
 
       const successorHost = await fixture.startHost(undefined, true, {
         packagedResourcesRoot: resourcesRoot,
+        runtimeExecutablePath,
         providerCallLogPath: callLog,
       });
       const successorClient = await connectClient(fixture.root);
@@ -251,51 +255,56 @@ test('Host startup automatically resumes one managed task without an experimenta
     t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the automatic managed resume test');
     return;
   }
-  await withManagedContinuationFixture(helperPath, async ({ fixture, resourcesRoot, callLog }) => {
-    const source = await fixture.seedSafeBoundaryContinuationSource();
-    const firstHost = await fixture.startHost(undefined, false, {
-      packagedResourcesRoot: resourcesRoot,
-      providerCallLogPath: callLog,
-    });
-    try {
-      await waitForProviderCalls(callLog, 1);
-    } finally {
-      await fixture.stopHost(firstHost);
-    }
+  await withManagedContinuationFixture(
+    helperPath,
+    async ({ fixture, resourcesRoot, runtimeExecutablePath, callLog }) => {
+      const source = await fixture.seedSafeBoundaryContinuationSource();
+      const firstHost = await fixture.startHost(undefined, false, {
+        packagedResourcesRoot: resourcesRoot,
+        runtimeExecutablePath,
+        providerCallLogPath: callLog,
+      });
+      try {
+        await waitForProviderCalls(callLog, 1);
+      } finally {
+        await fixture.stopHost(firstHost);
+      }
 
-    const firstAdmissions = (await fixture.readAdmissionChain()).filter(
-      (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
-    );
-    assert.equal(firstAdmissions.length, 1);
-    const admission = firstAdmissions[0]!;
-    assert.equal(admission.execution.kind, 'safe_boundary_continuation');
-    if (admission.execution.kind !== 'safe_boundary_continuation') {
-      assert.fail('Automatic managed continuation admission is missing');
-    }
-    assert.equal(admission.execution.sourceRunId, source.sourceRunId);
-    assert.deepEqual(await fixture.readTurnFootprint(admission.turnId), {
-      admitted: true,
-      runCount: 1,
-      userMessageCount: 0,
-    });
-
-    const secondHost = await fixture.startHost(undefined, false, {
-      packagedResourcesRoot: resourcesRoot,
-      providerCallLogPath: callLog,
-    });
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      assert.equal(await providerCallCount(callLog), 1);
-      assert.equal(
-        (await fixture.readAdmissionChain()).filter(
-          (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
-        ).length,
-        1,
+      const firstAdmissions = (await fixture.readAdmissionChain()).filter(
+        (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
       );
-    } finally {
-      await fixture.stopHost(secondHost);
-    }
-  });
+      assert.equal(firstAdmissions.length, 1);
+      const admission = firstAdmissions[0]!;
+      assert.equal(admission.execution.kind, 'safe_boundary_continuation');
+      if (admission.execution.kind !== 'safe_boundary_continuation') {
+        assert.fail('Automatic managed continuation admission is missing');
+      }
+      assert.equal(admission.execution.sourceRunId, source.sourceRunId);
+      assert.deepEqual(await fixture.readTurnFootprint(admission.turnId), {
+        admitted: true,
+        runCount: 1,
+        userMessageCount: 0,
+      });
+
+      const secondHost = await fixture.startHost(undefined, false, {
+        packagedResourcesRoot: resourcesRoot,
+        runtimeExecutablePath,
+        providerCallLogPath: callLog,
+      });
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        assert.equal(await providerCallCount(callLog), 1);
+        assert.equal(
+          (await fixture.readAdmissionChain()).filter(
+            (candidate) => candidate.execution.kind === 'safe_boundary_continuation',
+          ).length,
+          1,
+        );
+      } finally {
+        await fixture.stopHost(secondHost);
+      }
+    },
+  );
 });
 
 for (const sourceKind of ['git_repository_v1', 'filesystem_snapshot_v1'] as const) {
@@ -307,11 +316,18 @@ for (const sourceKind of ['git_repository_v1', 'filesystem_snapshot_v1'] as cons
     }
     await withManagedContinuationFixture(
       helperPath,
-      async ({ fixture, resourcesRoot, callLog, sourceKind: admittedSourceKind }) => {
+      async ({
+        fixture,
+        resourcesRoot,
+        runtimeExecutablePath,
+        callLog,
+        sourceKind: admittedSourceKind,
+      }) => {
         assert.equal(admittedSourceKind, sourceKind);
         const source = await fixture.seedSafeBoundaryContinuationSource();
         const firstHost = await fixture.startHost(undefined, false, {
           packagedResourcesRoot: resourcesRoot,
+          runtimeExecutablePath,
           providerCallLogPath: callLog,
           providerFailpointAfterSend: true,
         });
@@ -330,6 +346,7 @@ for (const sourceKind of ['git_repository_v1', 'filesystem_snapshot_v1'] as cons
 
         const secondHost = await fixture.startHost(undefined, false, {
           packagedResourcesRoot: resourcesRoot,
+          runtimeExecutablePath,
           providerCallLogPath: callLog,
         });
         const secondClient = await connectClient(fixture.root);
@@ -369,6 +386,7 @@ async function withManagedContinuationFixture(
   run: (input: {
     fixture: ExecutionFixture;
     resourcesRoot: string;
+    runtimeExecutablePath: string;
     callLog: string;
     sourceKind: 'git_repository_v1' | 'filesystem_snapshot_v1';
     boundary: NonNullable<
@@ -402,7 +420,12 @@ async function withManagedContinuationFixture(
   }
   await resolveWorkspaceIdentity({ path: sourceRoot });
 
-  const resourcesRoot = await preparePackagedResources(base, helperInputPath);
+  const runtimeExecutablePath = resolveElectronExecutable();
+  const resourcesRoot = await preparePackagedResources(
+    base,
+    helperInputPath,
+    runtimeExecutablePath,
+  );
   const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const owner = await tryAcquireInteractiveRootOwner(capability);
   assert.ok(owner);
@@ -445,6 +468,7 @@ async function withManagedContinuationFixture(
     await run({
       fixture,
       resourcesRoot,
+      runtimeExecutablePath,
       callLog,
       sourceKind: options.sourceKind ?? 'git_repository_v1',
       boundary: boundary!,
@@ -454,7 +478,11 @@ async function withManagedContinuationFixture(
   }
 }
 
-async function preparePackagedResources(base: string, helperInputPath: string): Promise<string> {
+async function preparePackagedResources(
+  base: string,
+  helperInputPath: string,
+  runtimeExecutablePath: string,
+): Promise<string> {
   const resourcesRoot = join(base, 'resources');
   const helperDirectory = join(resourcesRoot, 'gitoxide');
   const executableName =
@@ -481,7 +509,58 @@ async function preparePackagedResources(base: string, helperInputPath: string): 
     })}\n`,
     'utf8',
   );
+
+  const commandRoot = join(resourcesRoot, 'managed-command');
+  const entrypointPath = join(commandRoot, 'managed-command-helper-main.js');
+  await mkdir(commandRoot);
+  await copyFile(
+    resolve(import.meta.dirname, '..', 'server', 'managed-command-helper-main.js'),
+    entrypointPath,
+  );
+  const entrypoint = await readFile(entrypointPath);
+  const nodeVersion = execFileSync(runtimeExecutablePath, ['-p', 'process.versions.node'], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    encoding: 'utf8',
+    windowsHide: true,
+  }).trim();
+  await writeFile(
+    join(resourcesRoot, 'managed-command-toolchain.json'),
+    `${JSON.stringify({
+      schemaVersion: 2,
+      protocol: 'maka_managed_command_toolchain_release_v2',
+      provider: 'maka/managed-command-toolchain',
+      platform: process.platform,
+      arch: process.arch,
+      nodeVersion,
+      profileVersion: 1,
+      entrypointRelativePath: 'managed-command/managed-command-helper-main.js',
+      entrypointBytes: (await stat(entrypointPath)).size,
+      entrypointSha256: `sha256:${createHash('sha256').update(entrypoint).digest('hex')}`,
+      allowedEffectClasses: ['hermetic_observation_v2', 'workspace_transform_v1'],
+      distributionReady: true,
+    })}\n`,
+    'utf8',
+  );
+  if (process.platform === 'win32') {
+    const sandboxInputPath = process.env.MAKA_WINDOWS_SANDBOX_PATH;
+    assert.ok(
+      sandboxInputPath,
+      'MAKA_WINDOWS_SANDBOX_PATH is required for the Windows managed continuation gate',
+    );
+    const sandboxRoot = join(resourcesRoot, 'windows-sandbox');
+    await mkdir(sandboxRoot);
+    await copyFile(await realpath(sandboxInputPath), join(sandboxRoot, 'maka-windows-sandbox.exe'));
+  }
   return resourcesRoot;
+}
+
+function resolveElectronExecutable(): string {
+  const distributionRoot = resolve(process.cwd(), 'node_modules', 'electron', 'dist');
+  if (process.platform === 'win32') return join(distributionRoot, 'electron.exe');
+  if (process.platform === 'darwin') {
+    return join(distributionRoot, 'Electron.app', 'Contents', 'MacOS', 'Electron');
+  }
+  return join(distributionRoot, 'electron');
 }
 
 async function admitRealHelper(helperInputPath: string) {
