@@ -455,6 +455,237 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
   }
 });
 
+test('packaged managed-coding-v2 continues one accepted-world edit-command-test loop after Host death', {
+  timeout: 120_000,
+}, async (t) => {
+  const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
+  if (!helperPath) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the packaged v2 crash gate');
+    return;
+  }
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-managed-v2-loop-crash-')));
+  const root = join(base, 'root');
+  const executionId = randomUUID();
+  await Promise.all([
+    mkdir(join(root, 'scripts'), { recursive: true }),
+    mkdir(join(root, 'src'), { recursive: true }),
+    mkdir(join(root, 'node_modules', 'fixture-dependency'), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(join(root, '.gitignore'), 'node_modules/\n', 'utf8'),
+    writeFile(
+      join(root, 'package.json'),
+      '{"name":"managed-v2-loop-fixture","type":"module"}\n',
+      'utf8',
+    ),
+    writeFile(
+      join(root, 'package-lock.json'),
+      '{"name":"managed-v2-loop-fixture","lockfileVersion":3,"packages":{}}\n',
+      'utf8',
+    ),
+    writeFile(
+      join(root, 'node_modules', 'fixture-dependency', 'package.json'),
+      '{"name":"fixture-dependency","type":"module","exports":"./index.js"}\n',
+      'utf8',
+    ),
+    writeFile(
+      join(root, 'node_modules', 'fixture-dependency', 'index.js'),
+      'export const dependencyValue = 100;\n',
+      'utf8',
+    ),
+    writeFile(join(root, 'src', 'value.js'), 'export const value = 41;\n', 'utf8'),
+    writeFile(
+      join(root, 'scripts', 'check.mjs'),
+      [
+        "import { dependencyValue } from 'fixture-dependency';",
+        "import { value } from '../src/value.js';",
+        'console.log(JSON.stringify({ total: value + dependencyValue }));',
+        '',
+      ].join('\n'),
+      'utf8',
+    ),
+    writeFile(
+      join(root, 'managed.test.mjs'),
+      [
+        "import test from 'node:test';",
+        "import assert from 'node:assert/strict';",
+        "import { dependencyValue } from 'fixture-dependency';",
+        "import { value } from './src/value.js';",
+        "test('accepted successor is shared by command and test', () => assert.equal(value + dependencyValue, 142));",
+        '',
+      ].join('\n'),
+      'utf8',
+    ),
+  ]);
+  git(root, ['init', '--quiet', '--object-format=sha1']);
+  git(root, [
+    'add',
+    '.gitignore',
+    'package.json',
+    'package-lock.json',
+    'src/value.js',
+    'scripts/check.mjs',
+    'managed.test.mjs',
+  ]);
+  git(root, [
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=maka@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'managed v2 loop baseline',
+  ]);
+
+  const electronExecutable = resolveElectronExecutable();
+  const resourcesRoot = await preparePackagedResources(base, helperPath, electronExecutable);
+  const provider = await startManagedFullLoopProvider();
+  t.after(() => provider.close());
+  const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const connectionId = await configureProvider(capability, provider.baseUrl);
+  const fixture = new ExecutionFixture(base, root, capability, executionId);
+  try {
+    const firstHost = await fixture.startHost(undefined, true, {
+      packagedResourcesRoot: resourcesRoot,
+      runtimeExecutablePath: electronExecutable,
+      useProductionBackend: true,
+    });
+    const firstClient = await connectClient(root);
+    const startRequest = firstClient.request('hosted.execution.start', {
+      executionId,
+      session: {
+        workspace: { kind: 'host_path', path: root },
+        modelTarget: {
+          kind: 'explicit',
+          connectionId,
+          connectionSlug: 'managed-v2-provider',
+          model: MODEL_ID,
+        },
+        permissionMode: 'bypass',
+        collaborationMode: 'agent',
+        orchestrationMode: 'default',
+        toolProfile: 'managed-coding-v2',
+      },
+      content: { text: 'Update the value, run the explicit check, then run the explicit test.' },
+    });
+    if (process.platform === 'win32') {
+      try {
+        const projection = await startRequest;
+        assert.equal(projection.kind, 'indeterminate');
+        assert.ok((projection.failureReason ?? '').length > 0);
+        assert.equal(provider.requests.length, 0);
+      } finally {
+        await firstClient.close();
+        await fixture.stopHost(firstHost);
+      }
+      return;
+    }
+    const start = startRequest.then(
+      () => undefined,
+      () => undefined,
+    );
+    const startFailure = startRequest.then(
+      (projection) =>
+        Promise.reject(
+          new Error(
+            `hosted execution settled before the managed coding loop crash boundary: ${JSON.stringify(projection)}`,
+          ),
+        ),
+      (error: unknown) =>
+        Promise.reject(
+          new Error(
+            `hosted execution failed before the managed coding loop crash boundary: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          ),
+        ),
+    );
+    const completedNodeRunRequest = await Promise.race([
+      provider.waitForCompletedNodeRun(),
+      startFailure,
+    ]);
+    const completedNodeRun = readManagedNodeRunResult(completedNodeRunRequest);
+    assert.deepEqual(
+      {
+        kind: completedNodeRun.kind,
+        exitCode: completedNodeRun.exitCode,
+        stdout: completedNodeRun.stdout,
+      },
+      {
+        kind: 'node_command_observation',
+        exitCode: 0,
+        stdout: '{"total":142}\n',
+      },
+      `managed Node command failed: ${String(completedNodeRun.stderr)}`,
+    );
+    await fixture.killHost(firstHost);
+    await withTimeout(start, PROCESS_TIMEOUT_MS, 'crashed hosted execution did not close');
+    await firstClient.close().catch(() => undefined);
+
+    const secondHost = await fixture.startHost(undefined, true, {
+      packagedResourcesRoot: resourcesRoot,
+      runtimeExecutablePath: electronExecutable,
+      useProductionBackend: true,
+    });
+    const secondClient = await connectClient(root);
+    try {
+      await provider.waitForResumedCompletion();
+      const admission = await waitForContinuationAdmission(fixture, executionId);
+      const terminal = await waitForTerminalTurn(secondClient, executionId, admission.turnId);
+      assert.equal(terminal.status, 'completed');
+    } finally {
+      await secondClient.close();
+      await fixture.stopHost(secondHost);
+    }
+
+    assert.equal(provider.requests.length, 5);
+    assert.deepEqual(
+      readManagedNodeRunResult(provider.requests[3]),
+      readManagedNodeRunResult(completedNodeRunRequest),
+    );
+    assert.deepEqual(readManagedNodeTestResult(provider.requests[4]), {
+      protocolVersion: 1,
+      kind: 'node_test_observation',
+      passed: 1,
+      failed: 0,
+    });
+    const readerOwner = await tryAcquireInteractiveRootReader(capability);
+    assert.ok(readerOwner);
+    if (!readerOwner) throw new Error('Unable to read managed coding loop fixture root');
+    const reader = await openInteractiveExecutionStoresForRead(readerOwner.lease);
+    try {
+      const runs = await reader.agentRunStore.listSessionRuns(executionId);
+      const events = (
+        await Promise.all(
+          runs.map((run) =>
+            reader.runtimeEventStore.readImmutableRuntimeEvents(executionId, run.runId),
+          ),
+        )
+      ).flat();
+      for (const toolName of ['Edit', 'ManagedNodeRun', 'ManagedNodeTest']) {
+        assert.equal(
+          events.filter(
+            (event) => event.content?.kind === 'function_call' && event.content.name === toolName,
+          ).length,
+          1,
+        );
+        assert.equal(
+          events.filter(
+            (event) =>
+              event.content?.kind === 'function_response' && event.content.name === toolName,
+          ).length,
+          1,
+        );
+      }
+    } finally {
+      await reader.sessionStore.close?.();
+      await readerOwner.close();
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
 test('packaged managed-coding-v2 resumes after Host death without replaying an accepted workspace transform', {
   timeout: 90_000,
 }, async (t) => {
@@ -1056,6 +1287,103 @@ async function startManagedNodeRunProvider(): Promise<{
   };
 }
 
+async function startManagedFullLoopProvider(): Promise<{
+  readonly baseUrl: string;
+  readonly requests: readonly unknown[];
+  waitForCompletedNodeRun(): Promise<unknown>;
+  waitForResumedCompletion(): Promise<void>;
+  close(): Promise<void>;
+}> {
+  const requests: unknown[] = [];
+  let completedNodeRun!: (request: unknown) => void;
+  let resumedCompletion!: () => void;
+  const completedNodeRunReached = new Promise<unknown>((resolve) => {
+    completedNodeRun = resolve;
+  });
+  const resumedCompletionReached = new Promise<void>((resolve) => {
+    resumedCompletion = resolve;
+  });
+  const sockets = new Set<import('node:net').Socket>();
+  const server = createServer((request, response) => {
+    void (async () => {
+      const body = JSON.parse(await readBody(request)) as Record<string, unknown>;
+      if (body.stream !== true) {
+        respondSummary(response);
+        return;
+      }
+      requests.push(body);
+      if (requests.length === 1) {
+        respondToolCall(
+          response,
+          'Edit',
+          {
+            path: 'src/value.js',
+            old_string: 'export const value = 41;',
+            new_string: 'export const value = 42;',
+          },
+          'managed-v2-loop-edit',
+        );
+        return;
+      }
+      if (requests.length === 2) {
+        respondToolCall(
+          response,
+          'ManagedNodeRun',
+          { entryPath: 'scripts/check.mjs', args: [] },
+          'managed-v2-loop-command',
+        );
+        return;
+      }
+      if (requests.length === 3) {
+        completedNodeRun(body);
+        return;
+      }
+      if (requests.length === 4) {
+        respondToolCall(
+          response,
+          'ManagedNodeTest',
+          { relativePaths: ['managed.test.mjs'] },
+          'managed-v2-loop-test',
+        );
+        return;
+      }
+      if (requests.length === 5) {
+        respondText(response, 'Managed coding loop completed after recovery.');
+        resumedCompletion();
+        return;
+      }
+      response.destroy(new Error('Managed coding loop provider observed an unexpected replay'));
+    })().catch((error) => response.destroy(error as Error));
+  });
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  await listen(server);
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    requests,
+    waitForCompletedNodeRun: () =>
+      withTimeout(
+        completedNodeRunReached,
+        PROCESS_TIMEOUT_MS * 8,
+        'provider did not observe the accepted-world Node command result',
+      ),
+    waitForResumedCompletion: () =>
+      withTimeout(
+        resumedCompletionReached,
+        PROCESS_TIMEOUT_MS * 5,
+        'resumed Host did not complete the managed coding loop',
+      ),
+    close: async () => {
+      for (const socket of sockets) socket.destroy();
+      await closeServer(server);
+    },
+  };
+}
+
 async function startManagedNodeTransformProvider(): Promise<{
   readonly baseUrl: string;
   readonly requests: readonly unknown[];
@@ -1229,28 +1557,10 @@ async function startManagedShellProvider(): Promise<{
 }
 
 function readManagedNodeTestResult(request: unknown): Readonly<Record<string, unknown>> {
-  if (!request || typeof request !== 'object' || Array.isArray(request)) {
-    throw new Error('Provider request is invalid');
-  }
-  const messages = (request as { readonly messages?: unknown }).messages;
-  if (!Array.isArray(messages)) throw new Error('Provider request has no messages');
-  const toolMessage = messages.find(
-    (message): message is { readonly role: 'tool'; readonly content: string } =>
-      !!message &&
-      typeof message === 'object' &&
-      !Array.isArray(message) &&
-      (message as { readonly role?: unknown }).role === 'tool' &&
-      typeof (message as { readonly content?: unknown }).content === 'string',
+  const value = readProviderToolResults(request).find(
+    (candidate) => candidate.kind === 'node_test_observation',
   );
-  if (!toolMessage) throw new Error('Provider request has no tool result');
-  let value: Record<string, unknown>;
-  try {
-    value = JSON.parse(toolMessage.content) as Record<string, unknown>;
-  } catch (error) {
-    throw new Error(`Managed Node test returned a non-JSON result: ${toolMessage.content}`, {
-      cause: error,
-    });
-  }
+  if (!value) throw new Error('Provider request has no managed Node test result');
   return Object.freeze({
     protocolVersion: value.protocolVersion,
     kind: value.kind,
@@ -1260,6 +1570,20 @@ function readManagedNodeTestResult(request: unknown): Readonly<Record<string, un
 }
 
 function readManagedNodeRunResult(request: unknown): Readonly<Record<string, unknown>> {
+  const value = readProviderToolResults(request).find(
+    (candidate) => candidate.kind === 'node_command_observation',
+  );
+  if (!value) throw new Error('Provider request has no managed Node command result');
+  return Object.freeze({
+    protocolVersion: value.protocolVersion,
+    kind: value.kind,
+    exitCode: value.exitCode,
+    stdout: value.stdout,
+    stderr: value.stderr,
+  });
+}
+
+function readProviderToolResults(request: unknown): readonly Readonly<Record<string, unknown>>[] {
   if (!request || typeof request !== 'object' || Array.isArray(request)) {
     throw new Error('Provider request is invalid');
   }
@@ -1283,23 +1607,14 @@ function readManagedNodeRunResult(request: unknown): Readonly<Record<string, unk
       return [];
     }
   });
-  const value = values
+  return values
     .map((candidate) => {
-      if (candidate.kind === 'node_command_observation') return candidate;
       const nested = candidate.kind === 'json' ? candidate.value : undefined;
       return nested && typeof nested === 'object' && !Array.isArray(nested)
         ? (nested as Record<string, unknown>)
-        : undefined;
+        : candidate;
     })
-    .find((candidate) => candidate?.kind === 'node_command_observation');
-  if (!value) throw new Error('Provider request has no managed Node command result');
-  return Object.freeze({
-    protocolVersion: value.protocolVersion,
-    kind: value.kind,
-    exitCode: value.exitCode,
-    stdout: value.stdout,
-    stderr: value.stderr,
-  });
+    .map((value) => Object.freeze(value));
 }
 
 function readManagedNodeTransformResult(request: unknown): Readonly<Record<string, unknown>> {
@@ -1471,6 +1786,7 @@ function respondToolCall(
   response: ServerResponse,
   name: string,
   args: Record<string, unknown>,
+  callId = 'managed-v2-tool-call',
 ): void {
   response.writeHead(200, { 'content-type': 'text/event-stream' });
   response.write(
@@ -1487,7 +1803,7 @@ function respondToolCall(
             tool_calls: [
               {
                 index: 0,
-                id: 'managed-v2-tool-call',
+                id: callId,
                 type: 'function',
                 function: { name, arguments: JSON.stringify(args) },
               },
