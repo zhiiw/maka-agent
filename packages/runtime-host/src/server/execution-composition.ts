@@ -942,22 +942,12 @@ export async function createExecutionRuntimeHostComposition(
               : {}),
             ...(managedNodeTestAdmission || managedNodeCommandAdmission
               ? {
-                  admitManagedObservation: async (input) => {
-                    try {
-                      return await (input.toolName === 'ManagedNodeRun'
-                        ? (managedNodeCommandAdmission?.admit(input) ??
-                          Promise.reject(
-                            new Error('Managed Node command admission is unavailable'),
-                          ))
-                        : (managedNodeTestAdmission?.admit(input) ??
-                          Promise.reject(new Error('Managed Node test admission is unavailable'))));
-                    } catch (error) {
-                      if (process.env.MAKA_TEST_USE_PRODUCTION_BACKEND === '1') {
-                        console.error('[managed-observation-admission-test-diagnostic]', error);
-                      }
-                      throw error;
-                    }
-                  },
+                  admitManagedObservation: (input) =>
+                    input.toolName === 'ManagedNodeRun'
+                      ? (managedNodeCommandAdmission?.admit(input) ??
+                        Promise.reject(new Error('Managed Node command admission is unavailable')))
+                      : (managedNodeTestAdmission?.admit(input) ??
+                        Promise.reject(new Error('Managed Node test admission is unavailable'))),
                 }
               : {}),
             requestDrain: context.requestDrain,
