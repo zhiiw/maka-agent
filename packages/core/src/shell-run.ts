@@ -41,6 +41,7 @@ export const SHELL_RUN_TERMINAL_STATUSES = [
 
 export const SHELL_RUN_ID_MAX_CHARS = 128;
 export const SHELL_RUN_SOURCE_TOOL_CALL_ID_MAX_BYTES = 512;
+export const SHELL_RUN_SOURCE_OPERATION_ID_MAX_BYTES = 512;
 
 const SHELL_RUN_ID_PATTERN = new RegExp(`^[A-Za-z0-9_-]{1,${SHELL_RUN_ID_MAX_CHARS}}$`);
 const PIPE_SHELL_OUTPUT_KEYS = new Set([
@@ -132,6 +133,10 @@ export interface ShellRunRecord {
   sourceRunId?: string;
   sourceTurnId: string;
   sourceToolCallId: string;
+  /** Runtime-owned operation identity used to deduplicate one durable external effect. */
+  sourceOperationId?: string;
+  /** Exact execution request identity bound to sourceOperationId. */
+  sourceRequestHash?: `sha256:${string}`;
   /** Defaults to `model` for model-initiated Bash runs. */
   visibility?: ShellRunVisibility;
   cwd: string;
@@ -172,6 +177,13 @@ export interface ShellRunStore {
   ): Promise<ShellRunRecord>;
   readShellRun(sessionId: string, shellRunId: string): Promise<ShellRunRecord>;
   listSessionShellRuns(sessionId: string): Promise<ShellRunRecord[]>;
+  /** Optional for legacy/test stores; durable effect callers must require it before spawning. */
+  claimShellRun?(record: ShellRunRecord): Promise<{ created: boolean; record: ShellRunRecord }>;
+  /** Optional for legacy/test stores; production SQLite stores expose the durable lookup. */
+  readShellRunBySourceOperation?(
+    sessionId: string,
+    sourceOperationId: string,
+  ): Promise<ShellRunRecord | undefined>;
 }
 
 export function isShellRunStatus(value: unknown): value is ShellRunStatus {
@@ -184,6 +196,18 @@ export function isShellRunSourceToolCallId(value: unknown): value is string {
     value.length > 0 &&
     new TextEncoder().encode(value).byteLength <= SHELL_RUN_SOURCE_TOOL_CALL_ID_MAX_BYTES
   );
+}
+
+export function isShellRunSourceOperationId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    new TextEncoder().encode(value).byteLength <= SHELL_RUN_SOURCE_OPERATION_ID_MAX_BYTES
+  );
+}
+
+export function isShellRunSourceRequestHash(value: unknown): value is `sha256:${string}` {
+  return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
 export function isShellRunId(value: unknown): value is string {
@@ -321,6 +345,8 @@ const SHELL_RUN_RECORD_KEYS: ReadonlySet<string> = new Set([
   'sourceRunId',
   'sourceTurnId',
   'sourceToolCallId',
+  'sourceOperationId',
+  'sourceRequestHash',
   'visibility',
   'cwd',
   'command',
@@ -374,6 +400,9 @@ export function normalizeShellRunRecord(
     hasOnlyKeys(record, SHELL_RUN_RECORD_KEYS) &&
     requiredStrings.every((item) => typeof item === 'string') &&
     isShellRunSourceToolCallId(record.sourceToolCallId) &&
+    ((record.sourceOperationId === undefined && record.sourceRequestHash === undefined) ||
+      (isShellRunSourceOperationId(record.sourceOperationId) &&
+        isShellRunSourceRequestHash(record.sourceRequestHash))) &&
     (record.visibility === undefined ||
       record.visibility === 'model' ||
       record.visibility === 'user') &&
@@ -520,6 +549,12 @@ function canonicalShellRunRecord(record: ShellRunRecord): ShellRunRecord {
     ...(record.sourceRunId !== undefined ? { sourceRunId: record.sourceRunId } : {}),
     sourceTurnId: record.sourceTurnId,
     sourceToolCallId: record.sourceToolCallId,
+    ...(record.sourceOperationId !== undefined
+      ? {
+          sourceOperationId: record.sourceOperationId,
+          sourceRequestHash: record.sourceRequestHash,
+        }
+      : {}),
     ...(record.visibility !== undefined ? { visibility: record.visibility } : {}),
     cwd: record.cwd,
     command: record.command,

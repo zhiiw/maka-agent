@@ -230,6 +230,8 @@ export interface MakaToolContext {
   toolCallId: string;
   /** Runtime-owned durable identity of this tool operation, when enabled. */
   operationId?: string;
+  /** Canonical tool-argument identity committed with the same durable operation. */
+  operationArgsHash?: `sha256:${string}`;
   abortSignal: AbortSignal;
   emitOutput: (stream: ToolOutputStream, chunk: string) => void;
   /** Live-only bounded progress for multi-step tools. */
@@ -491,6 +493,7 @@ export interface RuntimeManagedMutationAdmission {
 
 interface DurableToolAttempt {
   operationId: string;
+  canonicalArgsHash: `sha256:${string}`;
   responseEventId: string;
   prepareOutcome(
     result: unknown,
@@ -1582,6 +1585,7 @@ export class ToolRuntime {
           // The id the call event actually carries, not the candidate: by here
           // `prepareDurableToolAttempt` has pushed it on the dispatch lane.
           ...(pushedCallEvent?.operationId ? { operationId: pushedCallEvent.operationId } : {}),
+          ...(durableAttempt ? { operationArgsHash: durableAttempt.canonicalArgsHash } : {}),
           abortSignal: ctx.abortSignal,
           emitOutput: output.emit,
           emitProgress: (current, total) => {
@@ -2462,6 +2466,7 @@ export class ToolRuntime {
     let committedOutcome: { id: string; operationId: string; ts: number } | undefined;
     return {
       operationId,
+      canonicalArgsHash,
       responseEventId: `${operationId}_response`,
       prepareOutcome: (result, isError, durationMs, terminalKind) => {
         if (terminalKind && !input.managedMutation) {

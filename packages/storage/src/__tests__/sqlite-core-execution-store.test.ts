@@ -424,6 +424,128 @@ describe('SQLite core execution stores', () => {
     });
   });
 
+  test('upgrades schema 6 ShellRun rows before adding durable source-operation claims', async () => {
+    await withRoot(async (root) => {
+      const initialized = createSqliteShellRunStore(root);
+      await initialized.createShellRun(shellRun());
+      initialized.close();
+      const path = join(root, 'runtime.sqlite');
+      const legacy = new DatabaseSync(path);
+      legacy.exec(`
+        DROP INDEX IF EXISTS core_shell_runs_source_operation;
+        ALTER TABLE core_shell_runs RENAME TO core_shell_runs_v7;
+        CREATE TABLE core_shell_runs (
+          session_id TEXT NOT NULL,
+          shell_run_id TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          record_json TEXT NOT NULL,
+          PRIMARY KEY (session_id, shell_run_id)
+        );
+        INSERT INTO core_shell_runs(session_id, shell_run_id, started_at, record_json)
+          SELECT session_id, shell_run_id, started_at, record_json FROM core_shell_runs_v7;
+        DROP TABLE core_shell_runs_v7;
+        UPDATE operational_schema_migrations SET version = 6 WHERE scope = 'core_execution';
+      `);
+      legacy.close();
+
+      const migrated = createSqliteShellRunStore(root);
+      try {
+        assert.equal((await migrated.readShellRun('session-1', 'shell-1')).command, 'printf "ok"');
+        const claim = await migrated.claimShellRun({
+          ...shellRun(),
+          shellRunId: 'shell-2',
+          sourceOperationId: 'operation-1',
+          sourceRequestHash: `sha256:${'a'.repeat(64)}`,
+        });
+        assert.equal(claim.created, true);
+      } finally {
+        migrated.close();
+      }
+    });
+  });
+
+  test('claims one ShellRun for an exact durable source operation', async () => {
+    await withRoot(async (root) => {
+      const first = createSqliteShellRunStore(root);
+      const second = createSqliteShellRunStore(root);
+      try {
+        const record = {
+          ...shellRun(),
+          sourceOperationId: 'operation-1',
+          sourceRequestHash: `sha256:${'a'.repeat(64)}` as const,
+        };
+        const [left, right] = await Promise.all([
+          first.claimShellRun(record),
+          second.claimShellRun({ ...record, shellRunId: 'shell-2' }),
+        ]);
+
+        assert.equal(Number(left.created) + Number(right.created), 1);
+        assert.equal(left.record.shellRunId, right.record.shellRunId);
+        assert.equal(
+          (await first.readShellRunBySourceOperation('session-1', 'operation-1'))?.shellRunId,
+          left.record.shellRunId,
+        );
+      } finally {
+        first.close();
+        second.close();
+      }
+    });
+  });
+
+  test('rejects a different request for an already claimed ShellRun operation', async () => {
+    await withRoot(async (root) => {
+      const store = createSqliteShellRunStore(root);
+      try {
+        await store.claimShellRun({
+          ...shellRun(),
+          sourceOperationId: 'operation-1',
+          sourceRequestHash: `sha256:${'a'.repeat(64)}` as const,
+        });
+        await assert.rejects(
+          store.claimShellRun({
+            ...shellRun(),
+            shellRunId: 'shell-2',
+            sourceOperationId: 'operation-1',
+            sourceRequestHash: `sha256:${'b'.repeat(64)}` as const,
+          }),
+          /ShellRun source operation request does not match its durable claim/u,
+        );
+      } finally {
+        store.close();
+      }
+    });
+  });
+
+  test('rejects a ShellRun source-operation index that disagrees with its durable record', async () => {
+    await withRoot(async (root) => {
+      const store = createSqliteShellRunStore(root);
+      await store.claimShellRun({
+        ...shellRun(),
+        sourceOperationId: 'operation-1',
+        sourceRequestHash: `sha256:${'a'.repeat(64)}` as const,
+      });
+      store.close();
+
+      const db = new DatabaseSync(join(root, 'runtime.sqlite'));
+      db.prepare(`
+        UPDATE core_shell_runs
+        SET source_operation_id = ?
+        WHERE session_id = ? AND shell_run_id = ?
+      `).run('operation-2', 'session-1', 'shell-1');
+      db.close();
+
+      const reopened = createSqliteShellRunStore(root);
+      try {
+        await assert.rejects(
+          reopened.readShellRunBySourceOperation('session-1', 'operation-2'),
+          /source-operation row does not match its durable record/u,
+        );
+      } finally {
+        reopened.close();
+      }
+    });
+  });
+
   test('reports a missing ShellRun with the ENOENT store contract', async () => {
     await withRoot(async (root) => {
       const store = createSqliteShellRunStore(root);

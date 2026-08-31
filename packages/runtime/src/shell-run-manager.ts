@@ -35,6 +35,22 @@ import { type ShellRunSnapshotResult, type ShellRunUpdate } from '@maka/core/eve
 import type { ToolResultContent } from '@maka/core/events';
 import { redactSecrets } from '@maka/core/redaction';
 
+class ExistingDurableShellRunClaim extends Error {
+  constructor(readonly record: ShellRunRecord) {
+    super('Durable ShellRun operation is already claimed');
+    this.name = 'ExistingDurableShellRunClaim';
+  }
+}
+
+export class ShellRunExternalEffectUnsettledError extends Error {
+  constructor(readonly shellRunId: string) {
+    super(
+      `Durable ShellRun ${shellRunId} has no live process owner and no terminal outcome; the external effect remains unsettled`,
+    );
+    this.name = 'ShellRunExternalEffectUnsettledError';
+  }
+}
+
 import {
   BASH_MAX_LIVE_EMIT_CHARS,
   BASH_MAX_RETAINED_CHARS,
@@ -326,6 +342,9 @@ export class ShellRunProcessManager
           : compactShellRunContent(handoffRecord);
       });
     } catch (error) {
+      if (error instanceof ExistingDurableShellRunClaim) {
+        return this.replayBackgroundClaim(error.record, ownedInput);
+      }
       notifyFailedStartup(onCompletion);
       throw error;
     }
@@ -354,6 +373,9 @@ export class ShellRunProcessManager
         return this.markObservedAndReturnTerminal(await live.finished.join());
       });
     } catch (error) {
+      if (error instanceof ExistingDurableShellRunClaim) {
+        return this.replayForegroundClaim(error.record, ownedInput);
+      }
       notifyFailedStartup(onCompletion);
       throw error;
     } finally {
@@ -978,6 +1000,12 @@ export class ShellRunProcessManager
       ...(input.sourceRunId ? { sourceRunId: input.sourceRunId } : {}),
       sourceTurnId: input.sourceTurnId,
       sourceToolCallId: input.sourceToolCallId,
+      ...(input.sourceOperationId
+        ? {
+            sourceOperationId: input.sourceOperationId,
+            sourceRequestHash: requireDurableShellRequestHash(input.sourceRequestHash),
+          }
+        : {}),
       ...(input.visibility === undefined ? {} : { visibility: input.visibility }),
       cwd: input.cwd,
       command: redactSecrets(input.command),
@@ -996,7 +1024,51 @@ export class ShellRunProcessManager
       revision: 1,
       output,
     };
-    return this.input.store.createShellRun(record);
+    if (!input.sourceOperationId) return this.input.store.createShellRun(record);
+    if (!this.input.store.claimShellRun) {
+      throw new Error('Durable ShellRun execution requires a claim-capable store');
+    }
+    const claim = await this.input.store.claimShellRun(record);
+    if (!claim.created) throw new ExistingDurableShellRunClaim(claim.record);
+    return claim.record;
+  }
+
+  private async replayForegroundClaim(
+    record: ShellRunRecord,
+    input: ShellRunBashInput,
+  ): Promise<TerminalToolResult> {
+    const live = this.live.get(record.shellRunId);
+    if (live) {
+      const terminal = await live.finished.join();
+      return this.markObservedAndReturnTerminal(terminal);
+    }
+    if (!isTerminalShellRunStatus(record.status)) {
+      notifyFailedStartup(input.onCompletion);
+      throw new ShellRunExternalEffectUnsettledError(record.shellRunId);
+    }
+    notifyReplayedCompletion(input.onCompletion, record);
+    return this.markObservedAndReturnTerminal(record);
+  }
+
+  private async replayBackgroundClaim(
+    record: ShellRunRecord,
+    input: ShellRunBashInput,
+  ): Promise<ShellRunToolResult> {
+    const live = this.live.get(record.shellRunId);
+    if (live) {
+      const current = isTerminalShellRunStatus(live.record.status)
+        ? await this.markObserved(live.record)
+        : live.record;
+      return isTerminalShellRunStatus(current.status)
+        ? shellRunContent(current)
+        : compactShellRunContent(current);
+    }
+    if (!isTerminalShellRunStatus(record.status)) {
+      notifyFailedStartup(input.onCompletion);
+      throw new ShellRunExternalEffectUnsettledError(record.shellRunId);
+    }
+    notifyReplayedCompletion(input.onCompletion, record);
+    return shellRunContent(await this.markObserved(record));
   }
 
   private async markRunning(live: LiveShellRun): Promise<void> {
@@ -1972,6 +2044,24 @@ function onceShellRunCompletion(
     completed = true;
     callback(outcome);
   };
+}
+
+function notifyReplayedCompletion(
+  callback: ShellRunBashInput['onCompletion'],
+  record: ShellRunRecord,
+): void {
+  try {
+    callback?.({ successful: record.status === 'completed' && record.exitCode === 0 });
+  } catch {
+    // A retry cleanup callback cannot replace the durable ShellRun outcome.
+  }
+}
+
+function requireDurableShellRequestHash(value: unknown): `sha256:${string}` {
+  if (typeof value !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(value)) {
+    throw new Error('Durable ShellRun operation requires its Runtime-owned canonical args hash');
+  }
+  return value as `sha256:${string}`;
 }
 
 function notifyFailedStartup(callback: ShellRunBashInput['onCompletion']): void {

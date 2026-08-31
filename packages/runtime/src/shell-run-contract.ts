@@ -90,6 +90,10 @@ export interface ShellRunBashInput {
   sourceRunId?: string;
   sourceTurnId: string;
   sourceToolCallId: string;
+  /** Runtime-owned durable operation identity. When present, process launch is exact-retry safe. */
+  sourceOperationId?: string;
+  /** Runtime-owned canonical tool-argument hash committed with sourceOperationId. */
+  sourceRequestHash?: `sha256:${string}`;
   /** User-owned terminals stay outside model context summaries. */
   visibility?: 'model' | 'user';
   cwd: string;

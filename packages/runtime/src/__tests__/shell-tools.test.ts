@@ -137,6 +137,46 @@ describe('Bash tool shell is threaded through to execution, not just the descrip
     assert.deepEqual((captured[0] as { shell?: unknown }).shell, pwshPlan);
   });
 
+  test('managed Bash binds the Runtime operation identity to its durable ShellRun', async () => {
+    let sourceOperationId: string | undefined;
+    let sourceRequestHash: string | undefined;
+    const controller: ShellRunLauncher = {
+      async runForegroundBash(input) {
+        sourceOperationId = input.sourceOperationId;
+        sourceRequestHash = input.sourceRequestHash;
+        return {
+          kind: 'terminal',
+          cwd: input.cwd,
+          cmd: input.command,
+          status: 'completed',
+          exitCode: 0,
+          output: {
+            mode: 'pipes',
+            stdout: '',
+            stderr: '',
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            redacted: false,
+          },
+        };
+      },
+      runBackgroundBash: () => Promise.reject(new Error('not used')),
+    };
+    const tool = buildManagedBashTool(controller);
+
+    await tool.impl(
+      { command: 'true' },
+      {
+        ...fakeToolContext(),
+        operationId: 'runtime-operation-1',
+        operationArgsHash: `sha256:${'a'.repeat(64)}`,
+      },
+    );
+
+    assert.equal(sourceOperationId, 'runtime-operation-1');
+    assert.equal(sourceRequestHash, `sha256:${'a'.repeat(64)}`);
+  });
+
   test('managed completion callback remains exactly-once when the launcher settles it', async () => {
     let completionCount = 0;
     const controller: ShellRunLauncher = {

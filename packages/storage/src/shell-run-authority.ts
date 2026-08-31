@@ -122,6 +122,12 @@ function createWriterFacade(
     },
     readShellRun: (sessionId, shellRunId) => run(() => store.readShellRun(sessionId, shellRunId)),
     listSessionShellRuns: (sessionId) => run(() => store.listSessionShellRuns(sessionId)),
+    claimShellRun: (record) => {
+      const accepted = cloneRecord(record);
+      return run(() => store.claimShellRun(accepted));
+    },
+    readShellRunBySourceOperation: (sessionId, sourceOperationId) =>
+      run(() => store.readShellRunBySourceOperation(sessionId, sourceOperationId)),
     close: () => {
       if (closed) return;
       closed = true;
