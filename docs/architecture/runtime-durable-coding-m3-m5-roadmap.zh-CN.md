@@ -178,6 +178,11 @@ Inspect -> Edit -> Build -> Test -> Observe -> Edit -> Review -> Publish
 每一步共享 Runtime high-water、accepted head、workspace epoch、toolchain profile 和 effect class。任何一步 kill
 Host 后，新的 Run 只采用 durable outcome/candidate/evidence；已完成操作不重放，不确定 external effect park。
 
+首个 production-shaped 组合证据已经覆盖 `Edit -> dependency-backed ManagedNodeRun -> Host kill -> continuation ->
+ManagedNodeTest`：command 与 test 都读取 Edit 接受后的同一 Git tree；恢复只采用 command T2，不重放 Edit 或
+command。详见 `managed-coding-v2-full-loop-crash-v1.zh-CN.md`。fenced ShellRun 仍由独立 external-effect 状态机证明，
+不会被并入 replay-safe 链。
+
 ## 6. 推荐后续 PR 顺序
 
 1. **M3 release evidence**：packaged Desktop Git/非 Git quiet-resume crash matrix；
