@@ -18,6 +18,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { MAX_READ_IMAGE_BYTES } from '@maka/core/attachments';
 import type { ContextOffloadLimits } from '@maka/core/context-offload';
 import { messageContentDigest, normalizeMessageContent } from '@maka/core/events';
@@ -90,6 +91,10 @@ import {
 import { createExternalSessionAdapterRegistry } from '@maka/storage/external-sessions';
 import { createGitWorktreeChildExecutor } from '@maka/storage/git-worktree-child-executor';
 import { runWithStorageRootLease } from '@maka/storage/root-authority';
+import {
+  createManagedDependencySnapshotAuthority,
+  type ManagedDependencySnapshotAuthority,
+} from '@maka/storage/managed-dependency-snapshot-authority';
 import { createInteractiveContextOffloadReader } from '@maka/storage/context-offload-store';
 import { openStorageWriterComposition } from '@maka/storage/storage-writer-composition';
 import type { RuntimePolicyStoresWriter } from '@maka/storage/runtime-policy-stores';
@@ -171,6 +176,7 @@ import {
 import { createManagedCommandSandboxOwnerInternal } from './managed-command-sandbox-owner-internal.js';
 import {
   createManagedNodeTestAdmissionOwnerInternal,
+  createManagedNodeTestDependencyOwnerInternal,
   createManagedNodeTestToolDeclarationInternal,
   createManagedNodeTestExecutionRootOwnerInternal,
 } from './managed-node-test-admission-owner-internal.js';
@@ -310,6 +316,7 @@ export async function createExecutionRuntimeHostComposition(
     throw error;
   });
   const managedToolchainInvocationOwnerToken = {};
+  const managedDependencyLeaseConsumerOwnerToken = {};
   const managedToolchainCapability = await resolveCurrentProcessManagedToolchainInternal({
     invocationOwnerToken: managedToolchainInvocationOwnerToken,
   }).catch((error: unknown) => {
@@ -330,6 +337,26 @@ export async function createExecutionRuntimeHostComposition(
   let unsubscribeUsageChanges: (() => void) | undefined;
   let workspaceExecution: RuntimeHostWorkspaceExecutionComposition | undefined;
   let goalExecutions: HostGoalExecutionCoordinator | undefined;
+  let managedDependencySnapshotAuthority: ManagedDependencySnapshotAuthority | undefined;
+  let managedDependencySnapshotAuthorityOpening:
+    | Promise<ManagedDependencySnapshotAuthority>
+    | undefined;
+  let openManagedDependencySnapshotAuthority:
+    | (() => Promise<ManagedDependencySnapshotAuthority>)
+    | undefined;
+  const closeManagedDependencySnapshotAuthority = async () => {
+    const opening = managedDependencySnapshotAuthorityOpening;
+    if (!managedDependencySnapshotAuthority && opening) {
+      try {
+        await opening;
+      } catch {
+        // The original admission receives the initialization failure.
+      }
+    }
+    const authority = managedDependencySnapshotAuthority;
+    managedDependencySnapshotAuthority = undefined;
+    if (authority) await authority.close();
+  };
   try {
     const openedProjectCatalog = storage.projectCatalog;
     const runtimePolicyStores = storage.runtimePolicy;
@@ -398,10 +425,39 @@ export async function createExecutionRuntimeHostComposition(
       sandboxManager && managedToolchainCapability
         ? createManagedCommandSandboxOwnerInternal({
             invocationOwnerToken: managedToolchainInvocationOwnerToken,
+            dependencyLeaseConsumerOwnerToken: managedDependencyLeaseConsumerOwnerToken,
             toolchainCapability: managedToolchainCapability,
             sandboxManager,
           })
         : undefined;
+    openManagedDependencySnapshotAuthority = managedCommandOwner
+      ? async () => {
+          if (managedDependencySnapshotAuthority) return managedDependencySnapshotAuthority;
+          if (!managedDependencySnapshotAuthorityOpening) {
+            managedDependencySnapshotAuthorityOpening = createManagedDependencySnapshotAuthority({
+              storageRoot: join(
+                context.owner.capability.canonicalPath,
+                'managed-dependency-snapshots-v1',
+              ),
+              leaseConsumerOwnerToken: managedDependencyLeaseConsumerOwnerToken,
+              nodeRuntime: {
+                version: process.versions.node,
+                abi: process.versions.modules,
+                platform: process.platform,
+                arch: process.arch,
+              },
+            })
+              .then((authority) => {
+                managedDependencySnapshotAuthority = authority;
+                return authority;
+              })
+              .finally(() => {
+                managedDependencySnapshotAuthorityOpening = undefined;
+              });
+          }
+          return await managedDependencySnapshotAuthorityOpening;
+        }
+      : undefined;
     const managedNodeTestExecutionRootOwner = createManagedNodeTestExecutionRootOwnerInternal({
       storageRootLease: context.owner.lease,
     });
@@ -773,8 +829,10 @@ export async function createExecutionRuntimeHostComposition(
             : undefined;
           const managedNodeTestAdmission =
             backendContext.header.toolProfile === 'managed-coding-v2'
-              ? (() => {
-                  if (!managedCommandOwner || !managedSession) {
+              ? await (async () => {
+                  const dependencySnapshotAuthority =
+                    await openManagedDependencySnapshotAuthority?.();
+                  if (!managedCommandOwner || !dependencySnapshotAuthority || !managedSession) {
                     throw new Error(
                       'managed_workspace_profile_unavailable: hermetic Node test authority is unavailable',
                     );
@@ -783,6 +841,10 @@ export async function createExecutionRuntimeHostComposition(
                     executionRootOwner: managedNodeTestExecutionRootOwner,
                     sourceOwner: managedSession.nodeTestSource,
                     commandOwner: managedCommandOwner,
+                    dependencyOwner: createManagedNodeTestDependencyOwnerInternal({
+                      sourceRoot: backendContext.header.cwd,
+                      snapshotAuthority: dependencySnapshotAuthority,
+                    }),
                   });
                 })()
               : undefined;
@@ -1880,6 +1942,7 @@ export async function createExecutionRuntimeHostComposition(
           },
           () => runtimeResources?.close(),
           () => workspaceExecution?.close(),
+          closeManagedDependencySnapshotAuthority,
           () => sessionEffects?.close(),
           () => messages.close(),
           () => interactions.close(),
@@ -1981,6 +2044,11 @@ export async function createExecutionRuntimeHostComposition(
     goalExecutions?.beginDrain();
     try {
       await workspaceExecution?.close();
+    } catch (closeError) {
+      errors.push(closeError);
+    }
+    try {
+      await closeManagedDependencySnapshotAuthority();
     } catch (closeError) {
       errors.push(closeError);
     }

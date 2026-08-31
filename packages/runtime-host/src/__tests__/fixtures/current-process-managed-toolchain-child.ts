@@ -30,7 +30,7 @@ const capability = await resolveCurrentProcessManagedToolchainInternal({
 const verified = await verifyManagedToolchainForInvocationInternal(
   invocationOwnerToken,
   capability,
-  'hermetic_observation_v1',
+  'hermetic_observation_v2',
 );
 process.stdout.write(
   `${JSON.stringify({

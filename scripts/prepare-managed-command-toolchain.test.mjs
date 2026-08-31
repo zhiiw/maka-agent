@@ -41,8 +41,8 @@ test('prepares one bounded managed-command entrypoint and exact release manifest
 
   assert.equal(await readFile(result.entrypointPath, 'utf8'), 'process.stdout.write("ready");\n');
   assert.deepEqual(JSON.parse(await readFile(result.manifestPath, 'utf8')), {
-    schemaVersion: 1,
-    protocol: 'maka_managed_command_toolchain_release_v1',
+    schemaVersion: 2,
+    protocol: 'maka_managed_command_toolchain_release_v2',
     provider: 'maka/managed-command-toolchain',
     platform: 'win32',
     arch: 'x64',
@@ -51,7 +51,7 @@ test('prepares one bounded managed-command entrypoint and exact release manifest
     entrypointRelativePath: 'managed-command/managed-command-helper-main.js',
     entrypointBytes: 31,
     entrypointSha256: result.entrypointSha256,
-    allowedEffectClasses: ['hermetic_observation_v1'],
+    allowedEffectClasses: ['hermetic_observation_v2'],
     distributionReady: true,
   });
 });

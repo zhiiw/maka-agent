@@ -26,6 +26,10 @@ import {
 } from '@maka/runtime/filesystem-worker/process-runner';
 import type { SandboxManager } from '@maka/runtime/sandbox';
 import {
+  requireManagedDependencySnapshotLeaseAccessInternal,
+  type ManagedDependencySnapshotLease,
+} from '@maka/storage/managed-dependency-snapshot-authority';
+import {
   verifyManagedToolchainForInvocationInternal,
   type ManagedToolchainInvocationCapabilityInternal,
 } from './managed-toolchain-artifact-authority-internal.js';
@@ -60,6 +64,9 @@ export interface ManagedNodeTestObservationInternal {
 
 export interface ManagedCommandSandboxOwnerInternal {
   readToolchainIdentity(): Promise<ManagedCommandToolchainIdentityInternal>;
+  readDependencyIdentity(
+    lease: ManagedDependencySnapshotLease,
+  ): Promise<ManagedCommandDependencyIdentityInternal>;
   inspectFile(
     input: ManagedCommandInspectFileInputInternal,
   ): Promise<ManagedFileObservationInternal>;
@@ -68,9 +75,20 @@ export interface ManagedCommandSandboxOwnerInternal {
   ): Promise<ManagedNodeTestObservationInternal>;
 }
 
+export interface ManagedCommandDependencyIdentityInternal {
+  readonly environmentId: `sha256:${string}`;
+  readonly contentTreeSha256: `sha256:${string}`;
+  readonly nodeVersion: string;
+  readonly nodeAbi: string;
+  readonly platform: NodeJS.Platform;
+  readonly arch: string;
+}
+
 export interface ManagedCommandToolchainIdentityInternal {
   readonly identityDigest: `sha256:${string}`;
   readonly nodeVersion: string;
+  readonly platform: NodeJS.Platform;
+  readonly arch: string;
 }
 
 export interface ManagedCommandInspectFileInputInternal {
@@ -84,11 +102,13 @@ export interface ManagedCommandRunNodeTestsInputInternal {
   readonly relativePaths: readonly string[];
   readonly inputRoot: string;
   readonly scratchRoot: string;
+  readonly dependencyLease?: ManagedDependencySnapshotLease;
   readonly abortSignal?: AbortSignal;
 }
 
 export function createManagedCommandSandboxOwnerInternal(input: {
   readonly invocationOwnerToken: object;
+  readonly dependencyLeaseConsumerOwnerToken: object;
   readonly toolchainCapability: ManagedToolchainInvocationCapabilityInternal;
   readonly sandboxManager: Pick<SandboxManager, 'transform'>;
   readonly runProcess?: FilesystemWorkerProcessRunner;
@@ -98,6 +118,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
     request: {
       readonly inputRoot: string;
       readonly scratchRoot: string;
+      readonly dependencyLease?: ManagedDependencySnapshotLease;
       readonly abortSignal?: AbortSignal;
     },
     invocation:
@@ -123,17 +144,24 @@ export function createManagedCommandSandboxOwnerInternal(input: {
     if (inputRoot === scratchRoot) {
       throw new Error('Managed command input and scratch roots must be distinct');
     }
+    const dependency = request.dependencyLease
+      ? requireManagedDependencySnapshotLeaseAccessInternal(
+          input.dependencyLeaseConsumerOwnerToken,
+          request.dependencyLease,
+        )
+      : undefined;
     const toolchain = await verifyManagedToolchainForInvocationInternal(
       input.invocationOwnerToken,
       input.toolchainCapability,
-      'hermetic_observation_v1',
+      'hermetic_observation_v2',
     );
     request.abortSignal?.throwIfAborted();
-    const profile = hermeticObservationProfile(inputRoot, scratchRoot);
+    const profile = hermeticObservationProfile(inputRoot, scratchRoot, dependency?.dependencyRoot);
     const runtimeArgs = [
       ...(process.platform === 'win32' ? ['--no-stdio-init'] : []),
       '--permission',
       `--allow-fs-read=${inputRoot}`,
+      ...(dependency ? [`--allow-fs-read=${dependency.dependencyRoot}`] : []),
       `--allow-fs-write=${scratchRoot}`,
       ...(invocation.kind === 'helper'
         ? [
@@ -148,6 +176,8 @@ export function createManagedCommandSandboxOwnerInternal(input: {
             '--test-reporter=tap',
             toolchain.entrypointPath,
             'maka-node-tests-v1',
+            ...(dependency ? ['--dependency-root', dependency.dependencyRoot] : []),
+            '--',
             ...invocation.relativePaths,
           ]),
     ];
@@ -160,7 +190,11 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         env: hermeticEnvironment(scratchRoot),
         profile,
         pathContext: {
-          workspaceRoots: [inputRoot, scratchRoot],
+          workspaceRoots: [
+            inputRoot,
+            scratchRoot,
+            ...(dependency ? [dependency.dependencyRoot] : []),
+          ],
           runtimeReadableRoots: [
             dirname(toolchain.entrypointPath),
             ...(process.platform === 'darwin' ? [dirname(dirname(toolchain.executablePath))] : []),
@@ -170,6 +204,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
                 runtimeExactReadableRoots: uniqueWindowsVolumeRoots([
                   inputRoot,
                   scratchRoot,
+                  ...(dependency ? [dependency.dependencyRoot] : []),
                   toolchain.executablePath,
                   toolchain.entrypointPath,
                 ]),
@@ -215,11 +250,42 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       const toolchain = await verifyManagedToolchainForInvocationInternal(
         input.invocationOwnerToken,
         input.toolchainCapability,
-        'hermetic_observation_v1',
+        'hermetic_observation_v2',
       );
       return Object.freeze({
         identityDigest: toolchain.identityDigest,
         nodeVersion: toolchain.nodeVersion,
+        platform: toolchain.platform,
+        arch: toolchain.arch,
+      });
+    },
+    async readDependencyIdentity(lease: ManagedDependencySnapshotLease) {
+      const dependency = requireManagedDependencySnapshotLeaseAccessInternal(
+        input.dependencyLeaseConsumerOwnerToken,
+        lease,
+      );
+      const toolchain = await verifyManagedToolchainForInvocationInternal(
+        input.invocationOwnerToken,
+        input.toolchainCapability,
+        'hermetic_observation_v2',
+      );
+      if (
+        !SHA256_PATTERN.test(dependency.environmentId) ||
+        !SHA256_PATTERN.test(dependency.contentTreeSha256) ||
+        dependency.runtime.nodeVersion !== toolchain.nodeVersion ||
+        dependency.runtime.platform !== toolchain.platform ||
+        dependency.runtime.arch !== toolchain.arch ||
+        !/^[0-9]{2,4}$/u.test(dependency.runtime.nodeAbi)
+      ) {
+        throw new Error('Managed command dependency snapshot identity is invalid');
+      }
+      return Object.freeze({
+        environmentId: dependency.environmentId,
+        contentTreeSha256: dependency.contentTreeSha256,
+        nodeVersion: dependency.runtime.nodeVersion,
+        nodeAbi: dependency.runtime.nodeAbi,
+        platform: dependency.runtime.platform,
+        arch: dependency.runtime.arch,
       });
     },
     async inspectFile(request: ManagedCommandInspectFileInputInternal) {
@@ -329,14 +395,18 @@ function formatManagedCommandFailure(
 function hermeticObservationProfile(
   inputRoot: string,
   scratchRoot: string,
+  dependencyRoot?: string,
 ): PermissionProfileManaged {
   return {
     type: 'managed',
-    name: 'managed-hermetic-observation-v1',
+    name: 'managed-hermetic-observation-v2',
     fileSystem: {
       kind: 'restricted',
       entries: [
         { kind: 'path', access: 'read', path: inputRoot, match: 'subtree' },
+        ...(dependencyRoot
+          ? ([{ kind: 'path', access: 'read', path: dependencyRoot, match: 'subtree' }] as const)
+          : []),
         { kind: 'path', access: 'write', path: scratchRoot, match: 'subtree' },
       ],
       protectedMetadata: { access: 'deny_write', names: ['.git', '.agents', '.codex'] },

@@ -10,7 +10,8 @@ accepted head，以及 managed command sandbox 的 opaque toolchain capability�
 ## 2. 主要不变量
 
 > 一次 Node test 的 T1 只能引用同一个 durable accepted head 物化出的精确文件，以及同一个受权
-> `hermetic_observation_v1` toolchain；T1 以后 input identity 漂移必须 fail closed。
+> `hermetic_observation_v2` toolchain 与显式 `none`/opaque dependency snapshot lease；T1 以后 accepted input
+> 或 dependency identity 漂移必须 fail closed。
 
 具体约束：
 

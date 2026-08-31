@@ -25,7 +25,8 @@ development Electron 变成正式 release authority。
 3. entrypoint 位于 resources root 内，且 bytes/hash 与 manifest 完全一致；
 4. 当前 `process.execPath` 是 bounded regular file；owner 在 admission 时计算其实际 bytes/hash；
 5. executable 与 entrypoint identity 被写入 opaque capability，并在每次 invocation 前重新验证；
-6. capability 只授予 `hermetic_observation_v1`，caller 不能增加 effect class。
+6. capability 只授予 dependency-aware `hermetic_observation_v2`，caller 不能增加 effect class；旧 v1
+   release manifest 不会被静默接受。
 
 v1 威胁模型不声称抵御已经能替换同一用户已安装、未经过平台验证的整个 App 与 manifest 的本地恶意进程。
 这种能力等价于替换应用本身，属于 Desktop release/install authority 的边界。运行时 owner 负责防止 PATH、caller path、

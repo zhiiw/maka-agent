@@ -20,7 +20,8 @@
 import { createHash } from 'node:crypto';
 import { writeSync } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { join } from 'node:path';
+import { registerHooks } from 'node:module';
+import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const MAX_OBSERVED_FILE_BYTES = 16 * 1024 * 1024;
@@ -28,7 +29,8 @@ const MAX_TEST_FILES = 64;
 const PORTABLE_PATH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/u;
 
 if (process.argv[2] === 'maka-node-tests-v1') {
-  const relativePaths = decodeNodeTestPaths(process.argv.slice(3));
+  const { dependencyRoot, relativePaths } = decodeNodeTestInvocation(process.argv.slice(3));
+  if (dependencyRoot) registerDependencyResolution(dependencyRoot);
   for (const relativePath of relativePaths) {
     await import(pathToFileURL(join(process.cwd(), ...relativePath.split('/'))).href);
   }
@@ -55,17 +57,38 @@ if (process.argv[2] === 'maka-node-tests-v1') {
   throw new Error('Managed command helper invocation is invalid');
 }
 
-function decodeNodeTestPaths(values: readonly string[]): readonly string[] {
+function decodeNodeTestInvocation(values: readonly string[]): {
+  readonly dependencyRoot?: string;
+  readonly relativePaths: readonly string[];
+} {
+  const separator = values.indexOf('--');
+  const dependencyArgs = separator === -1 ? [] : values.slice(0, separator);
+  const relativePaths = separator === -1 ? values : values.slice(separator + 1);
+  const dependencyRoot =
+    dependencyArgs.length === 0
+      ? undefined
+      : dependencyArgs.length === 2 && dependencyArgs[0] === '--dependency-root'
+        ? dependencyArgs[1]
+        : null;
   if (
-    values.length === 0 ||
-    values.length > MAX_TEST_FILES ||
-    !values.every((path) => isPortableRelativePath(path) && /\.(?:cjs|mjs|js)$/u.test(path)) ||
-    new Set(values).size !== values.length ||
-    [...values].sort().some((path, index) => path !== values[index])
+    dependencyRoot === null ||
+    (dependencyRoot !== undefined &&
+      (!isAbsolute(dependencyRoot) ||
+        dependencyRoot.includes('\0') ||
+        Buffer.byteLength(dependencyRoot, 'utf8') > 4096)) ||
+    relativePaths.length === 0 ||
+    relativePaths.length > MAX_TEST_FILES ||
+    !relativePaths.every(
+      (path) => isPortableRelativePath(path) && /\.(?:cjs|mjs|js)$/u.test(path),
+    ) ||
+    new Set(relativePaths).size !== relativePaths.length ||
+    [...relativePaths].sort().some((path, index) => path !== relativePaths[index])
   ) {
-    throw new Error('Managed Node test file list is invalid');
+    throw new Error('Managed Node test invocation is invalid');
   }
-  return values;
+  return dependencyRoot === undefined
+    ? { relativePaths }
+    : { dependencyRoot, relativePaths };
 }
 
 function decodeObservationPaths(
@@ -99,6 +122,19 @@ function writeJsonResponseAndExit(value: Readonly<Record<string, unknown>>): nev
   return process.exit(0);
 }
 
+function registerDependencyResolution(dependencyRoot: string): void {
+  const dependencyParentURL = pathToFileURL(join(dependencyRoot, '__maka_anchor__.mjs')).href;
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (!isBarePackageSpecifier(specifier)) return nextResolve(specifier, context);
+      return nextResolve(specifier, { ...context, parentURL: dependencyParentURL });
+    },
+  });
+}
+
+function isBarePackageSpecifier(specifier: string): boolean {
+  return /^(?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+(?:\/[^\\]*)?$/u.test(specifier);
+}
 async function observeFile(relativePath: string): Promise<{
   readonly relativePath: string;
   readonly bytes: number;

@@ -23,10 +23,11 @@ import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST } from '@maka/core/runtime-event';
+import { MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST } from '@maka/core/runtime-event';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import {
   createManagedNodeTestAdmissionOwnerInternal,
+  createManagedNodeTestDependencyOwnerInternal,
   createManagedNodeTestExecutionRootOwnerInternal,
   type ManagedNodeTestAcceptedBoundaryInternal,
 } from '../server/managed-node-test-admission-owner-internal.js';
@@ -41,6 +42,54 @@ const ACCEPTED_BOUNDARY: ManagedNodeTestAcceptedBoundaryInternal = Object.freeze
   acceptedHeadRevision: 7,
   acceptedCommitOid: '6'.repeat(40),
   acceptedTreeOid: '7'.repeat(40),
+});
+
+test('acquires dependencies only from a coherent npm source snapshot', async (t) => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'maka-managed-dependency-source-'));
+  const acceptedInputRoot = await mkdtemp(join(tmpdir(), 'maka-managed-dependency-accepted-'));
+  t.after(async () => {
+    await rm(sourceRoot, { recursive: true, force: true });
+    await rm(acceptedInputRoot, { recursive: true, force: true });
+  });
+  const lease = Object.freeze({
+    environmentId: `sha256:${'a'.repeat(64)}` as const,
+    contentTreeSha256: `sha256:${'b'.repeat(64)}` as const,
+    async release() {},
+  });
+  let acquired:
+    | {
+        sourceDependencyRoot: string;
+        manifestBytes: Uint8Array;
+        lockfileBytes: Uint8Array;
+      }
+    | undefined;
+  const owner = createManagedNodeTestDependencyOwnerInternal({
+    sourceRoot,
+    snapshotAuthority: {
+      async acquire(input) {
+        acquired = input;
+        return lease;
+      },
+      async close() {},
+    },
+  });
+  assert.equal(await owner.acquire({ acceptedInputRoot }), undefined);
+  await Promise.all([
+    writeFile(join(acceptedInputRoot, 'package.json'), '{"name":"accepted-fixture"}\n', 'utf8'),
+    writeFile(
+      join(acceptedInputRoot, 'package-lock.json'),
+      '{"name":"accepted-fixture","lockfileVersion":3,"packages":{}}\n',
+      'utf8',
+    ),
+    mkdir(join(sourceRoot, 'node_modules')),
+  ]);
+  assert.equal(await owner.acquire({ acceptedInputRoot }), lease);
+  assert.equal(acquired?.sourceDependencyRoot, join(sourceRoot, 'node_modules'));
+  assert.equal(
+    Buffer.from(acquired?.manifestBytes ?? []).toString('utf8'),
+    '{"name":"accepted-fixture"}\n',
+  );
+  assert.match(Buffer.from(acquired?.lockfileBytes ?? []).toString('utf8'), /lockfileVersion/u);
 });
 
 test('admits one exact accepted-world Node test and removes its disposable roots', async () => {
@@ -69,6 +118,16 @@ test('admits one exact accepted-world Node test and removes its disposable roots
         readToolchainIdentity: async () => ({
           identityDigest: `sha256:${'8'.repeat(64)}`,
           nodeVersion: '24.13.1',
+          platform: process.platform,
+          arch: process.arch,
+        }),
+        readDependencyIdentity: async (dependencyLease) => ({
+          environmentId: dependencyLease.environmentId,
+          contentTreeSha256: dependencyLease.contentTreeSha256,
+          nodeVersion: '24.13.1',
+          nodeAbi: '137',
+          platform: process.platform,
+          arch: process.arch,
         }),
         inspectFile: async (request) => ({
           protocolVersion: 1,
@@ -96,13 +155,14 @@ test('admits one exact accepted-world Node test and removes its disposable roots
     });
 
     assert.deepEqual(admission.durableDispatch, {
-      protocol: 'managed_observation_v1',
+      protocol: 'managed_observation_v2',
       ...ACCEPTED_BOUNDARY,
       objectFormat: 'sha1',
-      operationKind: 'node_test_v1',
-      effectClass: 'hermetic_observation_v1',
-      executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+      operationKind: 'node_test_v2',
+      effectClass: 'hermetic_observation_v2',
+      executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
       toolchainIdentityDigest: `sha256:${'8'.repeat(64)}`,
+      dependency: { kind: 'none' },
       files: [await fileIdentityFromContent('src/a.test.mjs', source)],
     });
 
@@ -190,6 +250,90 @@ test('rejects a materialized test file that changes after durable admission', as
   }
 });
 
+test('binds one opaque dependency snapshot before T1 and releases it after execution', async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), 'maka-managed-test-dependency-'));
+  const rootOwner = await openStorageRootOwner(storageRoot);
+  const source = 'test("uses dependency", () => {});\n';
+  let releaseCount = 0;
+  const dependencyLease = Object.freeze({
+    environmentId: `sha256:${'a'.repeat(64)}` as const,
+    contentTreeSha256: `sha256:${'b'.repeat(64)}` as const,
+    async release() {
+      releaseCount += 1;
+    },
+  });
+  let executedDependency: unknown;
+  try {
+    const commandOwner = commandOwnerForFilesystem();
+    const owner = createManagedNodeTestAdmissionOwnerInternal({
+      executionRootOwner: createManagedNodeTestExecutionRootOwnerInternal({
+        storageRootLease: rootOwner.lease,
+      }),
+      dependencyOwner: { acquire: async () => dependencyLease },
+      sourceOwner: {
+        readAcceptedBoundary: async () => ACCEPTED_BOUNDARY,
+        materializeAcceptedTree: async (request) => {
+          const path = join(request.destinationPath, 'src', 'dependency.test.mjs');
+          await mkdir(dirname(path), { recursive: true });
+          await writeFile(path, source, 'utf8');
+          return {
+            acceptedCommitOid: ACCEPTED_BOUNDARY.acceptedCommitOid,
+            acceptedTreeOid: ACCEPTED_BOUNDARY.acceptedTreeOid,
+          };
+        },
+      },
+      commandOwner: {
+        ...commandOwner,
+        runNodeTests: async (request) => {
+          executedDependency = request.dependencyLease;
+          return commandOwner.runNodeTests(request);
+        },
+      },
+    });
+    const abortSignal = new AbortController().signal;
+    const admission = await owner.admit({
+      operationId: 'operation-dependency',
+      toolName: 'ManagedNodeTest',
+      persistedArgs: { relativePaths: ['src/dependency.test.mjs'] },
+      abortSignal,
+    });
+    assert.deepEqual(admission.durableDispatch, {
+      protocol: 'managed_observation_v2',
+      ...ACCEPTED_BOUNDARY,
+      objectFormat: 'sha1',
+      operationKind: 'node_test_v2',
+      effectClass: 'hermetic_observation_v2',
+      executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
+      toolchainIdentityDigest: `sha256:${'8'.repeat(64)}`,
+      dependency: {
+        kind: 'managed_dependency_snapshot_v1',
+        environmentId: dependencyLease.environmentId,
+        contentTreeSha256: dependencyLease.contentTreeSha256,
+        nodeVersion: '24.13.1',
+        nodeAbi: '137',
+        platform: process.platform,
+        arch: process.arch,
+      },
+      files: [await fileIdentityFromContent('src/dependency.test.mjs', source)],
+    });
+    await admission.execute(
+      async (execution) =>
+        await owner.tool.managedObservationImpl!(
+          { relativePaths: ['src/dependency.test.mjs'] },
+          { abortSignal } as never,
+          execution,
+        ),
+    );
+    assert.equal(executedDependency, dependencyLease);
+    assert.equal(releaseCount, 0);
+    await admission.dispose();
+    assert.equal(releaseCount, 1);
+  } finally {
+    await rootOwner.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
 test('rejects a conflicting accepted-tree materialization before durable admission', async () => {
   const storageRoot = await mkdtemp(join(tmpdir(), 'maka-managed-test-conflict-'));
   const rootOwner = await openStorageRootOwner(storageRoot);
@@ -261,6 +405,19 @@ function commandOwnerForFilesystem() {
     readToolchainIdentity: async () => ({
       identityDigest: `sha256:${'8'.repeat(64)}` as const,
       nodeVersion: '24.13.1',
+      platform: process.platform,
+      arch: process.arch,
+    }),
+    readDependencyIdentity: async (lease: {
+      environmentId: `sha256:${string}`;
+      contentTreeSha256: `sha256:${string}`;
+    }) => ({
+      environmentId: lease.environmentId,
+      contentTreeSha256: lease.contentTreeSha256,
+      nodeVersion: '24.13.1',
+      nodeAbi: '137',
+      platform: process.platform,
+      arch: process.arch,
     }),
     inspectFile: async (request: { inputRoot: string; relativePath: string }) => ({
       protocolVersion: 1 as const,

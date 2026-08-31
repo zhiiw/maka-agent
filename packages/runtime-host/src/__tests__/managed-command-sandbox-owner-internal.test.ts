@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import type { SandboxTransformRequest, SandboxTransformResult } from '@maka/runtime/sandbox';
+import { createManagedDependencySnapshotAuthority } from '@maka/storage/managed-dependency-snapshot-authority';
 import { createManagedCommandSandboxOwnerInternal } from '../server/managed-command-sandbox-owner-internal.js';
 import {
   admitManagedToolchainArtifactInternal,
@@ -55,6 +56,7 @@ test('runs one bounded file observation through an enforcing sandbox plan', asyn
   const entrypoint = await fileIdentity(entrypointPath);
   const releaseOwnerToken = {};
   const invocationOwnerToken = {};
+  const dependencyLeaseConsumerOwnerToken = {};
   const capability = await admitManagedToolchainArtifactInternal({
     releaseOwnerToken,
     invocationOwnerToken,
@@ -69,12 +71,13 @@ test('runs one bounded file observation through an enforcing sandbox plan', asyn
       platform: process.platform,
       arch: process.arch,
       profileVersion: 1,
-      allowedEffectClasses: ['hermetic_observation_v1'],
+      allowedEffectClasses: ['hermetic_observation_v2'],
     }),
   });
   let transformedRequest: SandboxTransformRequest | undefined;
   const owner = createManagedCommandSandboxOwnerInternal({
     invocationOwnerToken,
+    dependencyLeaseConsumerOwnerToken,
     toolchainCapability: capability,
     sandboxManager: {
       transform(request): SandboxTransformResult {
@@ -141,7 +144,11 @@ test('runs one bounded file observation through an enforcing sandbox plan', asyn
 
 test('runs explicit dependency-free Node tests as one sandboxed root process', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'maka-managed-node-test-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  let closeDependencyAuthority: () => Promise<void> = async () => {};
+  t.after(async () => {
+    await closeDependencyAuthority();
+    await rm(root, { recursive: true, force: true });
+  });
   const inputRoot = join(root, 'input');
   const scratchRoot = join(root, 'scratch');
   await Promise.all([mkdir(inputRoot), mkdir(scratchRoot)]);
@@ -174,6 +181,7 @@ test('runs explicit dependency-free Node tests as one sandboxed root process', a
   const entrypoint = await fileIdentity(entrypointPath);
   const releaseOwnerToken = {};
   const invocationOwnerToken = {};
+  const dependencyLeaseConsumerOwnerToken = {};
   const capability = await admitManagedToolchainArtifactInternal({
     releaseOwnerToken,
     invocationOwnerToken,
@@ -188,12 +196,13 @@ test('runs explicit dependency-free Node tests as one sandboxed root process', a
       platform: process.platform,
       arch: process.arch,
       profileVersion: 1,
-      allowedEffectClasses: ['hermetic_observation_v1'],
+      allowedEffectClasses: ['hermetic_observation_v2'],
     }),
   });
   const transformedRequests: SandboxTransformRequest[] = [];
   const owner = createManagedCommandSandboxOwnerInternal({
     invocationOwnerToken,
+    dependencyLeaseConsumerOwnerToken,
     toolchainCapability: capability,
     sandboxManager: {
       transform(request): SandboxTransformResult {
@@ -241,6 +250,80 @@ test('runs explicit dependency-free Node tests as one sandboxed root process', a
   );
   assert.ok(
     transformedRequests.some((request) => request.command.args.includes('--test-force-exit')),
+  );
+
+  const dependencySourceRoot = join(root, 'dependency-source', 'node_modules');
+  await mkdir(join(dependencySourceRoot, 'fixture-dependency'), { recursive: true });
+  await writeFile(
+    join(dependencySourceRoot, 'fixture-dependency', 'package.json'),
+    '{"name":"fixture-dependency","type":"module","exports":"./index.js"}\n',
+    'utf8',
+  );
+  await writeFile(
+    join(dependencySourceRoot, 'fixture-dependency', 'index.js'),
+    'export const answer = 42;\n',
+    'utf8',
+  );
+  const dependencyAuthority = await createManagedDependencySnapshotAuthority({
+    storageRoot: join(root, 'dependency-storage'),
+    leaseConsumerOwnerToken: dependencyLeaseConsumerOwnerToken,
+    nodeRuntime: {
+      version: '24.18.1',
+      abi: process.versions.modules,
+      platform: process.platform,
+      arch: process.arch,
+    },
+  });
+  closeDependencyAuthority = () => dependencyAuthority.close();
+  const dependencyLease = await dependencyAuthority.acquire({
+    sourceDependencyRoot: dependencySourceRoot,
+    manifestBytes: Buffer.from('{"name":"fixture"}\n'),
+    lockfileBytes: Buffer.from('{"name":"fixture","lockfileVersion":3,"packages":{}}\n'),
+  });
+  assert.deepEqual(await owner.readDependencyIdentity(dependencyLease), {
+    environmentId: dependencyLease.environmentId,
+    contentTreeSha256: dependencyLease.contentTreeSha256,
+    nodeVersion: '24.18.1',
+    nodeAbi: process.versions.modules,
+    platform: process.platform,
+    arch: process.arch,
+  });
+  await assert.rejects(
+    owner.readDependencyIdentity({
+      environmentId: dependencyLease.environmentId,
+      contentTreeSha256: dependencyLease.contentTreeSha256,
+      async release() {},
+    }),
+    /lease capability is invalid/u,
+  );
+  await writeFile(
+    join(inputRoot, 'dependency.test.mjs'),
+    [
+      "import assert from 'node:assert/strict';",
+      "import test from 'node:test';",
+      "import { answer } from 'fixture-dependency';",
+      "test('uses the leased dependency snapshot', () => assert.equal(answer, 42));",
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  const withDependency = await owner.runNodeTests({
+    inputRoot,
+    scratchRoot,
+    relativePaths: ['dependency.test.mjs'],
+    dependencyLease,
+  });
+  assert.equal(withDependency.passed, 1);
+  assert.equal(withDependency.failed, 0);
+  await dependencyLease.release();
+  await assert.rejects(
+    owner.runNodeTests({
+      inputRoot,
+      scratchRoot,
+      relativePaths: ['dependency.test.mjs'],
+      dependencyLease,
+    }),
+    /lease capability is invalid/u,
   );
 
   await writeFile(

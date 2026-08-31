@@ -73,8 +73,8 @@ async function createFixture(t: test.TestContext) {
   await writeFile(
     join(resourcesRoot, 'managed-command-toolchain.json'),
     `${JSON.stringify({
-      schemaVersion: 1,
-      protocol: 'maka_managed_command_toolchain_release_v1',
+      schemaVersion: 2,
+      protocol: 'maka_managed_command_toolchain_release_v2',
       provider: 'maka/managed-command-toolchain',
       platform: process.platform,
       arch: process.arch,
@@ -83,7 +83,7 @@ async function createFixture(t: test.TestContext) {
       entrypointRelativePath: 'managed-command/managed-command-helper-main.js',
       entrypointBytes: (await stat(entrypointPath)).size,
       entrypointSha256: `sha256:${createHash('sha256').update(entrypoint).digest('hex')}`,
-      allowedEffectClasses: ['hermetic_observation_v1'],
+      allowedEffectClasses: ['hermetic_observation_v2'],
       distributionReady: true,
     })}\n`,
     'utf8',
