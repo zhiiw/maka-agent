@@ -100,17 +100,17 @@ export interface ManagedNodeTestAdmissionOwnerInternal {
   }): Promise<RuntimeManagedObservationAdmission>;
 }
 
-export interface ManagedNodeTestDependencyOwnerInternal {
+export interface ManagedNodeDependencyOwnerInternal {
   acquire(input: {
     readonly acceptedInputRoot: string;
     readonly abortSignal?: AbortSignal;
   }): Promise<ManagedDependencySnapshotLease | undefined>;
 }
 
-export function createManagedNodeTestDependencyOwnerInternal(input: {
+export function createManagedNodeDependencyOwnerInternal(input: {
   readonly sourceRoot: string;
   readonly snapshotAuthority: ManagedDependencySnapshotAuthority;
-}): ManagedNodeTestDependencyOwnerInternal {
+}): ManagedNodeDependencyOwnerInternal {
   return Object.freeze({
     async acquire(request: {
       readonly acceptedInputRoot: string;
@@ -173,7 +173,7 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
   readonly executionRootOwner: ManagedNodeTestExecutionRootOwnerInternal;
   readonly sourceOwner: ManagedNodeTestSourceOwnerInternal;
   readonly commandOwner: ManagedCommandSandboxOwnerInternal;
-  readonly dependencyOwner?: ManagedNodeTestDependencyOwnerInternal;
+  readonly dependencyOwner?: ManagedNodeDependencyOwnerInternal;
 }): ManagedNodeTestAdmissionOwnerInternal {
   const admittedFilesByInputRoot = new Map<
     string,
@@ -280,7 +280,7 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
         });
         request.abortSignal.throwIfAborted();
         const dependency = dependencyLease
-          ? requireManagedDependencyObservation(
+          ? requireManagedDependencyObservationInternal(
               await input.commandOwner.readDependencyIdentity(dependencyLease),
               toolchain,
             )
@@ -590,7 +590,7 @@ function assertAcceptedBoundary(boundary: ManagedNodeTestAcceptedBoundaryInterna
   }
 }
 
-function requireManagedDependencyObservation(
+export function requireManagedDependencyObservationInternal(
   dependency: Readonly<{
     environmentId: `sha256:${string}`;
     contentTreeSha256: `sha256:${string}`;

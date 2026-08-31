@@ -34,6 +34,11 @@ if (process.argv[2] === 'maka-node-tests-v1') {
   for (const relativePath of relativePaths) {
     await import(pathToFileURL(join(process.cwd(), ...relativePath.split('/'))).href);
   }
+} else if (process.argv[2] === 'maka-node-entrypoint-v2') {
+  const { dependencyRoot, entryPath, args } = decodeNodeEntrypointInvocation(process.argv.slice(3));
+  if (dependencyRoot) registerDependencyResolution(dependencyRoot);
+  process.argv = [process.execPath, join(process.cwd(), ...entryPath.split('/')), ...args];
+  await import(pathToFileURL(process.argv[1]!).href);
 } else if (process.argv[2] === 'maka-observe-file-v1') {
   const relativePath = decodeObservationPaths(process.argv.slice(3), 1)[0];
   if (!relativePath) throw new Error('Managed command observation path is missing');
@@ -55,6 +60,43 @@ if (process.argv[2] === 'maka-node-tests-v1') {
   });
 } else {
   throw new Error('Managed command helper invocation is invalid');
+}
+
+function decodeNodeEntrypointInvocation(values: readonly string[]): {
+  readonly dependencyRoot?: string;
+  readonly entryPath: string;
+  readonly args: readonly string[];
+} {
+  const separator = values.indexOf('--');
+  const dependencyArgs = separator === -1 ? [] : values.slice(0, separator);
+  const commandArgs = separator === -1 ? values : values.slice(separator + 1);
+  const [entryPath, ...args] = commandArgs;
+  const dependencyRoot =
+    dependencyArgs.length === 0
+      ? undefined
+      : dependencyArgs.length === 2 && dependencyArgs[0] === '--dependency-root'
+        ? dependencyArgs[1]
+        : null;
+  let totalArgBytes = 0;
+  if (
+    dependencyRoot === null ||
+    (dependencyRoot !== undefined &&
+      (!isAbsolute(dependencyRoot) ||
+        dependencyRoot.includes('\0') ||
+        Buffer.byteLength(dependencyRoot, 'utf8') > 4096)) ||
+    !entryPath ||
+    !isPortableRelativePath(entryPath) ||
+    !/\.(?:cjs|mjs|js)$/u.test(entryPath) ||
+    args.length > 64 ||
+    args.some((argument) => {
+      const bytes = Buffer.byteLength(argument, 'utf8');
+      totalArgBytes += bytes;
+      return bytes > 4096 || totalArgBytes > 32_768;
+    })
+  ) {
+    throw new Error('Managed Node entrypoint invocation is invalid');
+  }
+  return dependencyRoot === undefined ? { entryPath, args } : { dependencyRoot, entryPath, args };
 }
 
 function decodeNodeTestInvocation(values: readonly string[]): {
@@ -86,9 +128,7 @@ function decodeNodeTestInvocation(values: readonly string[]): {
   ) {
     throw new Error('Managed Node test invocation is invalid');
   }
-  return dependencyRoot === undefined
-    ? { relativePaths }
-    : { dependencyRoot, relativePaths };
+  return dependencyRoot === undefined ? { relativePaths } : { dependencyRoot, relativePaths };
 }
 
 function decodeObservationPaths(
@@ -133,6 +173,9 @@ function registerDependencyResolution(dependencyRoot: string): void {
 }
 
 function isBarePackageSpecifier(specifier: string): boolean {
+  if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('\\')) {
+    return false;
+  }
   return /^(?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+(?:\/[^\\]*)?$/u.test(specifier);
 }
 async function observeFile(relativePath: string): Promise<{

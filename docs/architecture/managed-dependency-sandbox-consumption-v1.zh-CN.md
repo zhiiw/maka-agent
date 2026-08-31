@@ -27,14 +27,14 @@ milestone: M5.4
 
 ## 主要不变量
 
-> `ManagedNodeTest` 在 T1 前只能选择 `none` 或一个 owner-issued immutable dependency snapshot；选择 snapshot
+> `ManagedNodeTest` 与 `ManagedNodeRun` 在 T1 前只能选择 `none` 或一个 owner-issued immutable dependency snapshot；选择 snapshot
 > 后，T1 必须绑定其 environment、content tree、Node ABI/platform identity，sandbox 只能只读该 snapshot，且禁止
 > 回退到 attached checkout、`PATH`、package manager 或网络。
 
 Owner 分为三层：
 
 - `ManagedDependencySnapshotAuthority` 唯一拥有 artifact publication、receipt 与 lease；
-- `ManagedNodeTestDependencyOwnerInternal` 只把 accepted tree 的 `package.json`/`package-lock.json` 与 source 中
+- `ManagedNodeDependencyOwnerInternal` 只把 accepted tree 的 `package.json`/`package-lock.json` 与 source 中
   已存在的 npm `node_modules` 组合成 snapshot acquisition；
 - `ManagedCommandSandboxOwnerInternal` 持有同一个 consumer owner token，只有它能从模块私有 `WeakMap` 解析
   dependency root 与 runtime identity、验证它们匹配当前 toolchain，并把 root 加入 enforcing sandbox。
@@ -50,7 +50,7 @@ accepted Git tree materialized
   -> observe/copy/hash existing source node_modules
   -> durable artifact receipt
   -> opaque lease
-  -> T1(managed_observation_v2 + exact dependency identity)
+  -> T1(node_test_v2/node_command_v2 + exact dependency identity)
   -> sandbox read-only accepted tree + read-only dependency snapshot
   -> exact durable observation outcome
   -> release lease + delete disposable execution roots

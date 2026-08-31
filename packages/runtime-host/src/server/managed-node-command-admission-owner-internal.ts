@@ -25,6 +25,7 @@ import {
 } from '@maka/core/runtime-event';
 import { mkdir } from 'node:fs/promises';
 import type { MakaTool, RuntimeManagedObservationAdmission } from '@maka/runtime/tool-runtime';
+import type { ManagedDependencySnapshotLease } from '@maka/storage/managed-dependency-snapshot-authority';
 import { z } from 'zod';
 import type {
   ManagedCommandSandboxOwnerInternal,
@@ -32,6 +33,8 @@ import type {
 } from './managed-command-sandbox-owner-internal.js';
 import {
   readManagedObservationExecutionRootInternal,
+  requireManagedDependencyObservationInternal,
+  type ManagedNodeDependencyOwnerInternal,
   type ManagedNodeTestAcceptedBoundaryInternal,
   type ManagedNodeTestExecutionRootOwnerInternal,
   type ManagedNodeTestSourceOwnerInternal,
@@ -73,16 +76,21 @@ export function createManagedNodeCommandAdmissionOwnerInternal(input: {
   readonly executionRootOwner: ManagedNodeTestExecutionRootOwnerInternal;
   readonly sourceOwner: ManagedNodeTestSourceOwnerInternal;
   readonly commandOwner: ManagedCommandSandboxOwnerInternal;
+  readonly dependencyOwner?: ManagedNodeDependencyOwnerInternal;
 }): ManagedNodeCommandAdmissionOwnerInternal {
   const admittedByInputRoot = new Map<
     string,
-    Readonly<{ entry: RuntimeEventManagedObservationFileV1; args: readonly string[] }>
+    Readonly<{
+      entry: RuntimeEventManagedObservationFileV1;
+      args: readonly string[];
+      dependencyLease?: ManagedDependencySnapshotLease;
+    }>
   >();
   const tool: MakaTool<ManagedNodeCommandArgsInternal, ManagedNodeCommandObservationInternal> = {
     name: 'ManagedNodeRun',
     displayName: 'Managed Node Run',
     description:
-      'Run one explicit JavaScript entrypoint from the immutable accepted workspace. It has no PATH, network, child-process, package-script, dependency-installation, or attached-checkout authority; writes are disposable scratch only.',
+      'Run one explicit JavaScript entrypoint from the immutable accepted workspace with an optional immutable dependency snapshot. It has no PATH, network, child-process, package-script, dependency-installation, or attached-checkout authority; writes are disposable scratch only.',
     parameters: MANAGED_NODE_COMMAND_PARAMETERS,
     categoryHint: 'custom_tool',
     recoveryMode: 'replay_safe',
@@ -109,6 +117,7 @@ export function createManagedNodeCommandAdmissionOwnerInternal(input: {
         args: normalized.args,
         inputRoot: execution.inputRoot,
         scratchRoot: execution.scratchRoot,
+        ...(admitted.dependencyLease ? { dependencyLease: admitted.dependencyLease } : {}),
         abortSignal: ctx.abortSignal,
       });
       if (!sameEntry(observation.entry, admitted.entry)) {
@@ -148,6 +157,7 @@ export function createManagedNodeCommandAdmissionOwnerInternal(input: {
       }
       const lease = await input.executionRootOwner.allocate();
       const executionRoot = readManagedObservationExecutionRootInternal(lease);
+      let dependencyLease: ManagedDependencySnapshotLease | undefined;
       let admitted = false;
       try {
         const materialized = await input.sourceOwner.materializeAcceptedTree({
@@ -163,6 +173,16 @@ export function createManagedNodeCommandAdmissionOwnerInternal(input: {
           throw new Error('Managed Node command materialization conflicts with accepted truth');
         }
         await mkdir(executionRoot.scratchRoot);
+        dependencyLease = await input.dependencyOwner?.acquire({
+          acceptedInputRoot: executionRoot.inputRoot,
+          abortSignal: request.abortSignal,
+        });
+        const dependency = dependencyLease
+          ? requireManagedDependencyObservationInternal(
+              await input.commandOwner.readDependencyIdentity(dependencyLease),
+              toolchain,
+            )
+          : Object.freeze({ kind: 'none' as const });
         const observed = await input.commandOwner.inspectFile({
           relativePath: normalized.entryPath,
           inputRoot: executionRoot.inputRoot,
@@ -187,6 +207,7 @@ export function createManagedNodeCommandAdmissionOwnerInternal(input: {
             effectClass: 'hermetic_observation_v2',
             executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
             toolchainIdentityDigest: toolchain.identityDigest,
+            dependency,
             entry,
             args: normalized.args,
           },
@@ -195,7 +216,11 @@ export function createManagedNodeCommandAdmissionOwnerInternal(input: {
         let state: 'ready' | 'running' | 'complete' | 'disposed' = 'ready';
         admittedByInputRoot.set(
           executionRoot.inputRoot,
-          Object.freeze({ entry, args: normalized.args }),
+          Object.freeze({
+            entry,
+            args: normalized.args,
+            ...(dependencyLease ? { dependencyLease } : {}),
+          }),
         );
         admitted = true;
         return Object.freeze({
@@ -218,11 +243,21 @@ export function createManagedNodeCommandAdmissionOwnerInternal(input: {
             await operation?.catch(() => undefined);
             state = 'disposed';
             admittedByInputRoot.delete(executionRoot.inputRoot);
-            await input.executionRootOwner.release(lease);
+            try {
+              await dependencyLease?.release();
+            } finally {
+              await input.executionRootOwner.release(lease);
+            }
           },
         });
       } finally {
-        if (!admitted) await input.executionRootOwner.release(lease);
+        if (!admitted) {
+          try {
+            await dependencyLease?.release();
+          } finally {
+            await input.executionRootOwner.release(lease);
+          }
+        }
       }
     },
   });
@@ -239,7 +274,7 @@ export function createManagedNodeCommandToolDeclarationInternal(): MakaTool<
     name: 'ManagedNodeRun',
     displayName: 'Managed Node Run',
     description:
-      'Run one explicit JavaScript entrypoint from the immutable accepted workspace without PATH, network, child-process, package-script, dependency-installation, or attached-checkout authority.',
+      'Run one explicit JavaScript entrypoint from the immutable accepted workspace with an optional immutable dependency snapshot, without PATH, network, child-process, package-script, dependency-installation, or attached-checkout authority.',
     parameters: MANAGED_NODE_COMMAND_PARAMETERS,
     categoryHint: 'custom_tool',
     recoveryMode: 'replay_safe',

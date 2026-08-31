@@ -393,13 +393,36 @@ test('runs explicit dependency-free Node tests as one sandboxed root process', a
 
 test('runs one explicit accepted-tree Node entrypoint without PATH, network, or child authority', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'maka-managed-node-run-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  let closeDependencyAuthority: () => Promise<void> = async () => {};
+  t.after(async () => {
+    await closeDependencyAuthority();
+    await rm(root, { recursive: true, force: true });
+  });
   const inputRoot = join(root, 'input');
   const scratchRoot = join(root, 'scratch');
-  await Promise.all([mkdir(join(inputRoot, 'scripts'), { recursive: true }), mkdir(scratchRoot)]);
+  await Promise.all([
+    mkdir(join(inputRoot, 'scripts'), { recursive: true }),
+    mkdir(join(inputRoot, 'src'), { recursive: true }),
+    mkdir(scratchRoot),
+  ]);
+  const dependencySourceRoot = join(root, 'dependency-source', 'node_modules');
+  await mkdir(join(dependencySourceRoot, 'fixture-dependency'), { recursive: true });
+  await writeFile(
+    join(dependencySourceRoot, 'fixture-dependency', 'package.json'),
+    '{"name":"fixture-dependency","type":"module","exports":"./index.js"}\n',
+    'utf8',
+  );
+  await writeFile(
+    join(dependencySourceRoot, 'fixture-dependency', 'index.js'),
+    'export const answer = 42;\n',
+    'utf8',
+  );
+  await writeFile(join(inputRoot, 'src', 'local.js'), 'export const local = 8;\n', 'utf8');
   await writeFile(
     join(inputRoot, 'scripts', 'check.mjs'),
     [
+      "import { answer } from 'fixture-dependency';",
+      "import { local } from '../src/local.js';",
       "import { writeFile } from 'node:fs/promises';",
       "import { spawnSync } from 'node:child_process';",
       "let inputWrite = 'allowed';",
@@ -407,7 +430,7 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
       "let child = 'allowed';",
       "try { spawnSync(process.execPath, ['--version']); } catch { child = 'blocked'; }",
       "await writeFile(process.env.TMP + '/scratch.txt', 'ok');",
-      'console.log(JSON.stringify({ argv: process.argv.slice(2), path: process.env.PATH, inputWrite, child }));',
+      'console.log(JSON.stringify({ argv: process.argv.slice(2), path: process.env.PATH, inputWrite, child, answer, local }));',
       'process.exitCode = 7;',
       '',
     ].join('\n'),
@@ -430,6 +453,7 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
   const entrypoint = await fileIdentity(entrypointPath);
   const releaseOwnerToken = {};
   const invocationOwnerToken = {};
+  const dependencyLeaseConsumerOwnerToken = {};
   const capability = await admitManagedToolchainArtifactInternal({
     releaseOwnerToken,
     invocationOwnerToken,
@@ -448,9 +472,25 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
     }),
   });
   let transformedRequest: SandboxTransformRequest | undefined;
+  const dependencyAuthority = await createManagedDependencySnapshotAuthority({
+    storageRoot: join(root, 'dependency-storage'),
+    leaseConsumerOwnerToken: dependencyLeaseConsumerOwnerToken,
+    nodeRuntime: {
+      version: '24.18.1',
+      abi: process.versions.modules,
+      platform: process.platform,
+      arch: process.arch,
+    },
+  });
+  closeDependencyAuthority = () => dependencyAuthority.close();
+  const dependencyLease = await dependencyAuthority.acquire({
+    sourceDependencyRoot: dependencySourceRoot,
+    manifestBytes: Buffer.from('{"name":"fixture"}\n'),
+    lockfileBytes: Buffer.from('{"name":"fixture","lockfileVersion":3,"packages":{}}\n'),
+  });
   const owner = createManagedCommandSandboxOwnerInternal({
     invocationOwnerToken,
-    dependencyLeaseConsumerOwnerToken: {},
+    dependencyLeaseConsumerOwnerToken,
     toolchainCapability: capability,
     sandboxManager: {
       transform(request): SandboxTransformResult {
@@ -477,6 +517,7 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
     scratchRoot,
     entryPath: 'scripts/check.mjs',
     args: ['--check', 'src/index.js'],
+    dependencyLease,
   });
   assert.equal(result.protocolVersion, 1);
   assert.equal(result.kind, 'node_command_observation');
@@ -488,6 +529,8 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
     path: '',
     inputWrite: 'blocked',
     child: 'blocked',
+    answer: 42,
+    local: 8,
   });
   assert.equal(
     transformedRequest?.command.profile.type === 'managed'
@@ -497,6 +540,7 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
   );
   assert.equal(await stat(join(scratchRoot, 'scratch.txt')).then((value) => value.size), 2);
   await assert.rejects(stat(join(inputRoot, 'scripts', 'tampered.txt')));
+  await dependencyLease.release();
 });
 
 test('runs one accepted-tree transform into the owner-selected single output file', async (t) => {

@@ -145,6 +145,7 @@ export interface ManagedCommandRunNodeEntrypointInputInternal {
   readonly args: readonly string[];
   readonly inputRoot: string;
   readonly scratchRoot: string;
+  readonly dependencyLease?: ManagedDependencySnapshotLease;
   readonly abortSignal?: AbortSignal;
 }
 
@@ -240,7 +241,14 @@ export function createManagedCommandSandboxOwnerInternal(input: {
               '--',
               ...invocation.relativePaths,
             ]
-          : [join(inputRoot, ...invocation.entryPath.split('/')), ...invocation.args]),
+          : [
+              toolchain.entrypointPath,
+              'maka-node-entrypoint-v2',
+              ...(dependency ? ['--dependency-root', dependency.dependencyRoot] : []),
+              '--',
+              invocation.entryPath,
+              ...invocation.args,
+            ]),
     ];
     const transformed = input.sandboxManager.transform({
       preference: 'require',
@@ -461,6 +469,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
     },
     async runNodeTransform(request: ManagedCommandRunNodeTransformInputInternal) {
       if (
+        request.dependencyLease !== undefined ||
         !isPortableRelativePath(request.entryPath) ||
         !/\.(?:cjs|mjs|js)$/u.test(request.entryPath) ||
         !isPortableRelativePath(request.outputPath) ||

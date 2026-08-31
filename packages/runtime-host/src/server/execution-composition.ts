@@ -182,7 +182,7 @@ import {
 } from './managed-node-command-admission-owner-internal.js';
 import {
   createManagedNodeTestAdmissionOwnerInternal,
-  createManagedNodeTestDependencyOwnerInternal,
+  createManagedNodeDependencyOwnerInternal,
   createManagedNodeTestToolDeclarationInternal,
   createManagedNodeTestExecutionRootOwnerInternal,
 } from './managed-node-test-admission-owner-internal.js';
@@ -862,12 +862,18 @@ export async function createExecutionRuntimeHostComposition(
                 });
               })()
             : undefined;
+          const managedDependencySnapshotAuthority =
+            backendContext.header.toolProfile === 'managed-coding-v2'
+              ? await openManagedDependencySnapshotAuthority?.()
+              : undefined;
           const managedNodeTestAdmission =
             backendContext.header.toolProfile === 'managed-coding-v2'
               ? await (async () => {
-                  const dependencySnapshotAuthority =
-                    await openManagedDependencySnapshotAuthority?.();
-                  if (!managedCommandOwner || !dependencySnapshotAuthority || !managedSession) {
+                  if (
+                    !managedCommandOwner ||
+                    !managedDependencySnapshotAuthority ||
+                    !managedSession
+                  ) {
                     throw new Error(
                       'managed_workspace_profile_unavailable: hermetic Node test authority is unavailable',
                     );
@@ -876,9 +882,9 @@ export async function createExecutionRuntimeHostComposition(
                     executionRootOwner: managedNodeTestExecutionRootOwner,
                     sourceOwner: managedSession.nodeTestSource,
                     commandOwner: managedCommandOwner,
-                    dependencyOwner: createManagedNodeTestDependencyOwnerInternal({
+                    dependencyOwner: createManagedNodeDependencyOwnerInternal({
                       sourceRoot: backendContext.header.cwd,
-                      snapshotAuthority: dependencySnapshotAuthority,
+                      snapshotAuthority: managedDependencySnapshotAuthority,
                     }),
                   });
                 })()
@@ -886,7 +892,11 @@ export async function createExecutionRuntimeHostComposition(
           const managedNodeCommandAdmission =
             backendContext.header.toolProfile === 'managed-coding-v2'
               ? await (async () => {
-                  if (!managedCommandOwner || !managedSession) {
+                  if (
+                    !managedCommandOwner ||
+                    !managedDependencySnapshotAuthority ||
+                    !managedSession
+                  ) {
                     throw new Error(
                       'managed_workspace_profile_unavailable: hermetic Node command authority is unavailable',
                     );
@@ -895,6 +905,10 @@ export async function createExecutionRuntimeHostComposition(
                     executionRootOwner: managedNodeTestExecutionRootOwner,
                     sourceOwner: managedSession.nodeTestSource,
                     commandOwner: managedCommandOwner,
+                    dependencyOwner: createManagedNodeDependencyOwnerInternal({
+                      sourceRoot: backendContext.header.cwd,
+                      snapshotAuthority: managedDependencySnapshotAuthority,
+                    }),
                   });
                 })()
               : undefined;
