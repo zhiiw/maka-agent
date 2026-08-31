@@ -337,7 +337,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
       (projection) =>
         Promise.reject(
           new Error(
-            `hosted execution settled before the Node command result: ${JSON.stringify(projection)}`,
+            `hosted execution settled before the Node command result: ${JSON.stringify(projection)}; runtime evidence: ${readRuntimeFailureEvidence(root, executionId)}`,
           ),
         ),
       (error: unknown) =>
@@ -507,7 +507,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying an a
       (projection) =>
         Promise.reject(
           new Error(
-            `hosted execution settled before the workspace transform result: ${JSON.stringify(projection)}`,
+            `hosted execution settled before the workspace transform result: ${JSON.stringify(projection)}; runtime evidence: ${readRuntimeFailureEvidence(root, executionId)}`,
           ),
         ),
       (error: unknown) =>

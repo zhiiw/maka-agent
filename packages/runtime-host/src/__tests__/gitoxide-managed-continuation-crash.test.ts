@@ -63,6 +63,10 @@ test('a started workspace-bound continuation survives Host death without provide
     t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the real helper continuation test');
     return;
   }
+  if (process.platform === 'win32') {
+    t.skip('managed-coding-v2 is not a supported Windows product profile yet');
+    return;
+  }
   await withManagedContinuationFixture(
     helperPath,
     async ({ fixture, resourcesRoot, runtimeExecutablePath, callLog, boundary }) => {
@@ -179,6 +183,10 @@ test('an accepted-head continuation never calls the provider twice after Host de
     t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the real provider crash test');
     return;
   }
+  if (process.platform === 'win32') {
+    t.skip('managed-coding-v2 is not a supported Windows product profile yet');
+    return;
+  }
   await withManagedContinuationFixture(
     helperPath,
     async ({ fixture, resourcesRoot, runtimeExecutablePath, callLog, boundary }) => {
@@ -255,6 +263,10 @@ test('Host startup automatically resumes one managed task without an experimenta
     t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the automatic managed resume test');
     return;
   }
+  if (process.platform === 'win32') {
+    t.skip('managed-coding-v2 is not a supported Windows product profile yet');
+    return;
+  }
   await withManagedContinuationFixture(
     helperPath,
     async ({ fixture, resourcesRoot, runtimeExecutablePath, callLog }) => {
@@ -312,6 +324,10 @@ for (const sourceKind of ['git_repository_v1', 'filesystem_snapshot_v1'] as cons
     const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
     if (!helperPath) {
       t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the automatic resume crash matrix');
+      return;
+    }
+    if (process.platform === 'win32') {
+      t.skip('managed-coding-v2 is not a supported Windows product profile yet');
       return;
     }
     await withManagedContinuationFixture(
@@ -386,7 +402,7 @@ async function withManagedContinuationFixture(
   run: (input: {
     fixture: ExecutionFixture;
     resourcesRoot: string;
-    runtimeExecutablePath?: string;
+    runtimeExecutablePath: string;
     callLog: string;
     sourceKind: 'git_repository_v1' | 'filesystem_snapshot_v1';
     boundary: NonNullable<
@@ -420,11 +436,7 @@ async function withManagedContinuationFixture(
   }
   await resolveWorkspaceIdentity({ path: sourceRoot });
 
-  // Windows intentionally has no canonical managed-coding-v2 product profile yet.
-  // Keep the platform in the Git/non-Git continuation matrix without inventing
-  // a toolchain capability that production refuses to advertise.
-  const runtimeExecutablePath =
-    process.platform === 'win32' ? undefined : resolveElectronExecutable();
+  const runtimeExecutablePath = resolveElectronExecutable();
   const resourcesRoot = await preparePackagedResources(
     base,
     helperInputPath,
@@ -446,7 +458,7 @@ async function withManagedContinuationFixture(
       llmConnectionSlug: 'fake',
       model: 'fake-model',
       permissionMode: 'ask',
-      ...(process.platform === 'win32' ? {} : { toolProfile: 'managed-coding-v2' as const }),
+      toolProfile: 'managed-coding-v2',
     });
     sessionId = session.id;
     const helper = await admitRealHelper(helperInputPath);
@@ -472,7 +484,7 @@ async function withManagedContinuationFixture(
     await run({
       fixture,
       resourcesRoot,
-      ...(runtimeExecutablePath ? { runtimeExecutablePath } : {}),
+      runtimeExecutablePath,
       callLog,
       sourceKind: options.sourceKind ?? 'git_repository_v1',
       boundary: boundary!,
@@ -485,7 +497,7 @@ async function withManagedContinuationFixture(
 async function preparePackagedResources(
   base: string,
   helperInputPath: string,
-  runtimeExecutablePath?: string,
+  runtimeExecutablePath: string,
 ): Promise<string> {
   const resourcesRoot = join(base, 'resources');
   const helperDirectory = join(resourcesRoot, 'gitoxide');
@@ -513,8 +525,6 @@ async function preparePackagedResources(
     })}\n`,
     'utf8',
   );
-
-  if (!runtimeExecutablePath) return resourcesRoot;
 
   const commandRoot = join(resourcesRoot, 'managed-command');
   const entrypointPath = join(commandRoot, 'managed-command-helper-main.js');
