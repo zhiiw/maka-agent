@@ -9,7 +9,7 @@ Desktop 展示的 workspace history 必须是某一次 durable accepted head 的
 
 - SQLite workspace-version authority 拥有 immutable version records 与 current head；
 - Gitoxide managed history owner 先捕获 current head，再沿 `parents[0]` 读取版本；
-- Runtime Host 只为 `managed-coding-v1` session 打开 history owner；
+- Runtime Host 只为 `managed-coding-v2` session 打开 history owner；
 - Desktop 只消费结构化、bounded 的 newest-first lineage；
 - historical restore 仍由 time-travel/restore owner 执行，history query 没有文件系统写权限。
 

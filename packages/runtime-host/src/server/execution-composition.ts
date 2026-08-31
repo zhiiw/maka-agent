@@ -838,7 +838,7 @@ export async function createExecutionRuntimeHostComposition(
                   sourceRoot: backendContext.header.cwd,
                   sessionId: backendContext.sessionId,
                   abortSignal: backendContext.abortSignal,
-                  ...(backendContext.header.toolProfile === 'managed-coding-v4' &&
+                  ...(backendContext.header.toolProfile === 'managed-coding-v2' &&
                   managedCommandOwner
                     ? {
                         managedNodeTransform: {
@@ -851,9 +851,7 @@ export async function createExecutionRuntimeHostComposition(
               })()
             : undefined;
           const managedNodeTestAdmission =
-            backendContext.header.toolProfile === 'managed-coding-v2' ||
-            backendContext.header.toolProfile === 'managed-coding-v3' ||
-            backendContext.header.toolProfile === 'managed-coding-v4'
+            backendContext.header.toolProfile === 'managed-coding-v2'
               ? await (async () => {
                   const dependencySnapshotAuthority =
                     await openManagedDependencySnapshotAuthority?.();
@@ -874,8 +872,7 @@ export async function createExecutionRuntimeHostComposition(
                 })()
               : undefined;
           const managedNodeCommandAdmission =
-            backendContext.header.toolProfile === 'managed-coding-v3' ||
-            backendContext.header.toolProfile === 'managed-coding-v4'
+            backendContext.header.toolProfile === 'managed-coding-v2'
               ? await (async () => {
                   if (!managedCommandOwner || !managedSession) {
                     throw new Error(
@@ -1046,18 +1043,13 @@ export async function createExecutionRuntimeHostComposition(
           modelId: header.model,
           hostTools: [
             ...hostTools,
-            ...((header.toolProfile === 'managed-coding-v2' ||
-              header.toolProfile === 'managed-coding-v3' ||
-              header.toolProfile === 'managed-coding-v4') &&
-            managedNodeTestToolDeclaration
+            ...(header.toolProfile === 'managed-coding-v2' && managedNodeTestToolDeclaration
               ? [managedNodeTestToolDeclaration]
               : []),
-            ...((header.toolProfile === 'managed-coding-v3' ||
-              header.toolProfile === 'managed-coding-v4') &&
-            managedNodeCommandToolDeclaration
+            ...(header.toolProfile === 'managed-coding-v2' && managedNodeCommandToolDeclaration
               ? [managedNodeCommandToolDeclaration]
               : []),
-            ...(header.toolProfile === 'managed-coding-v4' && managedNodeTransformToolDeclaration
+            ...(header.toolProfile === 'managed-coding-v2' && managedNodeTransformToolDeclaration
               ? [managedNodeTransformToolDeclaration]
               : []),
             ...graphTools,
@@ -2096,20 +2088,11 @@ export async function createExecutionRuntimeHostComposition(
       handlers,
       moduleIds: Object.freeze(domainModules.map(({ id }) => id)),
       executionProfiles: Object.freeze([
-        ...(gitoxideHelperCapability ? (['managed-coding-v1'] as const) : []),
-        ...(gitoxideHelperCapability && managedNodeTestToolDeclaration
-          ? (['managed-coding-v2'] as const)
-          : []),
-        ...(gitoxideHelperCapability &&
-        managedNodeTestToolDeclaration &&
-        managedNodeCommandToolDeclaration
-          ? (['managed-coding-v3'] as const)
-          : []),
         ...(gitoxideHelperCapability &&
         managedNodeTestToolDeclaration &&
         managedNodeCommandToolDeclaration &&
         managedNodeTransformToolDeclaration
-          ? (['managed-coding-v4'] as const)
+          ? (['managed-coding-v2'] as const)
           : []),
       ]),
       workspaceExecution: requireWorkspaceExecution(workspaceExecution),

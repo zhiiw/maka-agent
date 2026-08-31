@@ -6,7 +6,7 @@
 > 的实际 capability set 中冻结一个精确 execution profile；T1 后不得因平台、打包资源或 sandbox 不可用而
 > 静默降级。
 
-这个协议只决定“当前 Host 能提供什么”，不决定某次工具是否成功。`managed-coding-v1` 代表 accepted-world
+这个协议只决定“当前 Host 能提供什么”，不决定某次工具是否成功。`managed-coding-v2` 代表完整 accepted-world
 Read/Glob/Grep/Write/Edit；`managed-coding-v2` 在 v1 上增加受控 Node test observation。
 
 ## 2. Owner 与权限边界
@@ -51,15 +51,15 @@ Session，也不回退 attached execution。
 | --- | --- | --- | --- |
 | Linux | 可用 | Bubblewrap 证明后可用 | production-shaped Host crash gate |
 | macOS | 可用 | Seatbelt 证明后可用 | production-shaped Host crash gate |
-| Windows | 可用 | 当前不可用 | Host 只发布 v1；不会先创建 v2 再降级 |
+| Windows | Gitoxide kernel 可用 | 当前完整 profile 不可用 | Host 发布空集合；不会降级到旧 profile |
 
 Windows 的限制是当前 sandbox capability 合同，不是 Gitoxide/Write/Edit 的限制。将来加入可证明的 Windows
-managed Node sandbox 时，由 composition 增加 v2；协议和 Desktop selection 不需要改变。
+managed Node sandbox 时，由 composition 直接发布 canonical v2；协议和 Desktop selection 不需要改变。
 
 ## 6. 测试合同
 
 1. protocol 拒绝未知、重复、乱序 profile；
 2. Host kernel 返回 composition 实际集合；
-3. Desktop 在 v1/v2 共存时选择 v2，只存在 v1 时选择 v1，空集合时拒绝创建；
-4. packaged managed-coding-v2 gate 在 Linux/macOS 观察 v1+v2，在 Windows 只观察 v1；
+3. Desktop 只接受 exact v2，空集合或旧 Draft profile 时拒绝创建；
+4. packaged managed-coding-v2 gate 在具备完整 sandbox 的平台观察 v2，否则观察空集合；
 5. compatibility epoch 阻止不了解该冻结协议的旧 Client/Host 混用。

@@ -21,7 +21,7 @@ import {
   isCanonicalManagedMutationPathV1,
   MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
   type RuntimeEventManagedObservationFileV1,
-  type RuntimeEventManagedWorkspaceMutationV3,
+  type RuntimeEventManagedWorkspaceNodeTransformMutationV2,
 } from '@maka/core/runtime-event';
 import type {
   WorkspaceEpochRecordV1,
@@ -206,8 +206,8 @@ export function createManagedNodeTransformOwnerInternal(input: {
         };
         prepared.set(request.operationId, state);
         installed = true;
-        const durableDispatch: RuntimeEventManagedWorkspaceMutationV3 = Object.freeze({
-          protocol: 'managed_mutation_v3',
+        const durableDispatch: RuntimeEventManagedWorkspaceNodeTransformMutationV2 = Object.freeze({
+          protocol: 'managed_mutation_v2',
           repositoryId: head.repositoryId,
           workspaceId: head.workspaceId,
           workspaceEpochId: head.workspaceEpochId,
@@ -220,7 +220,7 @@ export function createManagedNodeTransformOwnerInternal(input: {
           baseTreeOid: head.treeOid,
           expectedPath: args.path,
           pathPolicyVersion: 3,
-          operationKind: 'node_transform_v1',
+          operationKind: 'node_transform_v2',
           executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
           toolchainIdentityDigest: toolchain.identityDigest,
           entry,

@@ -35,24 +35,13 @@ test('Host execution profiles are a closed canonical pre-session capability set'
     },
   );
   assert.deepEqual(
-    decodeHostFrame(
-      response([
-        'managed-coding-v1',
-        'managed-coding-v2',
-        'managed-coding-v3',
-        'managed-coding-v4',
-      ]),
-    ),
-    response(['managed-coding-v1', 'managed-coding-v2', 'managed-coding-v3', 'managed-coding-v4']),
+    decodeHostFrame(response(['managed-coding-v2'])),
+    response(['managed-coding-v2']),
   );
-  assert.deepEqual(
-    decodeHostFrame(response(['managed-coding-v1'])),
-    response(['managed-coding-v1']),
-  );
-  assert.throws(() =>
-    decodeHostFrame(response(['managed-coding-v3', 'managed-coding-v2', 'managed-coding-v1'])),
-  );
-  assert.throws(() => decodeHostFrame(response(['managed-coding-v1', 'managed-coding-v1'])));
+  assert.throws(() => decodeHostFrame(response(['managed-coding-v1'])));
+  assert.throws(() => decodeHostFrame(response(['managed-coding-v3'])));
+  assert.throws(() => decodeHostFrame(response(['managed-coding-v4'])));
+  assert.throws(() => decodeHostFrame(response(['managed-coding-v2', 'managed-coding-v2'])));
   assert.throws(() => decodeHostFrame(response(['managed-coding-v5'])));
 });
 

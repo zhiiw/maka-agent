@@ -341,6 +341,12 @@ describe('SQLite recovery authority multi-process races', () => {
         db.exec(`
           DROP TABLE runtime_managed_mutation_reservations;
           DROP TABLE runtime_session_event_ordinals;
+          DROP TABLE runtime_workspace_active_epochs;
+          DELETE FROM runtime_capabilities
+            WHERE capability IN (
+              'runtime_workspace_bound_continuation_authority',
+              'runtime_managed_workspace_canonical_v2'
+            );
           PRAGMA user_version = 10;
           UPDATE operational_schema_migrations SET version = 10 WHERE scope = 'runtime';
         `);

@@ -46,16 +46,17 @@ test('hosted execution tool profiles are durable Session creation inputs', () =>
   assert.equal(
     decodeHostedExecutionStartInput({
       ...decoded,
-      session: { ...decoded.session, toolProfile: 'managed-coding-v1' },
-    }).session.toolProfile,
-    'managed-coding-v1',
-  );
-  assert.equal(
-    decodeHostedExecutionStartInput({
-      ...decoded,
       session: { ...decoded.session, toolProfile: 'managed-coding-v2' },
     }).session.toolProfile,
     'managed-coding-v2',
+  );
+  assert.throws(
+    () =>
+      decodeHostedExecutionStartInput({
+        ...decoded,
+        session: { ...decoded.session, toolProfile: 'managed-coding-v1' },
+      }),
+    /Invalid Session tool profile/u,
   );
   assert.throws(
     () =>
@@ -154,102 +155,8 @@ test('the WorkHub coordination profile has conversational authority but zero too
   assert.deepEqual(projectHostedExecutionTools([productTool], 'workhub-coordination-v1'), []);
 });
 
-test('the managed coding profile reads and mutates only the accepted Git tree', () => {
-  const profile = hostedExecutionRunProfile('managed-coding-v1');
-  assert.ok(profile);
-  assert.deepEqual(profile.toolNames, ['Read', 'Glob', 'Grep', 'Write', 'Edit']);
-  assert.equal(profile.memoryExtraction, false);
-  assert.match(profile.systemPrompt, /managed Git workspace/u);
-  assert.match(profile.systemPrompt, /Read, Glob, and Grep/u);
-
-  const tools = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash'].map(
-    (name): MakaTool => ({
-      name,
-      description: name,
-      parameters: z.object({}),
-      impl: async () => 'not used by managed mutation execution',
-    }),
-  );
-  const selected = projectHostedExecutionTools(tools, 'managed-coding-v1');
-  assert.deepEqual(
-    selected.map(({ name }) => name),
-    ['Read', 'Glob', 'Grep', 'Write', 'Edit'],
-  );
-  for (const tool of selected.slice(0, 3)) {
-    assert.equal(tool.recoveryMode, 'replay_safe');
-    assert.equal(tool.durableExecutionProfile, undefined);
-  }
-  for (const tool of selected.slice(3)) {
-    assert.equal(tool.recoveryMode, 'reconcile');
-    assert.equal(tool.durableExecutionProfile, 'managed_mutation_v2');
-  }
-});
-
-test('managed coding v2 adds only the durable accepted-world Node test', () => {
+test('managed coding v2 is the only complete durable coding profile', () => {
   const profile = hostedExecutionRunProfile('managed-coding-v2');
-  assert.ok(profile);
-  assert.deepEqual(profile.toolNames, ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ManagedNodeTest']);
-  assert.match(profile.systemPrompt, /immutable read-only dependency snapshot/u);
-
-  const tools = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ManagedNodeTest', 'Bash'].map(
-    (name): MakaTool => ({
-      name,
-      description: name,
-      parameters: z.object({}),
-      impl: async () => 'not used',
-    }),
-  );
-  const selected = projectHostedExecutionTools(tools, 'managed-coding-v2');
-  assert.deepEqual(
-    selected.map(({ name }) => name),
-    ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ManagedNodeTest'],
-  );
-  assert.equal(selected.at(-1)?.recoveryMode, 'replay_safe');
-  assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_observation_v2');
-});
-
-test('managed coding v3 adds only an explicit hermetic accepted-world Node entrypoint', () => {
-  const profile = hostedExecutionRunProfile('managed-coding-v3');
-  assert.ok(profile);
-  assert.deepEqual(profile.toolNames, [
-    'Read',
-    'Glob',
-    'Grep',
-    'Write',
-    'Edit',
-    'ManagedNodeTest',
-    'ManagedNodeRun',
-  ]);
-  assert.match(profile.systemPrompt, /explicit accepted-workspace Node entrypoint/u);
-
-  const tools = [
-    'Read',
-    'Glob',
-    'Grep',
-    'Write',
-    'Edit',
-    'ManagedNodeTest',
-    'ManagedNodeRun',
-    'Bash',
-  ].map(
-    (name): MakaTool => ({
-      name,
-      description: name,
-      parameters: z.object({}),
-      impl: async () => 'not used',
-    }),
-  );
-  const selected = projectHostedExecutionTools(tools, 'managed-coding-v3');
-  assert.deepEqual(
-    selected.map(({ name }) => name),
-    ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ManagedNodeTest', 'ManagedNodeRun'],
-  );
-  assert.equal(selected.at(-1)?.recoveryMode, 'replay_safe');
-  assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_observation_v3');
-});
-
-test('managed coding v4 adds one owner-controlled accepted-world workspace transform', () => {
-  const profile = hostedExecutionRunProfile('managed-coding-v4');
   assert.ok(profile);
   assert.deepEqual(profile.toolNames, [
     'Read',
@@ -261,7 +168,12 @@ test('managed coding v4 adds one owner-controlled accepted-world workspace trans
     'ManagedNodeRun',
     'ManagedNodeTransform',
   ]);
+  assert.equal(profile.memoryExtraction, false);
+  assert.match(profile.systemPrompt, /managed Git workspace/u);
+  assert.match(profile.systemPrompt, /immutable read-only dependency snapshot/u);
+  assert.match(profile.systemPrompt, /explicit accepted-workspace Node entrypoint/u);
   assert.match(profile.systemPrompt, /one bounded UTF-8 workspace file/u);
+
   const tools = [...profile.toolNames, 'Bash'].map(
     (name): MakaTool => ({
       name,
@@ -270,7 +182,15 @@ test('managed coding v4 adds one owner-controlled accepted-world workspace trans
       impl: async () => 'not used',
     }),
   );
-  const selected = projectHostedExecutionTools(tools, 'managed-coding-v4');
+  const selected = projectHostedExecutionTools(tools, 'managed-coding-v2');
+  assert.deepEqual(
+    selected.map(({ name }) => name),
+    [...profile.toolNames],
+  );
+  assert.equal(selected[5]?.recoveryMode, 'replay_safe');
+  assert.equal(selected[5]?.durableExecutionProfile, 'managed_observation_v2');
+  assert.equal(selected[6]?.recoveryMode, 'replay_safe');
+  assert.equal(selected[6]?.durableExecutionProfile, 'managed_observation_v2');
   assert.equal(selected.at(-1)?.name, 'ManagedNodeTransform');
   assert.equal(selected.at(-1)?.recoveryMode, 'reconcile');
   assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_mutation_v2');

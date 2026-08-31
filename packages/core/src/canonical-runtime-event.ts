@@ -112,7 +112,14 @@ function omitUndefinedEnvelopeFields(value: object): object {
       throw new Error('RuntimeEvent is not losslessly serializable');
     }
     if (descriptor.value === undefined) continue;
-    Object.defineProperty(result, key, descriptor);
+    // This is a normalization-owned copy. Do not inherit frozen descriptor
+    // flags from an owner-issued immutable event, because the envelope fields
+    // below still need to be replaced with their normalized copies.
+    Object.defineProperty(result, key, {
+      ...descriptor,
+      configurable: true,
+      writable: true,
+    });
   }
   return result;
 }

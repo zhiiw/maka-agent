@@ -2,14 +2,14 @@
 
 ## 主要不变量
 
-只有显式选择 `managed-coding-v1` 的 Session，才能使用 packaged Gitoxide helper 打开 managed epoch，且该
+只有选择 canonical `managed-coding-v2` 的 Session，才能使用 packaged Gitoxide helper 打开 managed epoch，且该
 profile 的工具上限只有 Write/Edit。普通 Session 不进入该数据面；helper 缺失或身份不匹配时，managed Session
 在 provider dispatch 前失败，禁止从 PATH 发现 Git、回退 attached checkout 或改走普通文件工具。
 
 ## Owner 与权限
 
 - Desktop renderer 只提交 `productIntent: 'managed_coding'`，没有签发 `toolProfile` 的权限；Desktop main
-  是唯一把该产品意图映射为 `managed-coding-v1` 的 owner，并在 Session 创建前拒绝未知意图或与其它
+  是唯一把该产品意图映射为 `managed-coding-v2` 的 owner，并在 Session 创建前拒绝未知意图或与其它
   start mode 混用；
 - product release owner 生成 helper binary、strict manifest 和锁定 Cargo graph 的第三方 notices；
 - packaged-resource resolver 只接受 `process.resourcesPath` 内的固定路径，并绑定 platform、arch、bytes、SHA-256、
@@ -24,7 +24,7 @@ profile 的工具上限只有 Write/Edit。普通 Session 不进入该数据面�
 
 ## 原子性边界
 
-1. Session header 在任何 T1 以前持久化 `managed-coding-v1`；
+1. Session header 在任何 T1 以前持久化 `managed-coding-v2`；
 2. backend creation 在 provider dispatch 前要求 packaged helper capability，并打开 exact source epoch；
 3. Write/Edit tool 在 T1 前取得 managed admission；
 4. T1 后只允许 managed mutation state machine 提交 terminal outcome，禁止 generic T2 fallback；
@@ -55,7 +55,7 @@ electron-builder 读取这些资源。最终包验证必须要求 binary、manif
 | managed Run 无法取得 workspace boundary | provider dispatch 前失败；不静默退回普通 Run |
 | T1 后进程退出 | 下层 SQLite/Gitoxide owner 按 durable evidence 恢复，不重跑 Write/Edit |
 
-回滚本切片会删除 `managed-coding-v1` 产品入口和 packaged resource composition；现有普通 Session、SQLite 数据与
+回滚本切片会删除 `managed-coding-v2` 产品入口和 packaged resource composition；现有普通 Session、SQLite 数据与
 attached execution 行为不需要迁移。
 
 ## 平台能力矩阵

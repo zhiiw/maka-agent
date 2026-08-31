@@ -112,4 +112,28 @@ describe('canonical RuntimeEvent encoding', () => {
       /RuntimeEvent is not losslessly serializable/,
     );
   });
+
+  test('canonicalizes an owner-frozen event without mutating its descriptors', () => {
+    const content = Object.freeze({
+      kind: 'function_response' as const,
+      id: 'call-1',
+      name: 'ManagedNodeTransform',
+      result: Object.freeze({ path: 'generated/output.txt', bytes: 17 }),
+      isError: false,
+    });
+    const event = Object.freeze(
+      baseEvent({
+        role: 'tool',
+        author: 'tool',
+        content,
+        refs: Object.freeze({ operationId: 'operation-1', toolCallId: 'call-1' }),
+      }),
+    );
+
+    const encoded = encodeCanonicalRuntimeEvent(event);
+
+    assert.deepEqual(encoded.event.content, content);
+    assert.equal(Object.isFrozen(event), true);
+    assert.equal(Object.isFrozen(content), true);
+  });
 });

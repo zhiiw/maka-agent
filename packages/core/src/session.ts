@@ -207,17 +207,11 @@ export function isTurnStatus(value: unknown): value is TurnStatus {
 
 export const SESSION_TOOL_PROFILES = [
   'headless-coding-v1',
-  'managed-coding-v1',
   'managed-coding-v2',
-  'managed-coding-v3',
-  'managed-coding-v4',
   'workhub-coordination-v1',
 ] as const;
 export type SessionToolProfile = (typeof SESSION_TOOL_PROFILES)[number];
-export type ManagedCodingSessionToolProfile = Extract<
-  SessionToolProfile,
-  'managed-coding-v1' | 'managed-coding-v2' | 'managed-coding-v3' | 'managed-coding-v4'
->;
+export type ManagedCodingSessionToolProfile = Extract<SessionToolProfile, 'managed-coding-v2'>;
 
 export function isSessionToolProfile(value: unknown): value is SessionToolProfile {
   return typeof value === 'string' && (SESSION_TOOL_PROFILES as readonly string[]).includes(value);
@@ -226,12 +220,7 @@ export function isSessionToolProfile(value: unknown): value is SessionToolProfil
 export function isManagedCodingSessionToolProfile(
   value: unknown,
 ): value is ManagedCodingSessionToolProfile {
-  return (
-    value === 'managed-coding-v1' ||
-    value === 'managed-coding-v2' ||
-    value === 'managed-coding-v3' ||
-    value === 'managed-coding-v4'
-  );
+  return value === 'managed-coding-v2';
 }
 
 export interface SessionExternalOrigin {

@@ -57,7 +57,7 @@ test('managed Review reads the accepted tree from Runtime Host', async () => {
     allowLocalWorkspace: false,
     client: {
       async getSession() {
-        return sessionProjection('managed-coding-v1');
+        return sessionProjection('managed-coding-v2');
       },
       async readManagedWorkspaceReview(sessionId: string) {
         managedReads += 1;
@@ -162,7 +162,7 @@ test('managed Review fails closed instead of reading the attached checkout', asy
     ipcMain: ipc as never,
     client: {
       async getSession() {
-        return sessionProjection('managed-coding-v1');
+        return sessionProjection('managed-coding-v2');
       },
       async readManagedWorkspaceReview() {
         throw new Error('accepted review unavailable');
@@ -210,7 +210,7 @@ test('managed workspace Publish delegates one immutable accepted snapshot to Run
     ipcMain: ipc as never,
     client: {
       async getSession() {
-        return sessionProjection('managed-coding-v1');
+        return sessionProjection('managed-coding-v2');
       },
       async readManagedWorkspaceReview() {
         throw new Error('not used');
@@ -258,7 +258,7 @@ test('managed workspace source branch Publish delegates one exact branch request
     ipcMain: ipc as never,
     client: {
       async getSession() {
-        return sessionProjection('managed-coding-v1');
+        return sessionProjection('managed-coding-v2');
       },
       async readManagedWorkspaceReview() {
         throw new Error('not used');
@@ -341,7 +341,7 @@ test('managed workspace Restore delegates one isolated accepted snapshot to Runt
     ipcMain: ipc as never,
     client: {
       async getSession() {
-        return sessionProjection('managed-coding-v1');
+        return sessionProjection('managed-coding-v2');
       },
       async readManagedWorkspaceReview() {
         throw new Error('not used');
@@ -454,7 +454,7 @@ test('managed workspace maintenance delegates one bounded quiet cleanup', async 
     ipcMain: ipc as never,
     client: {
       async getSession() {
-        return sessionProjection('managed-coding-v1');
+        return sessionProjection('managed-coding-v2');
       },
       async maintainManagedWorkspace(sessionId: string) {
         calls += 1;
@@ -488,7 +488,7 @@ test('managed workspace lifecycle commands stay bound to the same session', asyn
     ipcMain: ipc as never,
     client: {
       async getSession() {
-        return sessionProjection('managed-coding-v1');
+        return sessionProjection('managed-coding-v2');
       },
       async readManagedWorkspaceHistory(sessionId: string, limit: number) {
         assert.equal(sessionId, 'session-managed');
@@ -589,7 +589,7 @@ test('managed workspace lifecycle commands stay bound to the same session', asyn
 });
 
 function sessionProjection(
-  toolProfile?: 'managed-coding-v1' | 'managed-coding-v2',
+  toolProfile?: 'managed-coding-v2',
   hostCwd = process.cwd(),
 ): SessionCatalogProjection {
   return {

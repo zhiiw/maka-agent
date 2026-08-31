@@ -1,74 +1,56 @@
 # Managed Coding v2 Product Composition
 
-## 1. 为什么是 v2
+## 1. Canonical contract
 
-`managed-coding-v1` 已经是持久化 Session 合同：它只有 accepted-world `Read/Glob/Grep/Write/Edit`。直接把
-新工具塞进 v1，会让同一 durable profile 在不同版本拥有不同权限，也会让旧 Session 因新 toolchain/sandbox 缺失而
-突然无法打开。
+`managed-coding-v2` 是第一版、也是当前唯一的 managed coding Session 合同。此前 integration stack 中出现过的
+`managed-coding-v1/v3/v4` 从未发布、没有生产消费者，也没有需要迁移的用户数据；它们不再是可读或可协商协议。
 
-因此 v1 保持冻结，v2 只增加一个能力：
+固定工具集合为：
 
 ```text
-ManagedNodeTest(explicit sorted .js/.mjs/.cjs files)
+Read / Glob / Grep / Write / Edit
+ManagedNodeTest / ManagedNodeRun / ManagedNodeTransform
 ```
 
-它不是 Bash、npm script 或任意 command；它只能观察同一个 accepted Git tree。
+- Read/Glob/Grep：只读取 accepted Git tree；
+- Write/Edit/ManagedNodeTransform：`reconcile + managed_mutation_v2`，用 `operationKind` 区分转换；
+- ManagedNodeTest/ManagedNodeRun：`replay_safe + managed_observation_v2`，用 `operationKind` 区分测试与命令；
+- Bash、PATH executable、联网安装和 attached checkout 不在 profile 内。
 
 ## 2. 主要不变量
 
-> `managed-coding-v2` 只有在一个 Runtime Host 同时拥有 accepted Gitoxide session、current-process Node
-> toolchain、enforcing sandbox 与 storage-root execution capability 时才可组合；缺一项必须在 T1 前明确不可用。
+> Host 只有同时拥有 Gitoxide accepted-world authority、canonical managed toolchain v2、enforcing sandbox、
+> dependency/execution-root authority 和对应 admission owner 时，才能在 T1 前宣告 `managed-coding-v2`；缺少任何
+> 能力都必须让整个 profile unavailable，禁止回退到旧 profile 或普通工具。
 
-v2 工具集合固定为：
-
-```text
-Read / Glob / Grep / Write / Edit / ManagedNodeTest
-```
-
-- Read/Glob/Grep：`replay_safe`，读取 accepted tree；
-- Write/Edit：`reconcile + managed_mutation_v2`；
-- ManagedNodeTest：`replay_safe + managed_observation_v2`；dependency 输入只能是显式 `none` 或 owner-bound
-  immutable snapshot lease，禁止从 checkout `node_modules` 回退；
-- Bash、npm、package script、PATH executable 与 attached checkout 均不在 profile 内。
+Session header、Host handshake、Runtime admission、durable dispatch 和 release manifest 都只接受 canonical v2。
+旧 Draft 标识明确 fail closed，不提供 dual reader、migration 或 downgrade。
 
 ## 3. Owner 与组合顺序
 
-1. Host boot 尝试 admission packaged Gitoxide helper 与 current-process managed toolchain；缺失只让对应 profile
-   unavailable，不让普通 Session 获得 fallback；manifest 损坏仍 fail Host boot。
-2. Session run 开始时，Gitoxide owner读取 durable epoch/head/version。
-3. v2 additionally 组合 command sandbox owner、execution-root owner 与 Node-test admission owner。
-4. Run composer 将 exact profile 工具投影给模型，同时把 mutation/observation admission 分别交给 Runtime。
-5. Runtime 在 T1 前冻结 mode；T1 后不允许换回 v1、普通 test runner 或 generic T2。
+1. Host boot 验证 Gitoxide helper 与 managed-command toolchain release v2；manifest 损坏 fail Host boot。
+2. Desktop 在创建 Session、任何 T1 之前读取 resident Host 的 exact capability set。
+3. Gitoxide owner读取 durable epoch/head/version；toolchain、sandbox 和 dependency owner签发不透明 capability。
+4. Run composer把固定工具集合投影给模型，并把 mutation/observation admission交给 Runtime。
+5. Runtime 在 T1 前冻结 mode、accepted head、operation kind、args 和 execution profile；T1 后禁止 generic fallback。
 
-## 4. 失败与兼容
+## 4. 失败与数据断代
 
-- 旧 `managed-coding-v1` Session 永远不要求 Node toolchain；
-- v2 缺 Gitoxide/toolchain/sandbox：run 在 provider 请求前以
-  `managed_workspace_profile_unavailable` 失败；
-- v2 test admission 失败：没有 T1；
-- T1 后 helper/Host 失败：按 `managed_observation_v2` exact accepted-tree + dependency boundary recovery 收敛；
-- profile 是 Session immutable identity，不允许运行中从 v2 降级 v1。
+- capability 不完整：Session 创建或 Run admission 明确返回 `managed_workspace_profile_unavailable`；
+- preflight 失败：不跨 T1；
+- T1 后失败：只按 canonical mutation/observation proof 收敛；
+- 旧 Draft SQLite schema 15–17、旧 profile/manifest/payload 不迁移；开发数据库必须备份后清理；
+- 正式 main schema 14 只通过一个 migration 15 进入 canonical managed workspace epoch。
 
-本切片建立 Host 产品 composition，但不立即把 Desktop 默认创建策略从 v1 切到 v2。默认切换必须与 packaged
-Host/helper kill-reopen 和三平台 enforcing sandbox gate 同一交付完成，避免用户拿到未经证明的默认能力。
+## 5. Crash gate 与平台矩阵
 
-## 5. Production-shaped crash gate
+真实 gate 必须启动 packaged/current-process Runtime Host、Gitoxide helper、toolchain 和平台 sandbox，强杀整个 Host
+process tree 后从 SQLite + accepted Git facts 继续；已完成工具不得重放。
 
-默认切换前的 crash gate 不使用同进程异常模拟：
+| 平台 | v2 availability |
+| --- | --- |
+| Windows | 只有完整 AppContainer/Job 与 Host kill/reopen 证据时可宣告，否则整个 v2 unavailable |
+| macOS | signed app + Seatbelt + kill/reopen |
+| Linux | distribution authority + Bubblewrap + kill/reopen |
 
-1. 使用仓库锁定的 Electron/Node 24 启动真实 Runtime Host；
-2. 使用真实 packaged Gitoxide helper、managed-command manifest 与平台 sandbox；
-3. provider 发出一次 `ManagedNodeTest`，并在看到 durable tool result 后挂起；
-4. 测试强杀整个 Host root process；
-5. 第二个 Host 从 SQLite、accepted Git tree 和 continuation facts 自动继续；
-6. provider 不得再次发出工具调用，RuntimeEvents 中只能有一对 `function_call/function_response`。
-
-测试由 Gitoxide 三平台 workflow 持有。没有真实 helper 的本地构建只能明确 skip，不能把 skip 计作 crash 证据。
-
-## 6. 平台矩阵
-
-| 平台 | composition 语义 | 默认启用前 gate |
-| --- | --- | --- |
-| Windows | v2 profile 与 owner graph 可组合 | packaged Electron + AppContainer/Job + kill/reopen |
-| macOS | 相同 durable profile | signed app + Seatbelt + kill/reopen |
-| Linux | 相同 protocol/build | signed distribution authority + Bubblewrap + kill/reopen |
+平台缺能力时采用“v2 或 unavailable”，不保留较弱 profile 作为兼容层。

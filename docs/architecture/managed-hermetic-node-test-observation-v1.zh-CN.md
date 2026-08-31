@@ -10,7 +10,7 @@ v1 不安装依赖，不读取系统 `PATH`，也不发现用户 checkout 的 `n
 
 一次 `run_node_tests_v1` observation 必须满足：
 
-- 复用 owner-bound `hermetic_observation_v1` toolchain capability；
+- 复用 owner-bound `hermetic_observation_v2` toolchain capability；
 - `SandboxManager` 必须提供 enforcing backend，`none` 或 unavailable 都 fail closed；
 - 已验证 helper 在一个短生命周期沙箱根进程内直接导入精确文件，由 Node 内建 harness 运行注册的 tests；不启用文件 discovery、不调用 programmatic `run()`、不派生 test child process，并固定使用 `--test-force-exit`；
 - Node Permission Model 不授予 child process、worker、native addon、WASI 或 accepted input 写权限；

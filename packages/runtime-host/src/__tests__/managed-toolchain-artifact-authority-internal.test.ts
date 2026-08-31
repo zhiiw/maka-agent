@@ -52,13 +52,13 @@ test('release owner admits one owner-bound toolchain and re-verifies both artifa
   const verified = await verifyManagedToolchainForInvocationInternal(
     invocationOwnerToken,
     capability,
-    'hermetic_observation_v1',
+    'hermetic_observation_v2',
   );
   assert.equal(verified.executablePath, executablePath);
   assert.equal(verified.entrypointPath, entrypointPath);
   assert.match(verified.identityDigest, /^sha256:[0-9a-f]{64}$/u);
   await assert.rejects(
-    verifyManagedToolchainForInvocationInternal({}, capability, 'hermetic_observation_v1'),
+    verifyManagedToolchainForInvocationInternal({}, capability, 'hermetic_observation_v2'),
     (error) =>
       error instanceof ManagedToolchainArtifactAuthorityError &&
       error.code === 'managed_toolchain_invocation_capability_invalid',
@@ -111,7 +111,7 @@ async function releaseState(executablePath: string, entrypointPath: string) {
     platform: process.platform,
     arch: process.arch,
     profileVersion: 1 as const,
-    allowedEffectClasses: ['hermetic_observation_v1', 'workspace_transform_v1'] as const,
+    allowedEffectClasses: ['hermetic_observation_v2', 'workspace_transform_v1'] as const,
   };
 }
 

@@ -79,7 +79,7 @@ immutable publish ref 与“应用到用户 checkout”必须分开：
 5. 崩溃后只 reconcile receipt/ref/worktree evidence，不重新计算 accepted mutation。
 
 当前 Desktop 已接入第 1 项：Review 面板签发稳定 `publishId`，Runtime Host 只允许
-`managed-coding-v1` session 创建 `refs/maka/published/<publishId>`。失败重试复用同一个 ID，ref 不存在或精确指向
+`managed-coding-v2` session 创建 `refs/maka/published/<publishId>`。失败重试复用同一个 ID，ref 不存在或精确指向
 accepted commit 是仅有的两种可收敛状态。这个动作不接触 source checkout；Apply 仍由后续独立 owner 负责。
 
 ### M4.3 Restore / Undo / Time travel
@@ -116,7 +116,7 @@ M5 不把普通 Bash 直接标成可恢复。命令在 T1 前必须被划分到�
 
 | Effect class | 权限 | 恢复策略 |
 | --- | --- | --- |
-| `hermetic_observation_v1` | 无网络、只读 accepted input、仅写 disposable scratch | 可从同一 boundary 重建或重跑 |
+| `hermetic_observation_v2` | 无网络、只读 accepted input、仅写 disposable scratch | 可从同一 boundary 重建或重跑 |
 | `workspace_transform_v1` | 只写 owner-owned output tree | 固化 candidate，SQLite 接受后投影；不原地改 accepted tree |
 | `external_effect_v1` | 网络、凭据、远端 API 或不可观察系统状态 | 需要外部 idempotency/acceptance evidence；否则 park，禁止自动重放 |
 
@@ -153,16 +153,15 @@ exit status、test summary 与 artifact digest。缓存是 projection；test out
    T2；
 3. Host admission owner 已只从 Gitoxide accepted-world 与 toolchain opaque capability 签发 envelope，并用一次性
    input/scratch roots 执行显式 Node tests；
-4. `managed-coding-v2` Host composition 已定义版本化工具集合，并保持 v1 不变；真实 Electron Host/helper
-   kill-reopen 已进入平台 gate；Desktop 在 Session/T1 前查询 resident Host capability，Linux/macOS 选择 v2，
-   Windows 当前只获得 v1，禁止执行时降级；
+4. `managed-coding-v2` 是唯一产品合同；真实 Electron Host/helper kill-reopen 已进入平台 gate；Desktop 在
+   Session/T1 前查询 resident Host capability，平台不满足完整条件时整个 v2 unavailable，禁止降级；
 5. 需要外部包的项目在 M5.3 capability 可用前明确 unavailable，禁止静默降级。
 
 `ManagedNodeRun` kernel 只运行 accepted tree 中的显式 Node 入口，exact argv 在 T1 前冻结，写入仅限
 disposable scratch。它不等同于 Bash，也不发现 package scripts 或 `PATH` 工具。独立产品组合切片已经把
-`managed-coding-v3` 加入 Host negotiation，并用真实 Host kill/restart 证明完成结果不重放；Linux/macOS
-可宣告 v3，Windows 在完整证据形成前只宣告 v1。详见 `managed-hermetic-node-command-kernel-v1.zh-CN.md`
-与 `managed-coding-v3-product-composition.zh-CN.md`。
+Node command 与 Node test 共用 canonical `managed_observation_v2`，通过 `operationKind` 区分；平台只能宣告完整的
+`managed-coding-v2` 或 unavailable。详见 `managed-hermetic-node-command-kernel-v1.zh-CN.md` 与
+`managed-coding-v2-product-composition.zh-CN.md`。
 
 ### M5.5 External-effect fencing
 
@@ -194,8 +193,8 @@ Host 后，新的 Run 只采用 durable outcome/candidate/evidence；已完成�
 每个 PR 必须列出 owner、原子性边界、失败状态、回滚/收敛方式和平台矩阵。CI 全绿只表示已布置用例通过；
 并发、崩溃与数据安全仍需单独论证。
 
-当前 workspace-transform kernel 已采用 `managed_mutation_v3`：受限 Node 进程只产生一个 owner-selected UTF-8
+当前 workspace-transform kernel 已采用 canonical `managed_mutation_v2` 的 `node_transform_v2` operation：受限 Node 进程只产生一个 owner-selected UTF-8
 输出，Gitoxide candidate 与 SQLite successor 才能把它纳入 accepted history。它不直接写 worktree，也不让
-caller 选择 executable/environment。packaged profile v4、Desktop negotiation 与 Host crash gate 已形成独立
+caller 选择 executable/environment。canonical profile v2、Desktop negotiation 与 Host crash gate 已形成独立
 产品组合切片；下一步推进 external-effect fencing。详见 `managed-node-transform-kernel-v1.zh-CN.md` 与
-`managed-coding-v4-product-composition.zh-CN.md`。
+`managed-coding-v2-product-composition.zh-CN.md`。

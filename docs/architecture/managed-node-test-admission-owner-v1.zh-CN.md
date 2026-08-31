@@ -4,7 +4,7 @@
 
 本切片把 durable `ManagedNodeTest` protocol 连接到两个已经存在的 authority：Gitoxide managed session 的
 accepted head，以及 managed command sandbox 的 opaque toolchain capability。它只建立 Runtime Host admission；
-不会把工具加入现有 `managed-coding-v1`，不会改变普通 Session，也不会在缺少 enforcing sandbox 时回退到
+不会改变普通 Session，也不会在缺少 enforcing sandbox 时回退到
 `node`、`npm`、package script 或 `PATH`。
 
 ## 2. 主要不变量
@@ -69,6 +69,6 @@ Admission 不接收裸 `storageRoot`。execution-root owner 必须持有不可�
 
 ## 6. 后续产品接线
 
-不要静默扩大 `managed-coding-v1`。后续独立切片应定义版本化 product profile，只有在 packaged/current-process
-toolchain authority、enforcing sandbox 和 production-shaped crash test 同时可用时，才把 `ManagedNodeTest` 暴露给
+canonical `managed-coding-v2` 只有在 packaged/current-process toolchain authority、enforcing sandbox 和
+production-shaped crash test 同时可用时，才把 `ManagedNodeTest` 暴露给
 Desktop。旧 profile 与旧 session 的工具集合保持冻结。

@@ -13,7 +13,7 @@ v1 capability 同时绑定：
 - profile version；
 - 允许的 effect class。
 
-当前只允许 `hermetic_observation_v1` 与 `workspace_transform_v1`。`external_effect_v1` 不在 capability 中，因此后续代码不能通过同一入口静默获得网络、凭据或远端副作用权限。
+当前只允许 `hermetic_observation_v2` 与 `workspace_transform_v1`。`external_effect_v1` 不在 capability 中，因此后续代码不能通过同一入口静默获得网络、凭据或远端副作用权限。
 
 ## Owner 与权限边界
 

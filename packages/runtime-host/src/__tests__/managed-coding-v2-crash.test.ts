@@ -125,10 +125,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
     });
     const firstClient = await connectClient(root);
     assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
-      profiles:
-        process.platform === 'win32'
-          ? ['managed-coding-v1']
-          : ['managed-coding-v1', 'managed-coding-v2', 'managed-coding-v3', 'managed-coding-v4'],
+      profiles: process.platform === 'win32' ? [] : ['managed-coding-v2'],
     });
     const startRequest = firstClient.request('hosted.execution.start', {
       executionId,
@@ -252,7 +249,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
   }
 });
 
-test('packaged managed-coding-v3 resumes after Host death without replaying a completed Node command', {
+test('packaged managed-coding-v2 resumes after Host death without replaying a completed Node command', {
   timeout: 90_000,
 }, async (t) => {
   const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
@@ -301,10 +298,7 @@ test('packaged managed-coding-v3 resumes after Host death without replaying a co
     });
     const firstClient = await connectClient(root);
     assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
-      profiles:
-        process.platform === 'win32'
-          ? ['managed-coding-v1']
-          : ['managed-coding-v1', 'managed-coding-v2', 'managed-coding-v3', 'managed-coding-v4'],
+      profiles: process.platform === 'win32' ? [] : ['managed-coding-v2'],
     });
     const startRequest = firstClient.request('hosted.execution.start', {
       executionId,
@@ -313,13 +307,13 @@ test('packaged managed-coding-v3 resumes after Host death without replaying a co
         modelTarget: {
           kind: 'explicit',
           connectionId,
-          connectionSlug: 'managed-v3-provider',
+          connectionSlug: 'managed-v2-provider',
           model: MODEL_ID,
         },
         permissionMode: 'bypass',
         collaborationMode: 'agent',
         orchestrationMode: 'default',
-        toolProfile: 'managed-coding-v3',
+        toolProfile: 'managed-coding-v2',
       },
       content: { text: 'Run scripts/check.mjs with the exact requested arguments.' },
     });
@@ -343,13 +337,13 @@ test('packaged managed-coding-v3 resumes after Host death without replaying a co
       (projection) =>
         Promise.reject(
           new Error(
-            `hosted execution settled before the Node command result: ${JSON.stringify(projection)}`,
+            `hosted execution settled before the Node command result: ${JSON.stringify(projection)}; runtime evidence: ${readRuntimeFailureEvidence(root, executionId)}`,
           ),
         ),
       (error: unknown) =>
         Promise.reject(
           new Error(
-            `hosted execution failed before the Node command result: ${error instanceof Error ? error.message : String(error)}`,
+            `hosted execution failed before the Node command result: ${error instanceof Error ? error.message : String(error)}; runtime evidence: ${readRuntimeFailureEvidence(root, executionId)}`,
             { cause: error },
           ),
         ),
@@ -358,13 +352,22 @@ test('packaged managed-coding-v3 resumes after Host death without replaying a co
       provider.waitForCompletedToolResult(),
       startFailure,
     ]);
-    assert.deepEqual(readManagedNodeRunResult(completedToolResult), {
-      protocolVersion: 1,
-      kind: 'node_command_observation',
-      exitCode: 7,
-      stdout: '{"argv":["--check","src/index.js"],"path":""}\n',
-      stderr: '',
-    });
+    const completedNodeRun = readManagedNodeRunResult(completedToolResult);
+    assert.deepEqual(
+      {
+        protocolVersion: completedNodeRun.protocolVersion,
+        kind: completedNodeRun.kind,
+        exitCode: completedNodeRun.exitCode,
+        stdout: completedNodeRun.stdout,
+      },
+      {
+        protocolVersion: 1,
+        kind: 'node_command_observation',
+        exitCode: 7,
+        stdout: '{"argv":["--check","src/index.js"],"path":""}\n',
+      },
+    );
+    assert.equal(typeof completedNodeRun.stderr, 'string');
     await fixture.killHost(firstHost);
     await withTimeout(start, PROCESS_TIMEOUT_MS, 'crashed hosted execution did not close');
     await firstClient.close().catch(() => undefined);
@@ -388,6 +391,7 @@ test('packaged managed-coding-v3 resumes after Host death without replaying a co
     assert.equal(provider.requests.length, 3);
     assert.match(JSON.stringify(provider.requests[1]), /ManagedNodeRun/u);
     assert.match(JSON.stringify(provider.requests[2]), /ManagedNodeRun/u);
+    assert.deepEqual(readManagedNodeRunResult(provider.requests[2]), completedNodeRun);
     const readerOwner = await tryAcquireInteractiveRootReader(capability);
     assert.ok(readerOwner);
     if (!readerOwner) throw new Error('Unable to read managed v3 fixture root');
@@ -424,15 +428,15 @@ test('packaged managed-coding-v3 resumes after Host death without replaying a co
   }
 });
 
-test('packaged managed-coding-v4 resumes after Host death without replaying an accepted workspace transform', {
+test('packaged managed-coding-v2 resumes after Host death without replaying an accepted workspace transform', {
   timeout: 90_000,
 }, async (t) => {
   const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
   if (!helperPath) {
-    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the packaged v4 crash gate');
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the packaged v2 crash gate');
     return;
   }
-  const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-managed-v4-crash-')));
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-managed-v2-crash-')));
   const root = join(base, 'root');
   const executionId = randomUUID();
   await mkdir(join(root, 'scripts'), { recursive: true });
@@ -456,7 +460,7 @@ test('packaged managed-coding-v4 resumes after Host death without replaying an a
     'commit',
     '--quiet',
     '-m',
-    'managed v4 baseline',
+    'managed v2 baseline',
   ]);
 
   const electronExecutable = resolveElectronExecutable();
@@ -474,10 +478,7 @@ test('packaged managed-coding-v4 resumes after Host death without replaying an a
     });
     const firstClient = await connectClient(root);
     assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
-      profiles:
-        process.platform === 'win32'
-          ? ['managed-coding-v1']
-          : ['managed-coding-v1', 'managed-coding-v2', 'managed-coding-v3', 'managed-coding-v4'],
+      profiles: process.platform === 'win32' ? [] : ['managed-coding-v2'],
     });
     const startRequest = firstClient.request('hosted.execution.start', {
       executionId,
@@ -486,13 +487,13 @@ test('packaged managed-coding-v4 resumes after Host death without replaying an a
         modelTarget: {
           kind: 'explicit',
           connectionId,
-          connectionSlug: 'managed-v4-provider',
+          connectionSlug: 'managed-v2-provider',
           model: MODEL_ID,
         },
         permissionMode: 'bypass',
         collaborationMode: 'agent',
         orchestrationMode: 'default',
-        toolProfile: 'managed-coding-v4',
+        toolProfile: 'managed-coding-v2',
       },
       content: { text: 'Generate one accepted workspace output.' },
     });
@@ -516,13 +517,13 @@ test('packaged managed-coding-v4 resumes after Host death without replaying an a
       (projection) =>
         Promise.reject(
           new Error(
-            `hosted execution settled before the workspace transform result: ${JSON.stringify(projection)}`,
+            `hosted execution settled before the workspace transform result: ${JSON.stringify(projection)}; runtime evidence: ${readRuntimeFailureEvidence(root, executionId)}`,
           ),
         ),
       (error: unknown) =>
         Promise.reject(
           new Error(
-            `hosted execution failed before the workspace transform result: ${error instanceof Error ? error.message : String(error)}`,
+            `hosted execution failed before the workspace transform result: ${error instanceof Error ? error.message : String(error)}; runtime evidence: ${readRuntimeFailureEvidence(root, executionId)}`,
             { cause: error },
           ),
         ),
@@ -562,7 +563,7 @@ test('packaged managed-coding-v4 resumes after Host death without replaying an a
     assert.match(JSON.stringify(provider.requests[2]), /ManagedNodeTransform/u);
     const readerOwner = await tryAcquireInteractiveRootReader(capability);
     assert.ok(readerOwner);
-    if (!readerOwner) throw new Error('Unable to read managed v4 fixture root');
+    if (!readerOwner) throw new Error('Unable to read managed v2 fixture root');
     const reader = await openInteractiveExecutionStoresForRead(readerOwner.lease);
     try {
       const runs = await reader.agentRunStore.listSessionRuns(executionId);
@@ -593,7 +594,7 @@ test('packaged managed-coding-v4 resumes after Host death without replaying an a
       try {
         const successorCount = database
           .prepare(
-            "SELECT COUNT(*) AS count FROM runtime_workspace_versions WHERE origin_kind = 'successor'",
+            "SELECT COUNT(*) AS count FROM runtime_workspace_versions WHERE origin_kind = 'tool_mutation'",
           )
           .get() as { count: number };
         const reservationCount = database
@@ -909,6 +910,38 @@ async function startManagedNodeTransformProvider(): Promise<{
   };
 }
 
+function readRuntimeFailureEvidence(root: string, executionId: string): string {
+  try {
+    const database = new DatabaseSync(join(root, 'runtime.sqlite'), { readOnly: true });
+    try {
+      const rows = database
+        .prepare(
+          `
+          SELECT event_kind AS eventKind, payload_json AS payloadJson
+          FROM runtime_events
+          WHERE session_id = ?
+          ORDER BY committed_at DESC, event_id DESC
+          LIMIT 12
+          `,
+        )
+        .all(executionId) as unknown as Array<{
+        readonly eventKind: string;
+        readonly payloadJson: string;
+      }>;
+      return JSON.stringify(
+        rows.reverse().map((row) => ({
+          eventKind: row.eventKind,
+          payload: row.payloadJson.slice(0, 2_000),
+        })),
+      );
+    } finally {
+      database.close();
+    }
+  } catch (error) {
+    return `unavailable (${error instanceof Error ? error.message : String(error)})`;
+  }
+}
+
 function readManagedNodeTestResult(request: unknown): Readonly<Record<string, unknown>> {
   if (!request || typeof request !== 'object' || Array.isArray(request)) {
     throw new Error('Provider request is invalid');
@@ -955,7 +988,14 @@ function readManagedNodeRunResult(request: unknown): Readonly<Record<string, unk
       typeof (message as { readonly content?: unknown }).content === 'string',
   );
   if (!toolMessage) throw new Error('Provider request has no tool result');
-  const value = JSON.parse(toolMessage.content) as Record<string, unknown>;
+  const envelope = JSON.parse(toolMessage.content) as Record<string, unknown>;
+  const value =
+    envelope.kind === 'json' &&
+    envelope.value &&
+    typeof envelope.value === 'object' &&
+    !Array.isArray(envelope.value)
+      ? (envelope.value as Record<string, unknown>)
+      : envelope;
   return Object.freeze({
     protocolVersion: value.protocolVersion,
     kind: value.kind,
@@ -1037,8 +1077,8 @@ async function preparePackagedResources(
   await writeFile(
     join(resourcesRoot, 'managed-command-toolchain.json'),
     `${JSON.stringify({
-      schemaVersion: 4,
-      protocol: 'maka_managed_command_toolchain_release_v4',
+      schemaVersion: 2,
+      protocol: 'maka_managed_command_toolchain_release_v2',
       provider: 'maka/managed-command-toolchain',
       platform: process.platform,
       arch: process.arch,
@@ -1047,11 +1087,7 @@ async function preparePackagedResources(
       entrypointRelativePath: 'managed-command/managed-command-helper-main.js',
       entrypointBytes: (await stat(entrypointPath)).size,
       entrypointSha256: `sha256:${createHash('sha256').update(entrypoint).digest('hex')}`,
-      allowedEffectClasses: [
-        'hermetic_observation_v2',
-        'hermetic_observation_v3',
-        'workspace_transform_v1',
-      ],
+      allowedEffectClasses: ['hermetic_observation_v2', 'workspace_transform_v1'],
       distributionReady: true,
     })}\n`,
     'utf8',

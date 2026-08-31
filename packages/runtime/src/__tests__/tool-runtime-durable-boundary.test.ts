@@ -75,7 +75,7 @@ describe('ToolRuntime durable boundary', () => {
       throw new Error('ordinary implementation must not execute');
     });
     managedTest.name = 'ManagedNodeTest';
-    managedTest.durableExecutionProfile = 'managed_observation_v1';
+    managedTest.durableExecutionProfile = 'managed_observation_v2';
     managedTest.managedObservationImpl = async (_args, _ctx, execution) => {
       order.push('observe');
       assert.deepEqual(execution, { inputRoot: '/accepted', scratchRoot: '/scratch' });
@@ -103,7 +103,7 @@ describe('ToolRuntime durable boundary', () => {
     assert.equal(outcomes.length, 1);
   });
 
-  it('binds an explicit Node entrypoint and arguments before managed observation v3 T1', async () => {
+  it('binds an explicit Node entrypoint and arguments before managed observation v2 T1', async () => {
     const prepared: ToolPreparedCommit[] = [];
     const harness = makeHarness(
       {
@@ -117,7 +117,7 @@ describe('ToolRuntime durable boundary', () => {
       'run-1',
       {
         admitManagedObservation: async () => ({
-          durableDispatch: managedObservationDispatchV3(),
+          durableDispatch: managedCommandObservationDispatchV2(),
           execute: async (operation) =>
             await operation({ inputRoot: '/accepted', scratchRoot: '/scratch' }),
           dispose: async () => undefined,
@@ -128,7 +128,7 @@ describe('ToolRuntime durable boundary', () => {
       throw new Error('ordinary implementation must not execute');
     });
     managedRun.name = 'ManagedNodeRun';
-    managedRun.durableExecutionProfile = 'managed_observation_v3';
+    managedRun.durableExecutionProfile = 'managed_observation_v2';
     managedRun.managedObservationImpl = async (_args, _ctx, execution) => {
       assert.deepEqual(execution, { inputRoot: '/accepted', scratchRoot: '/scratch' });
       return { exitCode: 0, stdout: 'ok\n', stderr: '' };
@@ -143,7 +143,7 @@ describe('ToolRuntime durable boundary', () => {
     );
     assert.deepEqual(
       prepared[0]?.dispatchRuntimeEvent.actions?.toolDispatch?.managedObservation,
-      managedObservationDispatchV3(),
+      managedCommandObservationDispatchV2(),
     );
   });
 
@@ -340,7 +340,7 @@ describe('ToolRuntime durable boundary', () => {
       throw new Error('ordinary implementation must not execute');
     });
     managedTest.name = 'ManagedNodeTest';
-    managedTest.durableExecutionProfile = 'managed_observation_v1';
+    managedTest.durableExecutionProfile = 'managed_observation_v2';
     managedTest.managedObservationImpl = async () => {
       observations += 1;
       return { passed: 1, failed: 0 };
@@ -2165,6 +2165,7 @@ function managedMutationDispatch(expectedPath = 'notes.txt') {
     baseTreeOid: '2'.repeat(40),
     expectedPath,
     pathPolicyVersion: 3 as const,
+    operationKind: 'write_edit_v2' as const,
     executionProfileDigest:
       'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
   };
@@ -2172,7 +2173,7 @@ function managedMutationDispatch(expectedPath = 'notes.txt') {
 
 function managedMutationDispatchV3() {
   return {
-    protocol: 'managed_mutation_v3' as const,
+    protocol: 'managed_mutation_v2' as const,
     repositoryId: 'repository_11111111111111111111111111111111',
     workspaceId: 'workspace_22222222222222222222222222222222',
     workspaceEpochId: 'epoch_33333333333333333333333333333333',
@@ -2185,7 +2186,7 @@ function managedMutationDispatchV3() {
     baseTreeOid: '2'.repeat(40),
     expectedPath: 'generated/output.txt',
     pathPolicyVersion: 3 as const,
-    operationKind: 'node_transform_v1' as const,
+    operationKind: 'node_transform_v2' as const,
     executionProfileDigest:
       'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
     toolchainIdentityDigest: `sha256:${'3'.repeat(64)}` as const,
@@ -2200,7 +2201,7 @@ function managedMutationDispatchV3() {
 
 function managedObservationDispatch() {
   return {
-    protocol: 'managed_observation_v1' as const,
+    protocol: 'managed_observation_v2' as const,
     repositoryId: 'repository_11111111111111111111111111111111',
     workspaceId: 'workspace_22222222222222222222222222222222',
     workspaceEpochId: 'epoch_33333333333333333333333333333333',
@@ -2211,10 +2212,10 @@ function managedObservationDispatch() {
     acceptedHeadRevision: 2,
     acceptedCommitOid: '1'.repeat(40),
     acceptedTreeOid: '2'.repeat(40),
-    operationKind: 'node_test_v1' as const,
-    effectClass: 'hermetic_observation_v1' as const,
+    operationKind: 'node_test_v2' as const,
+    effectClass: 'hermetic_observation_v2' as const,
     executionProfileDigest:
-      'sha256:816111c078084a460fad2d6d78a545d127b158d8089237e3a238878936d86e6e' as const,
+      'sha256:3702995e2893e5a4a813998665fd0ff6758d68e8faf64685fcc6319e250c0a46' as const,
     toolchainIdentityDigest: `sha256:${'3'.repeat(64)}` as const,
     files: [
       {
@@ -2223,6 +2224,7 @@ function managedObservationDispatch() {
         sha256: `sha256:${'4'.repeat(64)}` as const,
       },
     ],
+    dependency: { kind: 'none' as const },
   };
 }
 
@@ -2233,7 +2235,7 @@ function managedObservationDispatchV2() {
     operationKind: 'node_test_v2' as const,
     effectClass: 'hermetic_observation_v2' as const,
     executionProfileDigest:
-      'sha256:be3ca7af72a0d35cda471a6de71eed7dd260890624f11c8b5d71cccb2067c333' as const,
+      'sha256:3702995e2893e5a4a813998665fd0ff6758d68e8faf64685fcc6319e250c0a46' as const,
     dependency: {
       kind: 'managed_dependency_snapshot_v1' as const,
       environmentId: `sha256:${'5'.repeat(64)}` as const,
@@ -2246,15 +2248,15 @@ function managedObservationDispatchV2() {
   };
 }
 
-function managedObservationDispatchV3() {
-  const { files: _files, ...base } = managedObservationDispatch();
+function managedCommandObservationDispatchV2() {
+  const { files: _files, dependency: _dependency, ...base } = managedObservationDispatch();
   return {
     ...base,
-    protocol: 'managed_observation_v3' as const,
-    operationKind: 'node_command_v3' as const,
-    effectClass: 'hermetic_observation_v3' as const,
+    protocol: 'managed_observation_v2' as const,
+    operationKind: 'node_command_v2' as const,
+    effectClass: 'hermetic_observation_v2' as const,
     executionProfileDigest:
-      'sha256:8cde26b9e1b475fac75f0980baf04d09baed94184757bf02c3cc12fc5df2b50e' as const,
+      'sha256:3702995e2893e5a4a813998665fd0ff6758d68e8faf64685fcc6319e250c0a46' as const,
     entry: {
       relativePath: 'scripts/check.mjs',
       bytes: 123,

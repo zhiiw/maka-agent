@@ -32,7 +32,7 @@ test('Desktop main automatically admits ordinary project sessions to managed cod
       client: {
         async queryHostExecutionProfiles() {
           return {
-            profiles: ['managed-coding-v1', 'managed-coding-v2'] as const,
+            profiles: ['managed-coding-v2'] as const,
           };
         },
         async createSession(input: SessionCreateInput) {

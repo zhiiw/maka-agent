@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import {
-  MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+  MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
   type RuntimeEvent,
 } from '@maka/core/runtime-event';
 import { RunSealedError } from '@maka/core/runtime-event-store';
@@ -61,6 +61,38 @@ import {
 const TEST_STORAGE_ROOT_ID = 'a'.repeat(64);
 
 describe('SqliteRuntimeStore', () => {
+  it('uses one canonical post-main schema epoch and rejects experimental lookalikes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-canonical-managed-schema-'));
+    const dbPath = join(root, 'runtime.sqlite');
+    try {
+      const store = createSqliteRuntimeStore(dbPath);
+      try {
+        assert.equal(store.schemaVersion(), 15);
+      } finally {
+        store.close();
+      }
+
+      const raw = new DatabaseSync(dbPath);
+      try {
+        raw
+          .prepare(
+            `DELETE FROM runtime_capabilities
+             WHERE capability = 'runtime_managed_workspace_canonical_v2'`,
+          )
+          .run();
+      } finally {
+        raw.close();
+      }
+
+      assert.throws(
+        () => createSqliteRuntimeStore(dbPath),
+        /runtime managed workspace capability .* is unavailable/u,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('applies versioned migrations and reopens the same database without rewriting schema', async () => {
     await withStore(async (store, dbPath) => {
       assert.equal(store.schemaVersion(), SQLITE_RUNTIME_SCHEMA_VERSION);
@@ -2375,7 +2407,10 @@ function rewindContinuationClaimsToSchema14(db: DatabaseSync): void {
     DROP TABLE runtime_continuation_claims_schema_15;
     DROP TABLE runtime_workspace_active_epochs;
     DELETE FROM runtime_capabilities
-      WHERE capability = 'runtime_workspace_bound_continuation_authority';
+      WHERE capability IN (
+        'runtime_workspace_bound_continuation_authority',
+        'runtime_managed_workspace_canonical_v2'
+      );
     PRAGMA user_version = 14;
     COMMIT;
     PRAGMA foreign_keys = ON;
@@ -2554,7 +2589,7 @@ function toolDispatchEvent(overrides: Partial<RuntimeEvent> = {}): RuntimeEvent 
 
 function managedObservationDispatch() {
   return {
-    protocol: 'managed_observation_v1',
+    protocol: 'managed_observation_v2',
     repositoryId: `repository_${'1'.repeat(32)}`,
     workspaceId: `workspace_${'2'.repeat(32)}`,
     workspaceEpochId: `epoch_${'3'.repeat(32)}`,
@@ -2565,9 +2600,9 @@ function managedObservationDispatch() {
     acceptedHeadRevision: 7,
     acceptedCommitOid: '6'.repeat(40),
     acceptedTreeOid: '7'.repeat(40),
-    operationKind: 'node_test_v1',
-    effectClass: 'hermetic_observation_v1',
-    executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+    operationKind: 'node_test_v2',
+    effectClass: 'hermetic_observation_v2',
+    executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
     toolchainIdentityDigest: `sha256:${'8'.repeat(64)}`,
     files: [
       {
@@ -2576,6 +2611,7 @@ function managedObservationDispatch() {
         sha256: `sha256:${'9'.repeat(64)}`,
       },
     ],
+    dependency: { kind: 'none' },
   } as const;
 }
 

@@ -66,17 +66,13 @@ import type { ToolInvocationRecord } from '@maka/core/usage-stats/types';
 import { redactSecrets } from '@maka/core/redaction';
 import {
   decodeRuntimeEvent,
-  MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
-  MANAGED_OBSERVATION_EXECUTION_PROFILE_V3_DIGEST,
   MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
   MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC,
   TOOL_BOUNDARY_PROTOCOL_V1,
   type RuntimeEvent,
   type RuntimeEventManagedWorkspaceObservation,
-  type RuntimeEventManagedWorkspaceObservationV1,
   type RuntimeEventManagedWorkspaceObservationV2,
-  type RuntimeEventManagedWorkspaceObservationV3,
   type RuntimeEventManagedWorkspaceMutation,
 } from '@maka/core/runtime-event';
 import { isDeepStrictEqual } from 'node:util';
@@ -181,11 +177,7 @@ export interface MakaTool<P = any, R = unknown> {
   /** Crash-recovery contract used by the durable tool boundary. */
   recoveryMode?: ToolRecoveryMode;
   /** Durable execution profile selected by the Host before T1. */
-  durableExecutionProfile?:
-    | 'managed_mutation_v2'
-    | 'managed_observation_v1'
-    | 'managed_observation_v2'
-    | 'managed_observation_v3';
+  durableExecutionProfile?: 'managed_mutation_v2' | 'managed_observation_v2';
   /**
    * Pure Write/Edit transform for managed mutation mode. It receives only the
    * frozen arguments and must not read or mutate the live workspace.
@@ -1482,15 +1474,9 @@ export class ToolRuntime {
         return this.errorReturn(reason);
       }
     }
-    if (
-      tool.durableExecutionProfile === 'managed_observation_v1' ||
-      tool.durableExecutionProfile === 'managed_observation_v2' ||
-      tool.durableExecutionProfile === 'managed_observation_v3'
-    ) {
+    if (tool.durableExecutionProfile === 'managed_observation_v2') {
       const expectedToolName =
-        tool.durableExecutionProfile === 'managed_observation_v3'
-          ? 'ManagedNodeRun'
-          : 'ManagedNodeTest';
+        tool.name === 'ManagedNodeRun' ? 'ManagedNodeRun' : 'ManagedNodeTest';
       if (
         tool.name !== expectedToolName ||
         tool.recoveryMode !== 'replay_safe' ||
@@ -2399,12 +2385,8 @@ export class ToolRuntime {
       }
       if (input.managedObservation) {
         const profileMatches =
-          (input.tool.durableExecutionProfile === 'managed_observation_v1' &&
-            isManagedObservationV1(input.managedObservation)) ||
-          (input.tool.durableExecutionProfile === 'managed_observation_v2' &&
-            isManagedObservationV2(input.managedObservation)) ||
-          (input.tool.durableExecutionProfile === 'managed_observation_v3' &&
-            isManagedObservationV3(input.managedObservation));
+          input.tool.durableExecutionProfile === 'managed_observation_v2' &&
+          isManagedObservationV2(input.managedObservation);
         const callMatches = isManagedObservationCallMatch(
           input.tool.name,
           input.persistedArgs,
@@ -3360,7 +3342,7 @@ function managedMutationDispatchMatchesToolCall(
   ) {
     return false;
   }
-  if (mutation.protocol === 'managed_mutation_v2') {
+  if (mutation.operationKind === 'write_edit_v2') {
     return (
       tool.durableExecutionProfile === 'managed_mutation_v2' &&
       (tool.name === 'Write' || tool.name === 'Edit') &&
@@ -3370,7 +3352,7 @@ function managedMutationDispatchMatchesToolCall(
   return (
     tool.durableExecutionProfile === 'managed_mutation_v2' &&
     tool.name === 'ManagedNodeTransform' &&
-    mutation.operationKind === 'node_transform_v1' &&
+    mutation.operationKind === 'node_transform_v2' &&
     mutation.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST &&
     args.entryPath === mutation.entry.relativePath &&
     isDeepStrictEqual(args.args ?? [], mutation.args)
@@ -4084,36 +4066,14 @@ async function disposeManagedObservationAdmission(
   }
 }
 
-function isManagedObservationV1(
-  value: RuntimeEventManagedWorkspaceObservation,
-): value is RuntimeEventManagedWorkspaceObservationV1 {
-  return (
-    value.protocol === 'managed_observation_v1' &&
-    value.operationKind === 'node_test_v1' &&
-    value.effectClass === 'hermetic_observation_v1' &&
-    value.executionProfileDigest === MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST
-  );
-}
-
 function isManagedObservationV2(
   value: RuntimeEventManagedWorkspaceObservation,
 ): value is RuntimeEventManagedWorkspaceObservationV2 {
   return (
     value.protocol === 'managed_observation_v2' &&
-    value.operationKind === 'node_test_v2' &&
+    (value.operationKind === 'node_test_v2' || value.operationKind === 'node_command_v2') &&
     value.effectClass === 'hermetic_observation_v2' &&
     value.executionProfileDigest === MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST
-  );
-}
-
-function isManagedObservationV3(
-  value: RuntimeEventManagedWorkspaceObservation,
-): value is RuntimeEventManagedWorkspaceObservationV3 {
-  return (
-    value.protocol === 'managed_observation_v3' &&
-    value.operationKind === 'node_command_v3' &&
-    value.effectClass === 'hermetic_observation_v3' &&
-    value.executionProfileDigest === MANAGED_OBSERVATION_EXECUTION_PROFILE_V3_DIGEST
   );
 }
 
@@ -4125,7 +4085,7 @@ function isManagedObservationCallMatch(
   if (!persistedArgs || typeof persistedArgs !== 'object' || Array.isArray(persistedArgs)) {
     return false;
   }
-  if (isManagedObservationV3(observation)) {
+  if (observation.operationKind === 'node_command_v2') {
     const record = persistedArgs as { entryPath?: unknown; args?: unknown };
     const args = record.args === undefined ? [] : record.args;
     return (
