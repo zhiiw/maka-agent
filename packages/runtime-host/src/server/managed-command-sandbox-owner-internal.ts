@@ -18,7 +18,7 @@
  */
 
 import { lstat, realpath } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, win32 } from 'node:path';
 import type { PermissionProfileManaged } from '@maka/core/permission-profile';
 import {
   runFilesystemWorkerProcess,
@@ -134,6 +134,16 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         pathContext: {
           workspaceRoots: [inputRoot, scratchRoot],
           runtimeReadableRoots: [dirname(toolchain.entrypointPath)],
+          ...(process.platform === 'win32'
+            ? {
+                runtimeExactReadableRoots: uniqueWindowsVolumeRoots([
+                  inputRoot,
+                  scratchRoot,
+                  toolchain.executablePath,
+                  toolchain.entrypointPath,
+                ]),
+              }
+            : {}),
           executableRoots: [dirname(toolchain.executablePath)],
         },
       },
@@ -206,6 +216,17 @@ export function createManagedCommandSandboxOwnerInternal(input: {
       return decodeNodeTestObservation(result.stdout, relativePaths, result.nodeVersion);
     },
   });
+}
+
+function uniqueWindowsVolumeRoots(paths: readonly string[]): readonly string[] {
+  const roots: string[] = [];
+  for (const path of paths) {
+    const root = win32.parse(path).root;
+    if (root && !roots.some((existing) => existing.toLowerCase() === root.toLowerCase())) {
+      roots.push(root);
+    }
+  }
+  return roots;
 }
 
 function formatManagedCommandFailure(input: {

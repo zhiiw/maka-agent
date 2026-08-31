@@ -74,6 +74,11 @@ export function compileWindowsSandboxPolicy(command: SandboxCommand): WindowsSan
   ]) {
     addUnique(readRoots, canonicalWindowsPath(path));
   }
+  for (const path of pathContext.runtimeExactReadableRoots ?? []) {
+    const canonical = canonicalWindowsPath(path, true);
+    addUnique(readRoots, canonical);
+    addUnique(exactReadRoots, canonical);
+  }
   // A write whose target does not exist yet — and directory-entry mutations
   // such as ApplyPatch create/delete — can only be represented here as
   // recursive Modify on the existing parent, a kernel boundary broader than
@@ -127,9 +132,9 @@ function rootsForEntry(
   }
 }
 
-function canonicalWindowsPath(path: string): string {
+function canonicalWindowsPath(path: string, allowVolumeRoot = false): string {
   const canonical = coreCanonicalWindowsPath(path);
-  if (win32.parse(canonical).root.toLowerCase() === canonical.toLowerCase()) {
+  if (!allowVolumeRoot && win32.parse(canonical).root.toLowerCase() === canonical.toLowerCase()) {
     throw new Error(`Windows sandbox volume roots are not supported: ${path}`);
   }
   return canonical;

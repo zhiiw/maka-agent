@@ -122,6 +122,11 @@ test('runs one bounded file observation through an enforcing sandbox plan', asyn
     assert.equal(transformedRequest?.command.env?.SystemRoot, process.env.SystemRoot);
     assert.equal(transformedRequest?.command.env?.SystemDrive, process.env.SystemDrive);
     assert.equal(transformedRequest?.command.env?.LOCALAPPDATA, process.env.LOCALAPPDATA);
+    assert.deepEqual(transformedRequest?.command.pathContext.runtimeExactReadableRoots, [
+      ...new Set(
+        [inputRoot, scratchRoot, executablePath, entrypointPath].map((path) => path.slice(0, 3)),
+      ),
+    ]);
   }
   assert.equal(dirname(transformedRequest?.command.program ?? ''), dirname(executablePath));
   assert.equal(
