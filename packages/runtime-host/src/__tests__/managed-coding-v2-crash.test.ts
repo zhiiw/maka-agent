@@ -652,6 +652,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a fe
       packagedResourcesRoot: resourcesRoot,
       runtimeExecutablePath: electronExecutable,
       useProductionBackend: true,
+      shellRunTerminalFailpoint: true,
     });
     const firstClient = await connectClient(root);
     assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
@@ -705,11 +706,11 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a fe
           ),
         ),
     );
-    const completedToolResult = await Promise.race([
-      provider.waitForCompletedToolResult(),
-      startFailure,
-    ]);
-    assert.match(readManagedShellResult(completedToolResult), /managed-shell-output/u);
+    await Promise.race([fixture.waitForShellRunTerminalFailpoint(firstHost), startFailure]);
+    assert.equal(provider.requests.length, 1);
+    const crashBoundary = readShellRunCrashBoundary(root, executionId);
+    assert.equal(crashBoundary.shellRunStatus, 'completed');
+    assert.equal(crashBoundary.bashOutcomeCount, 0);
     await fixture.killHost(firstHost);
     await withTimeout(start, PROCESS_TIMEOUT_MS, 'crashed hosted execution did not close');
     await firstClient.close().catch(() => undefined);
@@ -721,6 +722,8 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a fe
     });
     const secondClient = await connectClient(root);
     try {
+      const completedToolResult = await provider.waitForCompletedToolResult();
+      assert.match(readManagedShellResult(completedToolResult), /managed-shell-output/u);
       await provider.waitForResumedCompletion();
       const admission = await waitForContinuationAdmission(fixture, executionId);
       const terminal = await waitForTerminalTurn(secondClient, executionId, admission.turnId);
@@ -790,6 +793,39 @@ function readDurableExecutionSnapshot(root: string, sessionId: string): string {
            ORDER BY journal_seq`,
         )
         .all(sessionId),
+    });
+  } finally {
+    database.close();
+  }
+}
+
+function readShellRunCrashBoundary(
+  root: string,
+  sessionId: string,
+): Readonly<{ shellRunStatus: string; bashOutcomeCount: number }> {
+  const database = new DatabaseSync(join(root, 'runtime.sqlite'), { readOnly: true });
+  try {
+    const shellRun = database
+      .prepare(
+        `SELECT record_json AS recordJson
+         FROM core_shell_runs
+         WHERE session_id = ?`,
+      )
+      .get(sessionId) as { recordJson: string } | undefined;
+    assert.ok(shellRun, 'ShellRun terminal record was not durable at the crash failpoint');
+    const shellRunRecord = JSON.parse(shellRun.recordJson) as { status?: unknown };
+    const bashOutcomeCount = database
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM runtime_events
+         WHERE session_id = ?
+           AND event_kind = 'function_response'
+           AND json_extract(payload_json, '$.content.name') = 'Bash'`,
+      )
+      .get(sessionId) as { count: number };
+    return Object.freeze({
+      shellRunStatus: String(shellRunRecord.status),
+      bashOutcomeCount: bashOutcomeCount.count,
     });
   } finally {
     database.close();

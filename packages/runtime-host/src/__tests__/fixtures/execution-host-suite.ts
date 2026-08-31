@@ -138,6 +138,7 @@ export interface ExecutionHostTestOptions {
     | 'after_continuation_start_committed';
   readonly providerFailpointAfterSend?: boolean;
   readonly useProductionBackend?: boolean;
+  readonly shellRunTerminalFailpoint?: boolean;
 }
 
 export interface TurnLedger {
@@ -1112,6 +1113,10 @@ export class ExecutionFixture {
     this.#children.delete(host.child);
   }
 
+  async waitForShellRunTerminalFailpoint(host: ExecutionHostHandle): Promise<void> {
+    await waitForShellRunTerminalFailpoint(host.child);
+  }
+
   async waitForHostExit(host: ExecutionHostHandle): Promise<void> {
     await withTimeout(
       waitForExit(host.child),
@@ -1287,6 +1292,11 @@ export class ExecutionFixture {
       env.MAKA_TEST_USE_PRODUCTION_BACKEND = '1';
     } else {
       delete env.MAKA_TEST_USE_PRODUCTION_BACKEND;
+    }
+    if (testOptions.shellRunTerminalFailpoint) {
+      env.MAKA_TEST_SHELL_RUN_TERMINAL_FAILPOINT = '1';
+    } else {
+      delete env.MAKA_TEST_SHELL_RUN_TERMINAL_FAILPOINT;
     }
     const childArgs = [
       fileURLToPath(new URL('./execution-host.js', import.meta.url)),
@@ -1710,6 +1720,42 @@ function waitForHostReady(
     }),
     PROCESS_TIMEOUT_MS,
     'execution Host did not become ready',
+  );
+}
+
+function waitForShellRunTerminalFailpoint(child: ChildProcess): Promise<void> {
+  return withTimeout(
+    new Promise((resolve, reject) => {
+      const cleanup = () => {
+        child.off('error', onError);
+        child.off('exit', onExit);
+        child.off('message', onMessage);
+      };
+      const onError = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+        cleanup();
+        reject(new Error(`execution Host exited before ShellRun failpoint: ${code ?? signal}`));
+      };
+      const onMessage = (message: unknown) => {
+        if (
+          !message ||
+          typeof message !== 'object' ||
+          (message as { type?: unknown }).type !== 'test.shell_run_terminal_failpoint'
+        ) {
+          return;
+        }
+        cleanup();
+        resolve();
+      };
+      child.once('error', onError);
+      child.once('exit', onExit);
+      child.on('message', onMessage);
+    }),
+    PROCESS_TIMEOUT_MS,
+    'execution Host did not reach the terminal ShellRun failpoint',
   );
 }
 

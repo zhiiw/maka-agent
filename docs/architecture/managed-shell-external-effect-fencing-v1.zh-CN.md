@@ -51,6 +51,10 @@ T1 同时持久化 `external_effect_v1`，其中包含 operation id、本地 ide
 
 Runtime 必须等待已经进入 `running` 的 operation capability 结束，owner 不得通过提前返回让副作用越过 terminal publication。cleanup 是幂等的，且不得覆盖已经持久化的 T1/T2 结论。
 
+production-shaped crash gate 必须覆盖更窄的关键窗口：真实 ShellRun terminal record 已经持久化，但
+Runtime 尚未提交 provider T2。测试 Host 在 terminal durability observer 中停住，父进程确认握手后强杀整个 Host；
+新 Host 必须从 ShellRun authority 采用一次原结果、写出唯一 T2，并且命令执行次数保持为 1。
+
 ## 平台能力矩阵
 
 | 能力 | Linux | macOS | Windows |
