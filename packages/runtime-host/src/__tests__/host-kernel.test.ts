@@ -108,7 +108,7 @@ const STARTUP_ATTEMPT_B = '00000000-0000-4000-8000-000000000002';
 const KERNEL_CANDIDATE_ENTRYPOINT = new URL('./fixtures/kernel-candidate.js', import.meta.url);
 const KERNEL_COMPOSITION = defineInteractiveRuntimeHostComposition(async () => ({
   handlers: createUnavailableDomainOperationHandlers(),
-  executionProfiles: ['managed-coding-v1'] as const,
+  executionProfiles: ['managed-coding-v2'] as const,
   beginDrain() {},
   async recover() {},
   async close() {},
@@ -750,7 +750,7 @@ describe('non-serving Runtime Host kernel', () => {
       if (connected.kind !== 'connected') return;
       assert.equal(connected.registration.lifecycleMode, 'service');
       assert.deepEqual(await connected.connection.request('host.execution-profiles.query', {}), {
-        profiles: ['managed-coding-v1'],
+        profiles: ['managed-coding-v2'],
       });
       await connected.connection.close();
 

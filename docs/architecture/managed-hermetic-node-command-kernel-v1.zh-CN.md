@@ -12,7 +12,7 @@ execution profile 必须在 T1 前由 admission owner 冻结；T1 后禁止切�
 依赖发现或 generic tool boundary。
 
 本切片只建立 kernel 与 admission；后续产品组合切片负责 packaged toolchain claim、Host profile negotiation
-与 production-shaped crash test。该组合见 `managed-coding-v3-product-composition.zh-CN.md`，只有通过组合边界的
+与 production-shaped crash test。该组合见 `managed-coding-v2-product-composition.zh-CN.md`，只有通过组合边界的
 Linux/macOS Host 才允许 Desktop 创建 v3 Session。
 
 ## 2. Owner 与权限
@@ -45,7 +45,7 @@ T1 前：
 3. 观察 entry identity；
 4. 验证 Node 24 toolchain capability；
 5. 冻结 entry 与 argv；
-6. 持久化 `managed_observation_v3`。
+6. 持久化 canonical `managed_observation_v2` 的 `node_command_v2` operation。
 
 T1 后：
 

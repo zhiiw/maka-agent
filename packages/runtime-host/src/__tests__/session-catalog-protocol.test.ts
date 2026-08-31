@@ -39,7 +39,7 @@ describe('Session catalog protocol', () => {
   });
 
   test('preserves the immutable managed coding profile in catalog projections', () => {
-    const catalog = projection({ toolProfile: 'managed-coding-v1' });
+    const catalog = projection({ toolProfile: 'managed-coding-v2' });
 
     assert.deepEqual(decodeSessionCatalogItem(catalog), catalog);
   });

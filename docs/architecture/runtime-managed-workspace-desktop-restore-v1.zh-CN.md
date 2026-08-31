@@ -14,7 +14,7 @@ durable accepted commit/tree
 ## 2. Owner 与权限
 
 - renderer 只签发稳定 `restoreId`，不能提交 repository path、commit、tree 或 destination；
-- Desktop main 只允许 `managed-coding-v1` session 进入 restore IPC；
+- Desktop main 只允许 `managed-coding-v2` session 进入 restore IPC；
 - Runtime Host 从 session header 重新打开 managed session owner；
 - restore owner 从 SQLite accepted head/version 读取 exact commit/tree；
 - Gitoxide helper 只向 owner 选择的 staging path 物化 accepted tree；

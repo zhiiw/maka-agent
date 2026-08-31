@@ -419,7 +419,7 @@ async function withManagedContinuationFixture(
       llmConnectionSlug: 'fake',
       model: 'fake-model',
       permissionMode: 'ask',
-      toolProfile: 'managed-coding-v1',
+      toolProfile: 'managed-coding-v2',
     });
     sessionId = session.id;
     const helper = await admitRealHelper(helperInputPath);

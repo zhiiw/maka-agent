@@ -222,6 +222,7 @@ test('does not report a current projection while a durable mutation reservation 
               baseTreeOid: treeOid,
               expectedPath: args.path,
               pathPolicyVersion: 3,
+              operationKind: 'write_edit_v2',
               executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
             },
           },

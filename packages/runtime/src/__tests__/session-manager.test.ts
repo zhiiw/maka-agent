@@ -4533,7 +4533,7 @@ describe('SessionManager permission mode updates', () => {
       newId: nextId(),
       now: nextNow(6_528),
     });
-    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v1' }));
+    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v2' }));
 
     await collectSessionEvents(
       manager.sendMessage(session.id, {
@@ -4564,7 +4564,7 @@ describe('SessionManager permission mode updates', () => {
       newId: nextId(),
       now: nextNow(6_529),
     });
-    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v1' }));
+    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v2' }));
 
     await expectRejects(
       collectSessionEvents(
@@ -4723,12 +4723,7 @@ describe('SessionManager permission mode updates', () => {
     expect(plan.rejectionReasons).toEqual(['safety_observation_unavailable']);
   });
 
-  for (const toolProfile of [
-    'managed-coding-v1',
-    'managed-coding-v2',
-    'managed-coding-v3',
-    'managed-coding-v4',
-  ] as const) {
+  for (const toolProfile of ['managed-coding-v2'] as const) {
     test(`never downgrades a ${toolProfile} session when its workspace boundary is unavailable`, async () => {
       const store = new MemorySessionStore();
       const runStore = new MemoryAgentRunStore();
@@ -4826,7 +4821,7 @@ describe('SessionManager permission mode updates', () => {
       newId: nextId(),
       now: nextNow(6_536),
     });
-    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v1' }));
+    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v2' }));
 
     const plan = await manager.planAuthoritativeSafeBoundaryContinuation(session.id, {
       sourceRunId: 'source-run-managed-manual-resume',
@@ -4847,7 +4842,7 @@ describe('SessionManager permission mode updates', () => {
       newId: nextId(),
       now: nextNow(6_537),
     });
-    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v1' }));
+    const session = await manager.createSession(makeInput({ toolProfile: 'managed-coding-v2' }));
     const header = await store.readHeader(session.id);
     await runStore.createRun(
       makeRunHeader({

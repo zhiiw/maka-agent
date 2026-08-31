@@ -125,10 +125,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
     });
     const firstClient = await connectClient(root);
     assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
-      profiles:
-        process.platform === 'win32'
-          ? ['managed-coding-v1']
-          : ['managed-coding-v1', 'managed-coding-v2', 'managed-coding-v3', 'managed-coding-v4'],
+      profiles: process.platform === 'win32' ? [] : ['managed-coding-v2'],
     });
     const startRequest = firstClient.request('hosted.execution.start', {
       executionId,
@@ -252,7 +249,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
   }
 });
 
-test('packaged managed-coding-v3 resumes after Host death without replaying a completed Node command', {
+test('packaged managed-coding-v2 resumes after Host death without replaying a completed Node command', {
   timeout: 90_000,
 }, async (t) => {
   const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
@@ -301,10 +298,7 @@ test('packaged managed-coding-v3 resumes after Host death without replaying a co
     });
     const firstClient = await connectClient(root);
     assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
-      profiles:
-        process.platform === 'win32'
-          ? ['managed-coding-v1']
-          : ['managed-coding-v1', 'managed-coding-v2', 'managed-coding-v3', 'managed-coding-v4'],
+      profiles: process.platform === 'win32' ? [] : ['managed-coding-v2'],
     });
     const startRequest = firstClient.request('hosted.execution.start', {
       executionId,
@@ -319,7 +313,7 @@ test('packaged managed-coding-v3 resumes after Host death without replaying a co
         permissionMode: 'bypass',
         collaborationMode: 'agent',
         orchestrationMode: 'default',
-        toolProfile: 'managed-coding-v3',
+        toolProfile: 'managed-coding-v2',
       },
       content: { text: 'Run scripts/check.mjs with the exact requested arguments.' },
     });
@@ -424,15 +418,15 @@ test('packaged managed-coding-v3 resumes after Host death without replaying a co
   }
 });
 
-test('packaged managed-coding-v4 resumes after Host death without replaying an accepted workspace transform', {
+test('packaged managed-coding-v2 resumes after Host death without replaying an accepted workspace transform', {
   timeout: 90_000,
 }, async (t) => {
   const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
   if (!helperPath) {
-    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the packaged v4 crash gate');
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the packaged v2 crash gate');
     return;
   }
-  const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-managed-v4-crash-')));
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-managed-v2-crash-')));
   const root = join(base, 'root');
   const executionId = randomUUID();
   await mkdir(join(root, 'scripts'), { recursive: true });
@@ -456,7 +450,7 @@ test('packaged managed-coding-v4 resumes after Host death without replaying an a
     'commit',
     '--quiet',
     '-m',
-    'managed v4 baseline',
+    'managed v2 baseline',
   ]);
 
   const electronExecutable = resolveElectronExecutable();
@@ -474,10 +468,7 @@ test('packaged managed-coding-v4 resumes after Host death without replaying an a
     });
     const firstClient = await connectClient(root);
     assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
-      profiles:
-        process.platform === 'win32'
-          ? ['managed-coding-v1']
-          : ['managed-coding-v1', 'managed-coding-v2', 'managed-coding-v3', 'managed-coding-v4'],
+      profiles: process.platform === 'win32' ? [] : ['managed-coding-v2'],
     });
     const startRequest = firstClient.request('hosted.execution.start', {
       executionId,
@@ -486,13 +477,13 @@ test('packaged managed-coding-v4 resumes after Host death without replaying an a
         modelTarget: {
           kind: 'explicit',
           connectionId,
-          connectionSlug: 'managed-v4-provider',
+          connectionSlug: 'managed-v2-provider',
           model: MODEL_ID,
         },
         permissionMode: 'bypass',
         collaborationMode: 'agent',
         orchestrationMode: 'default',
-        toolProfile: 'managed-coding-v4',
+        toolProfile: 'managed-coding-v2',
       },
       content: { text: 'Generate one accepted workspace output.' },
     });
@@ -562,7 +553,7 @@ test('packaged managed-coding-v4 resumes after Host death without replaying an a
     assert.match(JSON.stringify(provider.requests[2]), /ManagedNodeTransform/u);
     const readerOwner = await tryAcquireInteractiveRootReader(capability);
     assert.ok(readerOwner);
-    if (!readerOwner) throw new Error('Unable to read managed v4 fixture root');
+    if (!readerOwner) throw new Error('Unable to read managed v2 fixture root');
     const reader = await openInteractiveExecutionStoresForRead(readerOwner.lease);
     try {
       const runs = await reader.agentRunStore.listSessionRuns(executionId);
@@ -1037,8 +1028,8 @@ async function preparePackagedResources(
   await writeFile(
     join(resourcesRoot, 'managed-command-toolchain.json'),
     `${JSON.stringify({
-      schemaVersion: 4,
-      protocol: 'maka_managed_command_toolchain_release_v4',
+      schemaVersion: 2,
+      protocol: 'maka_managed_command_toolchain_release_v2',
       provider: 'maka/managed-command-toolchain',
       platform: process.platform,
       arch: process.arch,
@@ -1047,11 +1038,7 @@ async function preparePackagedResources(
       entrypointRelativePath: 'managed-command/managed-command-helper-main.js',
       entrypointBytes: (await stat(entrypointPath)).size,
       entrypointSha256: `sha256:${createHash('sha256').update(entrypoint).digest('hex')}`,
-      allowedEffectClasses: [
-        'hermetic_observation_v2',
-        'hermetic_observation_v3',
-        'workspace_transform_v1',
-      ],
+      allowedEffectClasses: ['hermetic_observation_v2', 'workspace_transform_v1'],
       distributionReady: true,
     })}\n`,
     'utf8',

@@ -38,10 +38,10 @@ test('maps Runtime Host live run state without collapsing unknown and known-empt
 
 test('keeps the immutable managed product identity in the Desktop summary', () => {
   const managed = toDesktopHostSessionSummary(
-    projection({ toolProfile: 'managed-coding-v1' }),
+    projection({ toolProfile: 'managed-coding-v2' }),
   );
 
-  assert.equal(managed.toolProfile, 'managed-coding-v1');
+  assert.equal(managed.toolProfile, 'managed-coding-v2');
 });
 
 function projection(overrides: Partial<SessionCatalogProjection> = {}): SessionCatalogProjection {

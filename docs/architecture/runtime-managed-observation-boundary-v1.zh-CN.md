@@ -10,7 +10,7 @@
 
 一次 durable managed observation 必须满足：
 
-1. durable mode 在 T1 前确定为 `replay_safe`，effect class 固定为 `hermetic_observation_v1`；
+1. durable mode 在 T1 前确定为 `replay_safe`，effect class 固定为 `hermetic_observation_v2`；
 2. T1 同时绑定 repository/workspace/epoch/instance、accepted version/event/revision/commit/tree、排序后的测试文件 bytes/SHA-256、toolchain identity digest 与固定 execution-profile digest；
 3. persisted function-call `relativePaths` 必须与 owner 冻结的文件集合完全一致，不能在 T1 后换路径；
 4. Runtime 独占 operation capability；它只能在 `open -> running -> settled -> closed` 生命周期内调用一次，Host 不能保留 callback 后迟到执行；
@@ -59,7 +59,7 @@ SQLite T1 和 T2 各自是单数据库事务；Git/object store、toolchain obse
 - tool name：`ManagedNodeTest`；
 - recovery mode：`replay_safe`；
 - object format：`sha1`；
-- operation/effect：`node_test_v1` / `hermetic_observation_v1`；
+- operation/effect：`node_test_v2` / `hermetic_observation_v2`；
 - 固定 profile digest；
 - 1–64 个 canonical、排序、唯一的 `.js/.mjs/.cjs` 文件。
 

@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_RUNTIME_SCHEMA_VERSION = 17;
+export const SQLITE_RUNTIME_SCHEMA_VERSION = 15;
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY = 'runtime_recovery_authority';
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY_VERSION = 1;
 export const RUNTIME_CONTINUATION_AUTHORITY_CAPABILITY = 'runtime_continuation_authority';
@@ -29,6 +29,9 @@ export const RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY =
 export const RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY_VERSION = 1;
 export const RUNTIME_WORKSPACE_VERSION_AUTHORITY_CAPABILITY = 'runtime_workspace_version_authority';
 export const RUNTIME_WORKSPACE_VERSION_AUTHORITY_CAPABILITY_VERSION = 1;
+export const RUNTIME_MANAGED_WORKSPACE_CANONICAL_CAPABILITY =
+  'runtime_managed_workspace_canonical_v2';
+export const RUNTIME_MANAGED_WORKSPACE_CANONICAL_CAPABILITY_VERSION = 1;
 const SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_INITIALIZATION_RETRY_DELAY_MS = 10;
 const initializationRetryGate = new Int32Array(new SharedArrayBuffer(4));
@@ -540,11 +543,7 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
 
     INSERT INTO runtime_capabilities(capability, version)
       VALUES ('runtime_workspace_bound_continuation_authority', 1);
-    `,
-  ],
-  [
-    16,
-    `
+
     ALTER TABLE runtime_workspace_heads RENAME TO runtime_workspace_heads_v15;
     ALTER TABLE runtime_workspace_versions RENAME TO runtime_workspace_versions_v15;
 
@@ -635,11 +634,7 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
     INSERT INTO runtime_workspace_heads SELECT * FROM runtime_workspace_heads_v15;
     DROP TABLE runtime_workspace_heads_v15;
     DROP TABLE runtime_workspace_versions_v15;
-    `,
-  ],
-  [
-    17,
-    `
+
     CREATE TABLE runtime_workspace_active_epochs (
       workspace_id TEXT PRIMARY KEY,
       repository_id TEXT NOT NULL,
@@ -673,6 +668,9 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
       AND json_extract(payload_json, '$.actions.workspaceFact.kind') = 'maka.workspace.epoch_activated'
       AND json_extract(payload_json, '$.actions.workspaceFact.payload.previousWorkspaceEpochId') IS NULL
       AND json_extract(payload_json, '$.actions.workspaceFact.payload.rebaselineId') IS NULL;
+
+    INSERT INTO runtime_capabilities(capability, version)
+      VALUES ('runtime_managed_workspace_canonical_v2', 1);
     `,
   ],
 ]);

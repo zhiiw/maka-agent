@@ -34,7 +34,7 @@ sandbox、timeout 与 candidate publication 都由 owner 决定。
 - accepted truth owner：SQLite RuntimeEvents 与 workspace successor transaction；
 - provider result owner：Runtime 的有界 immutable snapshot。
 
-`managed_mutation_v3` 在 T1 前绑定 exact accepted head、workspace epoch、output path、entry bytes/hash、argv、
+canonical `managed_mutation_v2` 的 `node_transform_v2` operation 在 T1 前绑定 exact accepted head、workspace epoch、output path、entry bytes/hash、argv、
 toolchain identity 与 execution profile。`managed_mutation_v2` 继续表达 Write/Edit 的参数形状；两种 RuntimeEvent
 payload 都只允许同一个 canonical mutation execution profile v2 digest。payload protocol 用于区分 operation
 proof 的字段，不再形成两套 execution authority，也没有 v1 digest 兼容路径。

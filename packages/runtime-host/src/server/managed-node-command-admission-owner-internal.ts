@@ -19,9 +19,9 @@
 
 import {
   isCanonicalManagedMutationPathV1,
-  MANAGED_OBSERVATION_EXECUTION_PROFILE_V3_DIGEST,
+  MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
   type RuntimeEventManagedObservationFileV1,
-  type RuntimeEventManagedWorkspaceObservationV3,
+  type RuntimeEventManagedWorkspaceNodeCommandObservationV2,
 } from '@maka/core/runtime-event';
 import { mkdir } from 'node:fs/promises';
 import type { MakaTool, RuntimeManagedObservationAdmission } from '@maka/runtime/tool-runtime';
@@ -86,7 +86,7 @@ export function createManagedNodeCommandAdmissionOwnerInternal(input: {
     parameters: MANAGED_NODE_COMMAND_PARAMETERS,
     categoryHint: 'custom_tool',
     recoveryMode: 'replay_safe',
-    durableExecutionProfile: 'managed_observation_v3',
+    durableExecutionProfile: 'managed_observation_v2',
     executionSemantics: 'exclusive_step',
     nesting: 'direct_only',
     impl: async () => {
@@ -137,7 +137,7 @@ export function createManagedNodeCommandAdmissionOwnerInternal(input: {
       const normalized = requireManagedNodeCommandArgs(request.persistedArgs);
       const [boundary, toolchain] = await Promise.all([
         input.sourceOwner.readAcceptedBoundary(request.abortSignal),
-        input.commandOwner.readToolchainIdentity('hermetic_observation_v3'),
+        input.commandOwner.readToolchainIdentity('hermetic_observation_v2'),
       ]);
       assertAcceptedBoundary(boundary);
       if (
@@ -167,7 +167,7 @@ export function createManagedNodeCommandAdmissionOwnerInternal(input: {
           relativePath: normalized.entryPath,
           inputRoot: executionRoot.inputRoot,
           scratchRoot: executionRoot.scratchRoot,
-          effectClass: 'hermetic_observation_v3',
+          effectClass: 'hermetic_observation_v2',
           abortSignal: request.abortSignal,
         });
         const entry = Object.freeze({
@@ -178,17 +178,19 @@ export function createManagedNodeCommandAdmissionOwnerInternal(input: {
         if (entry.relativePath !== normalized.entryPath) {
           throw new Error('Managed Node command entry identity is invalid');
         }
-        const durableDispatch: RuntimeEventManagedWorkspaceObservationV3 = Object.freeze({
-          protocol: 'managed_observation_v3',
-          ...boundary,
-          objectFormat: 'sha1',
-          operationKind: 'node_command_v3',
-          effectClass: 'hermetic_observation_v3',
-          executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V3_DIGEST,
-          toolchainIdentityDigest: toolchain.identityDigest,
-          entry,
-          args: normalized.args,
-        });
+        const durableDispatch: RuntimeEventManagedWorkspaceNodeCommandObservationV2 = Object.freeze(
+          {
+            protocol: 'managed_observation_v2',
+            ...boundary,
+            objectFormat: 'sha1',
+            operationKind: 'node_command_v2',
+            effectClass: 'hermetic_observation_v2',
+            executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
+            toolchainIdentityDigest: toolchain.identityDigest,
+            entry,
+            args: normalized.args,
+          },
+        );
         let operation: Promise<unknown> | undefined;
         let state: 'ready' | 'running' | 'complete' | 'disposed' = 'ready';
         admittedByInputRoot.set(
@@ -241,7 +243,7 @@ export function createManagedNodeCommandToolDeclarationInternal(): MakaTool<
     parameters: MANAGED_NODE_COMMAND_PARAMETERS,
     categoryHint: 'custom_tool',
     recoveryMode: 'replay_safe',
-    durableExecutionProfile: 'managed_observation_v3',
+    durableExecutionProfile: 'managed_observation_v2',
     executionSemantics: 'exclusive_step',
     nesting: 'direct_only',
     impl: ownerUnavailable,

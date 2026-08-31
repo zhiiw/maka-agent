@@ -89,7 +89,7 @@ export interface ManagedNodeTransformResultInternal {
 
 export interface ManagedCommandSandboxOwnerInternal {
   readToolchainIdentity(
-    effectClass?: 'hermetic_observation_v2' | 'hermetic_observation_v3' | 'workspace_transform_v1',
+    effectClass?: 'hermetic_observation_v2' | 'workspace_transform_v1',
   ): Promise<ManagedCommandToolchainIdentityInternal>;
   readDependencyIdentity(
     lease: ManagedDependencySnapshotLease,
@@ -128,10 +128,7 @@ export interface ManagedCommandInspectFileInputInternal {
   readonly relativePath: string;
   readonly inputRoot: string;
   readonly scratchRoot: string;
-  readonly effectClass?:
-    | 'hermetic_observation_v2'
-    | 'hermetic_observation_v3'
-    | 'workspace_transform_v1';
+  readonly effectClass?: 'hermetic_observation_v2' | 'workspace_transform_v1';
   readonly abortSignal?: AbortSignal;
 }
 
@@ -176,10 +173,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
           readonly kind: 'helper';
           readonly operation: 'inspect_file_v1' | 'inspect_files_v1';
           readonly relativePaths: readonly string[];
-          readonly effectClass?:
-            | 'hermetic_observation_v2'
-            | 'hermetic_observation_v3'
-            | 'workspace_transform_v1';
+          readonly effectClass?: 'hermetic_observation_v2' | 'workspace_transform_v1';
         }
       | {
           readonly kind: 'node_tests';
@@ -218,10 +212,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         ? 'workspace_transform_v1'
         : invocation.kind === 'helper' && invocation.effectClass === 'workspace_transform_v1'
           ? 'workspace_transform_v1'
-          : invocation.kind === 'node_entrypoint' ||
-              (invocation.kind === 'helper' && invocation.effectClass === 'hermetic_observation_v3')
-            ? 'hermetic_observation_v3'
-            : 'hermetic_observation_v2',
+          : 'hermetic_observation_v2',
     );
     request.abortSignal?.throwIfAborted();
     const profile = hermeticObservationProfile(inputRoot, scratchRoot, dependency?.dependencyRoot);
@@ -323,10 +314,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
   }
   return Object.freeze({
     async readToolchainIdentity(
-      effectClass:
-        | 'hermetic_observation_v2'
-        | 'hermetic_observation_v3'
-        | 'workspace_transform_v1' = 'hermetic_observation_v2',
+      effectClass: 'hermetic_observation_v2' | 'workspace_transform_v1' = 'hermetic_observation_v2',
     ) {
       const toolchain = await verifyManagedToolchainForInvocationInternal(
         input.invocationOwnerToken,
@@ -429,7 +417,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         kind: 'helper',
         operation: 'inspect_file_v1',
         relativePaths: [request.entryPath],
-        effectClass: 'hermetic_observation_v3',
+        effectClass: 'hermetic_observation_v2',
       });
       const entry = decodeObservation(before.stdout, request.entryPath, before.nodeVersion);
       const result = await execute(request, {
@@ -441,7 +429,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         kind: 'helper',
         operation: 'inspect_file_v1',
         relativePaths: [request.entryPath],
-        effectClass: 'hermetic_observation_v3',
+        effectClass: 'hermetic_observation_v2',
       });
       const afterEntry = decodeObservation(after.stdout, request.entryPath, after.nodeVersion);
       if (
@@ -493,7 +481,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         kind: 'helper',
         operation: 'inspect_file_v1',
         relativePaths: [request.entryPath],
-        effectClass: 'hermetic_observation_v3',
+        effectClass: 'hermetic_observation_v2',
       });
       const entry = decodeObservation(before.stdout, request.entryPath, before.nodeVersion);
       const result = await execute(request, {
@@ -506,7 +494,7 @@ export function createManagedCommandSandboxOwnerInternal(input: {
         kind: 'helper',
         operation: 'inspect_file_v1',
         relativePaths: [request.entryPath],
-        effectClass: 'hermetic_observation_v3',
+        effectClass: 'hermetic_observation_v2',
       });
       const afterEntry = decodeObservation(after.stdout, request.entryPath, after.nodeVersion);
       if (
@@ -599,10 +587,7 @@ function invocationLabel(
         readonly kind: 'helper';
         readonly operation: 'inspect_file_v1' | 'inspect_files_v1';
         readonly relativePaths: readonly string[];
-        readonly effectClass?:
-          | 'hermetic_observation_v2'
-          | 'hermetic_observation_v3'
-          | 'workspace_transform_v1';
+        readonly effectClass?: 'hermetic_observation_v2' | 'workspace_transform_v1';
       }
     | { readonly kind: 'node_tests'; readonly relativePaths: readonly string[] }
     | {

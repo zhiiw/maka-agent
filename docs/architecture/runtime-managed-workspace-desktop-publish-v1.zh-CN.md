@@ -14,7 +14,7 @@ Publish 描述成 Apply。
 ## 2. Owner 与权限
 
 - UI 只生成一个稳定、可重试的 `publishId`；
-- Desktop main 只允许 `managed-coding-v1` session 进入该 IPC；
+- Desktop main 只允许 `managed-coding-v2` session 进入该 IPC；
 - Runtime Host coordinator 重新打开该 session 的 managed owner，不接受 repository path、commit 或 ref 作为 caller
   输入；
 - Gitoxide managed publish owner 从 durable session identity 读取 accepted commit/tree，并拥有 ref CAS；

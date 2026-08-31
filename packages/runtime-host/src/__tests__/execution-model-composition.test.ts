@@ -1425,7 +1425,7 @@ test('hosted execution freezes the headless coding provider wire contract', asyn
           permissionMode: 'bypass',
           collaborationMode: 'agent',
           orchestrationMode: 'default',
-          toolProfile: 'managed-coding-v1',
+          toolProfile: 'managed-coding-v2',
         },
         content: { text: 'Modify the managed workspace.' },
       },

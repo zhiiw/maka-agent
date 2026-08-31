@@ -23,7 +23,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { MANAGED_OBSERVATION_EXECUTION_PROFILE_V3_DIGEST } from '@maka/core/runtime-event';
+import { MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST } from '@maka/core/runtime-event';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import { createManagedNodeCommandAdmissionOwnerInternal } from '../server/managed-node-command-admission-owner-internal.js';
 import { createManagedNodeTestExecutionRootOwnerInternal } from '../server/managed-node-test-admission-owner-internal.js';
@@ -68,7 +68,7 @@ test('admits one exact accepted-tree Node entrypoint and freezes its arguments b
     },
     commandOwner: {
       readToolchainIdentity: async (effectClass) => {
-        assert.equal(effectClass, 'hermetic_observation_v3');
+        assert.equal(effectClass, 'hermetic_observation_v2');
         return {
           identityDigest: `sha256:${'8'.repeat(64)}`,
           nodeVersion: '24.13.1',
@@ -80,7 +80,7 @@ test('admits one exact accepted-tree Node entrypoint and freezes its arguments b
         throw new Error('dependencies are not part of managed Node command v1');
       },
       inspectFile: async (request) => {
-        assert.equal(request.effectClass, 'hermetic_observation_v3');
+        assert.equal(request.effectClass, 'hermetic_observation_v2');
         const bytes = await readFile(join(request.inputRoot, ...request.relativePath.split('/')));
         return {
           protocolVersion: 1,
@@ -134,12 +134,12 @@ test('admits one exact accepted-tree Node entrypoint and freezes its arguments b
     abortSignal,
   });
   assert.deepEqual(admission.durableDispatch, {
-    protocol: 'managed_observation_v3',
+    protocol: 'managed_observation_v2',
     ...BOUNDARY,
     objectFormat: 'sha1',
-    operationKind: 'node_command_v3',
-    effectClass: 'hermetic_observation_v3',
-    executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V3_DIGEST,
+    operationKind: 'node_command_v2',
+    effectClass: 'hermetic_observation_v2',
+    executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
     toolchainIdentityDigest: `sha256:${'8'.repeat(64)}`,
     entry: {
       relativePath: 'scripts/check.mjs',

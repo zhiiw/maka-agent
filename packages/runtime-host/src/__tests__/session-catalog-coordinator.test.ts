@@ -89,7 +89,7 @@ test('projects only bounded execution boundary presentation facts', async () => 
 });
 
 test('projects the immutable managed coding profile from the durable Session header', async () => {
-  const fixture = createFixture({ header: { toolProfile: 'managed-coding-v1' } });
+  const fixture = createFixture({ header: { toolProfile: 'managed-coding-v2' } });
 
   const outcome = await fixture.coordinator.handlers['session.catalog.query'](
     { kind: 'get', sessionId: fixture.sessionId },
@@ -101,7 +101,7 @@ test('projects the immutable managed coding profile from the durable Session hea
     assert.fail('Catalog query did not return the managed Session');
   }
   if ('kind' in outcome.result.session) assert.fail('Managed Session was not representable');
-  assert.equal(outcome.result.session.toolProfile, 'managed-coding-v1');
+  assert.equal(outcome.result.session.toolProfile, 'managed-coding-v2');
 });
 
 test('reduces turn pages to their encoded wire budget without skipping contributions', async () => {

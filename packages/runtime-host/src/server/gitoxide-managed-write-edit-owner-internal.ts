@@ -25,7 +25,7 @@ import {
   type RuntimeEvent,
   type RuntimeEventManagedWorkspaceMutation,
   type RuntimeEventManagedWorkspaceMutationV2,
-  type RuntimeEventManagedWorkspaceMutationV3,
+  type RuntimeEventManagedWorkspaceNodeTransformMutationV2,
 } from '@maka/core/runtime-event';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import type {
@@ -106,7 +106,7 @@ export interface GitoxideManagedNodeTransformAdmissionInternal {
     readonly epoch: WorkspaceEpochRecordV1;
   }): Promise<
     Readonly<{
-      durableDispatch: RuntimeEventManagedWorkspaceMutationV3;
+      durableDispatch: RuntimeEventManagedWorkspaceNodeTransformMutationV2;
       dispose(): Promise<void>;
     }>
   >;
@@ -553,6 +553,7 @@ function freezeManagedDispatch(input: {
     baseTreeOid: input.head.treeOid,
     expectedPath: input.expectedPath,
     pathPolicyVersion: 3 as const,
+    operationKind: 'write_edit_v2' as const,
     executionProfileDigest: MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,
   });
 }
@@ -825,9 +826,9 @@ function managedMutationMatchesToolName(
   toolName: string,
   managed: RuntimeEventManagedWorkspaceMutation | undefined,
 ): boolean {
-  return managed?.protocol === 'managed_mutation_v2'
+  return managed?.operationKind === 'write_edit_v2'
     ? toolName === 'Write' || toolName === 'Edit'
-    : managed?.protocol === 'managed_mutation_v3' && toolName === 'ManagedNodeTransform';
+    : managed?.operationKind === 'node_transform_v2' && toolName === 'ManagedNodeTransform';
 }
 
 function parentMatchesSuccessor(

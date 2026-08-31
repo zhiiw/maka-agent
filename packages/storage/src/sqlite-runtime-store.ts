@@ -108,6 +108,8 @@ import {
   RUNTIME_RECOVERY_AUTHORITY_CAPABILITY_VERSION,
   RUNTIME_CONTINUATION_AUTHORITY_CAPABILITY,
   RUNTIME_CONTINUATION_AUTHORITY_CAPABILITY_VERSION,
+  RUNTIME_MANAGED_WORKSPACE_CANONICAL_CAPABILITY,
+  RUNTIME_MANAGED_WORKSPACE_CANONICAL_CAPABILITY_VERSION,
   RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY,
   RUNTIME_WORKSPACE_BOUND_CONTINUATION_AUTHORITY_CAPABILITY_VERSION,
   RUNTIME_WORKSPACE_VERSION_AUTHORITY_CAPABILITY,
@@ -322,6 +324,7 @@ export class SqliteRuntimeStore
       assertContinuationAuthorityCapability(this.db);
       assertWorkspaceBoundContinuationAuthorityCapability(this.db);
       assertWorkspaceVersionAuthorityCapability(this.db);
+      assertManagedWorkspaceCanonicalCapability(this.db);
       if (!options.readOnly) {
         this.registerWorkspaceBaselineAuthorityWriter();
         this.refreshToolLedgerHealth();
@@ -349,6 +352,7 @@ export class SqliteRuntimeStore
       assertContinuationAuthorityCapability(this.db);
       assertWorkspaceBoundContinuationAuthorityCapability(this.db);
       assertWorkspaceVersionAuthorityCapability(this.db);
+      assertManagedWorkspaceCanonicalCapability(this.db);
       if (!options.readOnly) {
         this.registerWorkspaceBaselineAuthorityWriter();
         this.refreshToolLedgerHealth();
@@ -4841,6 +4845,17 @@ function assertWorkspaceVersionAuthorityCapability(db: DatabaseSync): void {
   }
 }
 
+function assertManagedWorkspaceCanonicalCapability(db: DatabaseSync): void {
+  const row = db
+    .prepare('SELECT version FROM runtime_capabilities WHERE capability = ?')
+    .get(RUNTIME_MANAGED_WORKSPACE_CANONICAL_CAPABILITY) as { version?: unknown } | undefined;
+  if (row?.version !== RUNTIME_MANAGED_WORKSPACE_CANONICAL_CAPABILITY_VERSION) {
+    throw new Error(
+      `SQLite runtime managed workspace capability ${RUNTIME_MANAGED_WORKSPACE_CANONICAL_CAPABILITY}@${RUNTIME_MANAGED_WORKSPACE_CANONICAL_CAPABILITY_VERSION} is unavailable`,
+    );
+  }
+}
+
 interface WorkspaceEpochProjectionRow {
   workspace_id: string;
   workspace_epoch_id: string;
@@ -4992,9 +5007,9 @@ function managedMutationMatchesToolName(
   toolName: string,
   mutation: RuntimeEventManagedWorkspaceMutation | undefined,
 ): boolean {
-  return mutation?.protocol === 'managed_mutation_v2'
+  return mutation?.operationKind === 'write_edit_v2'
     ? toolName === 'Write' || toolName === 'Edit'
-    : mutation?.protocol === 'managed_mutation_v3' && toolName === 'ManagedNodeTransform';
+    : mutation?.operationKind === 'node_transform_v2' && toolName === 'ManagedNodeTransform';
 }
 
 function managedMutationMatchesCallArgs(
@@ -5004,7 +5019,7 @@ function managedMutationMatchesCallArgs(
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const args = value as Record<string, unknown>;
   if (args.path !== mutation.expectedPath) return false;
-  if (mutation.protocol === 'managed_mutation_v2') return true;
+  if (mutation.operationKind === 'write_edit_v2') return true;
   return (
     args.entryPath === mutation.entry.relativePath &&
     isDeepStrictEqual(args.args ?? [], mutation.args)

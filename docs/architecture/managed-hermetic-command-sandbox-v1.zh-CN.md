@@ -6,7 +6,7 @@
 
 ## 主要不变量
 
-一次 `hermetic_observation_v1` 必须同时满足：
+一次 `hermetic_observation_v2` 必须同时满足：
 
 - 使用 M5.1 owner-bound toolchain capability；
 - `SandboxManager` 必须选择真实 enforcing backend，`none` 或 unavailable 都 fail closed；
@@ -30,8 +30,8 @@ Node 官方明确说明 Permission Model 是防止受信代码意外越权的 se
 
 ## 平台矩阵
 
-- Linux：以 bubblewrap + 当前发布 Electron Node-mode runtime 证明 `hermetic_observation_v1`。
-- macOS：以 Seatbelt + 当前发布 Electron Node-mode runtime 证明 `hermetic_observation_v1`。
+- Linux：以 bubblewrap + 当前发布 Electron Node-mode runtime 证明 `hermetic_observation_v2`。
+- macOS：以 Seatbelt + 当前发布 Electron Node-mode runtime 证明 `hermetic_observation_v2`。
 - Windows：v1 明确不可用。Electron.exe 在 AppContainer 内无法形成已证明的短生命周期 Node
   command owner；Host 因而不签发 capability，并在 T1 前返回
   `managed_workspace_profile_unavailable`。后续支持必须引入独立校验的 standalone Node artifact，禁止从

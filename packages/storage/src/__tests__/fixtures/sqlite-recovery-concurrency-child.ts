@@ -374,6 +374,7 @@ function managedMutationPreparedCommit(variant: 'a' | 'b') {
             baseTreeOid: '2'.repeat(40),
             expectedPath: 'notes.txt',
             pathPolicyVersion: 3 as const,
+            operationKind: 'write_edit_v2' as const,
             executionProfileDigest:
               'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
           },

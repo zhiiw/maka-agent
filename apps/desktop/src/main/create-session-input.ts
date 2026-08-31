@@ -129,17 +129,14 @@ export function resolveCreateSessionRequest(
 export function resolveAutomaticWorkspaceToolProfile(
   request: ResolvedCreateSessionRequest,
   workspace: WorkspaceTarget,
-  availableProfiles: readonly SessionToolProfile[] = ['managed-coding-v1'],
+  availableProfiles: readonly SessionToolProfile[] = ['managed-coding-v2'],
 ): SessionToolProfile | undefined {
   if (request.mode !== undefined) return undefined;
 
   switch (workspace.kind) {
     case 'project':
     case 'host_path': {
-      if (availableProfiles.includes('managed-coding-v4')) return 'managed-coding-v4';
-      if (availableProfiles.includes('managed-coding-v3')) return 'managed-coding-v3';
       if (availableProfiles.includes('managed-coding-v2')) return 'managed-coding-v2';
-      if (availableProfiles.includes('managed-coding-v1')) return 'managed-coding-v1';
       throw new Error('Managed coding is unavailable in the active Runtime Host.');
     }
   }

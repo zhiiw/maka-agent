@@ -444,7 +444,7 @@ test('runs one explicit accepted-tree Node entrypoint without PATH, network, or 
       platform: process.platform,
       arch: process.arch,
       profileVersion: 1,
-      allowedEffectClasses: ['hermetic_observation_v3'],
+      allowedEffectClasses: ['hermetic_observation_v2'],
     }),
   });
   let transformedRequest: SandboxTransformRequest | undefined;
@@ -553,7 +553,7 @@ test('runs one accepted-tree transform into the owner-selected single output fil
       platform: process.platform,
       arch: process.arch,
       profileVersion: 1,
-      allowedEffectClasses: ['hermetic_observation_v3', 'workspace_transform_v1'],
+      allowedEffectClasses: ['hermetic_observation_v2', 'workspace_transform_v1'],
     }),
   });
   const transformedRequests: SandboxTransformRequest[] = [];

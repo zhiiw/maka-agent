@@ -162,7 +162,8 @@ test('freezes one accepted-tree transformer and returns one owner-bound output p
     head: HEAD,
     epoch: EPOCH,
   });
-  assert.equal(prepared.durableDispatch.protocol, 'managed_mutation_v3');
+  assert.equal(prepared.durableDispatch.protocol, 'managed_mutation_v2');
+  assert.equal(prepared.durableDispatch.operationKind, 'node_transform_v2');
   assert.equal(
     prepared.durableDispatch.executionProfileDigest,
     MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST,

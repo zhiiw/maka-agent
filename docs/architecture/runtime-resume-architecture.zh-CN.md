@@ -426,7 +426,7 @@ sequenceDiagram
 
 如果在两次提交之间再次崩溃，下次启动仍能从 terminal RuntimeEvent 修好 header。反过来先写 header，就会出现一个没有语义事实支持的“完成”状态。
 
-Desktop 还会恢复 Graph coordinator 和 supervisor wake。只有这些 startup repair 完成后，Runtime Host 才会尝试 continuation。普通 Session 仍要求 safe-boundary flag；durable `managed-coding-v1` Session 则按其 T1 前冻结的产品合同自动规划，不允许用运行时 flag 把它静默降级为较弱模式。
+Desktop 还会恢复 Graph coordinator 和 supervisor wake。只有这些 startup repair 完成后，Runtime Host 才会尝试 continuation。普通 Session 仍要求 safe-boundary flag；durable `managed-coding-v2` Session 则按其 T1 前冻结的产品合同自动规划，不允许用运行时 flag 把它静默降级为较弱模式。
 
 ## Phase 1：安全边界上创建新的执行
 

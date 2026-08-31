@@ -37,6 +37,7 @@ import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import { createConversationOperationalStateStore } from '../conversation-operational-state.js';
 import {
   createSqliteRuntimeStore,
+  SQLITE_RUNTIME_SCHEMA_VERSION,
   type SqliteRuntimeStoreFailpoint,
 } from '../sqlite-runtime-store.js';
 import {
@@ -290,7 +291,7 @@ describe('workspace version persistence authority', () => {
     });
   });
 
-  it('rebuilds one managed Node transform reservation from its immutable v3 T1', async () => {
+  it('rebuilds one managed Node transform reservation from its canonical v2 T1', async () => {
     await withDatabase(async ({ dbPath, store }) => {
       const baseline = baselineInput();
       const opened = await commitWorkspaceBaselineInternal(store, baseline);
@@ -831,7 +832,7 @@ describe('workspace version persistence authority', () => {
       bindWorkspaceBaselineAuthorityStoreRootInternal(upgraded, TEST_STORAGE_ROOT_ID);
       registerWorkspaceSuccessorCandidateVerifierInternal(upgraded, verifyTestCandidate);
       try {
-        assert.equal(upgraded.schemaVersion(), 17);
+        assert.equal(upgraded.schemaVersion(), SQLITE_RUNTIME_SCHEMA_VERSION);
         assert.equal(
           (
             await upgraded.readWorkspaceHead(
@@ -1303,6 +1304,7 @@ async function prepareSuccessorCommit(
             baseTreeOid: opened.head.treeOid,
             expectedPath: 'notes.txt',
             pathPolicyVersion: 3 as const,
+            operationKind: 'write_edit_v2' as const,
             executionProfileDigest:
               'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
           },
@@ -1433,6 +1435,7 @@ function managedPreparedCommit(
             baseTreeOid: head.treeOid,
             expectedPath: 'notes.txt',
             pathPolicyVersion: 3 as const,
+            operationKind: 'write_edit_v2' as const,
             executionProfileDigest:
               'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
           },
@@ -1500,7 +1503,7 @@ function managedTransformPreparedCommit(
           canonicalArgsHash: argsHash,
           recoveryMode: 'reconcile' as const,
           managedMutation: {
-            protocol: 'managed_mutation_v3' as const,
+            protocol: 'managed_mutation_v2' as const,
             repositoryId: baseline.epoch.repositoryId,
             workspaceId: baseline.epoch.workspaceId,
             workspaceEpochId: baseline.epoch.workspaceEpochId,
@@ -1513,7 +1516,7 @@ function managedTransformPreparedCommit(
             baseTreeOid: head.treeOid,
             expectedPath: 'generated/output.txt',
             pathPolicyVersion: 3 as const,
-            operationKind: 'node_transform_v1' as const,
+            operationKind: 'node_transform_v2' as const,
             executionProfileDigest:
               'sha256:7ff4eb75e8833f7bf97eaa252f47316f609093d89aa32acdeae7fc6caaa11a92' as const,
             toolchainIdentityDigest: `sha256:${'3'.repeat(64)}` as const,
@@ -1608,7 +1611,10 @@ function recreateWorkspaceTablesAsSchema12(database: DatabaseSync): void {
     DROP TABLE runtime_managed_mutation_reservations;
     DROP TABLE runtime_workspace_active_epochs;
     DELETE FROM runtime_capabilities
-      WHERE capability = 'runtime_workspace_bound_continuation_authority';
+      WHERE capability IN (
+        'runtime_workspace_bound_continuation_authority',
+        'runtime_managed_workspace_canonical_v2'
+      );
     PRAGMA user_version = 12;
     COMMIT;
     PRAGMA foreign_keys = ON;
