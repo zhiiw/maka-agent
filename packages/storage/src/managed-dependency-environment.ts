@@ -367,10 +367,18 @@ export interface ManagedDependencySnapshotLease {
   release(): Promise<void>;
 }
 
+export interface ManagedDependencySnapshotRuntimeIdentity {
+  readonly nodeVersion: string;
+  readonly nodeAbi: string;
+  readonly platform: NodeJS.Platform;
+  readonly arch: string;
+}
+
 export interface ManagedDependencySnapshotLeaseAccessInternal {
   readonly environmentId: `sha256:${string}`;
   readonly contentTreeSha256: `sha256:${string}`;
   readonly dependencyRoot: string;
+  readonly runtime: ManagedDependencySnapshotRuntimeIdentity;
 }
 
 const managedDependencySnapshotLeases = new WeakMap<
@@ -446,6 +454,12 @@ export async function createManagedDependencySnapshotAuthority(
     Buffer.from(MANAGED_DEPENDENCY_SNAPSHOT_RUNTIME_DOMAIN, 'utf8'),
   );
   const capability = createManagedDependencySnapshotProducerCapability(runtimeIdentitySha256);
+  const runtimeIdentity: ManagedDependencySnapshotRuntimeIdentity = Object.freeze({
+    nodeVersion: input.nodeRuntime.version,
+    nodeAbi: input.nodeRuntime.abi,
+    platform: input.nodeRuntime.platform,
+    arch: input.nodeRuntime.arch,
+  });
   const pendingSources = new Map<
     string,
     {
@@ -565,6 +579,7 @@ export async function createManagedDependencySnapshotAuthority(
             environmentId: lease.environmentId,
             contentTreeSha256: lease.contentTreeSha256,
             dependencyRoot: lease.dependencyRoot,
+            runtime: runtimeIdentity,
           }),
         });
         return snapshotLease;

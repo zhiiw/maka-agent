@@ -17,16 +17,21 @@
  * under the License.
  */
 
-import { lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   isCanonicalManagedMutationPathV1,
-  MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+  MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
+  type RuntimeEventManagedDependencyObservationV1,
   type RuntimeEventManagedObservationFileV1,
-  type RuntimeEventManagedWorkspaceObservationV1,
+  type RuntimeEventManagedWorkspaceObservationV2,
 } from '@maka/core/runtime-event';
 import type { MakaTool, RuntimeManagedObservationAdmission } from '@maka/runtime/tool-runtime';
 import { runWithStorageRootLease, type StorageRootLease } from '@maka/storage/root-authority';
+import type {
+  ManagedDependencySnapshotAuthority,
+  ManagedDependencySnapshotLease,
+} from '@maka/storage/managed-dependency-snapshot-authority';
 import { z } from 'zod';
 import type {
   ManagedCommandSandboxOwnerInternal,
@@ -37,6 +42,7 @@ const SHA1_PATTERN = /^[0-9a-f]{40}$/u;
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const MANAGED_TEST_ROOT = 'managed-node-test-observations-v1';
+const MAX_DEPENDENCY_METADATA_BYTES = 4 * 1024 * 1024;
 const executionRootLeaseBrand: unique symbol = Symbol('ManagedNodeTestExecutionRootLease');
 
 export interface ManagedNodeTestExecutionRootLeaseInternal {
@@ -92,6 +98,61 @@ export interface ManagedNodeTestAdmissionOwnerInternal {
   }): Promise<RuntimeManagedObservationAdmission>;
 }
 
+export interface ManagedNodeTestDependencyOwnerInternal {
+  acquire(input: {
+    readonly acceptedInputRoot: string;
+    readonly abortSignal?: AbortSignal;
+  }): Promise<ManagedDependencySnapshotLease | undefined>;
+}
+
+export function createManagedNodeTestDependencyOwnerInternal(input: {
+  readonly sourceRoot: string;
+  readonly snapshotAuthority: ManagedDependencySnapshotAuthority;
+}): ManagedNodeTestDependencyOwnerInternal {
+  return Object.freeze({
+    async acquire(request: {
+      readonly acceptedInputRoot: string;
+      readonly abortSignal?: AbortSignal;
+    }) {
+      const { abortSignal } = request;
+      abortSignal?.throwIfAborted();
+      const sourceRoot = await realpath(input.sourceRoot);
+      const sourceInfo = await lstat(sourceRoot);
+      if (!sourceInfo.isDirectory() || sourceInfo.isSymbolicLink()) {
+        throw new Error('Managed dependency source root is invalid');
+      }
+      const dependencyRoot = join(sourceRoot, 'node_modules');
+      let dependencyInfo;
+      try {
+        dependencyInfo = await lstat(dependencyRoot);
+      } catch (error) {
+        if (isMissingPathError(error)) return undefined;
+        throw error;
+      }
+      if (!dependencyInfo.isDirectory() || dependencyInfo.isSymbolicLink()) {
+        throw new Error('Managed dependency source node_modules is invalid');
+      }
+      const [manifestBytes, lockfileBytes] = await Promise.all([
+        readStableBoundedDependencyMetadata(
+          join(request.acceptedInputRoot, 'package.json'),
+          abortSignal,
+        ),
+        readStableBoundedDependencyMetadata(
+          join(request.acceptedInputRoot, 'package-lock.json'),
+          abortSignal,
+        ),
+      ]);
+      abortSignal?.throwIfAborted();
+      return await input.snapshotAuthority.acquire({
+        sourceDependencyRoot: dependencyRoot,
+        manifestBytes,
+        lockfileBytes,
+        ...(abortSignal ? { abortSignal } : {}),
+      });
+    },
+  });
+}
+
 export interface ManagedNodeTestArgsInternal {
   readonly relativePaths: readonly string[];
 }
@@ -110,20 +171,24 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
   readonly executionRootOwner: ManagedNodeTestExecutionRootOwnerInternal;
   readonly sourceOwner: ManagedNodeTestSourceOwnerInternal;
   readonly commandOwner: ManagedCommandSandboxOwnerInternal;
+  readonly dependencyOwner?: ManagedNodeTestDependencyOwnerInternal;
 }): ManagedNodeTestAdmissionOwnerInternal {
   const admittedFilesByInputRoot = new Map<
     string,
-    readonly RuntimeEventManagedObservationFileV1[]
+    Readonly<{
+      files: readonly RuntimeEventManagedObservationFileV1[];
+      dependencyLease?: ManagedDependencySnapshotLease;
+    }>
   >();
   const tool: MakaTool<ManagedNodeTestArgsInternal, ManagedNodeTestObservationInternal> = {
     name: 'ManagedNodeTest',
     displayName: 'Managed Node Test',
     description:
-      'Run explicit Node test files against the immutable accepted workspace. No package scripts, dependency installation, PATH tools, network, or child processes are available.',
+      'Run explicit Node test files against the immutable accepted workspace and an optional leased dependency snapshot. No package scripts, dependency installation, PATH tools, network, or child processes are available.',
     parameters: MANAGED_NODE_TEST_PARAMETERS,
     categoryHint: 'custom_tool',
     recoveryMode: 'replay_safe',
-    durableExecutionProfile: 'managed_observation_v1',
+    durableExecutionProfile: 'managed_observation_v2',
     executionSemantics: 'exclusive_step',
     nesting: 'direct_only',
     impl: async () => {
@@ -131,15 +196,16 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
     },
     managedObservationImpl: async (args, ctx, execution) => {
       const relativePaths = requireManagedNodeTestArgs(args);
+      const admitted = admittedFilesByInputRoot.get(execution.inputRoot);
+      if (!admitted) throw new Error('Managed Node test execution roots are not admitted');
       const observation = await input.commandOwner.runNodeTests({
         relativePaths,
         inputRoot: execution.inputRoot,
         scratchRoot: execution.scratchRoot,
+        ...(admitted.dependencyLease ? { dependencyLease: admitted.dependencyLease } : {}),
         abortSignal: ctx.abortSignal,
       });
-      const expectedFiles = admittedFilesByInputRoot.get(execution.inputRoot);
-      if (!expectedFiles) throw new Error('Managed Node test execution roots are not admitted');
-      assertExactFiles(observation.files, expectedFiles);
+      assertExactFiles(observation.files, admitted.files);
       return observation;
     },
   };
@@ -170,6 +236,7 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
       const executionRootLease = await input.executionRootOwner.allocate();
       const executionRoot = requireManagedNodeTestExecutionRootInternal(executionRootLease);
       const { inputRoot, scratchRoot } = executionRoot;
+      let dependencyLease: ManagedDependencySnapshotLease | undefined;
       let admitted = false;
       try {
         await mkdir(scratchRoot);
@@ -205,19 +272,37 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
             }),
           );
         }
-        const durableDispatch: RuntimeEventManagedWorkspaceObservationV1 = Object.freeze({
-          protocol: 'managed_observation_v1',
+        dependencyLease = await input.dependencyOwner?.acquire({
+          acceptedInputRoot: inputRoot,
+          abortSignal: request.abortSignal,
+        });
+        request.abortSignal.throwIfAborted();
+        const dependency = dependencyLease
+          ? requireManagedDependencyObservation(
+              await input.commandOwner.readDependencyIdentity(dependencyLease),
+              toolchain,
+            )
+          : Object.freeze({ kind: 'none' as const });
+        const durableDispatch: RuntimeEventManagedWorkspaceObservationV2 = Object.freeze({
+          protocol: 'managed_observation_v2',
           ...boundary,
           objectFormat: 'sha1',
-          operationKind: 'node_test_v1',
-          effectClass: 'hermetic_observation_v1',
-          executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V1_DIGEST,
+          operationKind: 'node_test_v2',
+          effectClass: 'hermetic_observation_v2',
+          executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
           toolchainIdentityDigest: toolchain.identityDigest,
+          dependency,
           files: Object.freeze(files),
         });
         let operation: Promise<unknown> | undefined;
         let state: 'ready' | 'running' | 'complete' | 'disposed' = 'ready';
-        admittedFilesByInputRoot.set(inputRoot, durableDispatch.files);
+        admittedFilesByInputRoot.set(
+          inputRoot,
+          Object.freeze({
+            files: durableDispatch.files,
+            ...(dependencyLease ? { dependencyLease } : {}),
+          }),
+        );
         admitted = true;
         return Object.freeze({
           durableDispatch,
@@ -244,11 +329,21 @@ export function createManagedNodeTestAdmissionOwnerInternal(input: {
             await operation?.catch(() => undefined);
             state = 'disposed';
             admittedFilesByInputRoot.delete(inputRoot);
-            await input.executionRootOwner.release(executionRootLease);
+            try {
+              await dependencyLease?.release();
+            } finally {
+              await input.executionRootOwner.release(executionRootLease);
+            }
           },
         });
       } finally {
-        if (!admitted) await input.executionRootOwner.release(executionRootLease);
+        if (!admitted) {
+          try {
+            await dependencyLease?.release();
+          } finally {
+            await input.executionRootOwner.release(executionRootLease);
+          }
+        }
       }
     },
   };
@@ -268,11 +363,11 @@ export function createManagedNodeTestToolDeclarationInternal(): MakaTool<
     name: 'ManagedNodeTest',
     displayName: 'Managed Node Test',
     description:
-      'Run explicit Node test files against the immutable accepted workspace. No package scripts, dependency installation, PATH tools, network, or child processes are available.',
+      'Run explicit Node test files against the immutable accepted workspace and an optional leased dependency snapshot. No package scripts, dependency installation, PATH tools, network, or child processes are available.',
     parameters: MANAGED_NODE_TEST_PARAMETERS,
     categoryHint: 'custom_tool',
     recoveryMode: 'replay_safe',
-    durableExecutionProfile: 'managed_observation_v1',
+    durableExecutionProfile: 'managed_observation_v2',
     executionSemantics: 'exclusive_step',
     nesting: 'direct_only',
     impl: async () => {
@@ -367,6 +462,44 @@ function samePath(left: string, right: string): boolean {
   return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 
+async function readStableBoundedDependencyMetadata(
+  path: string,
+  abortSignal?: AbortSignal,
+): Promise<Buffer> {
+  abortSignal?.throwIfAborted();
+  const lexical = await lstat(path);
+  if (!lexical.isFile() || lexical.isSymbolicLink()) {
+    throw new Error('Managed dependency metadata file is invalid');
+  }
+  const file = await open(path, 'r');
+  try {
+    const before = await file.stat();
+    if (!before.isFile() || before.size > MAX_DEPENDENCY_METADATA_BYTES) {
+      throw new Error('Managed dependency metadata file is invalid or too large');
+    }
+    const bytes = await file.readFile();
+    abortSignal?.throwIfAborted();
+    const after = await file.stat();
+    if (
+      bytes.byteLength !== before.size ||
+      after.size !== before.size ||
+      after.mtimeMs !== before.mtimeMs ||
+      after.ctimeMs !== before.ctimeMs
+    ) {
+      throw new Error('Managed dependency metadata changed while read');
+    }
+    return bytes;
+  } finally {
+    await file.close();
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return (
+    error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT'
+  );
+}
+
 function requireManagedNodeTestArgs(value: unknown): readonly string[] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Managed Node test arguments are invalid');
@@ -408,6 +541,44 @@ function assertAcceptedBoundary(boundary: ManagedNodeTestAcceptedBoundaryInterna
   ) {
     throw new Error('Managed Node test accepted boundary is invalid');
   }
+}
+
+function requireManagedDependencyObservation(
+  dependency: Readonly<{
+    environmentId: `sha256:${string}`;
+    contentTreeSha256: `sha256:${string}`;
+    nodeVersion: string;
+    nodeAbi: string;
+    platform: NodeJS.Platform;
+    arch: string;
+  }>,
+  toolchain: Readonly<{
+    nodeVersion: string;
+    platform: NodeJS.Platform;
+    arch: string;
+  }>,
+): RuntimeEventManagedDependencyObservationV1 {
+  if (
+    !SHA256_PATTERN.test(dependency.environmentId) ||
+    !SHA256_PATTERN.test(dependency.contentTreeSha256) ||
+    dependency.nodeVersion !== toolchain.nodeVersion ||
+    dependency.platform !== toolchain.platform ||
+    dependency.arch !== toolchain.arch ||
+    !/^[0-9]{2,4}$/u.test(dependency.nodeAbi) ||
+    !['linux', 'darwin', 'win32'].includes(dependency.platform) ||
+    !/^[A-Za-z0-9._-]{1,64}$/u.test(dependency.arch)
+  ) {
+    throw new Error('Managed Node test dependency snapshot identity is invalid');
+  }
+  return Object.freeze({
+    kind: 'managed_dependency_snapshot_v1' as const,
+    environmentId: dependency.environmentId,
+    contentTreeSha256: dependency.contentTreeSha256,
+    nodeVersion: dependency.nodeVersion,
+    nodeAbi: dependency.nodeAbi,
+    platform: dependency.platform as 'linux' | 'darwin' | 'win32',
+    arch: dependency.arch,
+  });
 }
 
 function assertExactFiles(

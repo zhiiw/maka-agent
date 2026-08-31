@@ -27,7 +27,8 @@ Read / Glob / Grep / Write / Edit / ManagedNodeTest
 
 - Read/Glob/Grep：`replay_safe`，读取 accepted tree；
 - Write/Edit：`reconcile + managed_mutation_v1`；
-- ManagedNodeTest：`replay_safe + managed_observation_v1`；
+- ManagedNodeTest：`replay_safe + managed_observation_v2`；dependency 输入只能是显式 `none` 或 owner-bound
+  immutable snapshot lease，禁止从 checkout `node_modules` 回退；
 - Bash、npm、package script、PATH executable 与 attached checkout 均不在 profile 内。
 
 ## 3. Owner 与组合顺序
@@ -45,7 +46,7 @@ Read / Glob / Grep / Write / Edit / ManagedNodeTest
 - v2 缺 Gitoxide/toolchain/sandbox：run 在 provider 请求前以
   `managed_workspace_profile_unavailable` 失败；
 - v2 test admission 失败：没有 T1；
-- T1 后 helper/Host 失败：按 `managed_observation_v1` exact-boundary recovery 收敛；
+- T1 后 helper/Host 失败：按 `managed_observation_v2` exact accepted-tree + dependency boundary recovery 收敛；
 - profile 是 Session immutable identity，不允许运行中从 v2 降级 v1。
 
 本切片建立 Host 产品 composition，但不立即把 Desktop 默认创建策略从 v1 切到 v2。默认切换必须与 packaged

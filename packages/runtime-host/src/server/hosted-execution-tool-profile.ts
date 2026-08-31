@@ -43,8 +43,8 @@ const MANAGED_CODING_V1_SYSTEM_PROMPT = [
 ].join('\n');
 const MANAGED_CODING_V2_SYSTEM_PROMPT = [
   MANAGED_CODING_V1_SYSTEM_PROMPT,
-  'Run only explicit dependency-free Node tests with ManagedNodeTest.',
-  'The test consumes the same immutable accepted Git tree and cannot use npm, package scripts, PATH, network, or the attached checkout.',
+  'Run only explicit Node tests with ManagedNodeTest.',
+  'The test consumes the same immutable accepted Git tree and, when present, an immutable read-only dependency snapshot. It cannot install dependencies, use package scripts, PATH, network, or the attached checkout.',
 ].join('\n');
 
 const HEADLESS_CODING_V1_SYSTEM_PROMPT = [
@@ -135,7 +135,7 @@ export function projectHostedExecutionTools(
         return {
           ...tool,
           recoveryMode: 'replay_safe',
-          durableExecutionProfile: 'managed_observation_v1',
+          durableExecutionProfile: 'managed_observation_v2',
         };
       }
       return {

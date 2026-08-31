@@ -72,6 +72,12 @@ test('imports a pre-provisioned npm dependency tree into immutable owned bytes',
     leaseConsumerOwnerToken,
     lease,
   );
+  assert.deepEqual(access.runtime, {
+    nodeVersion: process.versions.node,
+    nodeAbi: process.versions.modules,
+    platform: process.platform,
+    arch: process.arch,
+  });
   assert.equal(
     await readFile(join(access.dependencyRoot, 'fixture-package', 'index.js'), 'utf8'),
     'trusted\n',

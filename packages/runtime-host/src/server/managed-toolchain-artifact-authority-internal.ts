@@ -29,6 +29,7 @@ const HASH_BUFFER_BYTES = 64 * 1024;
 
 export const MANAGED_TOOLCHAIN_EFFECT_CLASSES_INTERNAL = Object.freeze([
   'hermetic_observation_v1',
+  'hermetic_observation_v2',
   'workspace_transform_v1',
 ] as const);
 export type ManagedToolchainEffectClassInternal =
@@ -60,6 +61,8 @@ export interface VerifiedManagedToolchainInternal {
   readonly executablePath: string;
   readonly entrypointPath: string;
   readonly nodeVersion: string;
+  readonly platform: NodeJS.Platform;
+  readonly arch: string;
   readonly profileVersion: 1;
   readonly allowedEffectClasses: readonly ManagedToolchainEffectClassInternal[];
   readonly identityDigest: `sha256:${string}`;
@@ -202,6 +205,8 @@ export async function verifyManagedToolchainForInvocationInternal(
     executablePath,
     entrypointPath,
     nodeVersion: record.release.nodeVersion,
+    platform: record.release.platform,
+    arch: record.release.arch,
     profileVersion: 1 as const,
     allowedEffectClasses: record.release.allowedEffectClasses,
     identityDigest: managedToolchainIdentityDigest(record.release),

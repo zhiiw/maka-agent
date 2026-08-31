@@ -66,18 +66,39 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
   const root = join(base, 'root');
   const executionId = randomUUID();
   await mkdir(root);
+  await mkdir(join(root, 'node_modules', 'fixture-dependency'), { recursive: true });
+  await Promise.all([
+    writeFile(join(root, '.gitignore'), 'node_modules/\n', 'utf8'),
+    writeFile(join(root, 'package.json'), '{"name":"managed-v2-fixture","private":true}\n', 'utf8'),
+    writeFile(
+      join(root, 'package-lock.json'),
+      '{"name":"managed-v2-fixture","lockfileVersion":3,"packages":{}}\n',
+      'utf8',
+    ),
+    writeFile(
+      join(root, 'node_modules', 'fixture-dependency', 'package.json'),
+      '{"name":"fixture-dependency","type":"module","exports":"./index.js"}\n',
+      'utf8',
+    ),
+    writeFile(
+      join(root, 'node_modules', 'fixture-dependency', 'index.js'),
+      'export const answer = 42;\n',
+      'utf8',
+    ),
+  ]);
   await writeFile(
     join(root, 'managed.test.mjs'),
     [
       "import test from 'node:test';",
       "import assert from 'node:assert/strict';",
-      "test('accepted world', () => assert.equal(2 + 2, 4));",
+      "import { answer } from 'fixture-dependency';",
+      "test('accepted world with leased dependencies', () => assert.equal(answer, 42));",
       '',
     ].join('\n'),
     'utf8',
   );
   git(root, ['init', '--quiet', '--object-format=sha1']);
-  git(root, ['add', 'managed.test.mjs']);
+  git(root, ['add', '.gitignore', 'managed.test.mjs', 'package.json', 'package-lock.json']);
   git(root, [
     '-c',
     'user.name=Maka Test',
@@ -461,8 +482,8 @@ async function preparePackagedResources(
   await writeFile(
     join(resourcesRoot, 'managed-command-toolchain.json'),
     `${JSON.stringify({
-      schemaVersion: 1,
-      protocol: 'maka_managed_command_toolchain_release_v1',
+      schemaVersion: 2,
+      protocol: 'maka_managed_command_toolchain_release_v2',
       provider: 'maka/managed-command-toolchain',
       platform: process.platform,
       arch: process.arch,
@@ -471,7 +492,7 @@ async function preparePackagedResources(
       entrypointRelativePath: 'managed-command/managed-command-helper-main.js',
       entrypointBytes: (await stat(entrypointPath)).size,
       entrypointSha256: `sha256:${createHash('sha256').update(entrypoint).digest('hex')}`,
-      allowedEffectClasses: ['hermetic_observation_v1'],
+      allowedEffectClasses: ['hermetic_observation_v2'],
       distributionReady: true,
     })}\n`,
     'utf8',

@@ -189,7 +189,7 @@ test('managed coding v2 adds only the durable accepted-world Node test', () => {
   const profile = hostedExecutionRunProfile('managed-coding-v2');
   assert.ok(profile);
   assert.deepEqual(profile.toolNames, ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ManagedNodeTest']);
-  assert.match(profile.systemPrompt, /explicit dependency-free Node tests/u);
+  assert.match(profile.systemPrompt, /immutable read-only dependency snapshot/u);
 
   const tools = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ManagedNodeTest', 'Bash'].map(
     (name): MakaTool => ({
@@ -205,5 +205,5 @@ test('managed coding v2 adds only the durable accepted-world Node test', () => {
     ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ManagedNodeTest'],
   );
   assert.equal(selected.at(-1)?.recoveryMode, 'replay_safe');
-  assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_observation_v1');
+  assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_observation_v2');
 });
