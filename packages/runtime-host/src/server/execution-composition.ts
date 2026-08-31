@@ -110,6 +110,7 @@ import { HostAgentGraphCoordinator } from './agent-graph-coordinator.js';
 import { HostAgentGraphExecutionCoordinator } from './agent-graph-execution-coordinator.js';
 import { HostScheduledTaskCoordinator } from './scheduled-task-coordinator.js';
 import { recoverClientCapabilityOutcomes } from './client-capability-recovery.js';
+import { recoverShellRunToolOutcomes } from './shell-run-recovery.js';
 import { HostConnectionEffectCoordinator } from './connection-effect-coordinator.js';
 import { HostChangeFeed } from './host-change-feed.js';
 import { HostConfigurationCoordinator } from './configuration-coordinator.js';
@@ -1910,6 +1911,11 @@ export async function createExecutionRuntimeHostComposition(
           executions: async () => {
             await coordinator.prepareRecovery();
             await interactions.recoverPendingAfterHostRestart();
+            await recoverShellRunToolOutcomes(
+              stores.runtimeEventStore,
+              openedShellRunStore,
+              recoverySessions.map((session) => session.id),
+            );
             await manager.recoverInterruptedSessionsStrict(stores);
             await manager.recoverChildWorkspacePatches(
               recoverySessions.flatMap((session) =>

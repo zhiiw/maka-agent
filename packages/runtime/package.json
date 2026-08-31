@@ -12,6 +12,7 @@
     "./builtin-tools": "./dist/builtin-tools.js",
     "./shell-tools": "./dist/shell-tools.js",
     "./shell-run-manager": "./dist/shell-run-manager.js",
+    "./shell-run-tool-result": "./dist/shell-run-tool-result.js",
     "./deep-research-tools": "./dist/deep-research-tools.js",
     "./tool-artifacts": "./dist/tool-artifacts.js",
     "./model-factory": "./dist/model-factory.js",

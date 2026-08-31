@@ -262,6 +262,7 @@ export function buildManagedBashTool(
   return {
     name: 'Bash',
     activityKind: 'command',
+    recoveryMode: 'reattach',
     description:
       withTurnShellGuidance(options.lead ?? 'Run a shell command in the session cwd.', shell) +
       ` Foreground is the default (timeout ${DEFAULT_BASH_TIMEOUT_MS}ms, maximum ${MAX_FOREGROUND_BASH_TIMEOUT_MS}ms).` +
