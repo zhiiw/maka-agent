@@ -303,7 +303,11 @@ export function createManagedCommandSandboxOwnerInternal(input: {
           : invocation.outputPath !== undefined && result.exitCode !== 0) ||
       !result.dispatched
     ) {
-      throw new Error(formatManagedCommandFailure(result, invocationLabel(invocation)));
+      const failure = formatManagedCommandFailure(result, invocationLabel(invocation));
+      if (process.env.MAKA_TEST_USE_PRODUCTION_BACKEND === '1') {
+        console.error(`[managed-command-test-diagnostic] ${failure}`);
+      }
+      throw new Error(failure);
     }
     return {
       stdout: result.stdout,

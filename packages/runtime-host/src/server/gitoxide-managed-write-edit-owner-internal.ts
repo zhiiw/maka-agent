@@ -398,7 +398,13 @@ async function settleManagedMutation(input: {
   readonly durableDispatch: RuntimeEventManagedWorkspaceMutation;
   readonly failpoint?: (point: GitoxideManagedWriteEditOwnerFailpoint) => void | Promise<void>;
 }): Promise<RuntimeManagedMutationSettlement> {
-  const proof = await input.operation();
+  let proof: RuntimeManagedMutationOperationProof;
+  try {
+    proof = await input.operation();
+  } catch (error) {
+    reportManagedMutationTestDiagnostic('operation', error);
+    throw error;
+  }
   const reservation = await input.persistence.readActiveMutation(input.epoch.workspaceInstanceId);
   if (!reservationMatchesAdmission(reservation, input)) {
     return unsettled('Managed Write/Edit operation has no exact durable reservation');
@@ -432,6 +438,7 @@ async function settleManagedMutation(input: {
       input.durableDispatch.executionProfileDigest,
     );
   } catch (error) {
+    reportManagedMutationTestDiagnostic('candidate', error);
     return Object.freeze({ kind: 'unsettled' as const, error });
   }
 
@@ -467,7 +474,14 @@ async function settleManagedMutation(input: {
       durableOutcome: proof.durableOutcome,
     });
   } catch (error) {
+    reportManagedMutationTestDiagnostic('successor', error);
     return Object.freeze({ kind: 'unsettled' as const, error });
+  }
+}
+
+function reportManagedMutationTestDiagnostic(stage: string, error: unknown): void {
+  if (process.env.MAKA_TEST_USE_PRODUCTION_BACKEND === '1') {
+    console.error(`[managed-mutation-${stage}-test-diagnostic]`, error);
   }
 }
 
