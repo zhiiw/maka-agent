@@ -2,7 +2,7 @@
 
 ## 范围
 
-本切片只定义一个受限的、前台 `ShellRun` 专用外部副作用边界。它不是任意远端 API 的 exactly-once 框架，也不在本切片中向 Desktop 或 CLI 开放通用 managed Bash。
+本合同定义一个受限的、前台 `ShellRun` 专用外部副作用边界。它不是任意远端 API 的 exactly-once 框架。产品消费者是 `managed-coding-v2` 中的 fenced Bash；只有能够证明 command sandbox 的 Host 才广告该 profile。
 
 输入世界固定为一个已接受的 Git tree：
 
@@ -22,6 +22,8 @@ provider outcome or recovery adoption
 - SQLite RuntimeEvents 是工具调用、围栏和 provider outcome 的唯一 accepted truth。
 
 调用者只能提交 `command` 与可选 `timeout_ms`。v1 明确拒绝后台任务、PTY 和额外参数；因此 execution root 不会在仍有一个受支持的后台 ShellRun 使用它时被回收。
+
+一次性目录统一位于 unpublished canonical `managed-disposable-executions-v2` namespace。新 Host 的第一次 allocation 会在独占 storage-root owner 下删除上一进程遗留的 execution roots；不存在 v1 目录迁移或兼容读取。
 
 ## T1 原子边界
 
@@ -55,8 +57,8 @@ Runtime 必须等待已经进入 `running` 的 operation capability 结束，own
 | --- | --- | --- | --- |
 | accepted tree 一次性物化 | 实现预期 | 实现预期 | 实现预期 |
 | 前台 ShellRun 本地 claim/terminal adoption | 已有 ShellRun authority | 已有 ShellRun authority | 已有 ShellRun authority |
-| 通用 managed Bash sandbox | 本切片不开放 | 本切片不开放 | 本切片不开放 |
+| foreground fenced Bash | bubblewrap 可用时开放 | Seatbelt 可用时开放 | 不开放；任意 shell AppContainer 尚不可证明 |
 | 后台/PTY managed effect | 拒绝 | 拒绝 | 拒绝 |
 | 远端 exactly-once | 不承诺 | 不承诺 | 不承诺 |
 
-Desktop/CLI 消费者只有在对应平台能够证明 command sandbox、process-tree 回收和真实 Host kill/restart 测试后才能启用该 profile。在此之前，缺少 admission 必须在 T1 前 fail closed。
+Linux/macOS 的 packaged Host 只有在 Gitoxide、managed Node toolchain 和 foreground command sandbox 同时可用时才广告 `managed-coding-v2`。Windows 继续返回 profile unavailable。缺少任何 authority 都必须在 T1 前 fail closed，禁止退回 attached-checkout Bash。

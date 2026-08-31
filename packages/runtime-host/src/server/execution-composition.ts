@@ -30,6 +30,7 @@ import type { RuntimeExecutionConnection } from '@maka/core/llm-connections';
 import { generalizedErrorMessage } from '@maka/core/redaction';
 import { emptyPlanSessionState } from '@maka/core/plan';
 import type { PermissionMode } from '@maka/core/permission';
+import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
 import {
   isDeepResearchSession,
   isManagedCodingSessionToolProfile,
@@ -186,6 +187,7 @@ import {
   createManagedNodeTestExecutionRootOwnerInternal,
 } from './managed-node-test-admission-owner-internal.js';
 import { createManagedNodeTransformToolDeclarationInternal } from './managed-node-transform-admission-owner-internal.js';
+import { createShellRunExternalEffectAdmissionOwnerInternal } from './shell-run-external-effect-admission-owner-internal.js';
 import {
   HostProjectDirectoryAuthority,
   type PublishedProjectDirectoryRoot,
@@ -427,6 +429,12 @@ export async function createExecutionRuntimeHostComposition(
       },
     });
     const sandboxManager = createBuiltinSandboxManager();
+    const managedShellExternalEffectAvailable = Boolean(
+      sandboxManager?.canEnforce({
+        profile: createWorkspaceWritePermissionProfile(),
+        platform: process.platform,
+      }),
+    );
     const managedCommandOwner =
       sandboxManager && managedToolchainCapability
         ? createManagedCommandSandboxOwnerInternal({
@@ -886,10 +894,25 @@ export async function createExecutionRuntimeHostComposition(
                   });
                 })()
               : undefined;
+          const managedShellExternalEffectAdmission =
+            backendContext.header.toolProfile === 'managed-coding-v2'
+              ? await (async () => {
+                  if (!managedShellExternalEffectAvailable || !managedSession) {
+                    throw new Error(
+                      'managed_workspace_profile_unavailable: fenced ShellRun authority is unavailable',
+                    );
+                  }
+                  return createShellRunExternalEffectAdmissionOwnerInternal({
+                    executionRootOwner: managedNodeTestExecutionRootOwner,
+                    sourceOwner: managedSession.nodeTestSource,
+                  });
+                })()
+              : undefined;
           const runBuiltinTools = managedSession
             ? {
                 ...builtinTools,
                 filesystemWorker: adaptManagedInspectionFilesystemWorker(managedSession),
+                ...(managedShellExternalEffectAdmission ? { managedExternalEffect: true } : {}),
               }
             : builtinTools;
           return createHostAiSdkBackend({
@@ -948,6 +971,11 @@ export async function createExecutionRuntimeHostComposition(
                         Promise.reject(new Error('Managed Node command admission is unavailable')))
                       : (managedNodeTestAdmission?.admit(input) ??
                         Promise.reject(new Error('Managed Node test admission is unavailable'))),
+                }
+              : {}),
+            ...(managedShellExternalEffectAdmission
+              ? {
+                  admitExternalEffect: (input) => managedShellExternalEffectAdmission.admit(input),
                 }
               : {}),
             requestDrain: context.requestDrain,
@@ -2091,7 +2119,8 @@ export async function createExecutionRuntimeHostComposition(
         ...(gitoxideHelperCapability &&
         managedNodeTestToolDeclaration &&
         managedNodeCommandToolDeclaration &&
-        managedNodeTransformToolDeclaration
+        managedNodeTransformToolDeclaration &&
+        managedShellExternalEffectAvailable
           ? (['managed-coding-v2'] as const)
           : []),
       ]),

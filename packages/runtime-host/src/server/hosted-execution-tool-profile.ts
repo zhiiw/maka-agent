@@ -37,6 +37,7 @@ const MANAGED_CODING_V2_TOOL_NAMES = [
   'Grep',
   'Write',
   'Edit',
+  'Bash',
   'ManagedNodeTest',
   'ManagedNodeRun',
   'ManagedNodeTransform',
@@ -46,7 +47,8 @@ const MANAGED_CODING_V2_SYSTEM_PROMPT = [
   'Modify it with Write and Edit.',
   'All five tools consume the same immutable accepted Git tree.',
   'These tools transform immutable accepted Git content and publish an owner-verified successor.',
-  'No shell, attached-workspace read, or unmanaged filesystem authority is available in this profile.',
+  'Bash is a foreground-only fenced effect over a disposable materialization of the accepted tree; it never runs in the attached checkout.',
+  'Bash has no background or PTY mode, and missing effect admission fails before T1.',
   'Run only explicit Node tests with ManagedNodeTest.',
   'The test consumes the same immutable accepted Git tree and, when present, an immutable read-only dependency snapshot. It cannot install dependencies, use package scripts, PATH, network, or the attached checkout.',
   'Run an explicit accepted-workspace Node entrypoint with ManagedNodeRun only when a direct script check is useful.',
@@ -138,6 +140,13 @@ export function projectHostedExecutionTools(
           ...tool,
           recoveryMode: 'replay_safe',
           durableExecutionProfile: 'managed_observation_v2',
+        };
+      }
+      if (tool.name === 'Bash') {
+        return {
+          ...tool,
+          recoveryMode: 'reattach',
+          durableExecutionProfile: 'external_effect_v1',
         };
       }
       if (tool.name === 'ManagedNodeRun') {

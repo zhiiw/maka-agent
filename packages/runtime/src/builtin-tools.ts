@@ -159,6 +159,8 @@ function internalFilesystemWriteFailure(tool: string, subject: string, extra?: s
 
 export interface BuildBuiltinToolsOptions {
   shellRuns?: ShellRunLauncher;
+  /** Foreground-only Bash executed through a T1-frozen external-effect fence. */
+  managedExternalEffect?: boolean;
   runtimeResources?: RuntimeResourceReader;
   attachmentResources?: {
     readAttachmentResource(
@@ -297,6 +299,8 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         buildManagedBashTool(options.shellRuns, {
           executionFacts,
           shell,
+          ...(options.managedExternalEffect ? { managedExternalEffect: true } : {}),
+          ...(options.managedExternalEffect ? { declareSandboxBoundary: false } : {}),
           ...(options.sandboxManager
             ? {
                 transformCommand: ({ command, pty, requiredBoundary, ctx }) =>

@@ -164,6 +164,7 @@ test('managed coding v2 is the only complete durable coding profile', () => {
     'Grep',
     'Write',
     'Edit',
+    'Bash',
     'ManagedNodeTest',
     'ManagedNodeRun',
     'ManagedNodeTransform',
@@ -174,7 +175,7 @@ test('managed coding v2 is the only complete durable coding profile', () => {
   assert.match(profile.systemPrompt, /explicit accepted-workspace Node entrypoint/u);
   assert.match(profile.systemPrompt, /one bounded UTF-8 workspace file/u);
 
-  const tools = [...profile.toolNames, 'Bash'].map(
+  const tools = [...profile.toolNames].map(
     (name): MakaTool => ({
       name,
       description: name,
@@ -187,10 +188,13 @@ test('managed coding v2 is the only complete durable coding profile', () => {
     selected.map(({ name }) => name),
     [...profile.toolNames],
   );
-  assert.equal(selected[5]?.recoveryMode, 'replay_safe');
-  assert.equal(selected[5]?.durableExecutionProfile, 'managed_observation_v2');
+  assert.equal(selected[5]?.name, 'Bash');
+  assert.equal(selected[5]?.recoveryMode, 'reattach');
+  assert.equal(selected[5]?.durableExecutionProfile, 'external_effect_v1');
   assert.equal(selected[6]?.recoveryMode, 'replay_safe');
   assert.equal(selected[6]?.durableExecutionProfile, 'managed_observation_v2');
+  assert.equal(selected[7]?.recoveryMode, 'replay_safe');
+  assert.equal(selected[7]?.durableExecutionProfile, 'managed_observation_v2');
   assert.equal(selected.at(-1)?.name, 'ManagedNodeTransform');
   assert.equal(selected.at(-1)?.recoveryMode, 'reconcile');
   assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_mutation_v2');

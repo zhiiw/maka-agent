@@ -614,6 +614,160 @@ test('packaged managed-coding-v2 resumes after Host death without replaying an a
   }
 });
 
+test('packaged managed-coding-v2 resumes after Host death without replaying a fenced ShellRun', {
+  timeout: 90_000,
+}, async (t) => {
+  const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
+  if (!helperPath) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the packaged v2 crash gate');
+    return;
+  }
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-managed-shell-crash-')));
+  const root = join(base, 'root');
+  const executionId = randomUUID();
+  await mkdir(root);
+  await writeFile(join(root, 'package.json'), '{"name":"managed-shell-fixture"}\n', 'utf8');
+  git(root, ['init', '--quiet', '--object-format=sha1']);
+  git(root, ['add', 'package.json']);
+  git(root, [
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=maka@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'managed shell baseline',
+  ]);
+
+  const electronExecutable = resolveElectronExecutable();
+  const resourcesRoot = await preparePackagedResources(base, helperPath, electronExecutable);
+  const provider = await startManagedShellProvider();
+  t.after(() => provider.close());
+  const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const connectionId = await configureProvider(capability, provider.baseUrl);
+  const fixture = new ExecutionFixture(base, root, capability, executionId);
+  try {
+    const firstHost = await fixture.startHost(undefined, true, {
+      packagedResourcesRoot: resourcesRoot,
+      runtimeExecutablePath: electronExecutable,
+      useProductionBackend: true,
+    });
+    const firstClient = await connectClient(root);
+    assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
+      profiles: process.platform === 'win32' ? [] : ['managed-coding-v2'],
+    });
+    const startRequest = firstClient.request('hosted.execution.start', {
+      executionId,
+      session: {
+        workspace: { kind: 'host_path', path: root },
+        modelTarget: {
+          kind: 'explicit',
+          connectionId,
+          connectionSlug: 'managed-v2-provider',
+          model: MODEL_ID,
+        },
+        permissionMode: 'bypass',
+        collaborationMode: 'agent',
+        orchestrationMode: 'default',
+        toolProfile: 'managed-coding-v2',
+      },
+      content: { text: 'Run the fenced shell fixture.' },
+    });
+    if (process.platform === 'win32') {
+      try {
+        const projection = await startRequest;
+        assert.equal(projection.kind, 'indeterminate');
+        assert.ok((projection.failureReason ?? '').length > 0);
+        assert.equal(provider.requests.length, 0);
+      } finally {
+        await firstClient.close();
+        await fixture.stopHost(firstHost);
+      }
+      return;
+    }
+    const start = startRequest.then(
+      () => undefined,
+      () => undefined,
+    );
+    const startFailure = startRequest.then(
+      (projection) =>
+        Promise.reject(
+          new Error(
+            `hosted execution settled before the fenced ShellRun result: ${JSON.stringify(projection)}`,
+          ),
+        ),
+      (error: unknown) =>
+        Promise.reject(
+          new Error(
+            `hosted execution failed before the fenced ShellRun result: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          ),
+        ),
+    );
+    const completedToolResult = await Promise.race([
+      provider.waitForCompletedToolResult(),
+      startFailure,
+    ]);
+    assert.match(readManagedShellResult(completedToolResult), /managed-shell-output/u);
+    await fixture.killHost(firstHost);
+    await withTimeout(start, PROCESS_TIMEOUT_MS, 'crashed hosted execution did not close');
+    await firstClient.close().catch(() => undefined);
+
+    const secondHost = await fixture.startHost(undefined, true, {
+      packagedResourcesRoot: resourcesRoot,
+      runtimeExecutablePath: electronExecutable,
+      useProductionBackend: true,
+    });
+    const secondClient = await connectClient(root);
+    try {
+      await provider.waitForResumedCompletion();
+      const admission = await waitForContinuationAdmission(fixture, executionId);
+      const terminal = await waitForTerminalTurn(secondClient, executionId, admission.turnId);
+      assert.equal(terminal.status, 'completed');
+    } finally {
+      await secondClient.close();
+      await fixture.stopHost(secondHost);
+    }
+
+    assert.equal(provider.requests.length, 3);
+    assert.match(JSON.stringify(provider.requests[1]), /managed-shell-output/u);
+    assert.match(JSON.stringify(provider.requests[2]), /managed-shell-output/u);
+    const readerOwner = await tryAcquireInteractiveRootReader(capability);
+    assert.ok(readerOwner);
+    if (!readerOwner) throw new Error('Unable to read managed shell fixture root');
+    const reader = await openInteractiveExecutionStoresForRead(readerOwner.lease);
+    try {
+      const runs = await reader.agentRunStore.listSessionRuns(executionId);
+      const events = (
+        await Promise.all(
+          runs.map((run) =>
+            reader.runtimeEventStore.readImmutableRuntimeEvents(executionId, run.runId),
+          ),
+        )
+      ).flat();
+      const calls = events.filter(
+        (event) => event.content?.kind === 'function_call' && event.content.name === 'Bash',
+      );
+      const responses = events.filter(
+        (event) => event.content?.kind === 'function_response' && event.content.name === 'Bash',
+      );
+      assert.equal(calls.length, 1);
+      assert.equal(responses.length, 1);
+      const dispatch = events.find((event) => event.actions?.toolDispatch?.externalEffect);
+      assert.equal(
+        dispatch?.actions?.toolDispatch?.externalEffect?.targetAuthority,
+        'shell_run_v1',
+      );
+    } finally {
+      await reader.sessionStore.close?.();
+      await readerOwner.close();
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
 function readDurableExecutionSnapshot(root: string, sessionId: string): string {
   const database = new DatabaseSync(join(root, 'runtime.sqlite'), { readOnly: true });
   try {
@@ -942,6 +1096,75 @@ function readRuntimeFailureEvidence(root: string, executionId: string): string {
   }
 }
 
+async function startManagedShellProvider(): Promise<{
+  readonly baseUrl: string;
+  readonly requests: readonly unknown[];
+  waitForCompletedToolResult(): Promise<unknown>;
+  waitForResumedCompletion(): Promise<void>;
+  close(): Promise<void>;
+}> {
+  const requests: unknown[] = [];
+  let completedToolResult!: (request: unknown) => void;
+  let resumedCompletion!: () => void;
+  const completedToolResultReached = new Promise<unknown>((resolve) => {
+    completedToolResult = resolve;
+  });
+  const resumedCompletionReached = new Promise<void>((resolve) => {
+    resumedCompletion = resolve;
+  });
+  const sockets = new Set<import('node:net').Socket>();
+  const server = createServer((request, response) => {
+    void (async () => {
+      const body = JSON.parse(await readBody(request)) as Record<string, unknown>;
+      if (body.stream !== true) {
+        respondSummary(response);
+        return;
+      }
+      requests.push(body);
+      if (requests.length === 1) {
+        respondToolCall(response, 'Bash', {
+          command: 'test -f package.json && printf managed-shell-output',
+          timeout_ms: 30_000,
+        });
+        return;
+      }
+      if (requests.length === 2) {
+        completedToolResult(body);
+        return;
+      }
+      respondText(response, 'Fenced ShellRun completed after recovery.');
+      resumedCompletion();
+    })().catch((error) => response.destroy(error as Error));
+  });
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  await listen(server);
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    requests,
+    waitForCompletedToolResult: () =>
+      withTimeout(
+        completedToolResultReached,
+        PROCESS_TIMEOUT_MS * 5,
+        'provider did not observe the fenced ShellRun result',
+      ),
+    waitForResumedCompletion: () =>
+      withTimeout(
+        resumedCompletionReached,
+        PROCESS_TIMEOUT_MS * 3,
+        'resumed Host did not complete the fenced ShellRun turn',
+      ),
+    close: async () => {
+      for (const socket of sockets) socket.destroy();
+      await closeServer(server);
+    },
+  };
+}
+
 function readManagedNodeTestResult(request: unknown): Readonly<Record<string, unknown>> {
   if (!request || typeof request !== 'object' || Array.isArray(request)) {
     throw new Error('Provider request is invalid');
@@ -1027,6 +1250,24 @@ function readManagedNodeTransformResult(request: unknown): Readonly<Record<strin
     path: value.path,
     bytes: value.bytes,
   });
+}
+
+function readManagedShellResult(request: unknown): string {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new Error('Provider request is invalid');
+  }
+  const messages = (request as { readonly messages?: unknown }).messages;
+  if (!Array.isArray(messages)) throw new Error('Provider request has no messages');
+  const toolMessage = messages.find(
+    (message): message is { readonly role: 'tool'; readonly content: string } =>
+      !!message &&
+      typeof message === 'object' &&
+      !Array.isArray(message) &&
+      (message as { readonly role?: unknown }).role === 'tool' &&
+      typeof (message as { readonly content?: unknown }).content === 'string',
+  );
+  if (!toolMessage) throw new Error('Provider request has no tool result');
+  return toolMessage.content;
 }
 
 async function preparePackagedResources(

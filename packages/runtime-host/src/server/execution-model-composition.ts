@@ -84,6 +84,7 @@ export interface HostAiSdkBackendInput {
   readonly runtimeCommitSink?: RuntimeCommitSink;
   readonly admitManagedMutation?: ToolRuntimeInput['admitManagedMutation'];
   readonly admitManagedObservation?: ToolRuntimeInput['admitManagedObservation'];
+  readonly admitExternalEffect?: ToolRuntimeInput['admitExternalEffect'];
   readonly childAgents?: HostChildAgentBackendCapabilities;
   readonly createFetchTransport?: (proxy: ProxiedFetchProxy | null) => ProxiedFetchTransport;
 }
@@ -456,6 +457,7 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
         ...(input.admitManagedObservation
           ? { admitManagedObservation: input.admitManagedObservation }
           : {}),
+        ...(input.admitExternalEffect ? { admitExternalEffect: input.admitExternalEffect } : {}),
         ...(providerRequestCapture
           ? {
               recordProviderRequestCapture: providerRequestCapture,
