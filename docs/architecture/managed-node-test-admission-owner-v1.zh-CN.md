@@ -49,6 +49,8 @@ Admission 不接收裸 `storageRoot`。execution-root owner 必须持有不可�
 - T1 后 input 文件 identity 变化：helper 不运行或结果被拒绝，进入 durable observation 的 fail-stop/recovery；
 - operation 运行中 abort/timeout：等待 command owner 回收 process tree，然后清理 roots；
 - T2 已提交但 live response 丢失：采用 immutable RuntimeEvent outcome，不重新解释 helper stdout；
+- Runtime 在 operation callback 返回 Host owner 以前提交精确 T2；owner response 丢失、提前返回或后续 live
+  publication 失败，都不得触发 generic T2 或重新运行 test；
 - T1 已提交但 T2 缺失：后续 recovery 只能在同一 accepted commit/tree、文件、toolchain/profile 上重建；任一
   identity 漂移都 park，禁止 generic test fallback。
 
