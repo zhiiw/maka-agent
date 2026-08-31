@@ -71,6 +71,7 @@ import {
   MANAGED_MUTATION_EXECUTION_PROFILE_V2_SPEC,
   TOOL_BOUNDARY_PROTOCOL_V1,
   type RuntimeEvent,
+  type RuntimeEventExternalEffectV1,
   type RuntimeEventManagedWorkspaceObservation,
   type RuntimeEventManagedWorkspaceObservationV2,
   type RuntimeEventManagedWorkspaceMutation,
@@ -177,7 +178,7 @@ export interface MakaTool<P = any, R = unknown> {
   /** Crash-recovery contract used by the durable tool boundary. */
   recoveryMode?: ToolRecoveryMode;
   /** Durable execution profile selected by the Host before T1. */
-  durableExecutionProfile?: 'managed_mutation_v2' | 'managed_observation_v2';
+  durableExecutionProfile?: 'managed_mutation_v2' | 'managed_observation_v2' | 'external_effect_v1';
   /**
    * Pure Write/Edit transform for managed mutation mode. It receives only the
    * frozen arguments and must not read or mutate the live workspace.
@@ -195,6 +196,12 @@ export interface MakaTool<P = any, R = unknown> {
     args: P,
     ctx: MakaToolContext,
     execution: RuntimeManagedObservationExecution,
+  ) => Promise<R> | R;
+  /** External effect implementation invoked only inside its owner-issued fence. */
+  managedExternalEffectImpl?: (
+    args: P,
+    ctx: MakaToolContext,
+    execution: RuntimeExternalEffectExecution,
   ) => Promise<R> | R;
   /** Step-level admission contract. Exclusive tools cannot share an assistant step. */
   executionSemantics?: 'parallel' | 'exclusive_step';
@@ -422,6 +429,25 @@ export interface ToolRuntimeInput {
     readonly persistedArgs: unknown;
     readonly abortSignal: AbortSignal;
   }) => Promise<RuntimeManagedObservationAdmission>;
+  /** Host-owned external-effect fence, frozen before T1. */
+  admitExternalEffect?: (input: {
+    readonly operationId: string;
+    readonly toolName: string;
+    readonly persistedArgs: unknown;
+    readonly abortSignal: AbortSignal;
+  }) => Promise<RuntimeExternalEffectAdmission>;
+}
+
+export interface RuntimeExternalEffectAdmission {
+  readonly durableDispatch: Readonly<RuntimeEventExternalEffectV1>;
+  execute<T>(operation: (execution: RuntimeExternalEffectExecution) => Promise<T>): Promise<T>;
+  /** Idempotent for an unused, failed-T1, completed, or failed effect. */
+  dispose(): Promise<void>;
+}
+
+export interface RuntimeExternalEffectExecution {
+  readonly cwd: string;
+  readonly scratchRoot: string;
 }
 
 export interface RuntimeManagedObservationExecution {
@@ -1430,6 +1456,7 @@ export class ToolRuntime {
 
     let managedMutationAdmission: RuntimeManagedMutationAdmission | undefined;
     let managedObservationAdmission: RuntimeManagedObservationAdmission | undefined;
+    let externalEffectAdmission: RuntimeExternalEffectAdmission | undefined;
     if (tool.durableExecutionProfile === 'managed_mutation_v2') {
       const mutationToolMatches =
         tool.name === 'Write' || tool.name === 'Edit' || tool.name === 'ManagedNodeTransform';
@@ -1505,11 +1532,41 @@ export class ToolRuntime {
         return this.errorReturn(reason);
       }
     }
+    if (tool.durableExecutionProfile === 'external_effect_v1') {
+      if (
+        tool.name !== 'Bash' ||
+        tool.recoveryMode !== 'reattach' ||
+        !tool.managedExternalEffectImpl ||
+        !dispatchOperationId ||
+        !this.input.runtimeCommitSink ||
+        !this.input.admitExternalEffect
+      ) {
+        const reason = 'External effect fencing admission is unavailable before T1';
+        await refuseBeforeDispatch(reason);
+        this.recordLoopGateOutcome(callSignature, true);
+        return this.errorReturn(reason);
+      }
+      try {
+        externalEffectAdmission = await this.input.admitExternalEffect({
+          operationId: dispatchOperationId,
+          toolName: tool.name,
+          persistedArgs: structuredClone(persistedArgs),
+          abortSignal: ctx.abortSignal,
+        });
+      } catch (error) {
+        await disposeExternalEffectAdmission(externalEffectAdmission);
+        const reason = `External effect fencing admission failed: ${formatSyntheticToolErrorText(error)}`;
+        await refuseBeforeDispatch(reason);
+        this.recordLoopGateOutcome(callSignature, true);
+        return this.errorReturn(reason);
+      }
+    }
 
     const reservedSubagentSlot = this.reserveSubagentSlot(tool);
     if (!reservedSubagentSlot) {
       await disposeManagedMutationAdmission(managedMutationAdmission);
       await disposeManagedObservationAdmission(managedObservationAdmission);
+      await disposeExternalEffectAdmission(externalEffectAdmission);
       trace?.emit('tool', 'tool_failed', 'Tool execution rejected by runtime limit', {
         toolUseId,
         toolName: tool.name,
@@ -1535,6 +1592,9 @@ export class ToolRuntime {
         ...(managedObservationAdmission
           ? { managedObservation: managedObservationAdmission.durableDispatch }
           : {}),
+        ...(externalEffectAdmission
+          ? { externalEffect: externalEffectAdmission.durableDispatch }
+          : {}),
         ...(invocationId ? { invocationId } : {}),
         ...(runId ? { runId } : {}),
       });
@@ -1542,6 +1602,7 @@ export class ToolRuntime {
       if (reservedSubagentSlot) this.releaseSubagentSlot(tool);
       await disposeManagedMutationAdmission(managedMutationAdmission);
       await disposeManagedObservationAdmission(managedObservationAdmission);
+      await disposeExternalEffectAdmission(externalEffectAdmission);
       throw error;
     }
     if (durableAttempt) {
@@ -1661,8 +1722,15 @@ export class ToolRuntime {
             toolContext,
             execution,
           );
+        const invokeManagedExternalEffect = (execution: RuntimeExternalEffectExecution) =>
+          tool.managedExternalEffectImpl!(
+            structuredClone(executionArgs) as never,
+            toolContext,
+            execution,
+          );
         const prepareOperationValue = async (
           immutableSnapshot = false,
+          invoke: () => Promise<unknown> | unknown = invokeTool,
         ): Promise<RuntimeManagedMutationOperationValue<unknown>> => {
           let mutationResult: RuntimeManagedMutationResultProof | undefined;
           let rawResult: unknown;
@@ -1708,7 +1776,7 @@ export class ToolRuntime {
           } else {
             rawResult = await (immutableSnapshot
               ? tool.managedMutationTransform!(structuredClone(executionArgs) as never)
-              : invokeTool());
+              : invoke());
           }
           const result = immutableSnapshot
             ? snapshotManagedToolResult(rawResult, ctx.maxResultBytes)
@@ -1951,6 +2019,63 @@ export class ToolRuntime {
           if (ownerError !== undefined && !committedObservationOutcome) throw ownerError;
           if (!runtimeOwnedValue) {
             throw new Error('Managed observation owner settled without executing the operation');
+          }
+          settledExecution = { kind: 'generic', value: runtimeOwnedValue };
+        } else if (externalEffectAdmission) {
+          const lifecycle: { state: 'open' | 'running' | 'settled' | 'closed' } = {
+            state: 'open',
+          };
+          let operationPromise: Promise<RuntimeManagedMutationOperationValue<unknown>> | undefined;
+          let runtimeOwnedValue: RuntimeManagedMutationOperationValue<unknown> | undefined;
+          const executeExternalEffectOperation = (
+            execution: RuntimeExternalEffectExecution,
+          ): Promise<RuntimeManagedMutationOperationValue<unknown>> => {
+            if (lifecycle.state !== 'open') {
+              return Promise.reject(
+                new Error(
+                  lifecycle.state === 'closed'
+                    ? 'External effect operation capability is closed'
+                    : 'External effect owner invoked the operation more than once',
+                ),
+              );
+            }
+            lifecycle.state = 'running';
+            operationPromise = (async () => {
+              try {
+                const value = await prepareOperationValue(false, () =>
+                  invokeManagedExternalEffect(execution),
+                );
+                runtimeOwnedValue = value;
+                return value;
+              } finally {
+                if (lifecycle.state === 'running') lifecycle.state = 'settled';
+              }
+            })();
+            void operationPromise.catch(() => undefined);
+            return operationPromise;
+          };
+          let ownerError: unknown;
+          try {
+            await externalEffectAdmission.execute(executeExternalEffectOperation);
+          } catch (error) {
+            ownerError = error;
+          }
+          if (lifecycle.state === 'running') {
+            try {
+              await operationPromise;
+            } catch {
+              // Join the effect so no side effect can outlive terminal publication.
+            } finally {
+              lifecycle.state = 'closed';
+            }
+            throw new Error('External effect owner settled before the operation completed', {
+              ...(ownerError !== undefined ? { cause: ownerError } : {}),
+            });
+          }
+          lifecycle.state = 'closed';
+          if (ownerError !== undefined) throw ownerError;
+          if (!runtimeOwnedValue) {
+            throw new Error('External effect owner settled without executing the operation');
           }
           settledExecution = { kind: 'generic', value: runtimeOwnedValue };
         } else {
@@ -2259,6 +2384,7 @@ export class ToolRuntime {
       if (reservedSubagentSlot) this.releaseSubagentSlot(tool);
       await disposeManagedMutationAdmission(managedMutationAdmission);
       await disposeManagedObservationAdmission(managedObservationAdmission);
+      await disposeExternalEffectAdmission(externalEffectAdmission);
     }
   }
 
@@ -2271,6 +2397,7 @@ export class ToolRuntime {
     abortSignal: AbortSignal;
     managedMutation?: Readonly<RuntimeEventManagedWorkspaceMutation>;
     managedObservation?: Readonly<RuntimeEventManagedWorkspaceObservation>;
+    externalEffect?: Readonly<RuntimeEventExternalEffectV1>;
     invocationId?: string;
     runId?: string;
   }): Promise<DurableToolAttempt | undefined> {
@@ -2357,6 +2484,7 @@ export class ToolRuntime {
           recoveryMode,
           ...(input.managedMutation ? { managedMutation: input.managedMutation } : {}),
           ...(input.managedObservation ? { managedObservation: input.managedObservation } : {}),
+          ...(input.externalEffect ? { externalEffect: input.externalEffect } : {}),
         },
       },
       refs: {
@@ -2396,6 +2524,7 @@ export class ToolRuntime {
           throw new Error('Managed observation admission does not match the durable tool call');
         }
       }
+      if (input.externalEffect) decodeRuntimeEvent(dispatchEvent);
       this.assertDurableDispatchNotAborted(input.tool.name, input.abortSignal);
       const prepared = await sink.commitToolPrepared({
         operationId,
@@ -4063,6 +4192,16 @@ async function disposeManagedObservationAdmission(
     await admission?.dispose();
   } catch {
     // Cleanup is best-effort and must not obscure the durable tool result.
+  }
+}
+
+async function disposeExternalEffectAdmission(
+  admission: RuntimeExternalEffectAdmission | undefined,
+): Promise<void> {
+  try {
+    await admission?.dispose();
+  } catch {
+    // Cleanup is best-effort and must not obscure T1/T2 or the external outcome.
   }
 }
 

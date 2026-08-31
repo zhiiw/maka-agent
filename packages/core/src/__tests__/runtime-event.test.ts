@@ -31,6 +31,8 @@ import {
 import { INTERACTION_ID_MAX_BYTES, INTERACTION_TOOL_NAME_MAX_BYTES } from '../interaction.js';
 import {
   decodeRuntimeEvent,
+  EXTERNAL_EFFECT_EXECUTION_PROFILE_V1_DIGEST,
+  EXTERNAL_EFFECT_EXECUTION_PROFILE_V1_SPEC,
   isTerminalRuntimeEvent,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
   MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_SPEC,
@@ -583,6 +585,14 @@ describe('RuntimeEvent actions', () => {
     const canonical = JSON.stringify(MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_SPEC);
     assert.equal(
       MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
+      `sha256:${createHash('sha256').update(canonical).digest('hex')}`,
+    );
+  });
+
+  test('binds the ShellRun external-effect fence to its canonical execution profile', () => {
+    const canonical = JSON.stringify(EXTERNAL_EFFECT_EXECUTION_PROFILE_V1_SPEC);
+    assert.equal(
+      EXTERNAL_EFFECT_EXECUTION_PROFILE_V1_DIGEST,
       `sha256:${createHash('sha256').update(canonical).digest('hex')}`,
     );
   });
