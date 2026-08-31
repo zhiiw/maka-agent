@@ -602,6 +602,60 @@ describe('builtin Bash streaming output', () => {
     expect(calls[0]?.fdInputs?.[0]?.fd).toBe(3);
   });
 
+  test('binds managed Bash to a foreground-only disposable accepted tree', async () => {
+    const acceptedRoot = await mkdtemp(join(tmpdir(), 'maka-managed-bash-accepted-'));
+    const scratchRoot = join(acceptedRoot, '..', 'scratch');
+    await mkdir(scratchRoot, { recursive: true });
+    const calls: any[] = [];
+    try {
+      const bash = buildBuiltinTools({
+        shellRuns: {
+          async runForegroundBash(input: any) {
+            calls.push(input);
+            return terminalResult(input, 'completed', 0);
+          },
+          async runBackgroundBash() {
+            throw new Error('not used');
+          },
+        },
+        sandboxManager: availableLinuxManager(),
+        sandboxPlatform: 'linux',
+        managedExternalEffect: true,
+      }).find((candidate) => candidate.name === 'Bash');
+      assert.ok(bash);
+      assert.equal(bash.durableExecutionProfile, 'external_effect_v1');
+      assert.equal(bash.recoveryMode, 'reattach');
+      assert.ok(bash.managedExternalEffectImpl);
+      const parameters = bash.parameters as z.ZodTypeAny;
+      assert.equal(parameters.safeParse({ command: 'npm test' }).success, true);
+      assert.equal(
+        parameters.safeParse({ command: 'npm test', run_in_background: true }).success,
+        false,
+      );
+
+      await bash.managedExternalEffectImpl(
+        { command: 'npm test' },
+        {
+          sessionId: 'session-1',
+          turnId: 'turn-1',
+          toolCallId: 'tool-1',
+          cwd: '/attached-checkout',
+          permissionMode: 'ask',
+          abortSignal: new AbortController().signal,
+          emitOutput: () => {},
+        },
+        { cwd: acceptedRoot, scratchRoot },
+      );
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].cwd, acceptedRoot);
+      assert.equal(calls[0].argv?.[0], '/usr/bin/bwrap');
+    } finally {
+      await rm(acceptedRoot, { recursive: true, force: true });
+      await rm(scratchRoot, { recursive: true, force: true });
+    }
+  });
+
   test('pins a missing exact-write target and removes an untouched successful placeholder', async () => {
     const fixture = await linuxMissingExactWriteFixture();
     let launchInput: any;

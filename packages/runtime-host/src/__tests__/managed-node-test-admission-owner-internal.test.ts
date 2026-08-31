@@ -367,9 +367,57 @@ test('rejects a conflicting accepted-tree materialization before durable admissi
       /materialization conflicts with the accepted boundary/u,
     );
 
-    const ownerRoot = join(storageRoot, 'managed-node-test-observations-v1');
+    const ownerRoot = join(storageRoot, 'managed-disposable-executions-v2');
     const entries = await readdir(ownerRoot);
     assert.deepEqual(entries, []);
+  } finally {
+    await rootOwner.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test('reclaims the previous Host disposable roots before the first allocation', async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), 'maka-managed-root-recovery-'));
+  const rootOwner = await openStorageRootOwner(storageRoot);
+  const ownerRoot = join(storageRoot, 'managed-disposable-executions-v2');
+  const staleRoot = join(ownerRoot, 'execution-stale');
+  await mkdir(staleRoot, { recursive: true });
+  await writeFile(join(staleRoot, 'late.txt'), 'stale\n', 'utf8');
+  try {
+    const executionRoots = createManagedNodeTestExecutionRootOwnerInternal({
+      storageRootLease: rootOwner.lease,
+    });
+    const lease = await executionRoots.allocate();
+    try {
+      await assert.rejects(access(staleRoot), (error: unknown) =>
+        Boolean(
+          error && typeof error === 'object' && (error as NodeJS.ErrnoException).code === 'ENOENT',
+        ),
+      );
+    } finally {
+      await executionRoots.release(lease);
+    }
+    assert.deepEqual(await readdir(ownerRoot), []);
+  } finally {
+    await rootOwner.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test('rejects a second disposable execution-root owner for the same storage-root authority', async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), 'maka-managed-root-owner-'));
+  const rootOwner = await openStorageRootOwner(storageRoot);
+  try {
+    createManagedNodeTestExecutionRootOwnerInternal({
+      storageRootLease: rootOwner.lease,
+    });
+    assert.throws(
+      () =>
+        createManagedNodeTestExecutionRootOwnerInternal({
+          storageRootLease: rootOwner.lease,
+        }),
+      /already has an owner/u,
+    );
   } finally {
     await rootOwner.close();
     await rm(storageRoot, { recursive: true, force: true });

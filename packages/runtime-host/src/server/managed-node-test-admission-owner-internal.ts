@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { lstat, mkdir, mkdtemp, open, realpath, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, readdir, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   isCanonicalManagedMutationPathV1,
@@ -41,9 +41,11 @@ import type {
 const SHA1_PATTERN = /^[0-9a-f]{40}$/u;
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
-const MANAGED_TEST_ROOT = 'managed-node-test-observations-v1';
+const MANAGED_DISPOSABLE_EXECUTION_ROOT = 'managed-disposable-executions-v2';
+const MANAGED_DISPOSABLE_ENTRY_PATTERN = /^execution-[A-Za-z0-9_-]+$/u;
 const MAX_DEPENDENCY_METADATA_BYTES = 4 * 1024 * 1024;
 const executionRootLeaseBrand: unique symbol = Symbol('ManagedNodeTestExecutionRootLease');
+const claimedDisposableExecutionRoots = new WeakSet<object>();
 
 export interface ManagedNodeTestExecutionRootLeaseInternal {
   readonly [executionRootLeaseBrand]: true;
@@ -382,8 +384,41 @@ export function createManagedNodeTestToolDeclarationInternal(): MakaTool<
 export function createManagedNodeTestExecutionRootOwnerInternal(input: {
   readonly storageRootLease: StorageRootLease<'interactive', 'write'>;
 }): ManagedNodeTestExecutionRootOwnerInternal {
+  if (claimedDisposableExecutionRoots.has(input.storageRootLease)) {
+    throw new Error('Managed disposable execution root already has an owner');
+  }
+  claimedDisposableExecutionRoots.add(input.storageRootLease);
+  let initialization: Promise<string> | undefined;
+  const initialize = () => {
+    initialization ??= runWithStorageRootLease(
+      input.storageRootLease,
+      'interactive',
+      'write',
+      async (storageRoot) => {
+        const ownerRoot = await requireDisposableExecutionOwnerRoot(storageRoot);
+        for (const entry of await readdir(ownerRoot)) {
+          if (!MANAGED_DISPOSABLE_ENTRY_PATTERN.test(entry)) {
+            throw new Error('Managed disposable execution-root entry is invalid');
+          }
+          const entryPath = join(ownerRoot, entry);
+          const metadata = await lstat(entryPath);
+          if (metadata.isSymbolicLink()) {
+            await rm(entryPath, { force: true });
+            continue;
+          }
+          if (!metadata.isDirectory()) {
+            throw new Error('Managed disposable execution-root entry is invalid');
+          }
+          await rm(entryPath, { recursive: true, force: true });
+        }
+        return ownerRoot;
+      },
+    );
+    return initialization;
+  };
   return Object.freeze({
     async allocate() {
+      await initialize();
       let publishLease!: (lease: ManagedNodeTestExecutionRootLeaseInternal) => void;
       let rejectLease!: (error: unknown) => void;
       const leasePublished = new Promise<ManagedNodeTestExecutionRootLeaseInternal>(
@@ -402,17 +437,8 @@ export function createManagedNodeTestExecutionRootOwnerInternal(input: {
         'interactive',
         'write',
         async (storageRoot) => {
-          const ownerRoot = join(storageRoot, MANAGED_TEST_ROOT);
-          await mkdir(ownerRoot, { recursive: true });
-          const ownerRootStat = await lstat(ownerRoot);
-          if (!ownerRootStat.isDirectory() || ownerRootStat.isSymbolicLink()) {
-            throw new Error('Managed Node test execution-root authority is invalid');
-          }
-          const canonicalOwnerRoot = await realpath(ownerRoot);
-          if (!samePath(canonicalOwnerRoot, ownerRoot)) {
-            throw new Error('Managed Node test execution-root authority escaped its storage root');
-          }
-          const executionRoot = await mkdtemp(join(canonicalOwnerRoot, 'observation-'));
+          const canonicalOwnerRoot = await requireDisposableExecutionOwnerRoot(storageRoot);
+          const executionRoot = await mkdtemp(join(canonicalOwnerRoot, 'execution-'));
           const inputRoot = join(executionRoot, 'input');
           const scratchRoot = join(executionRoot, 'scratch');
           const lease = Object.freeze({
@@ -446,6 +472,20 @@ export function createManagedNodeTestExecutionRootOwnerInternal(input: {
       await requireManagedNodeTestExecutionRootInternal(lease).release();
     },
   });
+}
+
+async function requireDisposableExecutionOwnerRoot(storageRoot: string): Promise<string> {
+  const ownerRoot = join(storageRoot, MANAGED_DISPOSABLE_EXECUTION_ROOT);
+  await mkdir(ownerRoot, { recursive: true });
+  const ownerRootStat = await lstat(ownerRoot);
+  if (!ownerRootStat.isDirectory() || ownerRootStat.isSymbolicLink()) {
+    throw new Error('Managed disposable execution-root authority is invalid');
+  }
+  const canonicalOwnerRoot = await realpath(ownerRoot);
+  if (!samePath(canonicalOwnerRoot, ownerRoot)) {
+    throw new Error('Managed disposable execution-root authority escaped its storage root');
+  }
+  return canonicalOwnerRoot;
 }
 
 function requireManagedNodeTestExecutionRootInternal(
