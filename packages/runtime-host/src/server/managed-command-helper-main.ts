@@ -45,14 +45,12 @@ const raw = await readBoundedStdin();
 const request = decodeRequest(JSON.parse(raw) as unknown);
 if (request.operation === 'inspect_file_v1') {
   const observation = await observeFile(request.relativePath);
-  process.stdout.write(
-    `${JSON.stringify({
-      protocolVersion: 1,
-      kind: 'file_observation',
-      nodeVersion: process.versions.node,
-      ...observation,
-    })}\n`,
-  );
+  await writeJsonResponseAndExit({
+    protocolVersion: 1,
+    kind: 'file_observation',
+    nodeVersion: process.versions.node,
+    ...observation,
+  });
 } else {
   const files = await Promise.all(request.relativePaths.map(observeFile));
   const counts = { passed: 0, failed: 0, skipped: 0, todo: 0 };
@@ -60,47 +58,72 @@ if (request.operation === 'inspect_file_v1') {
   const originalStdoutWrite = process.stdout.write;
   process.stdout.write = process.stderr.write.bind(process.stderr) as typeof process.stdout.write;
   try {
-    const stream = run({
-      cwd: process.cwd(),
-      files: [...request.relativePaths],
-      isolation: 'none',
-      concurrency: false,
-      timeout: 25_000,
-    });
-    for await (const event of stream) {
-      if (event.type !== 'test:pass' && event.type !== 'test:fail') continue;
-      if (event.data.details.type === 'suite') continue;
-      if (
-        event.data.nesting === 0 &&
-        event.data.line === 1 &&
-        event.data.column === 1 &&
-        request.relativePaths.includes(event.data.name)
-      ) {
-        continue;
-      }
-      if (event.type === 'test:fail') {
-        counts.failed += 1;
-      } else if (event.data.skip !== undefined) {
-        counts.skipped += 1;
-      } else if (event.data.todo !== undefined) {
-        counts.todo += 1;
-      } else {
-        counts.passed += 1;
+    for (const relativePath of request.relativePaths) {
+      const pendingTestIds = new Set<number>();
+      let sawTerminalEvent = false;
+      const stream = run({
+        cwd: process.cwd(),
+        files: [relativePath],
+        isolation: 'none',
+        concurrency: false,
+        timeout: 25_000,
+      });
+      for await (const event of stream) {
+        if (event.type === 'test:enqueue') {
+          pendingTestIds.add(event.data.testId);
+          continue;
+        }
+        if (event.type !== 'test:pass' && event.type !== 'test:fail') continue;
+        sawTerminalEvent = true;
+        pendingTestIds.delete(event.data.testId);
+        const isFileWrapper =
+          event.data.nesting === 0 &&
+          event.data.line === 1 &&
+          event.data.column === 1 &&
+          event.data.name === relativePath;
+        if (event.data.details.type !== 'suite' && !isFileWrapper) {
+          if (event.type === 'test:fail') {
+            counts.failed += 1;
+          } else if (event.data.skip !== undefined) {
+            counts.skipped += 1;
+          } else if (event.data.todo !== undefined) {
+            counts.todo += 1;
+          } else {
+            counts.passed += 1;
+          }
+        }
+        // node:test keeps its reporter open for unrelated leaked handles. The
+        // one-shot helper owns the reporter and closes it after every test
+        // registered by this fully evaluated file reaches a terminal event.
+        if (sawTerminalEvent && pendingTestIds.size === 0) break;
       }
     }
   } finally {
     process.stdout.write = originalStdoutWrite;
   }
-  process.exitCode = 0;
-  responseWrite(
-    `${JSON.stringify({
+  await writeJsonResponseAndExit(
+    {
       protocolVersion: 1,
       kind: 'node_test_observation',
       nodeVersion: process.versions.node,
       files,
       ...counts,
-    })}\n`,
+    },
+    responseWrite,
   );
+}
+
+async function writeJsonResponseAndExit(
+  value: Readonly<Record<string, unknown>>,
+  write: typeof process.stdout.write = process.stdout.write.bind(process.stdout),
+): Promise<never> {
+  await new Promise<void>((resolve, reject) => {
+    write(`${JSON.stringify(value)}\n`, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+  return process.exit(0);
 }
 
 function decodeRequest(value: unknown): ManagedCommandRequest {
