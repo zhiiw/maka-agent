@@ -29,4 +29,5 @@ export {
   type ManagedDependencySnapshotFailpoint,
   type ManagedDependencySnapshotLease,
   type ManagedDependencySnapshotLeaseAccessInternal,
+  type ManagedDependencySnapshotRuntimeIdentity,
 } from './managed-dependency-environment.js';
