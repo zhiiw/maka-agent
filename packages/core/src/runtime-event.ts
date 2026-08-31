@@ -337,7 +337,7 @@ export const MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_SPEC = Object.freeze({
       maxArgs: 64,
       maxArgBytes: 4096,
       maxTotalArgBytes: 32_768,
-      dependencyInput: 'none',
+      dependencyInput: 'optional_opaque_snapshot_lease_v1',
     }),
   }),
   sandbox: Object.freeze({
@@ -361,7 +361,7 @@ export const MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_SPEC = Object.freeze({
 } as const);
 
 export const MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST =
-  'sha256:3702995e2893e5a4a813998665fd0ff6758d68e8faf64685fcc6319e250c0a46' as const;
+  'sha256:26ebbd3a21d9364991d9c3a35e1aface9d73418e1a723a8274352b205178a8af' as const;
 
 export interface RuntimeEventManagedObservationFileV1 {
   readonly relativePath: string;
@@ -408,6 +408,7 @@ export interface RuntimeEventManagedWorkspaceNodeTestObservationV2
 export interface RuntimeEventManagedWorkspaceNodeCommandObservationV2
   extends RuntimeEventManagedWorkspaceObservationV2Base {
   readonly operationKind: 'node_command_v2';
+  readonly dependency: RuntimeEventManagedDependencyObservationV1;
   readonly entry: RuntimeEventManagedObservationFileV1;
   readonly args: readonly string[];
 }
@@ -870,6 +871,7 @@ const RUNTIME_MANAGED_WORKSPACE_NODE_COMMAND_OBSERVATION_V2_SHAPE =
       'effectClass',
       'executionProfileDigest',
       'toolchainIdentityDigest',
+      'dependency',
       'entry',
       'args',
     ],
@@ -1316,6 +1318,7 @@ function isRuntimeManagedWorkspaceObservation(
   return (
     value.operationKind === 'node_command_v2' &&
     hasExactShape(value, RUNTIME_MANAGED_WORKSPACE_NODE_COMMAND_OBSERVATION_V2_SHAPE) &&
+    isRuntimeManagedDependencyObservation(value.dependency) &&
     areRuntimeManagedObservationFiles([value.entry]) &&
     isRuntimeManagedNodeCommandArgs(value.args)
   );

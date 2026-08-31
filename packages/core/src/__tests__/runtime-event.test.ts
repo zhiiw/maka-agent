@@ -614,6 +614,7 @@ describe('RuntimeEvent actions', () => {
       effectClass: 'hermetic_observation_v2',
       executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
       toolchainIdentityDigest: `sha256:${'3'.repeat(64)}`,
+      dependency: { kind: 'none' },
       entry: {
         relativePath: 'scripts/check.mjs',
         bytes: 123,
@@ -646,6 +647,10 @@ describe('RuntimeEvent actions', () => {
       },
       { ...managedObservation, args: [1] },
       { ...managedObservation, args: ['x'.repeat(4097)] },
+      (() => {
+        const { dependency: _dependency, ...withoutDependency } = managedObservation;
+        return withoutDependency;
+      })(),
       { ...managedObservation, extra: true },
     ]) {
       assert.throws(() =>

@@ -157,8 +157,9 @@ exit status、test summary 与 artifact digest。缓存是 projection；test out
    Session/T1 前查询 resident Host capability，平台不满足完整条件时整个 v2 unavailable，禁止降级；
 5. 需要外部包的项目在 M5.3 capability 可用前明确 unavailable，禁止静默降级。
 
-`ManagedNodeRun` kernel 只运行 accepted tree 中的显式 Node 入口，exact argv 在 T1 前冻结，写入仅限
-disposable scratch。它不等同于 Bash，也不发现 package scripts 或 `PATH` 工具。独立产品组合切片已经把
+`ManagedNodeRun` kernel 只运行 accepted tree 中的显式 Node 入口，exact argv 与可选 immutable dependency snapshot
+在 T1 前冻结，写入仅限 disposable scratch。它不等同于 Bash，不发现 package scripts 或 `PATH` 工具，也不安装
+依赖。独立产品组合切片已经把
 Node command 与 Node test 共用 canonical `managed_observation_v2`，通过 `operationKind` 区分；平台只能宣告完整的
 `managed-coding-v2` 或 unavailable。详见 `managed-hermetic-node-command-kernel-v1.zh-CN.md` 与
 `managed-coding-v2-product-composition.zh-CN.md`。

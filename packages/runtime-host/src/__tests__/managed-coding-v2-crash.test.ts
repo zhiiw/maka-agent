@@ -260,18 +260,45 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
   const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-managed-v3-crash-')));
   const root = join(base, 'root');
   const executionId = randomUUID();
-  await mkdir(join(root, 'scripts'), { recursive: true });
-  await writeFile(
-    join(root, 'scripts', 'check.mjs'),
-    [
-      'console.log(JSON.stringify({ argv: process.argv.slice(2), path: process.env.PATH }));',
-      'process.exitCode = 7;',
-      '',
-    ].join('\n'),
-    'utf8',
-  );
+  await Promise.all([
+    mkdir(join(root, 'scripts'), { recursive: true }),
+    mkdir(join(root, 'node_modules', 'fixture-dependency'), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(join(root, '.gitignore'), 'node_modules/\n', 'utf8'),
+    writeFile(
+      join(root, 'package.json'),
+      '{"name":"managed-node-run-fixture","type":"module"}\n',
+      'utf8',
+    ),
+    writeFile(
+      join(root, 'package-lock.json'),
+      '{"name":"managed-node-run-fixture","lockfileVersion":3,"packages":{}}\n',
+      'utf8',
+    ),
+    writeFile(
+      join(root, 'node_modules', 'fixture-dependency', 'package.json'),
+      '{"name":"fixture-dependency","type":"module","exports":"./index.js"}\n',
+      'utf8',
+    ),
+    writeFile(
+      join(root, 'node_modules', 'fixture-dependency', 'index.js'),
+      'export const answer = 42;\n',
+      'utf8',
+    ),
+    writeFile(
+      join(root, 'scripts', 'check.mjs'),
+      [
+        "import { answer } from 'fixture-dependency';",
+        'console.log(JSON.stringify({ argv: process.argv.slice(2), path: process.env.PATH, answer }));',
+        'process.exitCode = 7;',
+        '',
+      ].join('\n'),
+      'utf8',
+    ),
+  ]);
   git(root, ['init', '--quiet', '--object-format=sha1']);
-  git(root, ['add', 'scripts/check.mjs']);
+  git(root, ['add', '.gitignore', 'package.json', 'package-lock.json', 'scripts/check.mjs']);
   git(root, [
     '-c',
     'user.name=Maka Test',
@@ -364,7 +391,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
         protocolVersion: 1,
         kind: 'node_command_observation',
         exitCode: 7,
-        stdout: '{"argv":["--check","src/index.js"],"path":""}\n',
+        stdout: '{"argv":["--check","src/index.js"],"path":"","answer":42}\n',
       },
     );
     assert.equal(typeof completedNodeRun.stderr, 'string');
@@ -1238,23 +1265,34 @@ function readManagedNodeRunResult(request: unknown): Readonly<Record<string, unk
   }
   const messages = (request as { readonly messages?: unknown }).messages;
   if (!Array.isArray(messages)) throw new Error('Provider request has no messages');
-  const toolMessage = messages.find(
-    (message): message is { readonly role: 'tool'; readonly content: string } =>
-      !!message &&
-      typeof message === 'object' &&
-      !Array.isArray(message) &&
-      (message as { readonly role?: unknown }).role === 'tool' &&
-      typeof (message as { readonly content?: unknown }).content === 'string',
-  );
-  if (!toolMessage) throw new Error('Provider request has no tool result');
-  const envelope = JSON.parse(toolMessage.content) as Record<string, unknown>;
-  const value =
-    envelope.kind === 'json' &&
-    envelope.value &&
-    typeof envelope.value === 'object' &&
-    !Array.isArray(envelope.value)
-      ? (envelope.value as Record<string, unknown>)
-      : envelope;
+  const values = messages.flatMap((message) => {
+    if (
+      !message ||
+      typeof message !== 'object' ||
+      Array.isArray(message) ||
+      (message as { readonly role?: unknown }).role !== 'tool' ||
+      typeof (message as { readonly content?: unknown }).content !== 'string'
+    ) {
+      return [];
+    }
+    try {
+      return [
+        JSON.parse((message as { readonly content: string }).content) as Record<string, unknown>,
+      ];
+    } catch {
+      return [];
+    }
+  });
+  const value = values
+    .map((candidate) => {
+      if (candidate.kind === 'node_command_observation') return candidate;
+      const nested = candidate.kind === 'json' ? candidate.value : undefined;
+      return nested && typeof nested === 'object' && !Array.isArray(nested)
+        ? (nested as Record<string, unknown>)
+        : undefined;
+    })
+    .find((candidate) => candidate?.kind === 'node_command_observation');
+  if (!value) throw new Error('Provider request has no managed Node command result');
   return Object.freeze({
     protocolVersion: value.protocolVersion,
     kind: value.kind,

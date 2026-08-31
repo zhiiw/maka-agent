@@ -50,6 +50,14 @@ test('admits one exact accepted-tree Node entrypoint and freezes its arguments b
     await rm(storageRoot, { recursive: true, force: true });
   });
   const source = 'console.log("accepted");\n';
+  let dependencyReleased = false;
+  const dependencyLease = {
+    environmentId: `sha256:${'6'.repeat(64)}`,
+    contentTreeSha256: `sha256:${'7'.repeat(64)}`,
+    async release() {
+      dependencyReleased = true;
+    },
+  } as never;
   const owner = createManagedNodeCommandAdmissionOwnerInternal({
     executionRootOwner: createManagedNodeTestExecutionRootOwnerInternal({
       storageRootLease: storageOwner.lease,
@@ -76,8 +84,16 @@ test('admits one exact accepted-tree Node entrypoint and freezes its arguments b
           arch: process.arch,
         };
       },
-      readDependencyIdentity: async () => {
-        throw new Error('dependencies are not part of managed Node command v1');
+      readDependencyIdentity: async (lease) => {
+        assert.equal(lease, dependencyLease);
+        return {
+          environmentId: `sha256:${'6'.repeat(64)}`,
+          contentTreeSha256: `sha256:${'7'.repeat(64)}`,
+          nodeVersion: '24.13.1',
+          nodeAbi: '137',
+          platform: process.platform,
+          arch: process.arch,
+        };
       },
       inspectFile: async (request) => {
         assert.equal(request.effectClass, 'hermetic_observation_v2');
@@ -93,19 +109,25 @@ test('admits one exact accepted-tree Node entrypoint and freezes its arguments b
       runNodeTests: async () => {
         throw new Error('test runner is not part of this operation');
       },
-      runNodeEntrypoint: async (request) => ({
-        protocolVersion: 1,
-        kind: 'node_command_observation',
-        nodeVersion: '24.13.1',
-        entry: {
-          relativePath: request.entryPath,
-          bytes: Buffer.byteLength(source),
-          sha256: `sha256:${createHash('sha256').update(source).digest('hex')}`,
-        },
-        exitCode: 0,
-        stdout: `${request.args.join(',')}\n`,
-        stderr: '',
-      }),
+      runNodeEntrypoint: async (request) => {
+        assert.equal(request.dependencyLease, dependencyLease);
+        return {
+          protocolVersion: 1,
+          kind: 'node_command_observation',
+          nodeVersion: '24.13.1',
+          entry: {
+            relativePath: request.entryPath,
+            bytes: Buffer.byteLength(source),
+            sha256: `sha256:${createHash('sha256').update(source).digest('hex')}`,
+          },
+          exitCode: 0,
+          stdout: `${request.args.join(',')}\n`,
+          stderr: '',
+        };
+      },
+    },
+    dependencyOwner: {
+      acquire: async () => dependencyLease,
     },
   });
   const abortSignal = new AbortController().signal;
@@ -141,6 +163,15 @@ test('admits one exact accepted-tree Node entrypoint and freezes its arguments b
     effectClass: 'hermetic_observation_v2',
     executionProfileDigest: MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST,
     toolchainIdentityDigest: `sha256:${'8'.repeat(64)}`,
+    dependency: {
+      kind: 'managed_dependency_snapshot_v1',
+      environmentId: `sha256:${'6'.repeat(64)}`,
+      contentTreeSha256: `sha256:${'7'.repeat(64)}`,
+      nodeVersion: '24.13.1',
+      nodeAbi: '137',
+      platform: process.platform,
+      arch: process.arch,
+    },
     entry: {
       relativePath: 'scripts/check.mjs',
       bytes: Buffer.byteLength(source),
@@ -178,6 +209,7 @@ test('admits one exact accepted-tree Node entrypoint and freezes its arguments b
     stderr: '',
   });
   await admission.dispose();
+  assert.equal(dependencyReleased, true);
   assert.ok(executionRoot);
   await assert.rejects(stat(executionRoot));
 });

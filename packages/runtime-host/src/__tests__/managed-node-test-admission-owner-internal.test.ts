@@ -27,7 +27,7 @@ import { MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_DIGEST } from '@maka/core/runt
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import {
   createManagedNodeTestAdmissionOwnerInternal,
-  createManagedNodeTestDependencyOwnerInternal,
+  createManagedNodeDependencyOwnerInternal,
   createManagedNodeTestExecutionRootOwnerInternal,
   type ManagedNodeTestAcceptedBoundaryInternal,
 } from '../server/managed-node-test-admission-owner-internal.js';
@@ -63,7 +63,7 @@ test('acquires dependencies only from a coherent npm source snapshot', async (t)
         lockfileBytes: Uint8Array;
       }
     | undefined;
-  const owner = createManagedNodeTestDependencyOwnerInternal({
+  const owner = createManagedNodeDependencyOwnerInternal({
     sourceRoot,
     snapshotAuthority: {
       async acquire(input) {

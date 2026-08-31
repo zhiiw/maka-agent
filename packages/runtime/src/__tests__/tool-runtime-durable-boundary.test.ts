@@ -2442,7 +2442,7 @@ function managedObservationDispatch() {
     operationKind: 'node_test_v2' as const,
     effectClass: 'hermetic_observation_v2' as const,
     executionProfileDigest:
-      'sha256:3702995e2893e5a4a813998665fd0ff6758d68e8faf64685fcc6319e250c0a46' as const,
+      'sha256:26ebbd3a21d9364991d9c3a35e1aface9d73418e1a723a8274352b205178a8af' as const,
     toolchainIdentityDigest: `sha256:${'3'.repeat(64)}` as const,
     files: [
       {
@@ -2462,7 +2462,7 @@ function managedObservationDispatchV2() {
     operationKind: 'node_test_v2' as const,
     effectClass: 'hermetic_observation_v2' as const,
     executionProfileDigest:
-      'sha256:3702995e2893e5a4a813998665fd0ff6758d68e8faf64685fcc6319e250c0a46' as const,
+      'sha256:26ebbd3a21d9364991d9c3a35e1aface9d73418e1a723a8274352b205178a8af' as const,
     dependency: {
       kind: 'managed_dependency_snapshot_v1' as const,
       environmentId: `sha256:${'5'.repeat(64)}` as const,
@@ -2476,14 +2476,14 @@ function managedObservationDispatchV2() {
 }
 
 function managedCommandObservationDispatchV2() {
-  const { files: _files, dependency: _dependency, ...base } = managedObservationDispatch();
+  const { files: _files, ...base } = managedObservationDispatch();
   return {
     ...base,
     protocol: 'managed_observation_v2' as const,
     operationKind: 'node_command_v2' as const,
     effectClass: 'hermetic_observation_v2' as const,
     executionProfileDigest:
-      'sha256:3702995e2893e5a4a813998665fd0ff6758d68e8faf64685fcc6319e250c0a46' as const,
+      'sha256:26ebbd3a21d9364991d9c3a35e1aface9d73418e1a723a8274352b205178a8af' as const,
     entry: {
       relativePath: 'scripts/check.mjs',
       bytes: 123,

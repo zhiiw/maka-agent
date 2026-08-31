@@ -52,7 +52,7 @@ const MANAGED_CODING_V2_SYSTEM_PROMPT = [
   'Run only explicit Node tests with ManagedNodeTest.',
   'The test consumes the same immutable accepted Git tree and, when present, an immutable read-only dependency snapshot. It cannot install dependencies, use package scripts, PATH, network, or the attached checkout.',
   'Run an explicit accepted-workspace Node entrypoint with ManagedNodeRun only when a direct script check is useful.',
-  'ManagedNodeRun has no PATH, network, child-process, package-script, dependency-installation, or attached-checkout authority. Its writes are limited to disposable scratch.',
+  'ManagedNodeRun may read the same immutable dependency snapshot as ManagedNodeTest, but it cannot install dependencies, run package scripts, use PATH or network, spawn child processes, or read the attached checkout. Its writes are limited to disposable scratch.',
   'Use ManagedNodeTransform only when one accepted-tree JavaScript transformer should produce one bounded UTF-8 workspace file.',
   'ManagedNodeTransform cannot write the managed worktree directly; Gitoxide and SQLite must accept its exact output as a new successor.',
   'Stop when the requested changes are complete.',
