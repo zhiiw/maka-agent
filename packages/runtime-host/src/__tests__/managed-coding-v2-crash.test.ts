@@ -307,7 +307,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
         modelTarget: {
           kind: 'explicit',
           connectionId,
-          connectionSlug: 'managed-v3-provider',
+          connectionSlug: 'managed-v2-provider',
           model: MODEL_ID,
         },
         permissionMode: 'bypass',
@@ -584,7 +584,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying an a
       try {
         const successorCount = database
           .prepare(
-            "SELECT COUNT(*) AS count FROM runtime_workspace_versions WHERE origin_kind = 'successor'",
+            "SELECT COUNT(*) AS count FROM runtime_workspace_versions WHERE origin_kind = 'tool_mutation'",
           )
           .get() as { count: number };
         const reservationCount = database
