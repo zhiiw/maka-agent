@@ -118,13 +118,17 @@ function decodeHostExecutionProfilesResult(value: unknown): HostExecutionProfile
     throw invalidProtocolFrame('Invalid Runtime Host execution profiles');
   }
   const profiles = record.profiles.map((profile) => {
-    if (profile !== 'managed-coding-v1' && profile !== 'managed-coding-v2') {
+    if (
+      profile !== 'managed-coding-v1' &&
+      profile !== 'managed-coding-v2' &&
+      profile !== 'managed-coding-v3'
+    ) {
       throw invalidProtocolFrame('Invalid Runtime Host execution profile');
     }
     return profile;
   });
-  const canonical = ['managed-coding-v1', 'managed-coding-v2'].filter((profile) =>
-    profiles.includes(profile as SessionToolProfile),
+  const canonical = ['managed-coding-v1', 'managed-coding-v2', 'managed-coding-v3'].filter(
+    (profile) => profiles.includes(profile as SessionToolProfile),
   );
   if (
     new Set(profiles).size !== profiles.length ||

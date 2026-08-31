@@ -11,9 +11,9 @@ milestone: M5 foreground command loop
 execution profile 必须在 T1 前由 admission owner 冻结；T1 后禁止切换到普通 Bash、`PATH`、source checkout、
 依赖发现或 generic tool boundary。
 
-本切片只建立 kernel 与 admission，不让现有 Host 宣告 `managed-coding-v3`。下一产品组合切片必须同时提供
-packaged toolchain claim、Host profile negotiation 与 production-shaped crash test，才允许 Desktop 创建 v3
-Session。
+本切片只建立 kernel 与 admission；后续产品组合切片负责 packaged toolchain claim、Host profile negotiation
+与 production-shaped crash test。该组合见 `managed-coding-v3-product-composition.zh-CN.md`，只有通过组合边界的
+Linux/macOS Host 才允许 Desktop 创建 v3 Session。
 
 ## 2. Owner 与权限
 
@@ -69,8 +69,8 @@ entry drift 或 toolchain drift 都是未取得合法 observation 的失败。
 
 | 平台 | kernel | product availability |
 | --- | --- | --- |
-| Linux | Node permission + enforcing OS sandbox | 待 v3 Host crash gate |
-| macOS | Node permission + enforcing OS sandbox | 待 v3 Host crash gate |
+| Linux | Node permission + enforcing OS sandbox | v3 Host crash gate |
+| macOS | Node permission + enforcing OS sandbox | v3 Host crash gate |
 | Windows | Node permission 可限制输入写入/child；网络仍依赖外层 sandbox | 在完整网络隔离证据前不得宣告 v3 |
 
 没有平台证据时必须报告 profile unavailable，禁止回落到普通 Node/Bash。

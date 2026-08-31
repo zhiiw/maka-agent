@@ -173,7 +173,7 @@ jobs:
         env:
           MAKA_GITOXIDE_HELPER_PATH: ${{ github.workspace }}/native/gitoxide-helper/target/debug/maka-gitoxide-helper${{ runner.os == 'Windows' && '.exe' || '' }}
         run: node --test packages/runtime-host/dist/__tests__/gitoxide-managed-continuation-crash.test.js
-      - name: Test packaged managed-coding-v2 Host crash convergence
+      - name: Test packaged managed-coding-v2/v3 Host crash convergence
         env:
           MAKA_GITOXIDE_HELPER_PATH: ${{ github.workspace }}/native/gitoxide-helper/target/debug/maka-gitoxide-helper${{ runner.os == 'Windows' && '.exe' || '' }}
           MAKA_WINDOWS_SANDBOX_PATH: ${{ github.workspace }}/experiments/windows-sandbox/launcher/target/debug/maka-windows-sandbox.exe
