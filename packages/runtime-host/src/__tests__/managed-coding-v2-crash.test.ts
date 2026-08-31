@@ -733,9 +733,8 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a fe
       await fixture.stopHost(secondHost);
     }
 
-    assert.equal(provider.requests.length, 3);
+    assert.equal(provider.requests.length, 2);
     assert.match(JSON.stringify(provider.requests[1]), /managed-shell-output/u);
-    assert.match(JSON.stringify(provider.requests[2]), /managed-shell-output/u);
     const readerOwner = await tryAcquireInteractiveRootReader(capability);
     assert.ok(readerOwner);
     if (!readerOwner) throw new Error('Unable to read managed shell fixture root');
@@ -1166,10 +1165,11 @@ async function startManagedShellProvider(): Promise<{
       }
       if (requests.length === 2) {
         completedToolResult(body);
+        respondText(response, 'Fenced ShellRun completed after recovery.');
+        resumedCompletion();
         return;
       }
-      respondText(response, 'Fenced ShellRun completed after recovery.');
-      resumedCompletion();
+      response.destroy(new Error('Fenced ShellRun provider observed an unexpected replay'));
     })().catch((error) => response.destroy(error as Error));
   });
   server.on('connection', (socket) => {

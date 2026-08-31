@@ -20,6 +20,7 @@
 import assert from 'node:assert/strict';
 import { fork, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import {
   appendFile,
   chmod,
@@ -1114,7 +1115,10 @@ export class ExecutionFixture {
   }
 
   async waitForShellRunTerminalFailpoint(host: ExecutionHostHandle): Promise<void> {
-    await waitForShellRunTerminalFailpoint(host.child);
+    await waitForShellRunTerminalFailpoint(
+      host.child,
+      join(this.base, 'shell-run-terminal-failpoint'),
+    );
   }
 
   async waitForHostExit(host: ExecutionHostHandle): Promise<void> {
@@ -1294,7 +1298,7 @@ export class ExecutionFixture {
       delete env.MAKA_TEST_USE_PRODUCTION_BACKEND;
     }
     if (testOptions.shellRunTerminalFailpoint) {
-      env.MAKA_TEST_SHELL_RUN_TERMINAL_FAILPOINT = '1';
+      env.MAKA_TEST_SHELL_RUN_TERMINAL_FAILPOINT = join(this.base, 'shell-run-terminal-failpoint');
     } else {
       delete env.MAKA_TEST_SHELL_RUN_TERMINAL_FAILPOINT;
     }
@@ -1723,13 +1727,14 @@ function waitForHostReady(
   );
 }
 
-function waitForShellRunTerminalFailpoint(child: ChildProcess): Promise<void> {
+function waitForShellRunTerminalFailpoint(child: ChildProcess, markerPath: string): Promise<void> {
   return withTimeout(
     new Promise((resolve, reject) => {
+      let timer: NodeJS.Timeout | undefined;
       const cleanup = () => {
         child.off('error', onError);
         child.off('exit', onExit);
-        child.off('message', onMessage);
+        if (timer) clearTimeout(timer);
       };
       const onError = (error: Error) => {
         cleanup();
@@ -1739,20 +1744,17 @@ function waitForShellRunTerminalFailpoint(child: ChildProcess): Promise<void> {
         cleanup();
         reject(new Error(`execution Host exited before ShellRun failpoint: ${code ?? signal}`));
       };
-      const onMessage = (message: unknown) => {
-        if (
-          !message ||
-          typeof message !== 'object' ||
-          (message as { type?: unknown }).type !== 'test.shell_run_terminal_failpoint'
-        ) {
+      const observe = () => {
+        if (existsSync(markerPath)) {
+          cleanup();
+          resolve();
           return;
         }
-        cleanup();
-        resolve();
+        timer = setTimeout(observe, 10);
       };
       child.once('error', onError);
       child.once('exit', onExit);
-      child.on('message', onMessage);
+      observe();
     }),
     PROCESS_TIMEOUT_MS,
     'execution Host did not reach the terminal ShellRun failpoint',

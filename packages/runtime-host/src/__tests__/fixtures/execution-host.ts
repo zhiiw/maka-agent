@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { writeFileSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { inspect } from 'node:util';
@@ -58,7 +59,10 @@ if (packagedResourcesRoot) {
 
 const providerCallLogPath = process.env.MAKA_TEST_PROVIDER_CALL_LOG;
 const continuationFailpoint = process.env.MAKA_TEST_CONTINUATION_FAILPOINT;
-const shellRunTerminalFailpoint = process.env.MAKA_TEST_SHELL_RUN_TERMINAL_FAILPOINT === '1';
+const shellRunTerminalFailpoint = process.env.MAKA_TEST_SHELL_RUN_TERMINAL_FAILPOINT;
+if (shellRunTerminalFailpoint && !isAbsolute(shellRunTerminalFailpoint)) {
+  throw new Error('MAKA_TEST_SHELL_RUN_TERMINAL_FAILPOINT must be absolute');
+}
 const providerFailpointAfterSend = process.env.MAKA_TEST_PROVIDER_FAILPOINT_AFTER_SEND === '1';
 const useProductionBackend = process.env.MAKA_TEST_USE_PRODUCTION_BACKEND === '1';
 
@@ -105,9 +109,12 @@ const result = await startExecutionRuntimeHostCandidate(
               await new Promise<never>(() => undefined);
             }
           : undefined,
-        shellRunTerminalFailpoint: shellRunTerminalFailpoint
+        beforeExternalEffectOutcomeCommit: shellRunTerminalFailpoint
           ? () => {
-              process.send?.({ type: 'test.shell_run_terminal_failpoint' });
+              writeFileSync(shellRunTerminalFailpoint, 'ready\n', {
+                encoding: 'utf8',
+                flag: 'wx',
+              });
               Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
             }
           : undefined,

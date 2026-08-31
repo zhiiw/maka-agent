@@ -21,11 +21,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { MAX_READ_IMAGE_BYTES } from '@maka/core/attachments';
 import type { ContextOffloadLimits } from '@maka/core/context-offload';
-import {
-  messageContentDigest,
-  normalizeMessageContent,
-  type ShellRunUpdate,
-} from '@maka/core/events';
+import { messageContentDigest, normalizeMessageContent } from '@maka/core/events';
 import {
   describeChatConfigurationReason,
   NO_REAL_CONNECTION_CODE,
@@ -42,7 +38,6 @@ import {
   WORKHUB_COORDINATION_SESSION_ID,
 } from '@maka/core/session';
 import { filterModelVisibleTaskLedgerTasks } from '@maka/core/task-ledger';
-import { isActiveShellRunStatus } from '@maka/core/shell-run';
 import { AgentGraphCoordinator } from '@maka/runtime/stream-graph-coordinator';
 import { AgentGraphSupervisorWakeCoordinator } from '@maka/runtime/agent-graph-supervisor-wake';
 import {
@@ -272,8 +267,8 @@ export interface ExecutionRuntimeHostCompositionDependencies {
       | 'after_terminal_event_committed'
       | 'after_terminal_header_committed',
   ) => Promise<void>;
-  /** Production-shaped crash-test seam after terminal ShellRun durability and before Runtime T2. */
-  readonly shellRunTerminalFailpoint?: (update: ShellRunUpdate) => void;
+  /** Production-shaped crash-test seam after external-effect completion and before Runtime T2. */
+  readonly beforeExternalEffectOutcomeCommit?: () => void;
   /** Test/telemetry seam; it observes decisions but owns no durable state. */
   readonly onContinuationLifecycleEvent?: (
     event: RuntimeContinuationLifecycleEvent,
@@ -431,9 +426,6 @@ export async function createExecutionRuntimeHostComposition(
       newId: randomUUID,
       now: Date.now,
       onShellRunUpdate: (update) => {
-        if (!isActiveShellRunStatus(update.result.status)) {
-          dependencies.shellRunTerminalFailpoint?.(update);
-        }
         runtimeResources?.observeShellRunUpdate(update);
       },
       onPtyData: (event) => {
@@ -971,7 +963,20 @@ export async function createExecutionRuntimeHostComposition(
               requireSessionManager(manager),
               backendContext.sessionId,
             ),
-            runtimeCommitSink: stores.runtimeEventStore,
+            runtimeCommitSink: dependencies.beforeExternalEffectOutcomeCommit
+              ? {
+                  commitToolPrepared: (input) => stores.runtimeEventStore.commitToolPrepared(input),
+                  commitToolOutcome: (input) => {
+                    if (
+                      input.runtimeEvent.content?.kind === 'function_response' &&
+                      input.runtimeEvent.content.name === 'Bash'
+                    ) {
+                      dependencies.beforeExternalEffectOutcomeCommit?.();
+                    }
+                    return stores.runtimeEventStore.commitToolOutcome(input);
+                  },
+                }
+              : stores.runtimeEventStore,
             ...(managedSession
               ? { admitManagedMutation: managedSession.writeEdit.admitManagedMutation }
               : {}),
