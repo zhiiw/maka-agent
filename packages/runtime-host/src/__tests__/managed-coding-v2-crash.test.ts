@@ -65,7 +65,6 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
   const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-managed-v2-crash-')));
   const root = join(base, 'root');
   const executionId = randomUUID();
-  const provider = await startManagedNodeTestProvider();
   await mkdir(root);
   await writeFile(
     join(root, 'managed.test.mjs'),
@@ -92,6 +91,8 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
 
   const electronExecutable = resolveElectronExecutable();
   const resourcesRoot = await preparePackagedResources(base, helperPath, electronExecutable);
+  const provider = await startManagedNodeTestProvider();
+  t.after(() => provider.close());
   const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const connectionId = await configureProvider(capability, provider.baseUrl);
   const fixture = new ExecutionFixture(base, root, capability, executionId);
@@ -119,6 +120,21 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
       },
       content: { text: 'Run managed.test.mjs and report the result.' },
     });
+    if (process.platform === 'win32') {
+      try {
+        const projection = await startRequest;
+        assert.equal(projection.kind, 'indeterminate');
+        assert.match(
+          projection.failureReason ?? '',
+          /managed_workspace_profile_unavailable: hermetic Node test authority is unavailable/u,
+        );
+        assert.equal(provider.requests.length, 0);
+      } finally {
+        await firstClient.close();
+        await fixture.stopHost(firstHost);
+      }
+      return;
+    }
     const start = startRequest.then(
       () => undefined,
       () => undefined,
@@ -208,7 +224,6 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
       await readerOwner.close();
     }
   } finally {
-    await provider.close();
     await fixture.close();
   }
 });
@@ -478,13 +493,12 @@ async function preparePackagedResources(
 }
 
 function resolveElectronExecutable(): string {
-  return resolve(
-    process.cwd(),
-    'node_modules',
-    'electron',
-    'dist',
-    process.platform === 'win32' ? 'electron.exe' : 'electron',
-  );
+  const distributionRoot = resolve(process.cwd(), 'node_modules', 'electron', 'dist');
+  if (process.platform === 'win32') return join(distributionRoot, 'electron.exe');
+  if (process.platform === 'darwin') {
+    return join(distributionRoot, 'Electron.app', 'Contents', 'MacOS', 'Electron');
+  }
+  return join(distributionRoot, 'electron');
 }
 
 async function waitForContinuationAdmission(

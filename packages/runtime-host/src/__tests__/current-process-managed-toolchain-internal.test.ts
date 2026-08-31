@@ -28,8 +28,15 @@ import test from 'node:test';
 
 const execFileAsync = promisify(execFile);
 
-test('admits the current Electron Node runtime and packaged command entrypoint', async (t) => {
+test('admits the current Electron Node runtime and packaged command entrypoint where supported', async (t) => {
   const fixture = await createFixture(t);
+  if (process.platform === 'win32') {
+    await assert.rejects(
+      runElectronChild(fixture.resourcesRoot),
+      /independently admitted standalone Node runtime/u,
+    );
+    return;
+  }
   const result = await runElectronChild(fixture.resourcesRoot);
   const value = JSON.parse(result.stdout) as Record<string, unknown>;
   assert.equal(value.nodeVersion, fixture.nodeVersion);
@@ -37,7 +44,12 @@ test('admits the current Electron Node runtime and packaged command entrypoint',
   assert.match(String(value.identityDigest), /^sha256:[0-9a-f]{64}$/u);
 });
 
-test('rejects a command entrypoint changed after its release manifest was written', async (t) => {
+test('rejects a command entrypoint changed after its release manifest was written', {
+  skip:
+    process.platform === 'win32'
+      ? 'Windows does not admit Electron as the managed Node runtime'
+      : false,
+}, async (t) => {
   const fixture = await createFixture(t);
   await writeFile(fixture.entrypointPath, 'throw new Error("tampered");\n', 'utf8');
   await assert.rejects(runElectronChild(fixture.resourcesRoot), /failed release admission/u);

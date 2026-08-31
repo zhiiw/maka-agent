@@ -133,9 +133,13 @@ test('runs one bounded file observation through an enforcing sandbox plan', asyn
     transformedRequest?.command.args[0],
     process.platform === 'win32' ? '--no-stdio-init' : '--permission',
   );
+  assert.deepEqual(transformedRequest?.command.args.slice(-2), [
+    'maka-observe-file-v1',
+    'notes.txt',
+  ]);
 });
 
-test('runs explicit dependency-free Node tests in one sandboxed helper process', async (t) => {
+test('runs explicit dependency-free Node tests as one sandboxed root process', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'maka-managed-node-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const inputRoot = join(root, 'input');
@@ -187,11 +191,13 @@ test('runs explicit dependency-free Node tests in one sandboxed helper process',
       allowedEffectClasses: ['hermetic_observation_v1'],
     }),
   });
+  const transformedRequests: SandboxTransformRequest[] = [];
   const owner = createManagedCommandSandboxOwnerInternal({
     invocationOwnerToken,
     toolchainCapability: capability,
     sandboxManager: {
       transform(request): SandboxTransformResult {
+        transformedRequests.push(request);
         return {
           ok: true,
           exec: {
@@ -230,6 +236,12 @@ test('runs explicit dependency-free Node tests in one sandboxed helper process',
     skipped: 1,
     todo: 0,
   });
+  assert.ok(
+    transformedRequests.some((request) => request.command.args.includes('maka-node-tests-v1')),
+  );
+  assert.ok(
+    transformedRequests.some((request) => request.command.args.includes('--test-force-exit')),
+  );
 
   await writeFile(
     join(inputRoot, 'denied-effects.test.mjs'),
