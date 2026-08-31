@@ -615,6 +615,102 @@ test('reopens the activated epoch after the rebaseline response process exits', 
   );
 });
 
+test('converges Publish, source-branch Publish, and Restore after their response process exits', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the lifecycle response-loss test');
+    return;
+  }
+  const sourceRoot = await createRepository(t);
+  await writeFile(join(sourceRoot, 'notes.txt'), 'durable lifecycle\n', 'utf8');
+  git(sourceRoot, ['add', 'notes.txt']);
+  commit(sourceRoot, 'lifecycle baseline');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-lifecycle-crash-')));
+  t.after(() => deferTemporaryPathRemoval(root));
+  const initialCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const initialOwner = await tryAcquireInteractiveRootOwner(initialCapability);
+  assert.ok(initialOwner);
+  const initialStores = await openInteractiveExecutionStoresForWrite(initialOwner.lease);
+  const opened = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: initialOwner.lease,
+    stores: initialStores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-lifecycle-response-loss',
+  });
+  const repositoryPath = opened.repositoryPath;
+  const acceptedCommitOid = git(repositoryPath, ['rev-parse', 'refs/maka/accepted']);
+  await initialStores.sessionStore.close?.();
+  await initialOwner.close();
+
+  const lifecycleId = 'response-lost-1';
+  for (const [mode, expectedExitCode] of [
+    ['after_publish_response_lost', 77],
+    ['after_source_branch_publish_response_lost', 78],
+    ['after_restore_response_lost', 79],
+  ] as const) {
+    const fixturePath = join(root, `${mode}.json`);
+    await writeFile(
+      fixturePath,
+      `${JSON.stringify({
+        storageRoot: root,
+        sourceRoot,
+        sessionId: 'session-lifecycle-response-loss',
+        helperPath: helper.helperPath,
+        mode,
+        lifecycleId,
+      })}\n`,
+      'utf8',
+    );
+    const child = spawn(
+      process.execPath,
+      [
+        join(import.meta.dirname, 'fixtures', 'gitoxide-managed-session-owner-crash-child.js'),
+        fixturePath,
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    const stderr: Buffer[] = [];
+    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    const [exitCode] = (await once(child, 'exit')) as [number | null];
+    assert.equal(exitCode, expectedExitCode, Buffer.concat(stderr).toString('utf8'));
+  }
+
+  assert.equal(
+    git(repositoryPath, ['rev-parse', `refs/maka/published/${lifecycleId}`]),
+    acceptedCommitOid,
+  );
+  const sourcePublishedCommitOid = git(sourceRoot, ['rev-parse', `refs/heads/maka/${lifecycleId}`]);
+
+  const recoveredCapability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const recoveredOwner = await tryAcquireInteractiveRootOwner(recoveredCapability);
+  assert.ok(recoveredOwner);
+  t.after(() => recoveredOwner.close());
+  const recoveredStores = await openInteractiveExecutionStoresForWrite(recoveredOwner.lease);
+  t.after(() => recoveredStores.sessionStore.close?.());
+  const recovered = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: recoveredOwner.lease,
+    stores: recoveredStores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-lifecycle-response-loss',
+  });
+  assert.equal(
+    (await recovered.publish.publish(lifecycleId)).publishedRef,
+    `refs/maka/published/${lifecycleId}`,
+  );
+  assert.ok(recovered.sourceBranchPublish);
+  const sourceReplay = await recovered.sourceBranchPublish.publish(lifecycleId);
+  assert.equal(sourceReplay.publishedRef, `refs/heads/maka/${lifecycleId}`);
+  assert.equal(sourceReplay.publishedCommitOid, sourcePublishedCommitOid);
+  const restored = await recovered.restore.restore(lifecycleId);
+  assert.equal(
+    await readFile(join(restored.destinationPath, 'notes.txt'), 'utf8'),
+    'durable lifecycle\n',
+  );
+  assert.equal(restored.acceptedCommitOid, acceptedCommitOid);
+});
+
 test('issues a continuation boundary only for the exact source and accepted Gitoxide head', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {

@@ -38,9 +38,15 @@ interface Fixture {
   readonly sourceRoot: string;
   readonly sessionId: string;
   readonly helperPath: string;
-  readonly mode?: 'after_repository_import' | 'after_active_epoch_commit';
+  readonly mode?:
+    | 'after_repository_import'
+    | 'after_active_epoch_commit'
+    | 'after_publish_response_lost'
+    | 'after_source_branch_publish_response_lost'
+    | 'after_restore_response_lost';
   readonly rebaselineId?: string;
   readonly rebaselineContent?: string;
+  readonly lifecycleId?: string;
 }
 
 const fixturePath = process.argv[2];
@@ -102,5 +108,23 @@ if (mode === 'after_active_epoch_commit') {
     'epoch two',
   ]);
   await session.rebaseline(fixture.rebaselineId);
+}
+if (mode === 'after_publish_response_lost') {
+  if (!fixture.lifecycleId) throw new Error('Crash fixture publication identity is unavailable');
+  await session.publish.publish(fixture.lifecycleId);
+  process.exit(77);
+}
+if (mode === 'after_source_branch_publish_response_lost') {
+  if (!fixture.lifecycleId) throw new Error('Crash fixture publication identity is unavailable');
+  if (!session.sourceBranchPublish) {
+    throw new Error('Crash fixture source-branch publication is unavailable');
+  }
+  await session.sourceBranchPublish.publish(fixture.lifecycleId);
+  process.exit(78);
+}
+if (mode === 'after_restore_response_lost') {
+  if (!fixture.lifecycleId) throw new Error('Crash fixture restore identity is unavailable');
+  await session.restore.restore(fixture.lifecycleId);
+  process.exit(79);
 }
 throw new Error(`Crash fixture did not stop at ${mode}`);
