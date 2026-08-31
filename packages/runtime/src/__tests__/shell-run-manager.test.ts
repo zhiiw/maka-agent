@@ -189,6 +189,58 @@ describe('ShellRunProcessManager', () => {
     assert.equal(manager.liveCount(), 0);
   });
 
+  test('adopts a completed durable ShellRun retry without spawning the command again', async () => {
+    const cwd = await workspace();
+    const marker = join(cwd, 'effect-count.txt');
+    const input = shellInput({
+      cwd,
+      command: 'append one durable effect marker',
+      argv: [
+        process.execPath,
+        '-e',
+        "require('node:fs').appendFileSync(process.argv[1], 'effect\\n')",
+        marker,
+      ],
+      sourceOperationId: 'operation-1',
+      sourceRequestHash: `sha256:${'a'.repeat(64)}`,
+    });
+
+    const first = createManager(sqliteShellRunStore(cwd));
+    const firstResult = await first.runForegroundBash(input);
+    assert.equal(firstResult.kind, 'terminal');
+    assert.equal(firstResult.status, 'completed');
+
+    const reopened = createManager(sqliteShellRunStore(cwd));
+    const retriedResult = await reopened.runForegroundBash(input);
+    assert.deepEqual(retriedResult, firstResult);
+    assert.equal(await readFile(marker, 'utf8'), 'effect\n');
+  });
+
+  test('fails closed when a durable ShellRun operation is retried with different input', async () => {
+    const cwd = await workspace();
+    const manager = createManager(sqliteShellRunStore(cwd));
+    await manager.runForegroundBash(
+      shellInput({
+        cwd,
+        command: 'printf first',
+        sourceOperationId: 'operation-1',
+        sourceRequestHash: `sha256:${'a'.repeat(64)}`,
+      }),
+    );
+
+    await assert.rejects(
+      manager.runForegroundBash(
+        shellInput({
+          cwd,
+          command: 'printf second',
+          sourceOperationId: 'operation-1',
+          sourceRequestHash: `sha256:${'b'.repeat(64)}`,
+        }),
+      ),
+      /ShellRun source operation request does not match its durable claim/u,
+    );
+  });
+
   test('preserves CJK PowerShell output through pipes', {
     skip: process.platform === 'win32' ? false : 'Windows PowerShell 5.1 regression',
   }, async () => {
@@ -2900,6 +2952,8 @@ function shellInput(input: {
   emitOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void;
   shell?: ShellPlan;
   sourceToolCallId?: string;
+  sourceOperationId?: string;
+  sourceRequestHash?: `sha256:${string}`;
   onCompletion?: (outcome: { successful: boolean }) => void;
 }) {
   return {
@@ -2907,6 +2961,12 @@ function shellInput(input: {
     sourceRunId: 'run-1',
     sourceTurnId: 'turn-1',
     sourceToolCallId: input.sourceToolCallId ?? 'tool-1',
+    ...(input.sourceOperationId !== undefined
+      ? { sourceOperationId: input.sourceOperationId }
+      : {}),
+    ...(input.sourceRequestHash !== undefined
+      ? { sourceRequestHash: input.sourceRequestHash }
+      : {}),
     cwd: input.cwd,
     command: input.command,
     ...(input.argv !== undefined ? { argv: input.argv } : {}),

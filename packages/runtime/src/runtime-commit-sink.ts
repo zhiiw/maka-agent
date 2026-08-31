@@ -32,7 +32,7 @@ export interface ToolPreparedCommit {
   dispatchRuntimeEvent: RuntimeEvent;
   providerToolCallId: string;
   toolName: string;
-  canonicalArgsHash: string;
+  canonicalArgsHash: `sha256:${string}`;
   recoveryMode: ToolRecoveryMode;
   committedAt: number;
 }
@@ -70,6 +70,9 @@ export function buildToolOperationId(input: ToolOperationIdInput): string {
   return `toolop_${digest}`;
 }
 
-export function canonicalToolArgsHash(toolName: string, normalizedArgs: unknown): string {
+export function canonicalToolArgsHash(
+  toolName: string,
+  normalizedArgs: unknown,
+): `sha256:${string}` {
   return canonicalToolArgsHashCore(toolName, normalizedArgs);
 }

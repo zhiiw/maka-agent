@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_CORE_EXECUTION_SCHEMA_VERSION = 6;
+export const SQLITE_CORE_EXECUTION_SCHEMA_VERSION = 7;
 
 export function migrateSqliteCoreExecutionDatabase(db: DatabaseSync): void {
   db.exec(`
@@ -129,6 +129,8 @@ export function migrateSqliteCoreExecutionDatabase(db: DatabaseSync): void {
     'latest_model_call_sequence',
     'INTEGER CHECK (latest_model_call_sequence >= 0)',
   );
+  ensureColumn(db, 'core_shell_runs', 'source_operation_id', 'TEXT');
+  ensureColumn(db, 'core_shell_runs', 'source_request_hash', 'TEXT');
   db.exec(`
     UPDATE core_agent_runs
     SET latest_model_call_sequence = (
@@ -155,6 +157,10 @@ export function migrateSqliteCoreExecutionDatabase(db: DatabaseSync): void {
 
     DROP TABLE IF EXISTS core_message_receipts;
     DROP TABLE IF EXISTS core_message_host_epochs;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS core_shell_runs_source_operation
+      ON core_shell_runs(session_id, source_operation_id)
+      WHERE source_operation_id IS NOT NULL;
   `);
 }
 

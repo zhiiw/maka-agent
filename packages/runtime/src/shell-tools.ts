@@ -312,6 +312,8 @@ export function buildManagedBashTool(
           ...(ctx.runId ? { sourceRunId: ctx.runId } : {}),
           sourceTurnId: ctx.turnId,
           sourceToolCallId: ctx.toolCallId,
+          ...(ctx.operationId ? { sourceOperationId: ctx.operationId } : {}),
+          ...(ctx.operationArgsHash ? { sourceRequestHash: ctx.operationArgsHash } : {}),
           cwd: transformed?.cwd ?? ctx.cwd,
           command,
           ...(pty !== undefined ? { pty } : {}),

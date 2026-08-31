@@ -439,6 +439,7 @@ describe('ToolRuntime durable boundary', () => {
     const order: string[] = [];
     const prepared: ToolPreparedCommit[] = [];
     const outcomes: ToolOutcomeCommit[] = [];
+    let operationArgsHash: string | undefined;
     const harness = makeHarness(
       {
         commitToolPrepared: async (input) => {
@@ -456,7 +457,8 @@ describe('ToolRuntime durable boundary', () => {
     );
 
     const result = await harness.execute(
-      tool(() => {
+      tool((_args, context) => {
+        operationArgsHash = context?.operationArgsHash;
         order.push('impl');
         return { ok: true, text: 'done' };
       }),
@@ -475,6 +477,7 @@ describe('ToolRuntime durable boundary', () => {
     assert.equal(prepared[0]?.runtimeEvent.refs?.operationId, prepared[0]?.operationId);
     assert.equal(prepared[0]?.dispatchRuntimeEvent.refs?.operationId, prepared[0]?.operationId);
     assert.equal(outcomes[0]?.runtimeEvent.refs?.operationId, prepared[0]?.operationId);
+    assert.equal(operationArgsHash, prepared[0]?.canonicalArgsHash);
   });
 
   it('adopts an owner-committed managed successor without invoking generic T2', async () => {
