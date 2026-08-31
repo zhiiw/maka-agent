@@ -32,6 +32,7 @@ if (!storageRoot || !sourceDependencyRoot || !failpoint) {
 
 const authority = await createManagedDependencySnapshotAuthority({
   storageRoot,
+  leaseConsumerOwnerToken: {},
   nodeRuntime: {
     version: process.versions.node,
     abi: process.versions.modules,

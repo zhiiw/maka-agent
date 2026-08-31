@@ -22,9 +22,11 @@
 // module-private so production consumers can acquire only snapshot leases.
 export {
   createManagedDependencySnapshotAuthority,
+  requireManagedDependencySnapshotLeaseAccessInternal,
   type CreateManagedDependencySnapshotAuthorityInput,
-  type ManagedDependencyEnvironmentLease,
   type ManagedDependencySnapshotAcquireInput,
   type ManagedDependencySnapshotAuthority,
   type ManagedDependencySnapshotFailpoint,
+  type ManagedDependencySnapshotLease,
+  type ManagedDependencySnapshotLeaseAccessInternal,
 } from './managed-dependency-environment.js';

@@ -361,13 +361,34 @@ export interface ManagedDependencySnapshotAcquireInput {
   readonly abortSignal?: AbortSignal;
 }
 
+export interface ManagedDependencySnapshotLease {
+  readonly environmentId: `sha256:${string}`;
+  readonly contentTreeSha256: `sha256:${string}`;
+  release(): Promise<void>;
+}
+
+export interface ManagedDependencySnapshotLeaseAccessInternal {
+  readonly environmentId: `sha256:${string}`;
+  readonly contentTreeSha256: `sha256:${string}`;
+  readonly dependencyRoot: string;
+}
+
+const managedDependencySnapshotLeases = new WeakMap<
+  object,
+  {
+    readonly consumerOwnerToken: object;
+    readonly access: ManagedDependencySnapshotLeaseAccessInternal;
+  }
+>();
+
 export interface ManagedDependencySnapshotAuthority {
-  acquire(input: ManagedDependencySnapshotAcquireInput): Promise<ManagedDependencyEnvironmentLease>;
+  acquire(input: ManagedDependencySnapshotAcquireInput): Promise<ManagedDependencySnapshotLease>;
   close(): Promise<void>;
 }
 
 export interface CreateManagedDependencySnapshotAuthorityInput {
   readonly storageRoot: string;
+  readonly leaseConsumerOwnerToken: object;
   readonly nodeRuntime: {
     readonly version: string;
     readonly abi: string;
@@ -383,6 +404,17 @@ export interface CreateManagedDependencySnapshotAuthorityInput {
 export type ManagedDependencySnapshotFailpoint =
   | 'after_source_observation'
   | ManagedDependencyEnvironmentFailpoint;
+
+export function requireManagedDependencySnapshotLeaseAccessInternal(
+  consumerOwnerToken: object,
+  lease: ManagedDependencySnapshotLease,
+): ManagedDependencySnapshotLeaseAccessInternal {
+  const record = managedDependencySnapshotLeases.get(lease);
+  if (!record || record.consumerOwnerToken !== consumerOwnerToken) {
+    throw new Error('Managed dependency snapshot lease capability is invalid');
+  }
+  return record.access;
+}
 
 export interface ManagedDependencyEnvironmentAuthority {
   acquire(
@@ -516,7 +548,26 @@ export async function createManagedDependencySnapshotAuthority(
             'Managed dependency artifact does not match the imported source snapshot',
           );
         }
-        return lease;
+        let released = false;
+        const snapshotLease: ManagedDependencySnapshotLease = Object.freeze({
+          environmentId: lease.environmentId,
+          contentTreeSha256: lease.contentTreeSha256,
+          async release() {
+            if (released) return;
+            released = true;
+            managedDependencySnapshotLeases.delete(snapshotLease);
+            await lease.release();
+          },
+        });
+        managedDependencySnapshotLeases.set(snapshotLease, {
+          consumerOwnerToken: input.leaseConsumerOwnerToken,
+          access: Object.freeze({
+            environmentId: lease.environmentId,
+            contentTreeSha256: lease.contentTreeSha256,
+            dependencyRoot: lease.dependencyRoot,
+          }),
+        });
+        return snapshotLease;
       } finally {
         source.users -= 1;
         if (source.users === 0 && pendingSources.get(identity.environmentId) === source) {

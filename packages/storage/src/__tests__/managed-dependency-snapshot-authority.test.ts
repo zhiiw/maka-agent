@@ -27,6 +27,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 import {
   createManagedDependencySnapshotAuthority,
+  requireManagedDependencySnapshotLeaseAccessInternal,
   type ManagedDependencySnapshotFailpoint,
 } from '../managed-dependency-environment.js';
 
@@ -36,6 +37,7 @@ const execFileAsync = promisify(execFile);
 const crashChildEntrypoint = fileURLToPath(
   new URL('./fixtures/managed-dependency-snapshot-crash-child.js', import.meta.url),
 );
+const leaseConsumerOwnerToken = {};
 
 test('imports a pre-provisioned npm dependency tree into immutable owned bytes', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'maka-dependency-snapshot-'));
@@ -53,17 +55,38 @@ test('imports a pre-provisioned npm dependency tree into immutable owned bytes',
   });
   assert.match(lease.environmentId, /^sha256:[0-9a-f]{64}$/u);
   assert.match(lease.contentTreeSha256, /^sha256:[0-9a-f]{64}$/u);
+  assert.throws(
+    () => requireManagedDependencySnapshotLeaseAccessInternal({}, lease),
+    /lease capability is invalid/u,
+  );
+  assert.throws(
+    () =>
+      requireManagedDependencySnapshotLeaseAccessInternal(leaseConsumerOwnerToken, {
+        environmentId: lease.environmentId,
+        contentTreeSha256: lease.contentTreeSha256,
+        release: lease.release,
+      }),
+    /lease capability is invalid/u,
+  );
+  const access = requireManagedDependencySnapshotLeaseAccessInternal(
+    leaseConsumerOwnerToken,
+    lease,
+  );
   assert.equal(
-    await readFile(join(lease.dependencyRoot, 'fixture-package', 'index.js'), 'utf8'),
+    await readFile(join(access.dependencyRoot, 'fixture-package', 'index.js'), 'utf8'),
     'trusted\n',
   );
 
   await writeFile(join(sourceRoot, 'fixture-package', 'index.js'), 'mutated\n', 'utf8');
   assert.equal(
-    await readFile(join(lease.dependencyRoot, 'fixture-package', 'index.js'), 'utf8'),
+    await readFile(join(access.dependencyRoot, 'fixture-package', 'index.js'), 'utf8'),
     'trusted\n',
   );
   await lease.release();
+  assert.throws(
+    () => requireManagedDependencySnapshotLeaseAccessInternal(leaseConsumerOwnerToken, lease),
+    /lease capability is invalid/u,
+  );
 });
 
 test('rejects source drift between observation and owned copy', async (t) => {
@@ -121,6 +144,7 @@ test('enforces the source byte budget before publishing an artifact', async (t) 
   await mkdir(join(root, 'storage'), { recursive: true });
   const authority = await createManagedDependencySnapshotAuthority({
     storageRoot: join(root, 'storage'),
+    leaseConsumerOwnerToken,
     nodeRuntime: {
       version: process.versions.node,
       abi: process.versions.modules,
@@ -172,8 +196,12 @@ for (const failpoint of [
       manifestBytes: PACKAGE_JSON,
       lockfileBytes: PACKAGE_LOCK,
     });
+    const access = requireManagedDependencySnapshotLeaseAccessInternal(
+      leaseConsumerOwnerToken,
+      lease,
+    );
     assert.equal(
-      await readFile(join(lease.dependencyRoot, 'fixture-package', 'index.js'), 'utf8'),
+      await readFile(join(access.dependencyRoot, 'fixture-package', 'index.js'), 'utf8'),
       'crash-safe\n',
     );
     await lease.release();
@@ -188,6 +216,7 @@ async function createAuthority(
   await mkdir(storageRoot, { recursive: true });
   return await createManagedDependencySnapshotAuthority({
     storageRoot,
+    leaseConsumerOwnerToken,
     nodeRuntime: {
       version: process.versions.node,
       abi: process.versions.modules,
