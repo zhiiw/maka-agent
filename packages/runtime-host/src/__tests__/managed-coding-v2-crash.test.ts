@@ -343,7 +343,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
       (error: unknown) =>
         Promise.reject(
           new Error(
-            `hosted execution failed before the Node command result: ${error instanceof Error ? error.message : String(error)}`,
+            `hosted execution failed before the Node command result: ${error instanceof Error ? error.message : String(error)}; runtime evidence: ${readRuntimeFailureEvidence(root, executionId)}`,
             { cause: error },
           ),
         ),
@@ -513,7 +513,7 @@ test('packaged managed-coding-v2 resumes after Host death without replaying an a
       (error: unknown) =>
         Promise.reject(
           new Error(
-            `hosted execution failed before the workspace transform result: ${error instanceof Error ? error.message : String(error)}`,
+            `hosted execution failed before the workspace transform result: ${error instanceof Error ? error.message : String(error)}; runtime evidence: ${readRuntimeFailureEvidence(root, executionId)}`,
             { cause: error },
           ),
         ),
@@ -898,6 +898,38 @@ async function startManagedNodeTransformProvider(): Promise<{
       await closeServer(server);
     },
   };
+}
+
+function readRuntimeFailureEvidence(root: string, executionId: string): string {
+  try {
+    const database = new DatabaseSync(join(root, 'runtime.sqlite'), { readOnly: true });
+    try {
+      const rows = database
+        .prepare(
+          `
+          SELECT event_kind AS eventKind, payload_json AS payloadJson
+          FROM runtime_events
+          WHERE session_id = ?
+          ORDER BY committed_at DESC, event_id DESC
+          LIMIT 12
+          `,
+        )
+        .all(executionId) as unknown as Array<{
+        readonly eventKind: string;
+        readonly payloadJson: string;
+      }>;
+      return JSON.stringify(
+        rows.reverse().map((row) => ({
+          eventKind: row.eventKind,
+          payload: row.payloadJson.slice(0, 2_000),
+        })),
+      );
+    } finally {
+      database.close();
+    }
+  } catch (error) {
+    return `unavailable (${error instanceof Error ? error.message : String(error)})`;
+  }
 }
 
 function readManagedNodeTestResult(request: unknown): Readonly<Record<string, unknown>> {

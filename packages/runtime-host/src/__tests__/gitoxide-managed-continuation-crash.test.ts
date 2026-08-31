@@ -386,7 +386,7 @@ async function withManagedContinuationFixture(
   run: (input: {
     fixture: ExecutionFixture;
     resourcesRoot: string;
-    runtimeExecutablePath: string;
+    runtimeExecutablePath?: string;
     callLog: string;
     sourceKind: 'git_repository_v1' | 'filesystem_snapshot_v1';
     boundary: NonNullable<
@@ -420,7 +420,11 @@ async function withManagedContinuationFixture(
   }
   await resolveWorkspaceIdentity({ path: sourceRoot });
 
-  const runtimeExecutablePath = resolveElectronExecutable();
+  // Windows intentionally has no canonical managed-coding-v2 product profile yet.
+  // Keep the platform in the Git/non-Git continuation matrix without inventing
+  // a toolchain capability that production refuses to advertise.
+  const runtimeExecutablePath =
+    process.platform === 'win32' ? undefined : resolveElectronExecutable();
   const resourcesRoot = await preparePackagedResources(
     base,
     helperInputPath,
@@ -442,7 +446,7 @@ async function withManagedContinuationFixture(
       llmConnectionSlug: 'fake',
       model: 'fake-model',
       permissionMode: 'ask',
-      toolProfile: 'managed-coding-v2',
+      ...(process.platform === 'win32' ? {} : { toolProfile: 'managed-coding-v2' as const }),
     });
     sessionId = session.id;
     const helper = await admitRealHelper(helperInputPath);
@@ -468,7 +472,7 @@ async function withManagedContinuationFixture(
     await run({
       fixture,
       resourcesRoot,
-      runtimeExecutablePath,
+      ...(runtimeExecutablePath ? { runtimeExecutablePath } : {}),
       callLog,
       sourceKind: options.sourceKind ?? 'git_repository_v1',
       boundary: boundary!,
@@ -481,7 +485,7 @@ async function withManagedContinuationFixture(
 async function preparePackagedResources(
   base: string,
   helperInputPath: string,
-  runtimeExecutablePath: string,
+  runtimeExecutablePath?: string,
 ): Promise<string> {
   const resourcesRoot = join(base, 'resources');
   const helperDirectory = join(resourcesRoot, 'gitoxide');
@@ -509,6 +513,8 @@ async function preparePackagedResources(
     })}\n`,
     'utf8',
   );
+
+  if (!runtimeExecutablePath) return resourcesRoot;
 
   const commandRoot = join(resourcesRoot, 'managed-command');
   const entrypointPath = join(commandRoot, 'managed-command-helper-main.js');
@@ -541,16 +547,6 @@ async function preparePackagedResources(
     })}\n`,
     'utf8',
   );
-  if (process.platform === 'win32') {
-    const sandboxInputPath = process.env.MAKA_WINDOWS_SANDBOX_PATH;
-    assert.ok(
-      sandboxInputPath,
-      'MAKA_WINDOWS_SANDBOX_PATH is required for the Windows managed continuation gate',
-    );
-    const sandboxRoot = join(resourcesRoot, 'windows-sandbox');
-    await mkdir(sandboxRoot);
-    await copyFile(await realpath(sandboxInputPath), join(sandboxRoot, 'maka-windows-sandbox.exe'));
-  }
   return resourcesRoot;
 }
 
