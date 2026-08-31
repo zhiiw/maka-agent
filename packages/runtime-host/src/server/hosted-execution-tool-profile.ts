@@ -33,6 +33,7 @@ const HEADLESS_CODING_V1_TOOL_NAMES = [
 
 const MANAGED_CODING_V1_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Write', 'Edit'] as const;
 const MANAGED_CODING_V2_TOOL_NAMES = [...MANAGED_CODING_V1_TOOL_NAMES, 'ManagedNodeTest'] as const;
+const MANAGED_CODING_V3_TOOL_NAMES = [...MANAGED_CODING_V2_TOOL_NAMES, 'ManagedNodeRun'] as const;
 const MANAGED_CODING_V1_SYSTEM_PROMPT = [
   'Inspect the managed Git workspace with Read, Glob, and Grep.',
   'Modify it with Write and Edit.',
@@ -45,6 +46,11 @@ const MANAGED_CODING_V2_SYSTEM_PROMPT = [
   MANAGED_CODING_V1_SYSTEM_PROMPT,
   'Run only explicit Node tests with ManagedNodeTest.',
   'The test consumes the same immutable accepted Git tree and, when present, an immutable read-only dependency snapshot. It cannot install dependencies, use package scripts, PATH, network, or the attached checkout.',
+].join('\n');
+const MANAGED_CODING_V3_SYSTEM_PROMPT = [
+  MANAGED_CODING_V2_SYSTEM_PROMPT,
+  'Run an explicit accepted-workspace Node entrypoint with ManagedNodeRun only when a direct script check is useful.',
+  'ManagedNodeRun has no PATH, network, child-process, package-script, dependency-installation, or attached-checkout authority. Its writes are limited to disposable scratch.',
 ].join('\n');
 
 const HEADLESS_CODING_V1_SYSTEM_PROMPT = [
@@ -103,6 +109,13 @@ export function hostedExecutionRunProfile(
       memoryExtraction: false,
     };
   }
+  if (profile === 'managed-coding-v3') {
+    return {
+      toolNames: MANAGED_CODING_V3_TOOL_NAMES,
+      systemPrompt: MANAGED_CODING_V3_SYSTEM_PROMPT,
+      memoryExtraction: false,
+    };
+  }
   if (profile === 'workhub-coordination-v1') {
     return {
       toolNames: [],
@@ -127,7 +140,11 @@ export function projectHostedExecutionTools(
     throw new Error(`Hosted tool profile is unavailable: ${missing.join(', ')}`);
   }
   return (selected as MakaTool[]).map((tool) => {
-    if (profile === 'managed-coding-v1' || profile === 'managed-coding-v2') {
+    if (
+      profile === 'managed-coding-v1' ||
+      profile === 'managed-coding-v2' ||
+      profile === 'managed-coding-v3'
+    ) {
       if (tool.name === 'Read' || tool.name === 'Glob' || tool.name === 'Grep') {
         return { ...tool, recoveryMode: 'replay_safe' };
       }
@@ -136,6 +153,13 @@ export function projectHostedExecutionTools(
           ...tool,
           recoveryMode: 'replay_safe',
           durableExecutionProfile: 'managed_observation_v2',
+        };
+      }
+      if (tool.name === 'ManagedNodeRun') {
+        return {
+          ...tool,
+          recoveryMode: 'replay_safe',
+          durableExecutionProfile: 'managed_observation_v3',
         };
       }
       return {

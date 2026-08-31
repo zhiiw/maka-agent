@@ -30,6 +30,7 @@ const HASH_BUFFER_BYTES = 64 * 1024;
 export const MANAGED_TOOLCHAIN_EFFECT_CLASSES_INTERNAL = Object.freeze([
   'hermetic_observation_v1',
   'hermetic_observation_v2',
+  'hermetic_observation_v3',
   'workspace_transform_v1',
 ] as const);
 export type ManagedToolchainEffectClassInternal =

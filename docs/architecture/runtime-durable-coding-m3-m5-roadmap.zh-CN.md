@@ -158,6 +158,11 @@ exit status、test summary 与 artifact digest。缓存是 projection；test out
    Windows 当前只获得 v1，禁止执行时降级；
 5. 需要外部包的项目在 M5.3 capability 可用前明确 unavailable，禁止静默降级。
 
+当前下一步采用更窄的 `ManagedNodeRun` kernel：只运行 accepted tree 中的显式 Node 入口，exact argv 在 T1
+前冻结，写入仅限 disposable scratch。它不等同于 Bash，也不发现 package scripts 或 `PATH` 工具。kernel
+完成后，独立产品组合切片才把 `managed-coding-v3` 加入 Host negotiation，并用真实 Host kill/restart 证明
+完成结果不重放。详见 `managed-hermetic-node-command-kernel-v1.zh-CN.md`。
+
 ### M5.5 External-effect fencing
 
 外部调用必须在 T1 前绑定 operation id/idempotency key、目标 authority 与 reconciliation contract。远端没有

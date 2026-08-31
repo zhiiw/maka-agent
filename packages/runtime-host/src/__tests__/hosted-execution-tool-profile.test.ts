@@ -207,3 +207,43 @@ test('managed coding v2 adds only the durable accepted-world Node test', () => {
   assert.equal(selected.at(-1)?.recoveryMode, 'replay_safe');
   assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_observation_v2');
 });
+
+test('managed coding v3 adds only an explicit hermetic accepted-world Node entrypoint', () => {
+  const profile = hostedExecutionRunProfile('managed-coding-v3');
+  assert.ok(profile);
+  assert.deepEqual(profile.toolNames, [
+    'Read',
+    'Glob',
+    'Grep',
+    'Write',
+    'Edit',
+    'ManagedNodeTest',
+    'ManagedNodeRun',
+  ]);
+  assert.match(profile.systemPrompt, /explicit accepted-workspace Node entrypoint/u);
+
+  const tools = [
+    'Read',
+    'Glob',
+    'Grep',
+    'Write',
+    'Edit',
+    'ManagedNodeTest',
+    'ManagedNodeRun',
+    'Bash',
+  ].map(
+    (name): MakaTool => ({
+      name,
+      description: name,
+      parameters: z.object({}),
+      impl: async () => 'not used',
+    }),
+  );
+  const selected = projectHostedExecutionTools(tools, 'managed-coding-v3');
+  assert.deepEqual(
+    selected.map(({ name }) => name),
+    ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ManagedNodeTest', 'ManagedNodeRun'],
+  );
+  assert.equal(selected.at(-1)?.recoveryMode, 'replay_safe');
+  assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_observation_v3');
+});

@@ -4723,7 +4723,11 @@ describe('SessionManager permission mode updates', () => {
     expect(plan.rejectionReasons).toEqual(['safety_observation_unavailable']);
   });
 
-  for (const toolProfile of ['managed-coding-v1', 'managed-coding-v2'] as const) {
+  for (const toolProfile of [
+    'managed-coding-v1',
+    'managed-coding-v2',
+    'managed-coding-v3',
+  ] as const) {
     test(`never downgrades a ${toolProfile} session when its workspace boundary is unavailable`, async () => {
       const store = new MemorySessionStore();
       const runStore = new MemoryAgentRunStore();
