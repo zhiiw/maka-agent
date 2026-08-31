@@ -28,6 +28,7 @@
     "./interaction-store": "./dist/interaction-store-public.js",
     "./long-term-memory-store": "./dist/long-term-memory-store.js",
     "./managed-secret-store": "./dist/managed-secret-store.js",
+    "./managed-dependency-snapshot-authority": "./dist/managed-dependency-snapshot-authority.js",
     "./mcp-config-store": "./dist/mcp-config-store.js",
     "./memory-bundle-store": "./dist/memory-bundle-store.js",
     "./model-call-ledger": "./dist/model-call-ledger.js",

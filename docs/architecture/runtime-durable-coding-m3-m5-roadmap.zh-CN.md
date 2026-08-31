@@ -133,7 +133,9 @@ budgets 与 cancellation。无法在某平台证明 profile 时，该 profile �
 
 复核并收窄现有 `ManagedDependencyEnvironmentAuthority`：lockfile、package-manager/runtime identity 与 platform
 共同决定 artifact identity；producer 只得到一次性 staging/scratch；active lease、publication、receipt 与 GC 由
-单一 storage-root owner 管理。首版只支持明确锁定的 package-manager/profile，不捆绑 Git。
+单一 storage-root owner 管理。首版不执行或捆绑 package manager：只导入用户显式选择、已经存在的 npm
+`node_modules`，以 source/copy/receipt 三次一致的内容 identity 发布 immutable lease。缺少依赖时明确 unavailable；
+不得借用 `PATH`、联网安装或静默读取 source checkout。未来 installer 是独立 producer，不改变 snapshot 合同。
 
 ### M5.4 Durable build/test
 
