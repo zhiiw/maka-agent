@@ -42,6 +42,7 @@ export const GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL = Object.freeze({
   importFilesystemSnapshotMs: 10 * 60_000,
   createCandidateMs: 10 * 60_000,
   promoteCandidateMs: 10 * 60_000,
+  retireCandidateRefMs: 10 * 60_000,
   createHistoryCandidateMs: 10 * 60_000,
   promoteHistoryCandidateMs: 10 * 60_000,
   observeAcceptedRefMs: 10 * 60_000,
@@ -124,6 +125,7 @@ export const GITOXIDE_HELPER_ERROR_REASONS_V1 = Object.freeze([
   'history_candidate_request_conflict',
   'candidate_publication_indeterminate',
   'accepted_ref_promotion_indeterminate',
+  'candidate_ref_retirement_indeterminate',
   'invalid_candidate_commit_oid',
   'invalid_candidate_tree_oid',
   'invalid_result_blob_oid',
@@ -291,6 +293,18 @@ export interface GitoxideCandidatePromotionRejectedV1 {
 export type GitoxideCandidatePromotionResultV1 =
   | GitoxideCandidatePromotedV1
   | GitoxideCandidatePromotionRejectedV1;
+
+export interface GitoxideCandidateRefRetiredV1 {
+  readonly kind: 'candidate_ref_retired';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly acceptedCommitOid: string;
+  readonly candidateCommitOid: string;
+  readonly acceptedRef: string;
+  readonly candidateRef: string;
+  readonly replayed: boolean;
+  readonly managedTreePolicyVersion: 3;
+}
 
 export interface GitoxideHistoryCandidatePublishedV1 {
   readonly kind: 'history_candidate_published';
@@ -909,6 +923,102 @@ export async function promoteCandidateWithGitoxideHelperInternal(input: {
     deadlineAt,
   });
   return decodeCandidatePromotionOutcome(outcome, input);
+}
+
+export async function retireCandidateRefWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedRef: string;
+  readonly expectedAcceptedCommitOid: string;
+  readonly candidateRef: string;
+  readonly expectedCandidateCommitOid: string;
+  readonly managedTreePolicyVersion: 3;
+  readonly abortSignal?: AbortSignal;
+}): Promise<GitoxideCandidateRefRetiredV1> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.retireCandidateRefMs;
+  const { artifact, repositoryPath } = await runGitoxideOperationWithinDeadlineInternal({
+    deadlineAt,
+    abortSignal: input.abortSignal,
+    operation: async () => {
+      if (
+        !isAbsolute(input.repositoryPath) ||
+        !SHA1_OID_PATTERN.test(input.expectedAcceptedCommitOid) ||
+        !SHA1_OID_PATTERN.test(input.expectedCandidateCommitOid) ||
+        !MAKA_REF_PATTERN.test(input.acceptedRef) ||
+        !/^refs\/maka\/candidates\/[0-9a-f]{64}$/.test(input.candidateRef) ||
+        input.acceptedRef === input.candidateRef ||
+        input.managedTreePolicyVersion !== 3
+      ) {
+        throw invocationInvalid('Gitoxide candidate retirement request is invalid');
+      }
+      const [artifact, repositoryPath] = await Promise.all([
+        verifyGitoxideHelperArtifactForInvocationInternal(
+          input.invocationOwnerToken,
+          input.capability,
+        ),
+        realpath(input.repositoryPath).catch((error) => {
+          throw invocationInvalid(
+            `Gitoxide managed repository path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ]);
+      requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.capability, [
+        'retire_candidate_ref',
+      ]);
+      return { artifact, repositoryPath };
+    },
+  });
+  const request = Buffer.from(
+    JSON.stringify({
+      protocolVersion: artifact.protocolVersion,
+      operation: 'retire_candidate_ref',
+      repositoryPath,
+      acceptedRef: input.acceptedRef,
+      expectedAcceptedCommitOid: input.expectedAcceptedCommitOid,
+      candidateRef: input.candidateRef,
+      expectedCandidateCommitOid: input.expectedCandidateCommitOid,
+      managedTreePolicyVersion: input.managedTreePolicyVersion,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
+  const outcome = await invokeHelper({
+    executablePath: artifact.executablePath,
+    request,
+    abortSignal: input.abortSignal,
+    deadlineAt,
+  });
+  const value = parseHelperOutcome(outcome);
+  if (
+    outcome.exitCode === 0 &&
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'acceptedCommitOid',
+      'candidateCommitOid',
+      'acceptedRef',
+      'candidateRef',
+      'replayed',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'candidate_ref_retired' &&
+    value.objectFormat === 'sha1' &&
+    value.acceptedCommitOid === input.expectedAcceptedCommitOid &&
+    value.candidateCommitOid === input.expectedCandidateCommitOid &&
+    value.acceptedRef === input.acceptedRef &&
+    value.candidateRef === input.candidateRef &&
+    typeof value.replayed === 'boolean' &&
+    value.managedTreePolicyVersion === input.managedTreePolicyVersion
+  ) {
+    return Object.freeze(value as unknown as GitoxideCandidateRefRetiredV1);
+  }
+  if (outcome.exitCode === 1 && isHelperError(value)) {
+    throw operationFailed('retire the managed candidate reference', value.reason);
+  }
+  throw protocolInvalid('Gitoxide candidate retirement response is invalid');
 }
 
 export async function createHistoryCandidateWithGitoxideHelperInternal(input: {

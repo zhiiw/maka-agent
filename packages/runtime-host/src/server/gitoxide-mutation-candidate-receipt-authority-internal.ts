@@ -263,7 +263,7 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
         );
         return withProcessLifetimeFileUpdateLock(receiptPath, async () => {
           request.abortSignal?.throwIfAborted();
-          const durable = await readReceipt(receiptPath);
+          const durable = await readGitoxideMutationCandidateReceiptInternal(receiptPath);
           const candidate = await createGitoxideCandidateInternal({
             acceptedRepositoryOwnerToken: input.acceptedRepositoryOwnerToken,
             acceptedRepositoryCapability: input.acceptedRepositoryCapability,
@@ -414,7 +414,7 @@ export async function createGitoxideMutationCandidateAuthorityInternal(input: {
           `${sha256(request.operationId).slice(7)}.json`,
         );
         return withProcessLifetimeFileUpdateLock(receiptPath, async () => {
-          const receipt = await readReceipt(receiptPath);
+          const receipt = await readGitoxideMutationCandidateReceiptInternal(receiptPath);
           if (
             !receipt ||
             receipt.disposition !== 'published' ||
@@ -542,7 +542,9 @@ function assertCaptureInput(input: GitoxideMutationCandidateCaptureInput): void 
   }
 }
 
-async function readReceipt(path: string): Promise<GitoxideMutationCandidateReceiptV1 | undefined> {
+export async function readGitoxideMutationCandidateReceiptInternal(
+  path: string,
+): Promise<GitoxideMutationCandidateReceiptV1 | undefined> {
   const before = await lstat(path).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw error;

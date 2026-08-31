@@ -33,7 +33,7 @@ workspace content；materialized directory、Desktop UI 和缓存都只是可重
 | isolated Restore | artifact protocol 已实现 | 已实现 | 已接入 Desktop Review | real-helper process response-loss/reopen 已建立；packaged Desktop matrix 待 CI |
 | time travel | historical read/restore/undo successor 已实现 | 已实现 | 最近 50 个版本、隔离恢复与 Undo 已接入 Desktop | lineage 与 history-successor crash tests 已建立 |
 | rebaseline / relocation | epoch activation identity 已实现 | 已实现 | Rebaseline 已接入 Desktop | Host crash cases 已建立，packaged evidence 待 CI |
-| GC | restore-orphan tombstone 与维护 owner 已实现 | 已实现 | Desktop maintenance 入口已接入 | restore-orphan crash test 已建立；完整 candidate/ref/object roots 待补齐 |
+| GC | restore-orphan 与 mutation-candidate retention owner 已实现 | 已实现 | Desktop maintenance v2 入口已接入 | restore/candidate ref-response-loss tests 已建立；history candidate 与 physical object compaction 待后续保守证明 |
 | dependency snapshot / Node tests | immutable snapshot、sandbox、T1/T2 settlement 已实现 | 已实现 | Host profile 协商后普通 workspace task 自动选择最高可用 profile | Linux/macOS Host kill/reopen 已建立；Windows 明确只提供 v1 |
 | general Bash / external effects | shell correlation/recovery kernel 已实现 | 组合入口尚未闭合 | **缺失** | 外部 acceptance/fencing matrix **缺失** |
 
@@ -177,8 +177,7 @@ Host 后，新的 Run 只采用 durable outcome/candidate/evidence；已完成�
 1. **M3 release evidence**：packaged Desktop Git/非 Git quiet-resume crash matrix；
 2. **M4 lifecycle proof**：为 Publish/source-branch publish、Restore、Undo、Rebaseline 与 maintenance 统一补齐真实
    Host kill/reopen matrix；
-3. **M4 durable-root GC**：完整枚举 active epoch、pending continuation、accepted/published/history refs、restore/apply
-   receipts 与审计保留 roots；
+3. **M4 durable-root GC**：mutation candidate ref/receipt 已按 current/active operation roots 安全退役；后续独立枚举 active epoch、pending continuation、accepted/published/history refs、restore/apply receipts 与审计保留 roots，再考虑 physical object compaction；
 4. **M5 profile negotiation**：Host capability set 与 Desktop pre-Session selection（当前切片）；
 5. **M5 foreground command loop**：把 accepted tree、dependency snapshot、sandbox command 与 shell recovery 组合成
    可由产品调用的 build/test loop；

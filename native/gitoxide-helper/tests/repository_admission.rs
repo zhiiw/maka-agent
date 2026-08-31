@@ -929,6 +929,76 @@ fn promotes_a_verified_candidate_with_exact_cas_and_replays_without_moving_again
 }
 
 #[test]
+fn retires_only_the_exact_promoted_candidate_ref_and_replays_missing_ref() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let destination = fixture.root.join("retire-candidate.git");
+    let imported = invoke_import(&fixture.root, &source_head, &destination);
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let candidate_ref =
+        "refs/maka/candidates/2424242424242424242424242424242424242424242424242424242424242424";
+    let candidate = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "create_candidate",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedBaseCommitOid": imported["baselineCommitOid"],
+        "expectedBaseTreeOid": imported["baselineTreeOid"],
+        "candidateRef": candidate_ref,
+        "path": "docs/retired.txt",
+        "contentBase64": "cmV0aXJlZCBjYW5kaWRhdGUK",
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(candidate.status.success());
+    let candidate: serde_json::Value = serde_json::from_slice(&candidate.stdout).unwrap();
+    let promotion = invoke_request(serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "promote_candidate",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedBaseCommitOid": imported["baselineCommitOid"],
+        "candidateRef": candidate_ref,
+        "expectedCandidateCommitOid": candidate["candidateCommitOid"],
+        "expectedCandidateTreeOid": candidate["candidateTreeOid"],
+        "expectedResultBlobOid": candidate["resultBlobOid"],
+        "requestDigestSha256": candidate["requestDigestSha256"],
+        "path": "docs/retired.txt",
+        "managedTreePolicyVersion": 3,
+    }));
+    assert!(promotion.status.success());
+    let retirement_request = serde_json::json!({
+        "protocolVersion": 1,
+        "operation": "retire_candidate_ref",
+        "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline",
+        "expectedAcceptedCommitOid": candidate["candidateCommitOid"],
+        "candidateRef": candidate_ref,
+        "expectedCandidateCommitOid": candidate["candidateCommitOid"],
+        "managedTreePolicyVersion": 3,
+    });
+
+    let retired = invoke_request(retirement_request.clone());
+    assert!(retired.status.success());
+    let retired: serde_json::Value = serde_json::from_slice(&retired.stdout).unwrap();
+    assert_eq!(retired["kind"], "candidate_ref_retired");
+    assert_eq!(retired["replayed"], false);
+    assert!(!git_bare_succeeds(
+        &destination,
+        ["show-ref", "--verify", candidate_ref]
+    ));
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/baseline"]),
+        candidate["candidateCommitOid"].as_str().unwrap()
+    );
+
+    let replay = invoke_request(retirement_request);
+    assert!(replay.status.success());
+    let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(replay["kind"], "candidate_ref_retired");
+    assert_eq!(replay["replayed"], true);
+}
+
+#[test]
 fn restores_history_as_a_new_successor_and_exactly_replays_promotion() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let source_head = fixture.git_output(["rev-parse", "HEAD"]);

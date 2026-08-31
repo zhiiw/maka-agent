@@ -461,7 +461,7 @@ test('managed workspace maintenance delegates one bounded quiet cleanup', async 
         assert.equal(sessionId, 'session-managed');
         return {
           kind: 'managed_workspace_maintenance_completed' as const,
-          scope: 'restore_orphans_v1' as const,
+          scope: 'managed_artifacts_v2' as const,
           collected: 2,
           retained: 1,
         };
@@ -473,7 +473,7 @@ test('managed workspace maintenance delegates one bounded quiet cleanup', async 
     await ipc.invoke('managed-workspace:maintain', { sessionId: 'session-managed' }),
     {
       kind: 'managed_workspace_maintenance_completed',
-      scope: 'restore_orphans_v1',
+      scope: 'managed_artifacts_v2',
       collected: 2,
       retained: 1,
     },

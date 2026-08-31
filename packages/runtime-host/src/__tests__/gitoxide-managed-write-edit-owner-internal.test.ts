@@ -75,6 +75,7 @@ test('rejects a non-canonical managed path before consulting Gitoxide', async ()
       repositoryPath: join(root, 'managed.git'),
       workspaceId: `workspace_${'1'.repeat(32)}`,
       workspaceEpochId: `epoch_${'2'.repeat(32)}`,
+      workspaceInstanceId: `instance_${'3'.repeat(32)}`,
     });
 
     await assert.rejects(
@@ -108,6 +109,7 @@ test('requires the durable workspace epoch before consulting Gitoxide', async ()
       repositoryPath: join(root, 'managed.git'),
       workspaceId: `workspace_${'1'.repeat(32)}`,
       workspaceEpochId: `epoch_${'2'.repeat(32)}`,
+      workspaceInstanceId: `instance_${'3'.repeat(32)}`,
     });
 
     await assert.rejects(
@@ -240,6 +242,12 @@ test('does not report a current projection while a durable mutation reservation 
       repositoryPath: join(root, 'managed.git'),
       workspaceId: ids.workspaceId,
       workspaceEpochId: ids.workspaceEpochId,
+      workspaceInstanceId: ids.workspaceInstanceId,
+    });
+
+    assert.deepEqual(await owner.readCandidateRetentionRoots(), {
+      acceptedCommitOid: commitOid,
+      protectedOperationIdentitySha256: [sha256(operationId)],
     });
 
     await assert.rejects(owner.reconcileAcceptedProjection(), (error: unknown) => {
@@ -342,6 +350,7 @@ test('reopens after a process crash and promotes the exact durable Write success
       helperPath: helper.helperPath,
       workspaceId: ids.workspaceId,
       workspaceEpochId: ids.workspaceEpochId,
+      workspaceInstanceId: ids.workspaceInstanceId,
       operationId,
       toolCallId,
       args,
@@ -382,6 +391,7 @@ test('reopens after a process crash and promotes the exact durable Write success
     repositoryPath,
     workspaceId: ids.workspaceId,
     workspaceEpochId: ids.workspaceEpochId,
+    workspaceInstanceId: ids.workspaceInstanceId,
   });
   assert.equal(await owner.reconcileAcceptedProjection(), 'promoted');
 

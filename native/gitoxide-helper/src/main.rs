@@ -149,6 +149,7 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "history_candidate_request_conflict",
     "candidate_publication_indeterminate",
     "accepted_ref_promotion_indeterminate",
+    "candidate_ref_retirement_indeterminate",
     "invalid_candidate_commit_oid",
     "invalid_candidate_tree_oid",
     "invalid_result_blob_oid",
@@ -251,6 +252,15 @@ enum Request {
         expected_result_blob_oid: String,
         request_digest_sha256: String,
         path: String,
+        managed_tree_policy_version: u8,
+    },
+    RetireCandidateRef {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_ref: String,
+        expected_accepted_commit_oid: String,
+        candidate_ref: String,
+        expected_candidate_commit_oid: String,
         managed_tree_policy_version: u8,
     },
     PromoteHistoryCandidate {
@@ -464,6 +474,17 @@ enum Response<'a> {
         actual_accepted_commit_oid: String,
         accepted_ref: String,
         candidate_ref: String,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    CandidateRefRetired {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        candidate_commit_oid: String,
+        accepted_ref: String,
+        candidate_ref: String,
+        replayed: bool,
         managed_tree_policy_version: u8,
     },
     #[serde(rename_all = "camelCase")]
@@ -731,6 +752,25 @@ fn run() -> Result<ExitCode, &'static str> {
                 expected_result_blob_oid,
                 request_digest_sha256,
                 path,
+                managed_tree_policy_version,
+            )
+        }
+        Request::RetireCandidateRef {
+            protocol_version,
+            repository_path,
+            accepted_ref,
+            expected_accepted_commit_oid,
+            candidate_ref,
+            expected_candidate_commit_oid,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            retire_candidate_ref(
+                repository_path,
+                accepted_ref,
+                expected_accepted_commit_oid,
+                candidate_ref,
+                expected_candidate_commit_oid,
                 managed_tree_policy_version,
             )
         }
@@ -2456,6 +2496,146 @@ fn promote_candidate(
             }
         }
     }
+}
+
+fn retire_candidate_ref(
+    repository_path: PathBuf,
+    accepted_ref: String,
+    expected_accepted_commit_oid: String,
+    candidate_ref: String,
+    expected_candidate_commit_oid: String,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    if !accepted_ref.starts_with("refs/maka/")
+        || !candidate_ref.starts_with("refs/maka/candidates/")
+        || accepted_ref == candidate_ref
+    {
+        return Err("target_ref_outside_maka_namespace");
+    }
+    gix::refs::FullName::try_from(accepted_ref.as_str())
+        .map_err(|_| "target_ref_outside_maka_namespace")?;
+    gix::refs::FullName::try_from(candidate_ref.as_str())
+        .map_err(|_| "target_ref_outside_maka_namespace")?;
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+
+    let repository = open_repository(repository_path)?;
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err("unsupported_object_format");
+    }
+    let expected_accepted =
+        parse_sha1_oid(&expected_accepted_commit_oid, "invalid_accepted_commit_oid")?;
+    let expected_candidate = parse_sha1_oid(
+        &expected_candidate_commit_oid,
+        "invalid_candidate_commit_oid",
+    )?;
+    let accepted = read_direct_commit_ref(
+        &repository,
+        &accepted_ref,
+        "accepted_ref_not_direct",
+        "accepted_ref_target_invalid",
+    )?;
+    if accepted != expected_accepted {
+        return Err("accepted_ref_target_invalid");
+    }
+
+    let candidate_reference = match repository
+        .try_find_reference(candidate_ref.as_str())
+        .map_err(|_| "target_ref_unavailable")?
+    {
+        Some(reference) => reference,
+        None => {
+            write_candidate_ref_retired_response(
+                expected_accepted,
+                expected_candidate,
+                &accepted_ref,
+                &candidate_ref,
+                true,
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
+    let observed_candidate = read_direct_commit_reference(
+        &repository,
+        candidate_reference.clone(),
+        "candidate_ref_not_direct",
+        "candidate_ref_target_invalid",
+    )?;
+    if observed_candidate != expected_candidate {
+        return Err("candidate_request_conflict");
+    }
+
+    match candidate_reference.delete() {
+        Ok(()) => {
+            write_candidate_ref_retired_response(
+                expected_accepted,
+                expected_candidate,
+                &accepted_ref,
+                &candidate_ref,
+                false,
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(_) => {
+            let observed_accepted = read_direct_commit_ref(
+                &repository,
+                &accepted_ref,
+                "accepted_ref_not_direct",
+                "accepted_ref_target_invalid",
+            )?;
+            if observed_accepted != expected_accepted {
+                return Err("accepted_ref_target_invalid");
+            }
+            match repository
+                .try_find_reference(candidate_ref.as_str())
+                .map_err(|_| "target_ref_unavailable")?
+            {
+                None => {
+                    write_candidate_ref_retired_response(
+                        expected_accepted,
+                        expected_candidate,
+                        &accepted_ref,
+                        &candidate_ref,
+                        true,
+                    );
+                    Ok(ExitCode::SUCCESS)
+                }
+                Some(reference) => {
+                    let observed = read_direct_commit_reference(
+                        &repository,
+                        reference,
+                        "candidate_ref_not_direct",
+                        "candidate_ref_target_invalid",
+                    )?;
+                    if observed != expected_candidate {
+                        Err("candidate_request_conflict")
+                    } else {
+                        Err("candidate_ref_retirement_indeterminate")
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn write_candidate_ref_retired_response(
+    accepted_commit_oid: gix::hash::ObjectId,
+    candidate_commit_oid: gix::hash::ObjectId,
+    accepted_ref: &str,
+    candidate_ref: &str,
+    replayed: bool,
+) {
+    write_response(&Response::CandidateRefRetired {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        accepted_commit_oid: accepted_commit_oid.to_string(),
+        candidate_commit_oid: candidate_commit_oid.to_string(),
+        accepted_ref: accepted_ref.to_owned(),
+        candidate_ref: candidate_ref.to_owned(),
+        replayed,
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+    });
 }
 
 fn observe_accepted_ref(

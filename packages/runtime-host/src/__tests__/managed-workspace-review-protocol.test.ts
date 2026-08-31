@@ -33,7 +33,7 @@ import {
 test('managed maintenance decodes one bounded restore-orphan collection result', () => {
   const result = {
     kind: 'managed_workspace_maintenance_completed',
-    scope: 'restore_orphans_v1',
+    scope: 'managed_artifacts_v2',
     collected: 3,
     retained: 5,
   } as const;
@@ -45,7 +45,7 @@ test('managed maintenance rejects counters outside its bounded inventory', () =>
     () =>
       decodeManagedWorkspaceMaintenanceResult({
         kind: 'managed_workspace_maintenance_completed',
-        scope: 'restore_orphans_v1',
+        scope: 'managed_artifacts_v2',
         collected: 257,
         retained: 0,
       }),

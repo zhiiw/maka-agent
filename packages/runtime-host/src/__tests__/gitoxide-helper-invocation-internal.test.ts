@@ -42,6 +42,7 @@ import {
   promoteHistoryCandidateWithGitoxideHelperInternal,
   publishAcceptedTreeToSourceBranchWithGitoxideHelperInternal,
   readTreeFileWithGitoxideHelperInternal,
+  retireCandidateRefWithGitoxideHelperInternal,
   runGitoxideOperationWithinDeadlineInternal,
 } from '../server/gitoxide-helper-invocation-internal.js';
 
@@ -59,6 +60,7 @@ test('uses bounded mutation/import deadlines distinct from repository inspection
     importFilesystemSnapshotMs: 10 * 60_000,
     createCandidateMs: 10 * 60_000,
     promoteCandidateMs: 10 * 60_000,
+    retireCandidateRefMs: 10 * 60_000,
     createHistoryCandidateMs: 10 * 60_000,
     promoteHistoryCandidateMs: 10 * 60_000,
     observeAcceptedRefMs: 10 * 60_000,
@@ -416,6 +418,46 @@ test('accepts only an exactly correlated candidate-promotion response', {
   });
   assert.equal(result.kind, 'candidate_promoted');
   assert.equal(result.acceptedCommitOid, expectedCandidateCommitOid);
+  assert.equal(result.replayed, false);
+});
+
+test('accepts only an exactly correlated candidate-ref retirement response', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-gitoxide-retirement-wire-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repositoryPath = await createRepository(t, 'sha1');
+  const acceptedRef = 'refs/maka/accepted';
+  const candidateRef = `refs/maka/candidates/${'2'.repeat(64)}`;
+  const acceptedCommitOid = 'a'.repeat(40);
+  const candidateCommitOid = 'b'.repeat(40);
+  const helperPath = join(root, 'retirement-helper');
+  const response = JSON.stringify({
+    protocolVersion: 1,
+    kind: 'candidate_ref_retired',
+    objectFormat: 'sha1',
+    acceptedCommitOid,
+    candidateCommitOid,
+    acceptedRef,
+    candidateRef,
+    replayed: false,
+    managedTreePolicyVersion: 3,
+  });
+  await writeFile(helperPath, `#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' '${response}'\n`);
+  await chmod(helperPath, 0o755);
+  const helper = await admitHelperPath(helperPath, ['retire_candidate_ref']);
+
+  const result = await retireCandidateRefWithGitoxideHelperInternal({
+    ...helper,
+    repositoryPath,
+    acceptedRef,
+    expectedAcceptedCommitOid: acceptedCommitOid,
+    candidateRef,
+    expectedCandidateCommitOid: candidateCommitOid,
+    managedTreePolicyVersion: 3,
+  });
+  assert.equal(result.kind, 'candidate_ref_retired');
+  assert.equal(result.candidateCommitOid, candidateCommitOid);
   assert.equal(result.replayed, false);
 });
 
@@ -787,6 +829,7 @@ async function admitHelperPath(
     | 'import_source_head'
     | 'create_candidate'
     | 'promote_candidate'
+    | 'retire_candidate_ref'
     | 'create_history_candidate'
     | 'promote_history_candidate'
     | 'observe_accepted_ref'

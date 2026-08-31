@@ -28,6 +28,7 @@ on:
       - 'packages/runtime-host/src/server/gitoxide-mutation-candidate-receipt-authority-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-managed-write-edit-owner-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-managed-session-owner-internal.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-gc-owner-internal.ts'
       - 'packages/runtime-host/src/server/packaged-gitoxide-helper-internal.ts'
       - 'packages/runtime-host/src/server/hosted-execution-tool-profile.ts'
       - 'packages/runtime-host/src/server/execution-composition.ts'
@@ -35,6 +36,7 @@ on:
       - 'packages/runtime-host/src/__tests__/gitoxide-repository-admission-authority-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-write-edit-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-session-owner-internal.test.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-gc-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-continuation-crash.test.ts'
       - 'packages/runtime-host/src/__tests__/managed-coding-v2-crash.test.ts'
       - 'experiments/windows-sandbox/launcher/**'
@@ -48,6 +50,7 @@ on:
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-candidate-receipt-crash-child.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-write-edit-owner-crash-child.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-session-owner-crash-child.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-candidate-gc-crash-child.ts'
       - 'packages/storage/src/execution-stores-workspace-authority-internal.ts'
       - 'packages/storage/src/workspace-version-authority-internal.ts'
       - 'packages/storage/src/sqlite-runtime-store.ts'
@@ -65,6 +68,7 @@ on:
       - 'packages/runtime-host/src/server/gitoxide-mutation-candidate-receipt-authority-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-managed-write-edit-owner-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-managed-session-owner-internal.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-gc-owner-internal.ts'
       - 'packages/runtime-host/src/server/packaged-gitoxide-helper-internal.ts'
       - 'packages/runtime-host/src/server/hosted-execution-tool-profile.ts'
       - 'packages/runtime-host/src/server/execution-composition.ts'
@@ -72,6 +76,7 @@ on:
       - 'packages/runtime-host/src/__tests__/gitoxide-repository-admission-authority-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-write-edit-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-session-owner-internal.test.ts'
+      - 'packages/runtime-host/src/__tests__/gitoxide-managed-gc-owner-internal.test.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-managed-continuation-crash.test.ts'
       - 'packages/runtime-host/src/__tests__/managed-coding-v2-crash.test.ts'
       - 'experiments/windows-sandbox/launcher/**'
@@ -85,6 +90,7 @@ on:
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-candidate-receipt-crash-child.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-write-edit-owner-crash-child.ts'
       - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-session-owner-crash-child.ts'
+      - 'packages/runtime-host/src/__tests__/fixtures/gitoxide-managed-candidate-gc-crash-child.ts'
       - 'packages/storage/src/execution-stores-workspace-authority-internal.ts'
       - 'packages/storage/src/workspace-version-authority-internal.ts'
       - 'packages/storage/src/sqlite-runtime-store.ts'
@@ -160,6 +166,7 @@ jobs:
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-managed-write-edit-owner-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-managed-session-owner-internal.test.js
+          packages/runtime-host/dist/__tests__/gitoxide-managed-gc-owner-internal.test.js
           packages/runtime-host/dist/__tests__/packaged-gitoxide-helper.test.js
           packages/runtime-host/dist/__tests__/hosted-execution-tool-profile.test.js
       - name: Test the Git and non-Git managed continuation crash matrix

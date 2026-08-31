@@ -78,6 +78,10 @@ export class GitoxideManagedWriteEditRecoveryError extends Error {
 export interface GitoxideManagedWriteEditOwnerInternal {
   readonly admitManagedMutation: NonNullable<ToolRuntimeInput['admitManagedMutation']>;
   reconcileAcceptedProjection(abortSignal?: AbortSignal): Promise<'already_current' | 'promoted'>;
+  readCandidateRetentionRoots(): Promise<{
+    readonly acceptedCommitOid: string;
+    readonly protectedOperationIdentitySha256: readonly `sha256:${string}`[];
+  }>;
 }
 
 export interface GitoxideManagedWriteEditOwnerInputInternal {
@@ -88,6 +92,7 @@ export interface GitoxideManagedWriteEditOwnerInputInternal {
   readonly repositoryPath: string;
   readonly workspaceId: string;
   readonly workspaceEpochId: string;
+  readonly workspaceInstanceId: string;
   readonly failpoint?: (point: GitoxideManagedWriteEditOwnerFailpoint) => void | Promise<void>;
 }
 
@@ -323,7 +328,37 @@ export function createGitoxideManagedWriteEditOwnerInternal(
     }
   };
 
-  return Object.freeze({ admitManagedMutation, reconcileAcceptedProjection });
+  const readCandidateRetentionRoots = async () => {
+    const [epoch, head] = await Promise.all([
+      persistence.readEpoch(input.workspaceId, input.workspaceEpochId),
+      persistence.readHead(input.workspaceId, input.workspaceEpochId),
+    ]);
+    if (!head || !epochMatchesOwner(epoch, input.workspaceId, input.workspaceEpochId)) {
+      throw new Error('Gitoxide candidate retention has no accepted workspace boundary');
+    }
+    const version = await persistence.readVersion(head.workspaceVersionId);
+    if (!version || !versionMatchesHead(version, head, epoch)) {
+      throw new Error('Gitoxide candidate retention workspace version is unavailable');
+    }
+    const active = await persistence.readActiveMutation(input.workspaceInstanceId);
+    const protectedOperations = new Set<string>();
+    if (version.protocol === 'workspace_version_accepted_v1') {
+      protectedOperations.add(sha256(version.origin.operationId));
+    }
+    if (active) protectedOperations.add(sha256(active.operationId));
+    return Object.freeze({
+      acceptedCommitOid: head.commitOid,
+      protectedOperationIdentitySha256: Object.freeze(
+        [...protectedOperations].sort() as `sha256:${string}`[],
+      ),
+    });
+  };
+
+  return Object.freeze({
+    admitManagedMutation,
+    reconcileAcceptedProjection,
+    readCandidateRetentionRoots,
+  });
 }
 
 async function settleManagedMutation(input: {
