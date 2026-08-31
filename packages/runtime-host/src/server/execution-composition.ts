@@ -2034,6 +2034,12 @@ export async function createExecutionRuntimeHostComposition(
     return {
       handlers,
       moduleIds: Object.freeze(domainModules.map(({ id }) => id)),
+      executionProfiles: Object.freeze([
+        ...(gitoxideHelperCapability ? (['managed-coding-v1'] as const) : []),
+        ...(gitoxideHelperCapability && managedNodeTestToolDeclaration
+          ? (['managed-coding-v2'] as const)
+          : []),
+      ]),
       workspaceExecution: requireWorkspaceExecution(workspaceExecution),
       continuity: continuityCoordinator,
       clientCapabilities,

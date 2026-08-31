@@ -95,7 +95,10 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 80 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 81 as const;
+// 81: Desktop freezes the managed execution profile from the resident Host's
+// exact admitted capability set before Session creation. Older peers cannot
+// prove managed-coding-v2 availability and must not silently select it.
 // 77: Managed Session Review reads the accepted Gitoxide tree through a
 // Host-owned query. Older peers would silently inspect the attached checkout.
 // 76: Peer Mesh endpoint and Mesh display names are signed, persisted facts

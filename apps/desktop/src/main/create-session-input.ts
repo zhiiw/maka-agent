@@ -79,7 +79,6 @@ export interface ResolvedCreateSessionRequest {
   orchestrationMode: OrchestrationMode;
   name: string;
   labels: string[] | undefined;
-  toolProfile?: SessionToolProfile;
 }
 
 export function resolveCreateSessionRequest(
@@ -113,7 +112,6 @@ export function resolveCreateSessionRequest(
     orchestrationMode,
     name: input?.name ?? DEFAULT_SESSION_NAME,
     labels: input?.labels,
-    ...(productIntent === 'managed_coding' ? { toolProfile: 'managed-coding-v1' } : {}),
   };
 }
 
@@ -131,13 +129,16 @@ export function resolveCreateSessionRequest(
 export function resolveAutomaticWorkspaceToolProfile(
   request: ResolvedCreateSessionRequest,
   workspace: WorkspaceTarget,
+  availableProfiles: readonly SessionToolProfile[] = ['managed-coding-v1'],
 ): SessionToolProfile | undefined {
-  if (request.toolProfile !== undefined) return request.toolProfile;
   if (request.mode !== undefined) return undefined;
 
   switch (workspace.kind) {
     case 'project':
-    case 'host_path':
-      return 'managed-coding-v1';
+    case 'host_path': {
+      if (availableProfiles.includes('managed-coding-v2')) return 'managed-coding-v2';
+      if (availableProfiles.includes('managed-coding-v1')) return 'managed-coding-v1';
+      throw new Error('Managed coding is unavailable in the active Runtime Host.');
+    }
   }
 }
