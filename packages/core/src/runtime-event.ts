@@ -258,7 +258,56 @@ export interface RuntimeEventToolDispatch {
   managedMutation?: RuntimeEventManagedWorkspaceMutation;
   /** T1-frozen immutable accepted-world observation identity. */
   managedObservation?: RuntimeEventManagedWorkspaceObservation;
+  /** T1-frozen local fencing and recovery contract for one external effect. */
+  externalEffect?: RuntimeEventExternalEffectV1;
 }
+
+/**
+ * The first external-effect contract is intentionally ShellRun-specific.
+ * `idempotencyKey` fences Maka's local process claim; it is not evidence that
+ * an arbitrary remote service honors the same key.
+ */
+export interface RuntimeEventExternalEffectV1 {
+  readonly protocol: 'external_effect_v1';
+  readonly effectClass: 'external_effect_v1';
+  readonly operationId: string;
+  readonly idempotencyKey: string;
+  readonly targetAuthority: 'shell_run_v1';
+  readonly reconciliationContract: 'shell_run_terminal_or_park_v1';
+  readonly repositoryId: string;
+  readonly workspaceId: string;
+  readonly workspaceEpochId: string;
+  readonly workspaceInstanceId: string;
+  readonly objectFormat: 'sha1';
+  readonly acceptedWorkspaceVersionId: string;
+  readonly acceptedEventId: string;
+  readonly acceptedHeadRevision: number;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly executionProfileDigest: typeof EXTERNAL_EFFECT_EXECUTION_PROFILE_V1_DIGEST;
+}
+
+export const EXTERNAL_EFFECT_EXECUTION_PROFILE_V1_SPEC = Object.freeze({
+  protocol: 'external_effect_execution_profile_v1',
+  effectClass: 'external_effect_v1',
+  objectFormat: 'sha1',
+  acceptedInput: 'materialized_disposable_accepted_tree_v1',
+  targetAuthority: 'shell_run_v1',
+  localIdempotency: 'operation_id_unique_claim_v1',
+  reconciliation: 'terminal_adopt_or_active_park_v1',
+  sandbox: Object.freeze({
+    required: true,
+    filesystem: 'disposable_projection_v1',
+    network: 'permission_boundary',
+    credentials: 'permission_boundary',
+    processTree: 'owned_v1',
+  }),
+  replay: 'never_auto_replay_v1',
+  executionFallback: 'forbidden',
+} as const);
+
+export const EXTERNAL_EFFECT_EXECUTION_PROFILE_V1_DIGEST =
+  'sha256:19f3fe01a695e4a39a8283de68c04a31fa792d13f1828f028820101adaa2814a' as const;
 
 export const MANAGED_OBSERVATION_EXECUTION_PROFILE_V2_SPEC = Object.freeze({
   protocol: 'managed_observation_execution_profile_v2',
@@ -756,7 +805,29 @@ const RUNTIME_TOOL_DISPATCH_SHAPE = defineObjectShape<RuntimeEventToolDispatch>(
     'canonicalArgsHash',
     'recoveryMode',
   ],
-  ['managedMutation', 'managedObservation'],
+  ['managedMutation', 'managedObservation', 'externalEffect'],
+);
+const RUNTIME_EXTERNAL_EFFECT_V1_SHAPE = defineObjectShape<RuntimeEventExternalEffectV1>()(
+  [
+    'protocol',
+    'effectClass',
+    'operationId',
+    'idempotencyKey',
+    'targetAuthority',
+    'reconciliationContract',
+    'repositoryId',
+    'workspaceId',
+    'workspaceEpochId',
+    'workspaceInstanceId',
+    'objectFormat',
+    'acceptedWorkspaceVersionId',
+    'acceptedEventId',
+    'acceptedHeadRevision',
+    'acceptedCommitOid',
+    'acceptedTreeOid',
+    'executionProfileDigest',
+  ],
+  [],
 );
 const RUNTIME_MANAGED_WORKSPACE_NODE_TEST_OBSERVATION_V2_SHAPE =
   defineObjectShape<RuntimeEventManagedWorkspaceNodeTestObservationV2>()(
@@ -1148,13 +1219,56 @@ function isRuntimeToolDispatch(value: unknown): value is RuntimeEventToolDispatc
       isRuntimeManagedWorkspaceMutation(value.managedMutation)) &&
     (value.managedObservation === undefined ||
       isRuntimeManagedWorkspaceObservation(value.managedObservation)) &&
-    !(value.managedMutation !== undefined && value.managedObservation !== undefined) &&
+    (value.externalEffect === undefined || isRuntimeExternalEffectV1(value.externalEffect)) &&
+    [value.managedMutation, value.managedObservation, value.externalEffect].filter(
+      (candidate) => candidate !== undefined,
+    ).length <= 1 &&
     (value.managedObservation === undefined ||
       (value.recoveryMode === 'replay_safe' &&
         ((value.toolName === 'ManagedNodeTest' &&
           value.managedObservation.operationKind === 'node_test_v2') ||
           (value.toolName === 'ManagedNodeRun' &&
-            value.managedObservation.operationKind === 'node_command_v2'))))
+            value.managedObservation.operationKind === 'node_command_v2')))) &&
+    (value.externalEffect === undefined ||
+      (value.toolName === 'Bash' &&
+        value.recoveryMode === 'reattach' &&
+        value.externalEffect.operationId === value.operationId &&
+        value.externalEffect.idempotencyKey === value.operationId))
+  );
+}
+
+function isRuntimeExternalEffectV1(value: unknown): value is RuntimeEventExternalEffectV1 {
+  return (
+    isRecord(value) &&
+    hasExactShape(value, RUNTIME_EXTERNAL_EFFECT_V1_SHAPE) &&
+    value.protocol === 'external_effect_v1' &&
+    value.effectClass === 'external_effect_v1' &&
+    typeof value.operationId === 'string' &&
+    value.operationId.length > 0 &&
+    typeof value.idempotencyKey === 'string' &&
+    value.idempotencyKey.length > 0 &&
+    value.targetAuthority === 'shell_run_v1' &&
+    value.reconciliationContract === 'shell_run_terminal_or_park_v1' &&
+    typeof value.repositoryId === 'string' &&
+    /^repository_[0-9a-f]{32}$/u.test(value.repositoryId) &&
+    typeof value.workspaceId === 'string' &&
+    /^workspace_[0-9a-f]{32}$/u.test(value.workspaceId) &&
+    typeof value.workspaceEpochId === 'string' &&
+    /^epoch_[0-9a-f]{32}$/u.test(value.workspaceEpochId) &&
+    typeof value.workspaceInstanceId === 'string' &&
+    /^instance_[0-9a-f]{32}$/u.test(value.workspaceInstanceId) &&
+    value.objectFormat === 'sha1' &&
+    typeof value.acceptedWorkspaceVersionId === 'string' &&
+    /^version_[0-9a-f]{32}$/u.test(value.acceptedWorkspaceVersionId) &&
+    typeof value.acceptedEventId === 'string' &&
+    /^[A-Za-z0-9_-]{1,128}$/u.test(value.acceptedEventId) &&
+    Number.isSafeInteger(value.acceptedHeadRevision) &&
+    (value.acceptedHeadRevision as number) >= 1 &&
+    typeof value.acceptedCommitOid === 'string' &&
+    /^[0-9a-f]{40}$/u.test(value.acceptedCommitOid) &&
+    typeof value.acceptedTreeOid === 'string' &&
+    /^[0-9a-f]{40}$/u.test(value.acceptedTreeOid) &&
+    value.executionProfileDigest === EXTERNAL_EFFECT_EXECUTION_PROFILE_V1_DIGEST
   );
 }
 

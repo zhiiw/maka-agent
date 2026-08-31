@@ -1637,6 +1637,233 @@ describe('ToolRuntime durable boundary', () => {
     assert.equal(implementationCalls, 0);
   });
 
+  it('refuses an external effect before T1 when fencing admission is unavailable', async () => {
+    let preparedCalls = 0;
+    let implementationCalls = 0;
+    const harness = makeHarness({
+      commitToolPrepared: async () => {
+        preparedCalls += 1;
+        return { created: true, runtimeEventSeq: 1 };
+      },
+      commitToolOutcome: async () => ({ created: true, runtimeEventSeq: 2 }),
+    });
+    const externalTool = tool(() => {
+      implementationCalls += 1;
+      return { ok: true };
+    });
+    externalTool.name = 'Bash';
+    externalTool.recoveryMode = 'reattach';
+    (
+      externalTool as unknown as {
+        durableExecutionProfile: string;
+      }
+    ).durableExecutionProfile = 'external_effect_v1';
+
+    assert.deepEqual(await harness.execute(externalTool), {
+      error: 'External effect fencing admission is unavailable before T1',
+    });
+    assert.equal(preparedCalls, 0);
+    assert.equal(implementationCalls, 0);
+  });
+
+  it('freezes an owner-issued ShellRun fence in T1 before executing the external effect', async () => {
+    const order: string[] = [];
+    const prepared: ToolPreparedCommit[] = [];
+    let admittedOperationId = '';
+    const externalEffectOverrides = {
+      admitExternalEffect: async (input: { readonly operationId: string }) => {
+        admittedOperationId = input.operationId;
+        order.push('admit');
+        return {
+          durableDispatch: externalEffectDispatch(input.operationId),
+          execute: async <T>(
+            operation: (execution: { cwd: string; scratchRoot: string }) => Promise<T>,
+          ) => await operation({ cwd: '/accepted', scratchRoot: '/scratch' }),
+          dispose: async () => {
+            order.push('dispose-external-effect');
+          },
+        };
+      },
+    } as unknown as Partial<ToolRuntimeInput>;
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async (input) => {
+          prepared.push(input);
+          order.push('t1');
+          return { created: true, runtimeEventSeq: 1 };
+        },
+        commitToolOutcome: async () => {
+          order.push('t2');
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      order,
+      'run-1',
+      externalEffectOverrides,
+    );
+    const externalTool = tool(() => {
+      order.push('effect');
+      return { exitCode: 0 };
+    });
+    externalTool.name = 'Bash';
+    externalTool.recoveryMode = 'reattach';
+    (
+      externalTool as unknown as {
+        durableExecutionProfile: string;
+      }
+    ).durableExecutionProfile = 'external_effect_v1';
+    (
+      externalTool as unknown as {
+        managedExternalEffectImpl: (
+          args: unknown,
+          ctx: unknown,
+          execution: { readonly cwd: string; readonly scratchRoot: string },
+        ) => Promise<unknown> | unknown;
+      }
+    ).managedExternalEffectImpl = async () => {
+      order.push('effect');
+      return { exitCode: 0 };
+    };
+
+    assert.deepEqual(await harness.executeWithInput(externalTool, { command: 'npm publish' }), {
+      exitCode: 0,
+    });
+    const durableDispatch = prepared[0]?.dispatchRuntimeEvent.actions?.toolDispatch as unknown as {
+      readonly externalEffect?: unknown;
+    };
+    assert.deepEqual(durableDispatch?.externalEffect, externalEffectDispatch(admittedOperationId));
+    assert.deepEqual(order, [
+      'admit',
+      't1',
+      'effect',
+      't2',
+      'published-result',
+      'dispose-external-effect',
+    ]);
+  });
+
+  it('executes an external effect only inside the owner-issued linear capability', async () => {
+    let operationOpen = false;
+    let ordinaryImplementationCalls = 0;
+    const externalEffectOverrides = {
+      admitExternalEffect: async (input: { readonly operationId: string }) => ({
+        durableDispatch: externalEffectDispatch(input.operationId),
+        execute: async <T>(
+          operation: (execution: {
+            readonly cwd: string;
+            readonly scratchRoot: string;
+          }) => Promise<T>,
+        ) => {
+          operationOpen = true;
+          try {
+            return await operation({ cwd: '/accepted', scratchRoot: '/scratch' });
+          } finally {
+            operationOpen = false;
+          }
+        },
+        dispose: async () => undefined,
+      }),
+    } as unknown as Partial<ToolRuntimeInput>;
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async () => ({ created: true, runtimeEventSeq: 2 }),
+      },
+      undefined,
+      'run-1',
+      externalEffectOverrides,
+    );
+    const externalTool = tool(() => {
+      ordinaryImplementationCalls += 1;
+      throw new Error('ordinary external-effect implementation must not execute');
+    });
+    externalTool.name = 'Bash';
+    externalTool.recoveryMode = 'reattach';
+    (
+      externalTool as unknown as {
+        durableExecutionProfile: string;
+        managedExternalEffectImpl: (
+          args: unknown,
+          ctx: unknown,
+          execution: { readonly cwd: string; readonly scratchRoot: string },
+        ) => Promise<unknown> | unknown;
+      }
+    ).durableExecutionProfile = 'external_effect_v1';
+    (
+      externalTool as unknown as {
+        managedExternalEffectImpl: (
+          args: unknown,
+          ctx: unknown,
+          execution: { readonly cwd: string; readonly scratchRoot: string },
+        ) => Promise<unknown> | unknown;
+      }
+    ).managedExternalEffectImpl = async (_args, _ctx, execution) => {
+      assert.equal(operationOpen, true);
+      assert.deepEqual(execution, { cwd: '/accepted', scratchRoot: '/scratch' });
+      return { exitCode: 0 };
+    };
+
+    assert.deepEqual(await harness.executeWithInput(externalTool, { command: 'npm publish' }), {
+      exitCode: 0,
+    });
+    assert.equal(operationOpen, false);
+    assert.equal(ordinaryImplementationCalls, 0);
+  });
+
+  it('rejects an external-effect fence with no accepted-workspace identity before T1', async () => {
+    let preparedCalls = 0;
+    let implementationCalls = 0;
+    const externalEffectOverrides = {
+      admitExternalEffect: async (input: { readonly operationId: string }) => ({
+        durableDispatch: {
+          protocol: 'external_effect_v1' as const,
+          effectClass: 'external_effect_v1' as const,
+          operationId: input.operationId,
+          idempotencyKey: input.operationId,
+          targetAuthority: 'shell_run_v1' as const,
+          reconciliationContract: 'shell_run_terminal_or_park_v1' as const,
+        },
+        execute: async <T>(
+          operation: (execution: { cwd: string; scratchRoot: string }) => Promise<T>,
+        ) => await operation({ cwd: '/accepted', scratchRoot: '/scratch' }),
+        dispose: async () => undefined,
+      }),
+    } as unknown as Partial<ToolRuntimeInput>;
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => {
+          preparedCalls += 1;
+          return { created: true, runtimeEventSeq: 1 };
+        },
+        commitToolOutcome: async () => ({ created: true, runtimeEventSeq: 2 }),
+      },
+      undefined,
+      'run-1',
+      externalEffectOverrides,
+    );
+    const externalTool = tool(() => {
+      throw new Error('ordinary external-effect implementation must not execute');
+    });
+    externalTool.name = 'Bash';
+    externalTool.recoveryMode = 'reattach';
+    const externalSurface = externalTool as unknown as {
+      durableExecutionProfile: string;
+      managedExternalEffectImpl: () => Promise<unknown> | unknown;
+    };
+    externalSurface.durableExecutionProfile = 'external_effect_v1';
+    externalSurface.managedExternalEffectImpl = async () => {
+      implementationCalls += 1;
+      return { exitCode: 0 };
+    };
+
+    await assert.rejects(
+      harness.executeWithInput(externalTool, { command: 'npm publish' }),
+      /invalid RuntimeEvent schema/i,
+    );
+    assert.equal(preparedCalls, 0);
+    assert.equal(implementationCalls, 0);
+  });
+
   it('rejects an oversized nested result before durable publication', async () => {
     const outcomes: ToolOutcomeCommit[] = [];
     const harness = makeHarness({
@@ -2263,6 +2490,29 @@ function managedCommandObservationDispatchV2() {
       sha256: `sha256:${'4'.repeat(64)}` as const,
     },
     args: ['--check', 'src/index.js'],
+  };
+}
+
+function externalEffectDispatch(operationId: string) {
+  return {
+    protocol: 'external_effect_v1' as const,
+    effectClass: 'external_effect_v1' as const,
+    operationId,
+    idempotencyKey: operationId,
+    targetAuthority: 'shell_run_v1' as const,
+    reconciliationContract: 'shell_run_terminal_or_park_v1' as const,
+    repositoryId: 'repository_11111111111111111111111111111111',
+    workspaceId: 'workspace_22222222222222222222222222222222',
+    workspaceEpochId: 'epoch_33333333333333333333333333333333',
+    workspaceInstanceId: 'instance_44444444444444444444444444444444',
+    objectFormat: 'sha1' as const,
+    acceptedWorkspaceVersionId: 'version_55555555555555555555555555555555',
+    acceptedEventId: 'accepted-event-1',
+    acceptedHeadRevision: 2,
+    acceptedCommitOid: '1'.repeat(40),
+    acceptedTreeOid: '2'.repeat(40),
+    executionProfileDigest:
+      'sha256:19f3fe01a695e4a39a8283de68c04a31fa792d13f1828f028820101adaa2814a' as const,
   };
 }
 
