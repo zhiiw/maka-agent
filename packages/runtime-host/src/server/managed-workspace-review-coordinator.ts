@@ -246,7 +246,11 @@ export class HostManagedWorkspaceReviewCoordinator {
         sourceRoot: header.cwd,
         sessionId: input.sessionId,
       });
-      const collected = await session.gc.collectRestoreOrphans({
+      const restores = await session.gc.collectRestoreOrphans({
+        olderThanMs: 24 * 60 * 60 * 1_000,
+        maxEntries: 32,
+      });
+      const candidates = await session.gc.collectMutationCandidates({
         olderThanMs: 24 * 60 * 60 * 1_000,
         maxEntries: 32,
       });
@@ -254,9 +258,9 @@ export class HostManagedWorkspaceReviewCoordinator {
         ok: true,
         result: {
           kind: 'managed_workspace_maintenance_completed',
-          scope: 'restore_orphans_v1',
-          collected: collected.collected,
-          retained: collected.retained,
+          scope: 'managed_artifacts_v2',
+          collected: restores.collected + candidates.collected,
+          retained: restores.retained + candidates.retained,
         },
       };
     } catch (error) {

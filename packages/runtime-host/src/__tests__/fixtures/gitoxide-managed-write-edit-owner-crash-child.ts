@@ -38,6 +38,7 @@ interface Fixture {
   readonly helperPath: string;
   readonly workspaceId: string;
   readonly workspaceEpochId: string;
+  readonly workspaceInstanceId: string;
   readonly operationId: string;
   readonly toolCallId: string;
   readonly args: {
@@ -82,6 +83,7 @@ const owner = createGitoxideManagedWriteEditOwnerInternal({
   repositoryPath: fixture.repositoryPath,
   workspaceId: fixture.workspaceId,
   workspaceEpochId: fixture.workspaceEpochId,
+  workspaceInstanceId: fixture.workspaceInstanceId,
   failpoint(point) {
     if (point === 'after_workspace_successor_commit') process.exit(73);
   },

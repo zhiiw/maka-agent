@@ -31,6 +31,7 @@ export const GITOXIDE_HELPER_RELEASE_OPERATIONS = Object.freeze([
   'import_filesystem_snapshot',
   'create_candidate',
   'promote_candidate',
+  'retire_candidate_ref',
   'create_history_candidate',
   'promote_history_candidate',
   'observe_accepted_ref',

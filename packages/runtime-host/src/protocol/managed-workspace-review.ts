@@ -77,7 +77,7 @@ export interface ManagedWorkspaceMaintenanceInput {
 
 export interface ManagedWorkspaceMaintenanceResult {
   readonly kind: 'managed_workspace_maintenance_completed';
-  readonly scope: 'restore_orphans_v1';
+  readonly scope: 'managed_artifacts_v2';
   readonly collected: number;
   readonly retained: number;
 }
@@ -586,7 +586,7 @@ export function decodeManagedWorkspaceMaintenanceResult(
   ]);
   if (
     record.kind !== 'managed_workspace_maintenance_completed' ||
-    record.scope !== 'restore_orphans_v1' ||
+    record.scope !== 'managed_artifacts_v2' ||
     !Number.isSafeInteger(record.collected) ||
     (record.collected as number) < 0 ||
     (record.collected as number) > 256 ||

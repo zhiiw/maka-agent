@@ -551,6 +551,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     repositoryPath,
     workspaceId: identity.workspaceId,
     workspaceEpochId: identity.workspaceEpochId,
+    workspaceInstanceId: identity.workspaceInstanceId,
   });
   const inspection = createGitoxideManagedInspectionOwnerInternal({
     invocationOwnerToken: input.invocationOwnerToken,
@@ -869,7 +870,12 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
   });
   const gc = createGitoxideManagedGcOwnerInternal({
     storageRoot,
+    workspaceId: identity.workspaceId,
     workspaceEpochId: identity.workspaceEpochId,
+    repositoryPath,
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    readCandidateRetentionRoots: () => writeEdit.readCandidateRetentionRoots(),
   });
   await writeEdit.reconcileAcceptedProjection(input.abortSignal);
   const rebaseline = async (
