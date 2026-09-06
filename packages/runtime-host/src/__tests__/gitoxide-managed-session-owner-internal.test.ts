@@ -142,6 +142,19 @@ test('imports a non-Git directory as one durable synthetic baseline', async (t) 
     kind: 'read',
     content: 'snapshot baseline\n',
   });
+  await writeFile(join(sourceRoot, 'notes.txt'), 'new external contents\n', 'utf8');
+  const reopened = await openGitoxideManagedSessionOwnerInternal({
+    storageRootLease: rootOwner.lease,
+    stores,
+    ...helper,
+    sourceRoot,
+    sessionId: 'session-snapshot-source',
+  });
+  assert.equal(reopened.workspaceEpochId, session.workspaceEpochId);
+  assert.deepEqual(await reopened.inspection.execute({ kind: 'read', path: 'notes.txt' }), {
+    kind: 'read',
+    content: 'snapshot baseline\n',
+  });
 });
 
 test('Read, Glob, and Grep observe only the accepted managed tree', async (t) => {
@@ -403,7 +416,7 @@ test('Time travel restores a historical accepted version without rewinding the c
   assert.equal(git(session.repositoryPath, ['rev-parse', 'refs/maka/accepted']), acceptedHead);
 });
 
-test('fails closed when the source advances after its managed epoch opens', async (t) => {
+test('reopens accepted history when the source advances after its managed epoch opens', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {
     t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the source drift test');
@@ -428,14 +441,17 @@ test('fails closed when the source advances after its managed epoch opens', asyn
     sourceRoot,
     sessionId: 'session-managed-drift',
   } as const;
-  await openGitoxideManagedSessionOwnerInternal(common);
+  const opened = await openGitoxideManagedSessionOwnerInternal(common);
   await writeFile(join(sourceRoot, 'notes.txt'), 'source advanced\n', 'utf8');
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'advance');
-  await assert.rejects(
-    openGitoxideManagedSessionOwnerInternal(common),
-    /source or durable epoch has drifted/i,
-  );
+  const reopened = await openGitoxideManagedSessionOwnerInternal(common);
+  assert.equal(reopened.workspaceEpochId, opened.workspaceEpochId);
+  assert.deepEqual(await reopened.inspection.execute({ kind: 'read', path: 'notes.txt' }), {
+    kind: 'read',
+    content: 'before\n',
+  });
+  assert.equal(await readFile(join(sourceRoot, 'notes.txt'), 'utf8'), 'source advanced\n');
 });
 
 test('explicit rebaseline opens a new epoch and preserves the prior epoch', async (t) => {
@@ -711,7 +727,7 @@ test('converges Publish, source-branch Publish, and Restore after their response
   assert.equal(restored.acceptedCommitOid, acceptedCommitOid);
 });
 
-test('issues a continuation boundary only for the exact source and accepted Gitoxide head', async (t) => {
+test('issues the same accepted continuation boundary after the source advances', async (t) => {
   const helper = await admittedHelper();
   if (!helper) {
     t.skip('MAKA_GITOXIDE_HELPER_PATH is required for the continuation boundary test');
@@ -747,10 +763,7 @@ test('issues a continuation boundary only for the exact source and accepted Gito
   await writeFile(join(sourceRoot, 'notes.txt'), 'source advanced\n', 'utf8');
   git(sourceRoot, ['add', 'notes.txt']);
   commit(sourceRoot, 'advance after boundary');
-  await assert.rejects(
-    inspectGitoxideManagedContinuationBoundaryInternal(common),
-    /source has drifted/i,
-  );
+  assert.deepEqual(await inspectGitoxideManagedContinuationBoundaryInternal(common), boundary);
 });
 
 test('retries an exact import after the publishing process exits before baseline commit', async (t) => {

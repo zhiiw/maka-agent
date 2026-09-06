@@ -241,49 +241,9 @@ export async function inspectGitoxideManagedContinuationBoundaryInternal(input: 
     identity.workspaceEpochId,
     'repository.git',
   );
-  if (sourceBinding.kind === 'git_repository_v1') {
-    const admissionOwnerToken = {};
-    const sourceAdmission = await admitGitoxideRepositoryInternal({
-      invocationOwnerToken: input.invocationOwnerToken,
-      helperCapability: input.helperCapability,
-      admissionOwnerToken,
-      repositoryPath: sourceRoot,
-      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-    });
-    if (sourceAdmission.kind !== 'accepted') {
-      throw new Error(`Gitoxide managed continuation rejected source: ${sourceAdmission.reason}`);
-    }
-    const source = requireGitoxideRepositoryAdmissionInternal(
-      admissionOwnerToken,
-      sourceAdmission.capability,
-    );
-    if (
-      source.headCommitOid !== boundary.sourceCommitOid ||
-      source.headTreeOid !== boundary.sourceTreeOid
-    ) {
-      throw new Error('Gitoxide managed continuation source has drifted');
-    }
-  } else {
-    requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.helperCapability, [
-      'import_filesystem_snapshot',
-    ]);
-    const snapshot = await importFilesystemSnapshotWithGitoxideHelperInternal({
-      invocationOwnerToken: input.invocationOwnerToken,
-      capability: input.helperCapability,
-      sourceRootPath: sourceRoot,
-      destinationRepositoryPath: repositoryPath,
-      baselineRef: SOURCE_BASELINE_REF,
-      acceptedRef: ACCEPTED_REF,
-      managedTreePolicyVersion: 3,
-      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-    });
-    if (
-      snapshot.baselineCommitOid !== boundary.sourceCommitOid ||
-      snapshot.baselineTreeOid !== boundary.sourceTreeOid
-    ) {
-      throw new Error('Gitoxide managed continuation source has drifted');
-    }
-  }
+  // The source is provenance, not the task's current content authority. Resume
+  // verifies the accepted repository below; source drift belongs to explicit
+  // publication/rebaseline admission and must not invalidate this history.
   await reopenGitoxideAcceptedRepositoryInternal({
     invocationOwnerToken: input.invocationOwnerToken,
     helperCapability: input.helperCapability,
@@ -405,6 +365,20 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     baselineOwnerToken,
     baselineCapability,
   );
+  const existingEpoch = await baselineAuthority.readEpoch(
+    identity.workspaceId,
+    identity.workspaceEpochId,
+  );
+  const existingHead = await baselineAuthority.readHead(
+    identity.workspaceId,
+    identity.workspaceEpochId,
+  );
+  const existingVersion = existingHead
+    ? await baselineAuthority.readVersion(existingHead.workspaceVersionId)
+    : undefined;
+  if (Boolean(existingEpoch) !== Boolean(existingHead)) {
+    throw new Error('Gitoxide managed session durable epoch is incomplete');
+  }
   let sourceCommitOid: string;
   let sourceTreeOid: string;
   let importedBaseline:
@@ -421,7 +395,12 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
         readonly capability: Awaited<ReturnType<typeof admitGitoxideRepositoryInternal>>;
       }
     | undefined;
-  if (sourceBinding.kind === 'git_repository_v1') {
+  if (existingEpoch) {
+    // Never re-import or re-observe source content to reopen an accepted epoch.
+    // In particular, a non-Git snapshot import is not a harmless freshness read.
+    sourceCommitOid = existingEpoch.sourceCommitOid;
+    sourceTreeOid = existingEpoch.sourceTreeOid;
+  } else if (sourceBinding.kind === 'git_repository_v1') {
     const admissionOwnerToken = {};
     const admission = await admitGitoxideRepositoryInternal({
       invocationOwnerToken: input.invocationOwnerToken,
@@ -469,25 +448,12 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       filesImported: snapshot.filesImported,
     };
   }
-  const existingEpoch = await baselineAuthority.readEpoch(
-    identity.workspaceId,
-    identity.workspaceEpochId,
-  );
-  const existingHead = await baselineAuthority.readHead(
-    identity.workspaceId,
-    identity.workspaceEpochId,
-  );
-  const existingVersion = existingHead
-    ? await baselineAuthority.readVersion(existingHead.workspaceVersionId)
-    : undefined;
   if (existingEpoch || existingHead) {
     if (
       !existingEpoch ||
       !existingHead ||
       existingEpoch.repositoryId !== identity.repositoryId ||
       existingEpoch.workspaceInstanceId !== identity.workspaceInstanceId ||
-      existingEpoch.sourceCommitOid !== sourceCommitOid ||
-      existingEpoch.sourceTreeOid !== sourceTreeOid ||
       existingEpoch.objectFormat !== 'sha1' ||
       existingEpoch.materializationProfileDigest !== materializationProfileDigest ||
       existingEpoch.policyHash !== policyHash ||
@@ -499,7 +465,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
       existingVersion.treeOid !== existingHead.treeOid ||
       existingVersion.policyHash !== policyHash
     ) {
-      throw new Error('Gitoxide managed session source or durable epoch has drifted');
+      throw new Error('Gitoxide managed session durable epoch has drifted');
     }
   } else {
     if (sourceBinding.kind === 'git_repository_v1') {

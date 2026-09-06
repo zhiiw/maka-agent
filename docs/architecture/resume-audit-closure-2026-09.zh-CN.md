@@ -12,7 +12,7 @@
 | 基础文件任务可用性 | Host 在 Session 创建前证明 profile，M5 缺失不阻塞五种文件工具 | 已实现，定向测试通过；真实 Desktop/Host 验收待补 | 仅 Gitoxide 时可创建文件任务；完整 profile 缺能力仍拒绝 |
 | active T1 收敛 | 原 operation 的 Runtime proof 与 workspace terminal 一致 | 待实现 | T1 / candidate 后 kill，重启不重放外部副作用 |
 | transcript 单一权威 | RuntimeEvent 决定 live、replay、历史页面 | 沿用上游 #4791 / #4879，不平行重写 importer | T2 后投影失败不得变成失败结果；历史与 active 切换一致 |
-| 连续恢复策略 | accepted history 独立于 source；Stop 与无进展重启不得自动重跑 | 待实现 | source 前进后恢复；多代有进展恢复；Stop / 无进展 park |
+| 连续恢复策略 | accepted history 独立于 source；Stop 与无进展重启不得自动重跑 | 已关闭 Git/非 Git 内容漂移阻塞；多代恢复待实现 | source 前进后恢复；多代有进展恢复；Stop / 无进展 park |
 | 有界在线读取 | workspace authority 在线读取不扫描全库历史 | 待实现 | 无关历史增长不导致单次 admission 全量 decode |
 | 产品证据 | 真实 Host/worker、Desktop IPC 与 crash matrix | 待补齐 | Git / 非 Git、多次 kill、平台显式结果 |
 
@@ -35,3 +35,18 @@
 
 本轮没有放宽工具权限、外部副作用恢复、未知 outcome 或损坏证据的 fail-closed 合同。
 没有把“定向测试通过”写成“无缝 Resume 已全部完成”。
+
+## Source provenance 与 accepted history
+
+初次导入和显式新 epoch/rebaseline 仍执行 source admission；已有 epoch 的 reopen
+直接读取 durable source provenance，不重新导入非 Git 目录，也不要求 Git checkout
+仍停在导入时的 HEAD。Continuation 校验内部 accepted ref/tree 与 SQLite 边界，
+而不是把外部 checkout 的新提交当作 task 损坏。
+
+没有放宽 source branch Publish 的独立校验，也没有允许静默修改用户 checkout。
+当前 source 根路径仍需存在、可解析且保持相同的 Git/非 Git 分类；源目录彻底删除或
+分类改变后的纯内部恢复需要另行持久化 source-kind 绑定，不能伪称本轮已支持。
+
+真实 Linux helper 回归（WSL）：Git 新提交后 reopen、非 Git 内容变化后 reopen、
+source 新提交后 continuation boundary 不变，以及既有 source-branch Publish、显式
+rebaseline 共 5 项通过，无跳过。Windows/macOS 的这组真实 helper 证据尚未补齐。
