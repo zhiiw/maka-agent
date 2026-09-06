@@ -597,6 +597,29 @@ test('the Gitoxide gate owns repository admission changes', () => {
   );
 });
 
+test('the Gitoxide crash gate selects the Runtime mutation boundary on PRs and main', () => {
+  const workflow = readWorkflow('gitoxide-helper-admission.yml');
+  for (const path of [
+    'packages/core/src/session.ts',
+    'packages/core/src/runtime-event.ts',
+    'packages/runtime/src/tool-runtime.ts',
+    'packages/runtime/src/managed-mutation-*.ts',
+    'packages/runtime/src/__tests__/tool-runtime-durable-boundary.test.ts',
+    'packages/runtime-host/src/__tests__/managed-coding-v2-crash.test.ts',
+  ]) {
+    const selector = `      - '${path}'`;
+    assert.equal(workflow.split(selector).length - 1, 2, path);
+  }
+  assert.ok(
+    workflow.includes(
+      'run: node --test packages/runtime-host/dist/__tests__/managed-coding-v2-crash.test.js',
+    ),
+  );
+  for (const platform of ['ubuntu-latest', 'macos-latest', 'windows-latest']) {
+    assert.ok(workflow.includes(`          - ${platform}`), platform);
+  }
+});
+
 test('specialized platform workflows stay reachable without pull requests', () => {
   const cli = readWorkflow('cli-package-validation.yml');
   const baseline = readWorkflow('windows-baseline.yml');

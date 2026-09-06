@@ -376,6 +376,10 @@ export function createGitoxideManagedWriteEditOwnerInternal(
     // retained candidate, or caller claims as authority to rerun it.
     if (
       call?.kind !== 'function_call' ||
+      (evidence.callEvent.origin !== undefined && evidence.callEvent.origin !== 'provider') ||
+      evidence.callEvent.modelVisibility === 'hidden' ||
+      evidence.callEvent.refs?.parentToolCallId !== undefined ||
+      evidence.callEvent.refs?.parentOperationId !== undefined ||
       (call.name !== 'Write' && call.name !== 'Edit') ||
       mutation?.operationKind !== 'write_edit_v2' ||
       mutation.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST

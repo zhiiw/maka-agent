@@ -82,17 +82,19 @@ describe('resolveCreateSessionRequest', () => {
     const ordinary = resolve({});
 
     assert.equal(
-      resolveAutomaticWorkspaceToolProfile(ordinary, {
-        kind: 'project',
-        projectId: 'project-1',
-      }),
+      resolveAutomaticWorkspaceToolProfile(
+        ordinary,
+        { kind: 'project', projectId: 'project-1' },
+        ['managed-coding-v2'],
+      ),
       'managed-coding-v2',
     );
     assert.equal(
-      resolveAutomaticWorkspaceToolProfile(ordinary, {
-        kind: 'host_path',
-        path: '/workspace/non-git',
-      }),
+      resolveAutomaticWorkspaceToolProfile(
+        ordinary,
+        { kind: 'host_path', path: '/workspace/non-git' },
+        ['managed-coding-v2'],
+      ),
       'managed-coding-v2',
     );
     assert.equal(
@@ -139,6 +141,10 @@ describe('resolveCreateSessionRequest', () => {
       'managed-coding-v2',
     );
     assert.throws(() => resolveAutomaticWorkspaceToolProfile(request, workspace, []));
+    assert.throws(
+      () => resolveAutomaticWorkspaceToolProfile(request, workspace),
+      /Managed coding is unavailable/u,
+    );
   });
 
   it('does not let the renderer mint an internal tool profile', () => {

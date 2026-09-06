@@ -54,170 +54,203 @@ import { GITOXIDE_HELPER_OPERATIONS_INTERNAL } from '../server/gitoxide-helper-a
 const MODEL_ID = 'moonshot-managed-v2-fixture';
 const API_KEY = 'managed-v2-fixture-key';
 
-for (const crashPoint of ['after_managed_t1', 'after_candidate_capture'] as const) {
-  test(`file-only task recovers ${crashPoint} through the real Host and Runtime`, {
-    timeout: 180_000,
-  }, async (t) => {
-    const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
-    if (!helperPath) {
-      t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
-      return;
-    }
-    const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-managed-files-recovery-')));
-    const root = join(base, 'root');
-    const executionId = randomUUID();
-    await mkdir(root);
-    await writeFile(join(root, 'notes.txt'), 'before\n');
-    git(root, ['init', '--quiet', '--object-format=sha1']);
-    git(root, ['add', 'notes.txt']);
-    git(root, [
-      '-c',
-      'user.name=Maka Test',
-      '-c',
-      'user.email=maka@example.invalid',
-      'commit',
-      '--quiet',
-      '-m',
-      'baseline',
-    ]);
-    const resourcesRoot = await preparePackagedResources(base, helperPath, process.execPath, true);
-    const requests: unknown[] = [];
-    const sockets = new Set<import('node:net').Socket>();
-    const server = createServer((request, response) => {
-      void (async () => {
-        const body = JSON.parse(await readBody(request)) as Record<string, unknown>;
-        if (body.stream !== true) {
-          respondSummary(response);
-          return;
-        }
-        requests.push(body);
-        if (requests.length === 1) {
-          respondToolCall(
-            response,
-            'Write',
-            { path: 'notes.txt', content: 'after\n' },
-            'file-only-write',
-          );
-        } else {
-          respondText(response, 'Recovered the accepted file change.');
-        }
-      })().catch((error) => response.destroy(error as Error));
-    });
-    server.on('connection', (socket) => {
-      sockets.add(socket);
-      socket.once('close', () => sockets.delete(socket));
-    });
-    await listen(server);
-    t.after(async () => {
-      for (const socket of sockets) socket.destroy();
-      await closeServer(server);
-    });
-    const address = server.address();
-    assert.ok(address && typeof address === 'object');
-    const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
-    const connectionId = await configureProvider(capability, `http://127.0.0.1:${address.port}/v1`);
-    const fixture = new ExecutionFixture(base, root, capability, executionId);
-    try {
-      const firstHost = await fixture.startHost(undefined, true, {
-        packagedResourcesRoot: resourcesRoot,
-        useProductionBackend: true,
-        managedMutationFailpoint: crashPoint,
-        startupTimeoutMs: 60_000,
-      });
-      const reached = new Promise<void>((resolve, reject) => {
-        firstHost.child.on('message', (message: unknown) => {
-          if (
-            (message as { type?: string; point?: string })?.type ===
-              'test.managed_mutation_failpoint' &&
-            (message as { point?: string }).point === crashPoint
-          )
-            resolve();
-        });
-        firstHost.child.once('exit', () =>
-          reject(new Error('Host exited before mutation failpoint')),
-        );
-      });
-      const client = await connectClient(root);
-      assert.deepEqual(await client.request('host.execution-profiles.query', {}), {
-        profiles: ['managed-files-v2'],
-      });
-      const starting = client
-        .request('hosted.execution.start', {
-          executionId,
-          session: {
-            workspace: { kind: 'host_path', path: root },
-            modelTarget: {
-              kind: 'explicit',
-              connectionId,
-              connectionSlug: 'managed-v2-provider',
-              model: MODEL_ID,
-            },
-            permissionMode: 'bypass',
-            collaborationMode: 'agent',
-            orchestrationMode: 'default',
-            toolProfile: 'managed-files-v2',
-          },
-          content: { text: 'Write after to notes.txt.' },
-        })
-        .catch(() => undefined);
-      await withTimeout(reached, PROCESS_TIMEOUT_MS * 4, `Host never reached ${crashPoint}`);
-      await fixture.killHost(firstHost);
-      await starting;
-      await client.close().catch(() => undefined);
-      const secondHost = await fixture.startHost(undefined, true, {
-        packagedResourcesRoot: resourcesRoot,
-        useProductionBackend: true,
-        startupTimeoutMs: 60_000,
-      });
-      const secondClient = await connectClient(root);
-      try {
-        const admission = await waitForContinuationAdmission(fixture, executionId);
-        const terminal = await waitForTerminalTurn(secondClient, executionId, admission.turnId);
-        assert.equal(terminal.status, 'completed');
-      } finally {
-        await secondClient.close();
-        await fixture.stopHost(secondHost);
+for (const sourceKind of ['git', 'non-git'] as const) {
+  for (const crashPoint of ['after_managed_t1', 'after_candidate_capture'] as const) {
+    test(`${sourceKind} file-only task recovers ${crashPoint} through the real Host and Runtime`, {
+      timeout: 180_000,
+    }, async (t) => {
+      const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
+      if (!helperPath) {
+        t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
+        return;
       }
-      assert.equal(
-        requests.length,
-        2,
-        'Provider must receive the recovered result, not repeat Write',
+      const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-managed-files-recovery-')));
+      const root = join(base, 'root');
+      const sourceRoot = join(base, 'source');
+      const executionId = randomUUID();
+      await Promise.all([mkdir(root), mkdir(sourceRoot)]);
+      await writeFile(join(sourceRoot, 'notes.txt'), 'before\n');
+      if (sourceKind === 'git') {
+        git(sourceRoot, ['init', '--quiet', '--object-format=sha1']);
+        git(sourceRoot, ['add', 'notes.txt']);
+        git(sourceRoot, [
+          '-c',
+          'user.name=Maka Test',
+          '-c',
+          'user.email=maka@example.invalid',
+          'commit',
+          '--quiet',
+          '-m',
+          'baseline',
+        ]);
+      }
+      const resourcesRoot = await preparePackagedResources(
+        base,
+        helperPath,
+        process.execPath,
+        true,
       );
-      assert.match(JSON.stringify(requests[1]), /file-only-write/u);
-      assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'before\n');
-      const readerOwner = await tryAcquireInteractiveRootReader(capability);
-      assert.ok(readerOwner);
-      const reader = await openInteractiveExecutionStoresForRead(readerOwner.lease);
+      const requests: unknown[] = [];
+      const sockets = new Set<import('node:net').Socket>();
+      const server = createServer((request, response) => {
+        void (async () => {
+          const body = JSON.parse(await readBody(request)) as Record<string, unknown>;
+          if (body.stream !== true) {
+            respondSummary(response);
+            return;
+          }
+          requests.push(body);
+          if (requests.length === 1) {
+            respondToolCall(
+              response,
+              'Write',
+              { path: 'notes.txt', content: 'after\n' },
+              'file-only-write',
+            );
+          } else {
+            respondText(response, 'Recovered the accepted file change.');
+          }
+        })().catch((error) => response.destroy(error as Error));
+      });
+      server.on('connection', (socket) => {
+        sockets.add(socket);
+        socket.once('close', () => sockets.delete(socket));
+      });
+      await listen(server);
+      t.after(async () => {
+        for (const socket of sockets) socket.destroy();
+        await closeServer(server);
+      });
+      const address = server.address();
+      assert.ok(address && typeof address === 'object');
+      const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+      const connectionId = await configureProvider(
+        capability,
+        `http://127.0.0.1:${address.port}/v1`,
+      );
+      const fixture = new ExecutionFixture(base, root, capability, executionId, sourceRoot);
       try {
-        const runs = await reader.agentRunStore.listSessionRuns(executionId);
-        const events = (
-          await Promise.all(
-            runs.map((run) =>
-              reader.runtimeEventStore.readImmutableRuntimeEvents(executionId, run.runId),
-            ),
-          )
-        ).flat();
+        const firstHost = await fixture.startHost(undefined, true, {
+          packagedResourcesRoot: resourcesRoot,
+          useProductionBackend: true,
+          managedMutationFailpoint: crashPoint,
+          startupTimeoutMs: 60_000,
+        });
+        let rejectAdmission: (error: unknown) => void = () => undefined;
+        const reached = new Promise<void>((resolve, reject) => {
+          rejectAdmission = reject;
+          firstHost.child.on('message', (message: unknown) => {
+            if (
+              (message as { type?: string; point?: string })?.type ===
+                'test.managed_mutation_failpoint' &&
+              (message as { point?: string }).point === crashPoint
+            )
+              resolve();
+          });
+          firstHost.child.once('exit', () =>
+            reject(new Error('Host exited before mutation failpoint')),
+          );
+        });
+        // Register a handler before setup awaits, so early admission/exit failures
+        // are reported by the bounded wait rather than as detached rejections.
+        void reached.catch(() => undefined);
+        const client = await connectClient(root);
+        assert.deepEqual(await client.request('host.execution-profiles.query', {}), {
+          profiles: ['managed-files-v2'],
+        });
+        const starting = client
+          .request('hosted.execution.start', {
+            executionId,
+            session: {
+              workspace: { kind: 'host_path', path: sourceRoot },
+              modelTarget: {
+                kind: 'explicit',
+                connectionId,
+                connectionSlug: 'managed-v2-provider',
+                model: MODEL_ID,
+              },
+              permissionMode: 'bypass',
+              collaborationMode: 'agent',
+              orchestrationMode: 'default',
+              toolProfile: 'managed-files-v2',
+            },
+            content: { text: 'Write after to notes.txt.' },
+          })
+          .catch((error) => rejectAdmission(error));
+        await withTimeout(
+          reached,
+          PROCESS_TIMEOUT_MS * 4,
+          `Host never reached ${crashPoint}`,
+        ).catch((error) => {
+          throw new Error(
+            `${String(error)}; durable snapshot: ${readDurableExecutionSnapshot(root, executionId)}`,
+            { cause: error },
+          );
+        });
+        await fixture.killHost(firstHost);
+        await starting;
+        await client.close().catch(() => undefined);
+        // A user may keep editing the source while the private task is down.
+        // Recovery must keep using accepted history and never overwrite it.
+        await writeFile(join(sourceRoot, 'notes.txt'), 'user changed source while Host was down\n');
+        const secondHost = await fixture.startHost(undefined, true, {
+          packagedResourcesRoot: resourcesRoot,
+          useProductionBackend: true,
+          startupTimeoutMs: 60_000,
+        });
+        const secondClient = await connectClient(root);
+        try {
+          const admission = await waitForContinuationAdmission(fixture, executionId);
+          const terminal = await waitForTerminalTurn(secondClient, executionId, admission.turnId);
+          assert.equal(terminal.status, 'completed');
+        } finally {
+          await secondClient.close();
+          await fixture.stopHost(secondHost);
+        }
         assert.equal(
-          events.filter(
-            (event) => event.content?.kind === 'function_call' && event.content.name === 'Write',
-          ).length,
-          1,
+          requests.length,
+          2,
+          'Provider must receive the recovered result, not repeat Write',
         );
+        assert.match(JSON.stringify(requests[1]), /file-only-write/u);
         assert.equal(
-          events.filter(
-            (event) =>
-              event.content?.kind === 'function_response' && event.content.name === 'Write',
-          ).length,
-          1,
+          await readFile(join(sourceRoot, 'notes.txt'), 'utf8'),
+          'user changed source while Host was down\n',
         );
+        const readerOwner = await tryAcquireInteractiveRootReader(capability);
+        assert.ok(readerOwner);
+        const reader = await openInteractiveExecutionStoresForRead(readerOwner.lease);
+        try {
+          const runs = await reader.agentRunStore.listSessionRuns(executionId);
+          const events = (
+            await Promise.all(
+              runs.map((run) =>
+                reader.runtimeEventStore.readImmutableRuntimeEvents(executionId, run.runId),
+              ),
+            )
+          ).flat();
+          assert.equal(
+            events.filter(
+              (event) => event.content?.kind === 'function_call' && event.content.name === 'Write',
+            ).length,
+            1,
+          );
+          assert.equal(
+            events.filter(
+              (event) =>
+                event.content?.kind === 'function_response' && event.content.name === 'Write',
+            ).length,
+            1,
+          );
+        } finally {
+          await reader.sessionStore.close?.();
+          await readerOwner.close();
+        }
       } finally {
-        await reader.sessionStore.close?.();
-        await readerOwner.close();
+        await fixture.close();
       }
-    } finally {
-      await fixture.close();
-    }
-  });
+    });
+  }
 }
 
 test('packaged managed-coding-v2 resumes after Host death without replaying a completed Node test', {

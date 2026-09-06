@@ -3769,6 +3769,12 @@ export function prepareRecoveredManagedWriteEditProof(input: {
   if (
     ledger.hasCorruption ||
     ledger.operations.length !== 1 ||
+    // Nested calls may carry an extra non-durable result budget. Recovery
+    // only owns the top-level fixed profile until that budget is in T1.
+    (callEvent.origin !== undefined && callEvent.origin !== 'provider') ||
+    callEvent.modelVisibility === 'hidden' ||
+    callEvent.refs?.parentToolCallId !== undefined ||
+    callEvent.refs?.parentOperationId !== undefined ||
     call?.kind !== 'function_call' ||
     (call.name !== 'Write' && call.name !== 'Edit') ||
     dispatch?.recoveryMode !== 'reconcile' ||

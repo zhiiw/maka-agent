@@ -129,7 +129,7 @@ export function resolveCreateSessionRequest(
 export function resolveAutomaticWorkspaceToolProfile(
   request: ResolvedCreateSessionRequest,
   workspace: WorkspaceTarget,
-  availableProfiles: readonly SessionToolProfile[] = ['managed-coding-v2'],
+  availableProfiles: readonly SessionToolProfile[] = [],
 ): SessionToolProfile | undefined {
   if (request.mode !== undefined) return undefined;
 

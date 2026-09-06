@@ -99,6 +99,22 @@ describe('ToolRuntime durable boundary', () => {
                   ts: live.durableOutcome.ts,
                 }),
               );
+              const nestedCall = structuredClone(prepared.runtimeEvent);
+              const nestedDispatch = structuredClone(prepared.dispatchRuntimeEvent);
+              for (const event of [nestedCall, nestedDispatch]) {
+                event.origin = 'code_mode';
+                event.modelVisibility = 'hidden';
+              }
+              assert.throws(
+                () =>
+                  prepareRecoveredManagedWriteEditProof({
+                    callEvent: nestedCall,
+                    dispatchEvent: nestedDispatch,
+                    baseContent: scenario.base,
+                    ts: live.durableOutcome.ts,
+                  }),
+                /eligible for pure Write\/Edit recovery/u,
+              );
               verified = true;
               return {
                 kind: live.isError
