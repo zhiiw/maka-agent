@@ -522,6 +522,7 @@ export interface RuntimeManagedMutationAdmission {
 
 interface DurableToolAttempt {
   operationId: string;
+  readonly outcomeCommitted: boolean;
   canonicalArgsHash: `sha256:${string}`;
   responseEventId: string;
   prepareOutcome(
@@ -555,6 +556,19 @@ class RuntimeCommitBoundaryError extends Error {
   }
 }
 
+class RuntimeOutcomePublicationError extends Error {
+  constructor(
+    readonly operationId: string,
+    cause: unknown,
+  ) {
+    super(
+      `Tool outcome already committed; publication failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+    this.name = 'RuntimeOutcomePublicationError';
+  }
+}
+
 class RuntimeManagedMutationUnsettledError extends Error {
   constructor(cause: unknown) {
     super(
@@ -583,7 +597,11 @@ class ToolResultLimitError extends Error {
 }
 
 export function isRuntimeCommitBoundaryError(error: unknown): boolean {
-  return error instanceof RuntimeCommitBoundaryError;
+  // Both failures must escape provider/Code Mode tool-error normalization.
+  // Publication failure is not a failed T2: its original outcome is immutable.
+  return (
+    error instanceof RuntimeCommitBoundaryError || error instanceof RuntimeOutcomePublicationError
+  );
 }
 
 export class ToolRuntime {
@@ -2220,10 +2238,14 @@ export class ToolRuntime {
     } catch (err) {
       if (
         err instanceof RuntimeCommitBoundaryError ||
+        err instanceof RuntimeOutcomePublicationError ||
         err instanceof RuntimeManagedMutationUnsettledError ||
         err instanceof RuntimeManagedObservationUnsettledError
       ) {
         throw err;
+      }
+      if (durableAttempt?.outcomeCommitted) {
+        throw new RuntimeOutcomePublicationError(durableAttempt.operationId, err);
       }
       // Admission exists only after the owner has selected managed mode and
       // Runtime has committed its T1 dispatch. From that point onward every
@@ -2563,6 +2585,9 @@ export class ToolRuntime {
     let committedOutcome: { id: string; operationId: string; ts: number } | undefined;
     return {
       operationId,
+      get outcomeCommitted() {
+        return committedOutcome !== undefined;
+      },
       canonicalArgsHash,
       responseEventId: `${operationId}_response`,
       prepareOutcome: (result, isError, durationMs, terminalKind) => {

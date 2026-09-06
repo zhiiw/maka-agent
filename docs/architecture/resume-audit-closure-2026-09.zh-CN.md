@@ -11,7 +11,7 @@
 | --- | --- | --- | --- |
 | 基础文件任务可用性 | Host 在 Session 创建前证明 profile，M5 缺失不阻塞五种文件工具 | 已实现，定向测试通过；真实 Desktop/Host 验收待补 | 仅 Gitoxide 时可创建文件任务；完整 profile 缺能力仍拒绝 |
 | active T1 收敛 | 原 operation 的 Runtime proof 与 workspace terminal 一致 | 已实现纯 Write/Edit；真实 Host 两个 crash 点通过 | T1 / candidate 后 kill，重启不重放外部副作用 |
-| transcript 单一权威 | RuntimeEvent 决定 live、replay、历史页面 | 沿用上游 #4791 / #4879，不平行重写 importer | T2 后投影失败不得变成失败结果；历史与 active 切换一致 |
+| transcript 单一权威 | RuntimeEvent 决定 live、replay、历史页面 | 已遏止成功 T2 后生成矛盾失败结果；完整切换沿用上游 #4791 / #4879 | T2 后投影失败不得变成失败结果；历史与 active 切换一致 |
 | 连续恢复策略 | accepted history 独立于 source；Stop 与无进展重启不得自动重跑 | 已关闭 Git/非 Git 内容漂移阻塞；多代恢复待实现 | source 前进后恢复；多代有进展恢复；Stop / 无进展 park |
 | 有界在线读取 | workspace authority 在线读取不扫描全库历史 | 待实现 | 无关历史增长不导致单次 admission 全量 decode |
 | 产品证据 | 真实 Host/worker、Desktop IPC 与 crash matrix | 文件 profile IPC、Linux Host T1/candidate crash 已通过；其余矩阵待补齐 | Git / 非 Git、多次 kill、平台显式结果 |
@@ -73,3 +73,16 @@ Owner 继续使用原有 candidate/SQLite terminal/accepted-ref 事务和幂等�
 一次原始 Write 调用及其结果；source checkout 不被修改。WSL 挂载目录模块加载较慢，
 这两个测试显式使用 60 秒 startup budget、180 秒总时限，不修改生产 timeout。
 本轮没有 Windows/macOS 完整 Host crash 证据，也没有把无进展多代自动重启判为安全。
+
+## T2 与 transcript publication
+
+Durable attempt 现在显式拥有 committed 状态。T2 成功以后，transcript、SessionEvent 或
+telemetry 发布异常属于 publication failure，不再进入工具业务异常处理，也不生成第二个
+synthetic tool result。这个错误穿透 provider/Code Mode 的普通错误归一化，让当前执行
+fail-stop；原 RuntimeEvent 成功事实保持不变，不能把它误报为 T2 提交失败。
+
+这是完整单权威迁移前的安全遏止，不是自动补齐 `StoredMessage` 的实现。历史页面缺失的
+通用重建、旧 JSONL 导入和 active/completed 统一读取由 #4879 交付，避免两个 importer。
+在该前置合入之前，UI 仍可能暂时缺少那条记录；本轮没有承诺投影故障完全无感。
+新增 transient transcript failure 和 telemetry failure 两项先 RED 后 GREEN，
+Runtime durable-boundary 最终 60/60，通过结果仅证明这两个控制流不再制造矛盾事实。

@@ -31,6 +31,7 @@ import type {
 } from '../runtime-commit-sink.js';
 import {
   ToolRuntime,
+  isRuntimeCommitBoundaryError,
   prepareRecoveredManagedWriteEditProof,
   type MakaTool,
   type RuntimeManagedObservationAdmission,
@@ -348,7 +349,7 @@ describe('ToolRuntime durable boundary', () => {
 
     await assert.rejects(
       harness.executeWithInput(managedTest, { relativePaths: ['src/a.test.mjs'] }),
-      /Managed observation remains unsettled: live publication unavailable/u,
+      /Tool outcome already committed; publication failed: live publication unavailable/u,
     );
     assert.equal(outcomes.length, 1);
     const response = outcomes[0]?.runtimeEvent.content;
@@ -2223,6 +2224,66 @@ describe('ToolRuntime durable boundary', () => {
       false,
     );
   });
+
+  for (const surface of ['transcript', 'telemetry'] as const) {
+    it(`does not replace committed success after a ${surface} publication failure`, async () => {
+      const outcomes: ToolOutcomeCommit[] = [];
+      const published: StoredMessage[] = [];
+      let implementationCalls = 0;
+      let projectionAttempts = 0;
+      const harness = makeHarness(
+        {
+          commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+          commitToolOutcome: async (input) => {
+            outcomes.push(input);
+            return { created: true, runtimeEventSeq: 2 };
+          },
+        },
+        undefined,
+        'run-1',
+        {
+          appendMessage: async (message) => {
+            if (message.type === 'tool_result') {
+              projectionAttempts += 1;
+              if (surface === 'transcript' && projectionAttempts === 1)
+                throw new Error('projection temporarily unavailable');
+            }
+            published.push(message);
+          },
+          recordToolInvocation: () => {
+            if (surface === 'telemetry') throw new Error('telemetry unavailable');
+          },
+        },
+      );
+      await assert.rejects(
+        harness.execute(
+          tool(() => {
+            implementationCalls += 1;
+            return { ok: true };
+          }),
+        ),
+        (error: unknown) => {
+          assert.ok(isRuntimeCommitBoundaryError(error));
+          assert.match(String(error), /Tool outcome already committed; publication failed/u);
+          return true;
+        },
+      );
+      assert.equal(implementationCalls, 1);
+      assert.equal(projectionAttempts, 1);
+      assert.equal(outcomes.length, 1);
+      const response = outcomes[0]?.runtimeEvent.content;
+      assert.equal(response?.kind, 'function_response');
+      assert.equal(response?.kind === 'function_response' && response.isError === true, false);
+      assert.equal(
+        published.some((message) => message.type === 'tool_result' && message.isError),
+        false,
+      );
+      assert.equal(
+        harness.events.some((event) => event.type === 'tool_result' && event.isError),
+        false,
+      );
+    });
+  }
 
   it('commits a normalized error outcome before returning a thrown tool failure to the model', async () => {
     const outcomes: ToolOutcomeCommit[] = [];
