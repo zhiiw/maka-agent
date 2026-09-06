@@ -31,6 +31,7 @@ import type {
 } from '../runtime-commit-sink.js';
 import {
   ToolRuntime,
+  prepareRecoveredManagedWriteEditProof,
   type MakaTool,
   type RuntimeManagedObservationAdmission,
   type RuntimeManagedObservationExecution,
@@ -40,6 +41,92 @@ import {
 } from '../tool-runtime.js';
 
 describe('ToolRuntime durable boundary', () => {
+  for (const scenario of [
+    { name: 'Write', base: 'before\n', args: { path: 'notes.txt', content: 'after\n' } },
+    { name: 'Write', base: 'same\n', args: { path: 'notes.txt', content: 'same\n' } },
+    {
+      name: 'Edit',
+      base: 'before\n',
+      args: { path: 'notes.txt', old_string: 'missing', new_string: 'after' },
+    },
+  ] as const) {
+    it(`recovers the exact Runtime-owned ${scenario.name} result from original T1 (${JSON.stringify(scenario.args)})`, async () => {
+      let prepared: ToolPreparedCommit | undefined;
+      let verified = false;
+      const harness = makeHarness(
+        {
+          commitToolPrepared: async (input) => {
+            prepared = input;
+            return { created: true, runtimeEventSeq: 1 };
+          },
+          commitToolOutcome: async () => {
+            throw new Error('Generic T2 is forbidden');
+          },
+        },
+        undefined,
+        'run-1',
+        {
+          admitManagedMutation: async () => ({
+            durableDispatch: managedMutationDispatch(),
+            immutableBase: { content: scenario.base },
+            execute: async (operation) => {
+              const live = await operation();
+              assert.ok(prepared);
+              const recovered = prepareRecoveredManagedWriteEditProof({
+                callEvent: prepared.runtimeEvent,
+                dispatchEvent: prepared.dispatchRuntimeEvent,
+                baseContent: scenario.base,
+                ts: live.durableOutcome.ts,
+              });
+              assert.deepEqual(recovered.content, live.content);
+              assert.deepEqual(recovered.mutationResult, live.mutationResult);
+              assert.equal(recovered.isError, live.isError);
+              const expected = structuredClone(live.durableOutcome);
+              if (expected.actions) {
+                delete expected.actions.stateDelta;
+                if (Object.keys(expected.actions).length === 0) delete expected.actions;
+              }
+              assert.deepEqual(recovered.durableOutcome, expected);
+              assert.equal(Object.isFrozen(recovered.content), true);
+              const wrongHash = structuredClone(prepared.dispatchRuntimeEvent);
+              wrongHash.actions!.toolDispatch!.canonicalArgsHash = `sha256:${'0'.repeat(64)}`;
+              assert.throws(() =>
+                prepareRecoveredManagedWriteEditProof({
+                  callEvent: prepared!.runtimeEvent,
+                  dispatchEvent: wrongHash,
+                  baseContent: scenario.base,
+                  ts: live.durableOutcome.ts,
+                }),
+              );
+              verified = true;
+              return {
+                kind: live.isError
+                  ? 'operation_failed_no_effect_committed'
+                  : live.mutationResult?.changed
+                    ? 'workspace_successor_committed'
+                    : 'no_workspace_change_committed',
+                durableOutcome: live.durableOutcome,
+              };
+            },
+            dispose: async () => undefined,
+          }),
+        },
+      );
+      const managedTool = tool(() => {
+        throw new Error('Mutable tool implementation must not run');
+      });
+      managedTool.name = scenario.name;
+      managedTool.recoveryMode = 'reconcile';
+      managedTool.durableExecutionProfile = 'managed_mutation_v2';
+      await harness.executeWithInput(managedTool, scenario.args);
+      assert.ok(prepared);
+      assert.equal(
+        verified,
+        true,
+        'Runtime must not swallow a failed proof assertion as unsettled',
+      );
+    });
+  }
   it('freezes one managed observation before T1 and commits exact T2 before admission returns', async () => {
     const order: string[] = [];
     const prepared: ToolPreparedCommit[] = [];

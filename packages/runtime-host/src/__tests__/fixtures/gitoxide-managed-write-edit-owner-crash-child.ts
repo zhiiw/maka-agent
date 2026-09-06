@@ -33,6 +33,7 @@ import {
 import { createGitoxideManagedWriteEditOwnerInternal } from '../../server/gitoxide-managed-write-edit-owner-internal.js';
 
 interface Fixture {
+  readonly crashPoint?: 'after_t1' | 'after_workspace_successor_commit';
   readonly storageRoot: string;
   readonly repositoryPath: string;
   readonly helperPath: string;
@@ -103,6 +104,18 @@ const identity = {
   runId: 'run-real-write',
   turnId: 'turn-real-write',
 };
+await stores.agentRunStore.createRun({
+  ...identity,
+  status: 'running',
+  backendKind: 'fake',
+  llmConnectionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  llmConnectionSlug: 'fake',
+  modelId: 'fake-model',
+  cwd: fixture.repositoryPath,
+  permissionMode: 'ask',
+  createdAt: 1,
+  updatedAt: 1,
+});
 const canonicalArgsHash = canonicalToolArgsHash('Write', fixture.args);
 await stores.runtimeEventStore.commitToolPrepared({
   operationId: fixture.operationId,
@@ -148,6 +161,7 @@ await stores.runtimeEventStore.commitToolPrepared({
   recoveryMode: 'reconcile',
   committedAt: 2,
 });
+if (fixture.crashPoint === 'after_t1') process.exit(73);
 const durableOutcome = {
   id: 'outcome-event-real-write',
   ...identity,

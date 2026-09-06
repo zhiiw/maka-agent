@@ -40,6 +40,7 @@ import type {
   RuntimeManagedMutationSettlement,
   ToolRuntimeInput,
 } from '@maka/runtime/tool-runtime';
+import { prepareRecoveredManagedWriteEditProof } from '@maka/runtime/tool-runtime';
 import type { InteractiveExecutionStoresWriter } from '@maka/storage/execution-stores';
 import {
   issueExecutionStoresWorkspaceMutationAuthorityInternal,
@@ -62,7 +63,10 @@ import {
 const ACCEPTED_REF = 'refs/maka/accepted';
 const SHA1_PATTERN = /^[0-9a-f]{40}$/u;
 
-export type GitoxideManagedWriteEditOwnerFailpoint = 'after_workspace_successor_commit';
+export type GitoxideManagedWriteEditOwnerFailpoint =
+  | 'after_managed_t1'
+  | 'after_candidate_capture'
+  | 'after_workspace_successor_commit';
 
 export class GitoxideManagedWriteEditRecoveryError extends Error {
   constructor(
@@ -79,6 +83,8 @@ export class GitoxideManagedWriteEditRecoveryError extends Error {
 
 export interface GitoxideManagedWriteEditOwnerInternal {
   readonly admitManagedMutation: NonNullable<ToolRuntimeInput['admitManagedMutation']>;
+  /** Startup-only, while the root owner has not admitted new executions. */
+  recoverPreparedPureMutation(abortSignal?: AbortSignal): Promise<'none' | 'settled' | 'parked'>;
   reconcileAcceptedProjection(abortSignal?: AbortSignal): Promise<'already_current' | 'promoted'>;
   readCandidateRetentionRoots(): Promise<{
     readonly acceptedCommitOid: string;
@@ -285,7 +291,8 @@ export function createGitoxideManagedWriteEditOwnerInternal(
         );
       }
       const evidence = await persistence.readMutationEvidence(version.origin.operationId);
-      if (!evidence) throw new Error('Gitoxide projection recovery operation evidence is missing');
+      if (!evidence?.outcomeEvent)
+        throw new Error('Gitoxide projection recovery operation evidence is missing');
       const path = validateAcceptedSuccessorEvidence({
         epoch,
         parentHead,
@@ -349,6 +356,64 @@ export function createGitoxideManagedWriteEditOwnerInternal(
     }
   };
 
+  const recoverPreparedPureMutation = async (
+    abortSignal?: AbortSignal,
+  ): Promise<'none' | 'settled' | 'parked'> => {
+    abortSignal?.throwIfAborted();
+    const reservation = await persistence.readActiveMutation(input.workspaceInstanceId);
+    if (!reservation) return 'none';
+    const evidence = await persistence.readMutationEvidence(reservation.operationId);
+    if (
+      !evidence ||
+      evidence.outcomeEvent ||
+      evidence.dispatchEvent.id !== reservation.dispatchEventId
+    ) {
+      throw new Error('Prepared mutation recovery has inconsistent durable evidence');
+    }
+    const call = evidence.callEvent.content;
+    const mutation = evidence.dispatchEvent.actions?.toolDispatch?.managedMutation;
+    // A command is not a pure Write/Edit transform. Never use its output,
+    // retained candidate, or caller claims as authority to rerun it.
+    if (
+      call?.kind !== 'function_call' ||
+      (call.name !== 'Write' && call.name !== 'Edit') ||
+      mutation?.operationKind !== 'write_edit_v2' ||
+      mutation.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST
+    )
+      return 'parked';
+    const run = await input.stores.agentRunStore.readRun(
+      evidence.callEvent.sessionId,
+      evidence.callEvent.runId,
+    );
+    if (run.status !== 'running' || run.invocationId !== evidence.callEvent.invocationId)
+      return 'parked';
+
+    const signal = abortSignal ?? new AbortController().signal;
+    const admission = await admitManagedMutation({
+      operationId: reservation.operationId,
+      toolName: call.name,
+      persistedArgs: call.args,
+      abortSignal: signal,
+    });
+    try {
+      if (!admission.immutableBase || !isDeepStrictEqual(admission.durableDispatch, mutation)) {
+        throw new Error('Prepared mutation recovery conflicts with its original base/profile');
+      }
+      signal.throwIfAborted();
+      const proof = prepareRecoveredManagedWriteEditProof({
+        callEvent: evidence.callEvent,
+        dispatchEvent: evidence.dispatchEvent,
+        baseContent: admission.immutableBase.content,
+        ts: Math.max(Date.now(), evidence.dispatchEvent.ts),
+      });
+      const settled = await admission.execute(async () => proof);
+      if (settled.kind === 'unsettled') throw settled.error;
+      return 'settled';
+    } finally {
+      await admission.dispose();
+    }
+  };
+
   const readCandidateRetentionRoots = async () => {
     const [epoch, head] = await Promise.all([
       persistence.readEpoch(input.workspaceId, input.workspaceEpochId),
@@ -377,6 +442,7 @@ export function createGitoxideManagedWriteEditOwnerInternal(
 
   return Object.freeze({
     admitManagedMutation,
+    recoverPreparedPureMutation,
     reconcileAcceptedProjection,
     readCandidateRetentionRoots,
   });
@@ -398,6 +464,7 @@ async function settleManagedMutation(input: {
   readonly durableDispatch: RuntimeEventManagedWorkspaceMutation;
   readonly failpoint?: (point: GitoxideManagedWriteEditOwnerFailpoint) => void | Promise<void>;
 }): Promise<RuntimeManagedMutationSettlement> {
+  await input.failpoint?.('after_managed_t1');
   const proof = await input.operation();
   const reservation = await input.persistence.readActiveMutation(input.epoch.workspaceInstanceId);
   if (!reservationMatchesAdmission(reservation, input)) {
@@ -431,6 +498,7 @@ async function settleManagedMutation(input: {
       mutation.content,
       input.durableDispatch.executionProfileDigest,
     );
+    await input.failpoint?.('after_candidate_capture');
   } catch (error) {
     return Object.freeze({ kind: 'unsettled' as const, error });
   }
@@ -755,6 +823,7 @@ function validateAcceptedSuccessorEvidence(input: {
   const call = input.evidence.callEvent;
   const dispatch = input.evidence.dispatchEvent;
   const outcome = input.evidence.outcomeEvent;
+  if (!outcome) throw new Error('Gitoxide projection recovery durable outcome is missing');
   const callContent = call.content;
   const dispatchFact = dispatch.actions?.toolDispatch;
   const managed = dispatchFact?.managedMutation;

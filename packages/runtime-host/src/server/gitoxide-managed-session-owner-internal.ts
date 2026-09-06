@@ -272,6 +272,9 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     executionRootOwner: ManagedNodeTestExecutionRootOwnerInternal;
     commandOwner: ManagedCommandSandboxOwnerInternal;
   }>;
+  /** Only Host startup may settle prepared pure transforms before sealing old Runs. */
+  readonly recoverPreparedMutation?: true;
+  readonly mutationFailpoint?: import('./gitoxide-managed-write-edit-owner-internal.js').GitoxideManagedWriteEditOwnerInputInternal['failpoint'];
   readonly failpoint?: (point: GitoxideManagedSessionOwnerFailpoint) => void | Promise<void>;
 }): Promise<GitoxideManagedSessionOwnerInternal> {
   input.abortSignal?.throwIfAborted();
@@ -656,6 +659,7 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     workspaceEpochId: identity.workspaceEpochId,
     workspaceInstanceId: identity.workspaceInstanceId,
     ...(nodeTransform ? { managedNodeTransform: nodeTransform.admission } : {}),
+    ...(input.mutationFailpoint ? { failpoint: input.mutationFailpoint } : {}),
   });
   const review = createGitoxideManagedReviewOwnerInternal({
     invocationOwnerToken: input.invocationOwnerToken,
@@ -862,6 +866,9 @@ export async function openGitoxideManagedSessionOwnerInternal(input: {
     helperCapability: input.helperCapability,
     readCandidateRetentionRoots: () => writeEdit.readCandidateRetentionRoots(),
   });
+  if (input.recoverPreparedMutation) {
+    await writeEdit.recoverPreparedPureMutation(input.abortSignal);
+  }
   await writeEdit.reconcileAcceptedProjection(input.abortSignal);
   const rebaseline = async (
     rebaselineId: string,

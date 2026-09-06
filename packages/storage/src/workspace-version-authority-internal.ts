@@ -128,7 +128,8 @@ export interface ManagedMutationEvidenceRecordV1 {
   readonly operationId: string;
   readonly callEvent: RuntimeEvent;
   readonly dispatchEvent: RuntimeEvent;
-  readonly outcomeEvent: RuntimeEvent;
+  /** Absent while the original T1 remains prepared. */
+  readonly outcomeEvent?: RuntimeEvent;
 }
 type ManagedMutationReservationReader = (
   workspaceInstanceId: string,

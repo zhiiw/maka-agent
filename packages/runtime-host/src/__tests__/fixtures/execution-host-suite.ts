@@ -130,6 +130,8 @@ export interface ExecutionHostHandle {
 }
 
 export interface ExecutionHostTestOptions {
+  readonly startupTimeoutMs?: number;
+  readonly managedMutationFailpoint?: 'after_managed_t1' | 'after_candidate_capture';
   readonly packagedResourcesRoot?: string;
   readonly runtimeExecutablePath?: string;
   readonly providerCallLogPath?: string;
@@ -1069,7 +1071,7 @@ export class ExecutionFixture {
     testOptions: ExecutionHostTestOptions = {},
   ): Promise<ExecutionHostHandle> {
     const child = this.spawnHost('inherit', recoveryProbe, safeBoundaryResumeEnabled, testOptions);
-    const ready = await waitForHostReady(child);
+    const ready = await waitForHostReady(child, testOptions.startupTimeoutMs);
     return { child, ...ready };
   }
 
@@ -1270,6 +1272,9 @@ export class ExecutionFixture {
     testOptions: ExecutionHostTestOptions = {},
   ): ChildProcess {
     const env = { ...process.env };
+    if (testOptions.managedMutationFailpoint)
+      env.MAKA_TEST_MANAGED_MUTATION_FAILPOINT = testOptions.managedMutationFailpoint;
+    else delete env.MAKA_TEST_MANAGED_MUTATION_FAILPOINT;
     if (safeBoundaryResumeEnabled) env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME = '1';
     else delete env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME;
     if (testOptions.packagedResourcesRoot) {
@@ -1693,6 +1698,7 @@ export function userRuntimeContent(
 
 function waitForHostReady(
   child: ChildProcess,
+  timeoutMs = PROCESS_TIMEOUT_MS,
 ): Promise<{ hostEpoch: string; endpoint: string; recoveryOutcome?: RuntimeEvent }> {
   return withTimeout(
     new Promise((resolve, reject) => {
@@ -1722,7 +1728,7 @@ function waitForHostReady(
       child.once('exit', onExit);
       child.on('message', onMessage);
     }),
-    PROCESS_TIMEOUT_MS,
+    timeoutMs,
     'execution Host did not become ready',
   );
 }

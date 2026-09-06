@@ -59,6 +59,7 @@ if (packagedResourcesRoot) {
 
 const providerCallLogPath = process.env.MAKA_TEST_PROVIDER_CALL_LOG;
 const continuationFailpoint = process.env.MAKA_TEST_CONTINUATION_FAILPOINT;
+const managedMutationFailpoint = process.env.MAKA_TEST_MANAGED_MUTATION_FAILPOINT;
 const shellRunTerminalFailpoint = process.env.MAKA_TEST_SHELL_RUN_TERMINAL_FAILPOINT;
 if (shellRunTerminalFailpoint && !isAbsolute(shellRunTerminalFailpoint)) {
   throw new Error('MAKA_TEST_SHELL_RUN_TERMINAL_FAILPOINT must be absolute');
@@ -106,6 +107,13 @@ const result = await startExecutionRuntimeHostCandidate(
           ? async (point) => {
               if (point !== continuationFailpoint) return;
               process.send?.({ type: 'test.continuation_failpoint', point });
+              await new Promise<never>(() => undefined);
+            }
+          : undefined,
+        managedMutationFailpoint: managedMutationFailpoint
+          ? async (point) => {
+              if (point !== managedMutationFailpoint) return;
+              process.send?.({ type: 'test.managed_mutation_failpoint', point });
               await new Promise<never>(() => undefined);
             }
           : undefined,

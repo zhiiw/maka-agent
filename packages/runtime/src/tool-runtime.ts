@@ -77,6 +77,7 @@ import {
   type RuntimeEventManagedWorkspaceMutation,
 } from '@maka/core/runtime-event';
 import { isDeepStrictEqual } from 'node:util';
+import { scanToolLedger } from '@maka/core/tool-ledger-scanner';
 
 import { recordToolArtifactsSafely, type ToolArtifactRecorder } from './tool-artifacts.js';
 import { computerActionFields, describeComputerUseArgsViolation } from './computer-use-codec.js';
@@ -2549,54 +2550,16 @@ export class ToolRuntime {
       durationMs: number | undefined,
       ts: number,
       terminalKind?: 'no_workspace_change' | 'operation_failed_no_effect',
-    ): RuntimeEvent => ({
-      id: `${operationId}_response`,
-      invocationId,
-      runId,
-      sessionId: this.input.sessionId,
-      turnId: input.startEvent.turnId,
-      ts,
-      partial: false,
-      role: 'tool',
-      author: 'tool',
-      origin: input.startEvent.origin ?? 'provider',
-      modelVisibility: input.startEvent.modelVisibility ?? 'visible',
-      content: {
-        kind: 'function_response',
-        id: input.startEvent.toolUseId,
-        name: input.tool.name,
+    ): RuntimeEvent =>
+      buildDurableToolResponseEvent({
+        callEvent,
+        dispatchEvent,
         result,
-        ...(isError ? { isError: true } : {}),
-      },
-      refs: {
-        operationId,
-        toolCallId: input.startEvent.toolUseId,
-        ...(input.startEvent.parentToolCallId
-          ? { parentToolCallId: input.startEvent.parentToolCallId }
-          : {}),
-        ...(input.startEvent.parentOperationId
-          ? { parentOperationId: input.startEvent.parentOperationId }
-          : {}),
-      },
-      ...(durationMs !== undefined || terminalKind
-        ? {
-            actions: {
-              ...(durationMs !== undefined ? { stateDelta: { durationMs } } : {}),
-              ...(terminalKind
-                ? {
-                    managedMutationTerminal: {
-                      protocol: 'managed_mutation_terminal_v1' as const,
-                      operationId,
-                      dispatchEventId: `${operationId}_dispatch`,
-                      workspaceInstanceId: input.managedMutation!.workspaceInstanceId,
-                      terminalKind,
-                    },
-                  }
-                : {}),
-            },
-          }
-        : {}),
-    });
+        isError,
+        durationMs,
+        ts,
+        terminalKind,
+      });
     let committedOutcome: { id: string; operationId: string; ts: number } | undefined;
     return {
       operationId,
@@ -3759,6 +3722,156 @@ function normalizeManagedMutationSettlement(settlement: unknown):
     kind,
     durableOutcome,
   };
+}
+
+/**
+ * Recomputes a pure transform, never a tool invocation. The caller must hold
+ * the original prepared reservation and supply content from its exact Git
+ * base. Terminal publication remains exclusively owned by the workspace.
+ */
+export function prepareRecoveredManagedWriteEditProof(input: {
+  readonly callEvent: RuntimeEvent;
+  readonly dispatchEvent: RuntimeEvent;
+  readonly baseContent: string | null;
+  readonly ts: number;
+}): RuntimeManagedMutationOperationProof {
+  const callEvent = decodeRuntimeEvent(input.callEvent);
+  const dispatchEvent = decodeRuntimeEvent(input.dispatchEvent);
+  const ledger = scanToolLedger([callEvent, dispatchEvent]);
+  const call = callEvent.content;
+  const dispatch = dispatchEvent.actions?.toolDispatch;
+  const mutation = dispatch?.managedMutation;
+  if (
+    ledger.hasCorruption ||
+    ledger.operations.length !== 1 ||
+    call?.kind !== 'function_call' ||
+    (call.name !== 'Write' && call.name !== 'Edit') ||
+    dispatch?.recoveryMode !== 'reconcile' ||
+    mutation?.protocol !== 'managed_mutation_v2' ||
+    mutation.operationKind !== 'write_edit_v2' ||
+    mutation.executionProfileDigest !== MANAGED_MUTATION_EXECUTION_PROFILE_V2_DIGEST ||
+    !Number.isFinite(input.ts) ||
+    input.ts < dispatchEvent.ts
+  ) {
+    throw new Error('Prepared mutation is not eligible for pure Write/Edit recovery');
+  }
+  let rawResult: unknown;
+  let mutationResult: RuntimeManagedMutationResultProof | undefined;
+  try {
+    const transformed = transformManagedMutation({
+      toolName: call.name,
+      canonicalPath: mutation.expectedPath,
+      baseContent: input.baseContent,
+      args: call.args,
+    });
+    rawResult = transformed.providerResult;
+    mutationResult = Object.freeze({
+      path: mutation.expectedPath,
+      content: transformed.content,
+      changed: transformed.changed,
+    });
+  } catch (error) {
+    rawResult = { error: formatSyntheticToolErrorText(error) };
+  }
+  const result = snapshotManagedToolResult(rawResult, undefined);
+  const content = Object.freeze(coerceResultContent(result));
+  const isError = deriveToolResultStatus(content, result) !== 'success';
+  const terminalKind = isError
+    ? 'operation_failed_no_effect'
+    : mutationResult && !mutationResult.changed
+      ? 'no_workspace_change'
+      : undefined;
+  // Original execution duration is unknown after process loss; do not invent
+  // elapsed time in the durable event. The proof's duration is recomputation-only.
+  const durableOutcome = buildDurableToolResponseEvent({
+    callEvent,
+    dispatchEvent,
+    result: content,
+    isError,
+    ts: input.ts,
+    terminalKind,
+  });
+  decodeRuntimeEvent(durableOutcome);
+  return Object.freeze({
+    content,
+    isError,
+    durationMs: 0,
+    ...(mutationResult ? { mutationResult } : {}),
+    durableOutcome,
+    ...(terminalKind
+      ? { terminalOutcome: Object.freeze({ kind: terminalKind, durableOutcome }) }
+      : {}),
+  });
+}
+
+function buildDurableToolResponseEvent(input: {
+  readonly callEvent: RuntimeEvent;
+  readonly dispatchEvent: RuntimeEvent;
+  readonly result: unknown;
+  readonly isError: boolean;
+  readonly ts: number;
+  readonly durationMs?: number;
+  readonly terminalKind?: 'no_workspace_change' | 'operation_failed_no_effect';
+}): RuntimeEvent {
+  const call = input.callEvent.content;
+  const dispatch = input.dispatchEvent.actions?.toolDispatch;
+  if (call?.kind !== 'function_call' || !dispatch) {
+    throw new Error('Tool response requires its original call and dispatch');
+  }
+  const operationId = dispatch.operationId;
+  if (input.terminalKind && !dispatch.managedMutation) {
+    throw new Error('Managed terminal requires its original mutation identity');
+  }
+  return Object.freeze({
+    id: `${operationId}_response`,
+    invocationId: input.callEvent.invocationId,
+    runId: input.callEvent.runId,
+    sessionId: input.callEvent.sessionId,
+    turnId: input.callEvent.turnId,
+    ts: input.ts,
+    partial: false,
+    role: 'tool',
+    author: 'tool',
+    origin: input.callEvent.origin ?? 'provider',
+    modelVisibility: input.callEvent.modelVisibility ?? 'visible',
+    content: Object.freeze({
+      kind: 'function_response' as const,
+      id: call.id,
+      name: call.name,
+      result: input.result,
+      ...(input.isError ? { isError: true } : {}),
+    }),
+    refs: Object.freeze({
+      operationId,
+      toolCallId: call.id,
+      ...(input.callEvent.refs?.parentToolCallId
+        ? { parentToolCallId: input.callEvent.refs.parentToolCallId }
+        : {}),
+      ...(input.callEvent.refs?.parentOperationId
+        ? { parentOperationId: input.callEvent.refs.parentOperationId }
+        : {}),
+    }),
+    ...(input.durationMs !== undefined || input.terminalKind
+      ? {
+          actions: Object.freeze({
+            ...(input.durationMs !== undefined
+              ? { stateDelta: Object.freeze({ durationMs: input.durationMs }) }
+              : {}),
+            ...(input.terminalKind
+              ? {
+                  managedMutationTerminal: Object.freeze({
+                    protocol: 'managed_mutation_terminal_v1' as const,
+                    operationId,
+                    dispatchEventId: input.dispatchEvent.id,
+                    workspaceInstanceId: dispatch.managedMutation!.workspaceInstanceId,
+                    terminalKind: input.terminalKind,
+                  }),
+                }
+              : {}),
+          }),
+        }
+      : {}),
+  });
 }
 
 function coerceResultContent(raw: unknown): ToolResultContent {

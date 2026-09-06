@@ -1972,12 +1972,14 @@ export class SqliteRuntimeStore
   > {
     return this.readTransaction(() => {
       const operation = this.readToolOperationSync(operationId);
-      if (!operation?.dispatchEventId || !operation.resultEventId) return undefined;
+      if (!operation?.dispatchEventId) return undefined;
       return Object.freeze({
         operationId,
         callEvent: this.readRequiredRuntimeEvent(operation.callEventId),
         dispatchEvent: this.readRequiredRuntimeEvent(operation.dispatchEventId),
-        outcomeEvent: this.readRequiredRuntimeEvent(operation.resultEventId),
+        ...(operation.resultEventId
+          ? { outcomeEvent: this.readRequiredRuntimeEvent(operation.resultEventId) }
+          : {}),
       });
     });
   }

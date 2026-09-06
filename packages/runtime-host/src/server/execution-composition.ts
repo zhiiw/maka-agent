@@ -269,6 +269,7 @@ export interface ExecutionRuntimeHostCompositionDependencies {
   ) => Promise<void>;
   /** Production-shaped crash-test seam after external-effect completion and before Runtime T2. */
   readonly beforeExternalEffectOutcomeCommit?: () => void;
+  readonly managedMutationFailpoint?: import('./gitoxide-managed-write-edit-owner-internal.js').GitoxideManagedWriteEditOwnerInputInternal['failpoint'];
   /** Test/telemetry seam; it observes decisions but owns no durable state. */
   readonly onContinuationLifecycleEvent?: (
     event: RuntimeContinuationLifecycleEvent,
@@ -850,6 +851,9 @@ export async function createExecutionRuntimeHostComposition(
                   sourceRoot: backendContext.header.cwd,
                   sessionId: backendContext.sessionId,
                   abortSignal: backendContext.abortSignal,
+                  ...(dependencies.managedMutationFailpoint
+                    ? { mutationFailpoint: dependencies.managedMutationFailpoint }
+                    : {}),
                   ...(backendContext.header.toolProfile === 'managed-coding-v2' &&
                   managedCommandOwner
                     ? {
@@ -2028,6 +2032,33 @@ export async function createExecutionRuntimeHostComposition(
               openedShellRunStore,
               recoverySessions.map((session) => session.id),
             );
+            // Settle pure prepared mutations while their original Run is still
+            // open, before interrupted-session repair seals it and before any
+            // new continuation can claim its immutable high-water boundary.
+            if (gitoxideHelperCapability) {
+              for (const session of recoverySessions) {
+                if (session.isArchived || !isManagedCodingSessionToolProfile(session.toolProfile))
+                  continue;
+                try {
+                  await openGitoxideManagedSessionOwnerInternal({
+                    storageRootLease: context.owner.lease,
+                    stores,
+                    invocationOwnerToken: gitoxideInvocationOwnerToken,
+                    helperCapability: gitoxideHelperCapability,
+                    sourceRoot: session.cwd,
+                    sessionId: session.id,
+                    recoverPreparedMutation: true,
+                  });
+                } catch (error) {
+                  // Keep unresolved reservations parked. A single corrupt or
+                  // unsupported task must not prevent the Host from starting.
+                  console.warn(
+                    `[startup] managed mutation recovery parked for ${session.id}`,
+                    error,
+                  );
+                }
+              }
+            }
             await manager.recoverInterruptedSessionsStrict(stores);
             await manager.recoverChildWorkspacePatches(
               recoverySessions.flatMap((session) =>
