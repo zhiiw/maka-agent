@@ -125,7 +125,10 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
     });
     const firstClient = await connectClient(root);
     assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
-      profiles: process.platform === 'win32' ? [] : ['managed-coding-v2'],
+      profiles:
+        process.platform === 'win32'
+          ? ['managed-files-v2']
+          : ['managed-files-v2', 'managed-coding-v2'],
     });
     const startRequest = firstClient.request('hosted.execution.start', {
       executionId,
@@ -325,7 +328,10 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a co
     });
     const firstClient = await connectClient(root);
     assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
-      profiles: process.platform === 'win32' ? [] : ['managed-coding-v2'],
+      profiles:
+        process.platform === 'win32'
+          ? ['managed-files-v2']
+          : ['managed-files-v2', 'managed-coding-v2'],
     });
     const startRequest = firstClient.request('hosted.execution.start', {
       executionId,
@@ -736,7 +742,10 @@ test('packaged managed-coding-v2 resumes after Host death without replaying an a
     });
     const firstClient = await connectClient(root);
     assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
-      profiles: process.platform === 'win32' ? [] : ['managed-coding-v2'],
+      profiles:
+        process.platform === 'win32'
+          ? ['managed-files-v2']
+          : ['managed-files-v2', 'managed-coding-v2'],
     });
     const startRequest = firstClient.request('hosted.execution.start', {
       executionId,
@@ -914,7 +923,10 @@ test('packaged managed-coding-v2 resumes after Host death without replaying a fe
     });
     const firstClient = await connectClient(root);
     assert.deepEqual(await firstClient.request('host.execution-profiles.query', {}), {
-      profiles: process.platform === 'win32' ? [] : ['managed-coding-v2'],
+      profiles:
+        process.platform === 'win32'
+          ? ['managed-files-v2']
+          : ['managed-files-v2', 'managed-coding-v2'],
     });
     const startRequest = firstClient.request('hosted.execution.start', {
       executionId,

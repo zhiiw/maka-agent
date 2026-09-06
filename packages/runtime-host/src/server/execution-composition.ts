@@ -2147,6 +2147,7 @@ export async function createExecutionRuntimeHostComposition(
       handlers,
       moduleIds: Object.freeze(domainModules.map(({ id }) => id)),
       executionProfiles: Object.freeze([
+        ...(gitoxideHelperCapability ? (['managed-files-v2'] as const) : []),
         ...(gitoxideHelperCapability &&
         managedNodeTestToolDeclaration &&
         managedNodeCommandToolDeclaration &&

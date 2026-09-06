@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import type { SessionToolProfile } from '@maka/core/session';
+import { isManagedCodingSessionToolProfile, type SessionToolProfile } from '@maka/core/session';
 import type { MakaTool } from '@maka/runtime/tool-runtime';
 import { z } from 'zod';
 
@@ -31,12 +31,17 @@ const HEADLESS_CODING_V1_TOOL_NAMES = [
   'apply_patch',
 ] as const;
 
+const MANAGED_FILES_V2_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Write', 'Edit'] as const;
+const MANAGED_FILES_V2_SYSTEM_PROMPT = [
+  'Inspect the managed Git workspace with Read, Glob, and Grep.',
+  'Modify it with Write and Edit.',
+  'All five tools consume the same immutable accepted Git tree.',
+  'File changes publish an owner-verified successor, not changes to the attached checkout.',
+  'This task has no shell, dependency installation, or test execution capability. Do not claim to have run commands or tests.',
+  'Stop when the requested changes are complete.',
+].join('\n');
 const MANAGED_CODING_V2_TOOL_NAMES = [
-  'Read',
-  'Glob',
-  'Grep',
-  'Write',
-  'Edit',
+  ...MANAGED_FILES_V2_TOOL_NAMES,
   'Bash',
   'ManagedNodeTest',
   'ManagedNodeRun',
@@ -100,6 +105,13 @@ export function hostedExecutionRunProfile(
       memoryExtraction: false,
     };
   }
+  if (profile === 'managed-files-v2') {
+    return {
+      toolNames: MANAGED_FILES_V2_TOOL_NAMES,
+      systemPrompt: MANAGED_FILES_V2_SYSTEM_PROMPT,
+      memoryExtraction: false,
+    };
+  }
   if (profile === 'managed-coding-v2') {
     return {
       toolNames: MANAGED_CODING_V2_TOOL_NAMES,
@@ -131,7 +143,7 @@ export function projectHostedExecutionTools(
     throw new Error(`Hosted tool profile is unavailable: ${missing.join(', ')}`);
   }
   return (selected as MakaTool[]).map((tool) => {
-    if (profile === 'managed-coding-v2') {
+    if (isManagedCodingSessionToolProfile(profile)) {
       if (tool.name === 'Read' || tool.name === 'Glob' || tool.name === 'Grep') {
         return { ...tool, recoveryMode: 'replay_safe' };
       }

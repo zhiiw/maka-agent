@@ -23,7 +23,8 @@ import type { SessionCreateInput } from '@maka/runtime-host/protocol';
 import type { IpcHandler } from '../ipc-reconnect-policy.js';
 import { registerRuntimeHostSessionCatalogIpc } from '../runtime-host-session-catalog-ipc-main.js';
 
-test('Desktop main automatically admits ordinary project sessions to managed coding', async () => {
+for (const profile of ['managed-files-v2', 'managed-coding-v2'] as const) {
+test(`Desktop main freezes the Host-admitted ${profile} before creating the session`, async () => {
   const handlers = new Map<string, IpcHandler>();
   const creates: SessionCreateInput[] = [];
 
@@ -32,7 +33,7 @@ test('Desktop main automatically admits ordinary project sessions to managed cod
       client: {
         async queryHostExecutionProfiles() {
           return {
-            profiles: ['managed-coding-v2'] as const,
+            profiles: [profile],
           };
         },
         async createSession(input: SessionCreateInput) {
@@ -60,9 +61,10 @@ test('Desktop main automatically admits ordinary project sessions to managed cod
   await create({} as never, { projectId: 'project-1' });
 
   assert.equal(creates.length, 1);
-  assert.equal(creates[0]?.toolProfile, 'managed-coding-v2');
+  assert.equal(creates[0]?.toolProfile, profile);
   assert.deepEqual(creates[0]?.workspace, { kind: 'project', projectId: 'project-1' });
 });
+}
 
 function sessionProjection(input: SessionCreateInput) {
   return {

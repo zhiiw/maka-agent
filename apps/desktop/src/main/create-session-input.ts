@@ -137,6 +137,7 @@ export function resolveAutomaticWorkspaceToolProfile(
     case 'project':
     case 'host_path': {
       if (availableProfiles.includes('managed-coding-v2')) return 'managed-coding-v2';
+      if (availableProfiles.includes('managed-files-v2')) return 'managed-files-v2';
       throw new Error('Managed coding is unavailable in the active Runtime Host.');
     }
   }

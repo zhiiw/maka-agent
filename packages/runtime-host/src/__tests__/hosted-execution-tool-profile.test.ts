@@ -199,3 +199,30 @@ test('managed coding v2 is the only complete durable coding profile', () => {
   assert.equal(selected.at(-1)?.recoveryMode, 'reconcile');
   assert.equal(selected.at(-1)?.durableExecutionProfile, 'managed_mutation_v2');
 });
+
+test('managed files v2 freezes accepted-world tools without requiring command producers', () => {
+  const profile = hostedExecutionRunProfile('managed-files-v2');
+  assert.ok(profile);
+  assert.deepEqual(profile.toolNames, ['Read', 'Glob', 'Grep', 'Write', 'Edit']);
+  assert.match(profile.systemPrompt, /no shell, dependency installation, or test execution/u);
+  const tools = [...profile.toolNames, 'Bash', 'ManagedNodeTest'].map(
+    (name): MakaTool => ({
+      name,
+      description: name,
+      parameters: z.object({}),
+      impl: async () => 'not used',
+    }),
+  );
+  const selected = projectHostedExecutionTools(tools, 'managed-files-v2');
+  assert.deepEqual(
+    selected.map(({ name }) => name),
+    profile.toolNames,
+  );
+  assert.deepEqual(
+    selected.map(({ recoveryMode }) => recoveryMode),
+    ['replay_safe', 'replay_safe', 'replay_safe', 'reconcile', 'reconcile'],
+  );
+  assert.equal(selected[3]?.durableExecutionProfile, 'managed_mutation_v2');
+  assert.equal(selected[4]?.durableExecutionProfile, 'managed_mutation_v2');
+  assert.throws(() => projectHostedExecutionTools(tools, 'managed-coding-v2'), /unavailable/u);
+});

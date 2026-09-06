@@ -95,7 +95,9 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 81 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 82 as const;
+// 82: File-only managed tasks have an independent, durable profile. An older
+// Host cannot decode this profile or advertise its exact tool ceiling.
 // 81: Desktop freezes the managed execution profile from the resident Host's
 // exact admitted capability set before Session creation. Older peers cannot
 // prove managed-coding-v2 availability and must not silently select it.

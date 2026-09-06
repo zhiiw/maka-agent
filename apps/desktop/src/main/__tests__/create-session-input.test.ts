@@ -124,6 +124,23 @@ describe('resolveCreateSessionRequest', () => {
     );
   });
 
+  it('selects file-only managed tasks before Session creation without command authority', () => {
+    const request = resolve({});
+    const workspace = { kind: 'project', projectId: 'project-1' } as const;
+    assert.equal(
+      resolveAutomaticWorkspaceToolProfile(request, workspace, ['managed-files-v2']),
+      'managed-files-v2',
+    );
+    assert.equal(
+      resolveAutomaticWorkspaceToolProfile(request, workspace, [
+        'managed-files-v2',
+        'managed-coding-v2',
+      ]),
+      'managed-coding-v2',
+    );
+    assert.throws(() => resolveAutomaticWorkspaceToolProfile(request, workspace, []));
+  });
+
   it('does not let the renderer mint an internal tool profile', () => {
     const resolved = resolve({ toolProfile: 'managed-coding-v1' });
     assert.equal('toolProfile' in resolved, false);
