@@ -33,11 +33,44 @@ import type {
 } from '../runtime-commit-sink.js';
 import {
   ToolRuntime,
+  isRuntimeCommitBoundaryError,
   type MakaTool,
   type RuntimeManagedMutationAdmission,
 } from '../tool-runtime.js';
 
 describe('ToolRuntime durable boundary', () => {
+  it('does not contradict committed T2 when result telemetry fails', async () => {
+    const outcomes: ToolOutcomeCommit[] = [];
+    const harness = makeHarness(
+      {
+        commitToolPrepared: async () => ({ created: true, runtimeEventSeq: 1 }),
+        commitToolOutcome: async (input) => {
+          outcomes.push(input);
+          return { created: true, runtimeEventSeq: 2 };
+        },
+      },
+      undefined,
+      undefined,
+      {
+        recordToolInvocation: () => {
+          throw new Error('telemetry unavailable');
+        },
+      },
+    );
+
+    await assert.rejects(harness.execute(tool(() => ({ ok: true }))), (error: unknown) => {
+      assert.ok(isRuntimeCommitBoundaryError(error), 'provider loop must fail-stop, not retry');
+      assert.match(String(error), /telemetry unavailable/);
+      return true;
+    });
+
+    assert.equal(outcomes.length, 1);
+    assert.equal(outcomes[0]?.runtimeEvent.content?.kind, 'function_response');
+    const results = harness.events.filter((event) => event.type === 'tool_result');
+    assert.equal(results.length, 1, 'publication must not append a contradictory failure');
+    assert.equal(results[0]?.isError, false);
+  });
+
   it('does not invoke the tool or publish a result when T1 fails', async () => {
     let implementationCalls = 0;
     const harness = makeHarness({

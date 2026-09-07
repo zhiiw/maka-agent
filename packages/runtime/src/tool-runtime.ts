@@ -501,6 +501,7 @@ export interface RuntimeManagedMutationAdmission {
 interface DurableToolAttempt {
   operationId: string;
   responseEventId: string;
+  readonly outcomeCommitted: boolean;
   commitOutcome(
     result: unknown,
     isError: boolean,
@@ -537,6 +538,16 @@ class RuntimeManagedMutationUnsettledError extends Error {
   }
 }
 
+class RuntimeOutcomePublicationError extends Error {
+  constructor(cause: unknown) {
+    super(
+      `Durable tool outcome committed but publication failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+    this.name = 'RuntimeOutcomePublicationError';
+  }
+}
+
 class ToolResultLimitError extends Error {
   constructor() {
     super('Tool result byte limit exceeded');
@@ -545,7 +556,9 @@ class ToolResultLimitError extends Error {
 }
 
 export function isRuntimeCommitBoundaryError(error: unknown): boolean {
-  return error instanceof RuntimeCommitBoundaryError;
+  return (
+    error instanceof RuntimeCommitBoundaryError || error instanceof RuntimeOutcomePublicationError
+  );
 }
 
 export class ToolRuntime {
@@ -1971,6 +1984,11 @@ export class ToolRuntime {
         pauseTarget?.resume();
       }
     } catch (err) {
+      // A committed/adopted T2 is irreversible here. Delivery and telemetry
+      // cannot reinterpret its tool result, even on the generic tool path.
+      if (durableAttempt?.outcomeCommitted) {
+        throw new RuntimeOutcomePublicationError(err);
+      }
       if (
         err instanceof RuntimeCommitBoundaryError ||
         err instanceof RuntimeManagedMutationUnsettledError
@@ -2323,6 +2341,9 @@ export class ToolRuntime {
     return {
       operationId,
       responseEventId: `${operationId}_response`,
+      get outcomeCommitted() {
+        return committedOutcome !== undefined;
+      },
       commitOutcome: async (result, isError, modelProjection, durationMs) => {
         if (committedOutcome) return committedOutcome;
         const responseEvent = buildResponseEvent(
