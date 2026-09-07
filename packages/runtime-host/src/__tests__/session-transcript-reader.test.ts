@@ -45,8 +45,9 @@ test('keeps durable history separate from the canonical active overlay', async (
   const owner = await tryAcquireInteractiveRootOwner(capability);
   assert.ok(owner);
   if (!owner) assert.fail('expected the interactive root owner');
+  let storesToClose: ExecutionStoresWriter<'interactive'> | undefined;
   try {
-    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const stores = (storesToClose = await openInteractiveExecutionStoresForWrite(owner.lease));
     const session = await stores.sessionStore.create({
       cwd: capability.canonicalPath,
       llmConnectionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
@@ -267,6 +268,7 @@ test('keeps durable history separate from the canonical active overlay', async (
       ],
     );
   } finally {
+    await storesToClose?.sessionStore.close?.();
     await owner.close();
     await rm(base, { recursive: true, force: true });
   }
@@ -277,8 +279,9 @@ test('pages the ledger without materializing Turns it takes no rows from', async
   const capability = await resolveStorageRoot({ path: join(base, 'root'), kind: 'interactive' });
   const owner = await tryAcquireInteractiveRootOwner(capability);
   assert.ok(owner);
+  let storesToClose: ExecutionStoresWriter<'interactive'> | undefined;
   try {
-    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const stores = (storesToClose = await openInteractiveExecutionStoresForWrite(owner.lease));
     const session = await stores.sessionStore.create({
       cwd: capability.canonicalPath,
       llmConnectionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
@@ -557,6 +560,7 @@ test('pages the ledger without materializing Turns it takes no rows from', async
     });
     assert.deepEqual(frozen.fragments, tail.fragments);
   } finally {
+    await storesToClose?.sessionStore.close?.();
     await owner.close();
     await rm(base, { recursive: true, force: true });
   }
