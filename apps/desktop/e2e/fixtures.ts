@@ -517,6 +517,7 @@ async function withE2eWindow(
 
 type E2eTestFixtures = {
   window: Page;
+  restartableWindow: { page: Page; restart(): Promise<Page> };
   gitReviewWindow: { page: Page; projectRoot: string };
   invocableSkillsWindow: Page;
   projectSidebarWindow: Page;
@@ -531,6 +532,36 @@ type E2eTestFixtures = {
 };
 
 export const test = base.extend<E2eTestFixtures>({
+  restartableWindow: async ({}, use) => {
+    await withE2eWindow(
+      { seed: true, readinessSelector: COMPOSER_INPUT, locale: 'zh-CN' },
+      async (page, { userDataDir, app }) => {
+        let currentApp = app;
+        try {
+          await use({
+            page,
+            restart: async () => {
+              // Graceful Desktop restart, not a Host kill or a power-loss test.
+              // Reuse only this fixture's directory; never seed it a second time.
+              await closeElectronApplication(currentApp, 5_000);
+              currentApp = await electron.launch({
+                args: ['.'],
+                cwd: DESKTOP_ROOT,
+                env: buildFixtureEnv(userDataDir, path.join(userDataDir, 'home'), {
+                  locale: 'zh-CN',
+                }),
+              });
+              const nextPage = await currentApp.firstWindow();
+              await nextPage.waitForSelector(COMPOSER_INPUT, { timeout: 20_000 });
+              return nextPage;
+            },
+          });
+        } finally {
+          if (currentApp !== app) await closeElectronApplication(currentApp, 5_000);
+        }
+      },
+    );
+  },
   directoryReferenceWindow: async ({}, use) => {
     await withE2eWindow(
       { seed: true, readinessSelector: COMPOSER_INPUT, locale: 'zh-CN', showWindow: true },

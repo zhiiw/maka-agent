@@ -5,6 +5,10 @@
     "Every spec below records the Electron-owned mechanism it needs. If you cannot name one, the test does not belong here."
   ],
   "specs": {
+    "transcript-recovery.spec.ts": {
+      "tests": 4,
+      "electron": "real renderer replacement and Desktop process restart must rehydrate the same Host/SQLite transcript without duplicate or resurrected turns"
+    },
     "composer-directory-reference.spec.ts": {
       "tests": 1,
       "electron": "the folder reference has to survive a renderer reload and still agree with the Host's session record"

@@ -115,6 +115,7 @@ interface ObservedSessionState {
   readonly subscriptionOwner: RuntimeHostSessionSubscriptionOwner;
   pendingTranscriptConsumers: number;
   replica?: DesktopTranscriptReplica;
+  detachedTranscriptGeneration?: string;
   snapshot?: SessionContinuitySnapshot;
   projector?: RuntimeHostSessionProjector;
   transcriptAccess: number;
@@ -259,7 +260,20 @@ export class RuntimeHostSessionObserver {
     let admitted = false;
     try {
       await Promise.race([state.subscriptionOwner.waitUntilReady(), cancelled]);
-      if (!state.replica?.resident) {
+      const rootTurn = state.snapshot?.rootTurn;
+      // A retained replica's overlay is the snapshot from its original Host
+      // subscription, not the live stream delivered to the previous renderer.
+      // A replacement renderer needs a fresh bounded Host bootstrap while a
+      // Turn is running; an unchanged durable watermark does not make that
+      // overlay current. Do not create a second local transcript writer.
+      const staleActiveOverlay =
+        state.replica !== undefined &&
+        (state.detachedTranscriptGeneration === state.replica.generation ||
+          [...state.transcriptConsumers.values()].some((consumer) => consumer.target.id === target.id)) &&
+        rootTurn !== undefined &&
+        rootTurn !== null &&
+        !isTerminalTurn(rootTurn);
+      if (!state.replica?.resident || staleActiveOverlay) {
         await Promise.race([state.subscriptionOwner.refresh(), cancelled]);
       }
       if (this.#pendingTranscriptConsumers.get(consumerId) !== pending) await cancelled;
@@ -1393,6 +1407,9 @@ export class RuntimeHostSessionObserver {
   ): void {
     if (state.transcriptConsumers.get(consumer.consumerId) !== consumer) return;
     state.transcriptConsumers.delete(consumer.consumerId);
+    if (state.transcriptConsumers.size === 0) {
+      state.detachedTranscriptGeneration = state.replica?.generation;
+    }
     this.#transcriptConsumers.delete(consumer.consumerId);
     consumer.resetRequested = false;
     this.#clearPendingTranscriptChange(consumer);
