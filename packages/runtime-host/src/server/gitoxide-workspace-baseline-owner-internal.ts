@@ -18,6 +18,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { continuationStartEventMatchesClaim } from '@maka/core/runtime-boundary';
 import {
   prepareGitoxideMutationInternal,
   type GitoxideMutationAdmissionInput,
@@ -188,13 +189,70 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
       });
       if (prefix.prefixDigest !== proof.prefixDigest)
         throw new Error('Managed continuation source prefix changed');
-      const outcome = prefix.events.find((event) => event.id === version.origin.outcomeEventId);
-      const dispatch = prefix.events.find((event) => event.id === version.origin.dispatchEventId);
+      let evidence = prefix;
+      if (!evidence.events.some((event) => event.id === version.origin.outcomeEventId)) {
+        // Only a store-authenticated continuation may inherit accepted evidence.
+        // A caller-supplied parent ID (or today's latest head) is not lineage.
+        const opening = prefix.events[0];
+        const source =
+          opening?.content?.kind === 'invocation_opened' ? opening.content.source : undefined;
+        const state =
+          source?.kind === 'continuation' && source.boundaryDigest
+            ? await stores.runtimeEventStore.readContinuationClaimStateByBoundary(
+                source.boundaryDigest,
+              )
+            : undefined;
+        if (
+          !state ||
+          state.startEventId !== opening?.id ||
+          !continuationStartEventMatchesClaim(opening, state.claim, state.startKind) ||
+          state.claim.target.sessionId !== input.sessionId ||
+          state.claim.target.runId !== input.sourceRunId ||
+          state.claim.boundary.segments.length > 32
+        ) {
+          throw new Error(
+            'Managed accepted head does not belong to the source Run: no authenticated lineage',
+          );
+        }
+        // At most 32 ancestors, each bounded to 1 MiB / 1,024 events. Do not
+        // recursively follow arbitrary parent links or load unlimited history.
+        for (const segment of [...state.claim.boundary.segments].reverse()) {
+          input.abortSignal?.throwIfAborted();
+          if (
+            segment.identity.sessionId !== input.sessionId ||
+            segment.identity.runId === input.sourceRunId
+          )
+            throw new Error('Invalid managed continuation ancestor');
+          const ancestorInput = {
+            sessionId: input.sessionId,
+            runId: segment.identity.runId,
+            upToEventSeq: segment.position.lastEventSeq,
+          };
+          const ancestorProof = await stores.runtimeEventStore.readImmutableRuntimePrefixProof(
+            ancestorInput,
+            { maxEvents: 1024, maxBytes: 1024 * 1024, maxRecordBytes: 1024 * 1024 },
+          );
+          if (
+            ancestorProof.prefixDigest !== segment.prefixDigest ||
+            ancestorProof.position.lastEventSeq !== segment.position.lastEventSeq
+          )
+            throw new Error('Managed continuation ancestor prefix changed');
+          const ancestor = await stores.runtimeEventStore.readImmutableRuntimePrefix(ancestorInput);
+          if (ancestor.prefixDigest !== ancestorProof.prefixDigest)
+            throw new Error('Managed continuation ancestor changed during verification');
+          if (ancestor.events.some((event) => event.id === version.origin.outcomeEventId)) {
+            evidence = ancestor;
+            break;
+          }
+        }
+      }
+      const outcome = evidence.events.find((event) => event.id === version.origin.outcomeEventId);
+      const dispatch = evidence.events.find((event) => event.id === version.origin.dispatchEventId);
       const mutation = dispatch?.actions?.toolDispatch?.managedMutation;
       if (
         !outcome ||
         outcome.sessionId !== input.sessionId ||
-        outcome.runId !== input.sourceRunId ||
+        outcome.runId !== evidence.identity.runId ||
         outcome.content?.kind !== 'function_response' ||
         outcome.content.isError === true ||
         outcome.refs?.operationId !== version.origin.operationId ||

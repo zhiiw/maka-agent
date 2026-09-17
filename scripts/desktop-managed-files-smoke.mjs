@@ -69,7 +69,9 @@ await git(
   'baseline',
 );
 const requests = [];
-const interruptTurn = process.argv.includes('--interrupt-turn');
+const repeatInterrupt = process.argv.includes('--repeat-interrupt');
+const interruptTurn = repeatInterrupt || process.argv.includes('--interrupt-turn');
+let restartNumber = 0;
 let waitingForCompletion = false;
 let operationStep = 0;
 const operations = [
@@ -105,7 +107,11 @@ const server = createServer(async (req, res) => {
     );
     return;
   }
-  if (interruptTurn && !restarted && operationStep === operations.length) {
+  if (
+    interruptTurn &&
+    ((!restarted && operationStep === operations.length) ||
+      (repeatInterrupt && restartNumber === 1 && operationStep === 1))
+  ) {
     // A real model request containing all tool results is our observable barrier.
     // Leave the response open: the turn cannot finish before the Host is killed.
     waitingForCompletion = true;
@@ -311,141 +317,150 @@ try {
     2,
   );
   const { controlDirectory } = await resolveExistingStorageRootControlDirectory(capability);
-  const registration = JSON.parse(
-    await readFile(join(controlDirectory, 'registration.json'), 'utf8'),
-  );
-  assert.equal(registration.rootId, capability.rootId);
-  assert.equal(registration.state, 'ready');
-  assert.ok(Number.isSafeInteger(registration.pid) && registration.pid > 0);
-  // Desktop may launch through a utility process. Verify the actual Host command,
-  // not an assumed direct-parent topology, against this newly created root.
-  const command =
-    process.platform === 'win32'
-      ? (
-          await promisify(execFile)(
-            'powershell.exe',
-            [
-              '-NoProfile',
-              '-NonInteractive',
-              '-Command',
-              `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${registration.pid}').CommandLine`,
-            ],
-            { timeout: 10000, windowsHide: true },
-          )
-        ).stdout.trim()
-      : (
-          await promisify(execFile)('ps', ['-o', 'args=', '-p', String(registration.pid)], {
-            timeout: 10000,
-          })
-        ).stdout.trim();
-  assert.ok(command.includes(capability.rootId), 'Host must name the isolated root ID');
-  assert.ok(command.includes(workspace), 'Host must name the isolated workspace path');
-  assert.ok(command.includes('--expected-root-id'), 'Host must use verified-root startup');
-  process.kill(registration.pid, 'SIGKILL');
-  await closeElectronApplication(app, 5000);
-  app = undefined;
-  restarted = true;
-  operationStep = 0;
-  app = await electron.launch({
-    args: [join(repo, 'scripts/desktop-managed-smoke-entry.cjs')],
-    cwd: join(repo, 'apps/desktop'),
-    env,
-    timeout: 30000,
-  });
-  app.process().stderr?.on('data', (chunk) => logs.push(chunk.toString()));
-  await expect
-    .poll(
-      () => {
-        page = app
-          .windows()
-          .find(
-            (candidate) =>
-              candidate.url().includes('/index.html') && !candidate.url().includes('surface='),
-          );
-        return Boolean(page);
-      },
-      { timeout: 30000 },
-    )
-    .toBe(true);
-  await page
-    .getByText('Managed files smoke task', { exact: true })
-    .first()
-    .click({ timeout: 30000 });
-  if (interruptTurn) {
-    await page
-      .getByRole('button', { name: 'Continue this turn', exact: true })
-      .click({ timeout: 30000 });
-  } else {
-    await expect(page.getByText('MANAGED_DESKTOP_SMOKE_OK', { exact: true })).toBeVisible({
-      timeout: 30000,
-    });
-    await page
-      .locator('.maka-composer-editor [contenteditable="true"]')
-      .fill('Read tracked.txt after restarting. Do not write or edit.');
-    await page.locator('.maka-composer button[type="submit"]').click();
-  }
-  {
-    await expect(page.getByText('MANAGED_DESKTOP_REOPEN_OK', { exact: true })).toBeVisible({
-      timeout: 30000,
-    });
-    const afterRequest = requests.filter(({ body }) => body.stream).at(-1);
-    const afterResults = afterRequest.body.messages
-      .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
-      .filter((part) => part.type === 'tool_result');
-    assert.equal(
-      afterResults.length,
-      4,
-      'Reopened model history includes the three durable results and new Read',
+  for (restartNumber = 1; restartNumber <= (repeatInterrupt ? 2 : 1); restartNumber++) {
+    const registration = JSON.parse(
+      await readFile(join(controlDirectory, 'registration.json'), 'utf8'),
     );
-    assert.match(JSON.stringify(afterResults.at(-1)), /edited/);
-    assert.equal(Boolean(afterResults.at(-1)?.is_error), false);
-  }
-  assert.deepEqual(
-    readMutations(),
-    mutationsBefore,
-    'Reopen must preserve the exact Write/Edit outcomes and successors',
-  );
-  if (interruptTurn) {
-    const db = new DatabaseSync(join(workspace, 'runtime.sqlite'), { readOnly: true });
-    try {
-      const openings = db
-        .prepare('SELECT payload_json FROM runtime_events ORDER BY rowid')
-        .all()
-        .map(({ payload_json }) => JSON.parse(payload_json))
-        .filter((event) => event.content?.kind === 'invocation_opened');
-      assert.equal(openings.length, 2, 'Continue creates exactly one new Run');
-      assert.equal(openings[0].content.source.kind, 'fresh');
-      const source = openings[1].content.source;
-      assert.equal(source.kind, 'continuation', 'Resume must not degrade to a fresh message');
-      assert.equal(source.sourceRunId, openings[0].runId);
-      assert.notEqual(openings[1].runId, openings[0].runId);
-      assert.ok(source.claimId);
-      assert.ok(source.sourceRuntimeEventHighWater > 0);
-      assert.match(source.boundaryDigest, /^sha256:[a-f0-9]{64}$/);
-    } finally {
-      db.close();
+    assert.equal(registration.rootId, capability.rootId);
+    assert.equal(registration.state, 'ready');
+    assert.ok(Number.isSafeInteger(registration.pid) && registration.pid > 0);
+    // Desktop may launch through a utility process. Verify the actual Host command,
+    // not an assumed direct-parent topology, against this newly created root.
+    const command =
+      process.platform === 'win32'
+        ? (
+            await promisify(execFile)(
+              'powershell.exe',
+              [
+                '-NoProfile',
+                '-NonInteractive',
+                '-Command',
+                `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${registration.pid}').CommandLine`,
+              ],
+              { timeout: 10000, windowsHide: true },
+            )
+          ).stdout.trim()
+        : (
+            await promisify(execFile)('ps', ['-o', 'args=', '-p', String(registration.pid)], {
+              timeout: 10000,
+            })
+          ).stdout.trim();
+    assert.ok(command.includes(capability.rootId), 'Host must name the isolated root ID');
+    assert.ok(command.includes(workspace), 'Host must name the isolated workspace path');
+    assert.ok(command.includes('--expected-root-id'), 'Host must use verified-root startup');
+    process.kill(registration.pid, 'SIGKILL');
+    await closeElectronApplication(app, 5000);
+    app = undefined;
+    restarted = true;
+    operationStep = 0;
+    waitingForCompletion = false;
+    app = await electron.launch({
+      args: [join(repo, 'scripts/desktop-managed-smoke-entry.cjs')],
+      cwd: join(repo, 'apps/desktop'),
+      env,
+      timeout: 30000,
+    });
+    app.process().stderr?.on('data', (chunk) => logs.push(chunk.toString()));
+    await expect
+      .poll(
+        () => {
+          page = app
+            .windows()
+            .find(
+              (candidate) =>
+                candidate.url().includes('/index.html') && !candidate.url().includes('surface='),
+            );
+          return Boolean(page);
+        },
+        { timeout: 30000 },
+      )
+      .toBe(true);
+    await page
+      .getByText('Managed files smoke task', { exact: true })
+      .first()
+      .click({ timeout: 30000 });
+    if (interruptTurn) {
+      await page
+        .getByRole('button', { name: 'Continue this turn', exact: true })
+        .click({ timeout: 30000 });
+    } else {
+      await expect(page.getByText('MANAGED_DESKTOP_SMOKE_OK', { exact: true })).toBeVisible({
+        timeout: 30000,
+      });
+      await page
+        .locator('.maka-composer-editor [contenteditable="true"]')
+        .fill('Read tracked.txt after restarting. Do not write or edit.');
+      await page.locator('.maka-composer button[type="submit"]').click();
     }
+    {
+      if (repeatInterrupt && restartNumber === 1) {
+        await expect.poll(() => waitingForCompletion, { timeout: 30000 }).toBe(true);
+      } else {
+        await expect(page.getByText('MANAGED_DESKTOP_REOPEN_OK', { exact: true })).toBeVisible({
+          timeout: 30000,
+        });
+      }
+      const afterRequest = requests.filter(({ body }) => body.stream).at(-1);
+      const afterResults = afterRequest.body.messages
+        .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+        .filter((part) => part.type === 'tool_result');
+      assert.equal(
+        afterResults.length,
+        3 + restartNumber,
+        'Reopened model history includes the three durable results and new Read',
+      );
+      assert.match(JSON.stringify(afterResults.at(-1)), /edited/);
+      assert.equal(Boolean(afterResults.at(-1)?.is_error), false);
+    }
+    assert.deepEqual(
+      readMutations(),
+      mutationsBefore,
+      'Reopen must preserve the exact Write/Edit outcomes and successors',
+    );
+    if (interruptTurn) {
+      const db = new DatabaseSync(join(workspace, 'runtime.sqlite'), { readOnly: true });
+      try {
+        const openings = db
+          .prepare('SELECT payload_json FROM runtime_events ORDER BY rowid')
+          .all()
+          .map(({ payload_json }) => JSON.parse(payload_json))
+          .filter((event) => event.content?.kind === 'invocation_opened');
+        assert.equal(openings.length, 1 + restartNumber, 'Continue creates exactly one new Run');
+        assert.equal(openings[0].content.source.kind, 'fresh');
+        const source = openings[restartNumber].content.source;
+        assert.equal(source.kind, 'continuation', 'Resume must not degrade to a fresh message');
+        assert.equal(source.sourceRunId, openings[restartNumber - 1].runId);
+        assert.notEqual(openings[restartNumber].runId, openings[restartNumber - 1].runId);
+        assert.ok(source.claimId);
+        assert.ok(source.sourceRuntimeEventHighWater > 0);
+        assert.match(source.boundaryDigest, /^sha256:[a-f0-9]{64}$/);
+      } finally {
+        db.close();
+      }
+    }
+    const reopened = JSON.parse(
+      await readFile(join(controlDirectory, 'registration.json'), 'utf8'),
+    );
+    assert.equal(reopened.rootId, capability.rootId);
+    assert.notEqual(reopened.hostEpoch, registration.hostEpoch);
+    assert.equal(await readFile(join(source, 'tracked.txt'), 'utf8'), 'baseline\n');
+    await page.screenshot({ path: join(root, 'reopened.png') });
+    await writeFile(
+      join(root, 'restart-evidence.json'),
+      JSON.stringify(
+        {
+          oldEpoch: registration.hostEpoch,
+          newEpoch: reopened.hostEpoch,
+          mutationEvents: mutationsBefore.map((event) => event.id),
+          checkpoint: interruptTurn
+            ? 'tool results durable; model completion pending; explicit source-bound Continue'
+            : 'completed turn; not an in-flight mutation crash',
+        },
+        null,
+        2,
+      ),
+    );
   }
-  const reopened = JSON.parse(await readFile(join(controlDirectory, 'registration.json'), 'utf8'));
-  assert.equal(reopened.rootId, capability.rootId);
-  assert.notEqual(reopened.hostEpoch, registration.hostEpoch);
-  assert.equal(await readFile(join(source, 'tracked.txt'), 'utf8'), 'baseline\n');
-  await page.screenshot({ path: join(root, 'reopened.png') });
-  await writeFile(
-    join(root, 'restart-evidence.json'),
-    JSON.stringify(
-      {
-        oldEpoch: registration.hostEpoch,
-        newEpoch: reopened.hostEpoch,
-        mutationEvents: mutationsBefore.map((event) => event.id),
-        checkpoint: interruptTurn
-          ? 'tool results durable; model completion pending; explicit source-bound Continue'
-          : 'completed turn; not an in-flight mutation crash',
-      },
-      null,
-      2,
-    ),
-  );
   console.log(
     `PASS: ${interruptTurn ? 'interrupted turn continues with accepted Read' : 'completed turn reopens with accepted Read'} after Host kill and Desktop restart; mutation events unchanged.`,
   );

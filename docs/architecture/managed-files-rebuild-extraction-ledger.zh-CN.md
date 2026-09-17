@@ -804,3 +804,25 @@ Host 的 WorkHub disabled-resume 定向测试在清理临时 runtime.sqlite 时�
 现有能力：成功 Write/Edit 已接受后，在等待模型期间中断，可以显式 Continue 并消费旧结果；源 checkout 不被修改。尚不能宣称任意 Write/Edit 中途都能自动恢复，也不能宣称只读任务、多轮反复中断已闭环。
 
 不作为这一交付前置：自动启动恢复、扫描优化、Bash/npm/tests、Publish/Undo、非 Git importer、长期 GC。它们分别属于自动化体验、额外执行能力或 workspace 生命周期，不应为了“Write/Edit Resume 完整”无止境扩张本轮范围。源码 checkout 的交付/发布也不是恢复成功的隐含行为。
+
+## 第四十一检查点：认证继承 head，并暴露第二次重启的 owner 缺口
+
+source Run 自己没有当前 successor 时，checkpoint inspector 现在只允许通过已持久化的 continuation claim/start 继承：opening 必须与 store-owned claim 的 target/startEventId 完整匹配，复用 core 的 continuationStartEventMatchesClaim；从 claim 固定的祖先 segment 读取 immutable prefix，并比较固定 high-water 与 prefix digest。在该前缀中找到 accepted version 的原始 outcome/dispatch 后，仍执行原有 workspace/epoch/repository/base/profile 校验、Git reopen 和最终 source/head/reservation 复验。返回的 high-water 是本 source Run 的位置，不冒用祖先位置。
+
+读取上限明确为最多 32 个祖先，每段 1,024 events / 1 MiB（单条也不超过 1 MiB）；原本的 source prefix 预算不变。超限、未认证 start、历史不符或 head 不在继承边界内都拒绝。此限制是 v1 保守产品边界，不宣称任意长历史都可恢复。首次 baseline-only/read-only fresh Run 仍拒绝，不以最新 head 补造入场事实。没有新增 schema 或第二套 lineage 表。
+
+原子性与回滚：claim/start 的持久化仍由现有 SQLite authority 拥有，inspector 只是验证者，不提交新的接受事实。失败不回退 head、不删除历史、不执行 Write/Edit；撤回此 inspector 扩展只会重新拒绝继承场景。祖先 segment 是固定不可变前缀，恢复 activation 仍须重新校验当前 head。
+
+真实 helper/SQLite fixture 先执行 AiSdk Write/Edit/Read，持久化 continuation claim/start 后子进程直接退出（不 close stores/lease）；独立进程重开并验证继承 ref 相同、source high-water 为新 Run 自己的位置。随后另一个 Run 推进 head，原 Run 和继承 Run 都必须拒绝恢复。该测试验证存储与 checkpoint seam，不冒充完整 Host 重启流程。
+
+### 新增的真实 Desktop 反例（尚未通过）
+
+`node scripts/desktop-managed-files-smoke.mjs --repeat-interrupt` 在第一次 Continue 后只执行 Read，再次在模型等待阶段 SIGKILL Host、重启，要求第二次 Continue 后历史保留且旧 mutation events 不变。它是显式手动回归，不加入默认 CI，当前仍失败，不能作为完成证据。
+
+Windows 复现目录：`C:/Users/wzy/AppData/Local/Temp/maka-managed-electron-JKEFnK`。第一次恢复成功，第二次不出现 Continue；SQLite 中 continuation Run 有 opening/Read，但没有重启修复 terminal。代码原因：recoverAgentRunsFromLedger 排除所有 claimOwnedUnsettledRunIds（包括已开始 provider 的 Run）；recoverContinuationClaimsBeforeProvider 又只为 claim_repair start 提交 terminal，runtime_admission start 直接跳过。两条 owner 路径均不收口，单独修继承 head 不能修复此现象。另一次尝试在首次窗口启动失败，未将其计作恢复边界失败。
+
+下一步必须在 continuation claim owner 明确定义“runtime_admission 已开始、旧 Host 已死、target 未终结”的恢复状态。先验证 claim/start、工具 ledger 与已接受结果，再由唯一 owner 提交可恢复的 interrupted terminal；未结算副作用仍 park，不能 generic fallback、不能把全部未终结 Run 直接标成安全失败。随后重跑本脚本及现有 claim-only/start/terminal crash matrix。不应仅删除 generic repair 的排除条件。
+
+平台：本轮真实 Desktop 反例及 fixture 在 Windows；Linux/macOS 未运行。连续多次 Desktop Resume 仍未闭环，首次只读、mutation 内部崩溃等前述剩余项不因本检查点自动完成。
+
+验证：Runtime Host build、Biome、diff check 通过；backend-live-sequence（包含 claim/start 进程退出重开、继承与 head 漂移）及 backend-crash-first 共 2/2 通过。`--repeat-interrupt` 失败已保留为下一检查点验收，不宣称 Desktop 全绿。

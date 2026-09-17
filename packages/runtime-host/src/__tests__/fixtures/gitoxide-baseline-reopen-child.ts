@@ -18,6 +18,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import {
+  createRuntimeBoundaryCursor,
+  runtimePrefixSegment,
+  type ContinuationClaimV1,
+} from '@maka/core/runtime-boundary';
 import { createDefaultRuntimePolicy } from '@maka/core/runtime-policy';
 import { HostSessionCatalogCoordinator } from '../../server/session-catalog-coordinator.js';
 import { SessionAdmissionGate } from '../../server/session-admission-gate.js';
@@ -94,7 +99,12 @@ const stores = await openInteractiveExecutionStoresForWrite(leaseOwner.lease);
 const owner = createGitoxideWorkspaceBaselineOwnerInternal(stores);
 const acceptedRepositoryOwnerToken = {};
 const repositoryPath = join(rootPath, 'repository.git');
-if (mode === 'inspect-continuation' || mode === 'inspect-head-drift') {
+if (
+  mode === 'inspect-continuation' ||
+  mode === 'inspect-head-drift' ||
+  mode === 'inspect-inherited' ||
+  mode === 'inspect-inherited-reopen'
+) {
   try {
     const inspect = owner.inspectContinuation.bind(owner);
     const input = {
@@ -130,6 +140,111 @@ if (mode === 'inspect-continuation' || mode === 'inspect-head-drift') {
         expectedRuntimeEventHighWater: observed.runtimeEventHighWater - 1,
       }),
     );
+    if (mode === 'inspect-inherited') {
+      await stores.runtimeEventStore.appendRuntimeEvent(input.sessionId, input.sourceRunId, {
+        id: 'source-terminal',
+        sessionId: input.sessionId,
+        runId: input.sourceRunId,
+        invocationId: 'settlement-invocation',
+        turnId: 'settlement-turn',
+        ts: Date.now(),
+        role: 'system',
+        author: 'system',
+        partial: false,
+        status: 'failed',
+        content: { kind: 'error', message: 'interrupted after durable tool results' },
+        actions: { endInvocation: true },
+      });
+      const parent = await stores.runtimeEventStore.readImmutableRuntimePrefix({
+        sessionId: input.sessionId,
+        runId: input.sourceRunId,
+      });
+      const boundary = createRuntimeBoundaryCursor([runtimePrefixSegment(parent)]);
+      const claim: ContinuationClaimV1 = {
+        protocol: 'continuation_claim_v1',
+        claimId: 'inherited-claim',
+        boundaryDigest: boundary.manifestDigest,
+        boundary,
+        providerProjectionVersion: 2,
+        providerReplayDigest: `sha256:${'a'.repeat(64)}`,
+        target: {
+          sessionId: input.sessionId,
+          runId: 'inherited-run',
+          invocationId: 'inherited-invocation',
+          turnId: 'inherited-turn',
+        },
+        targetOpening: {
+          kind: 'invocation_opened',
+          protocol: 'invocation_opened_v1',
+          route: {
+            provenance: 'unknown',
+            backendKind: 'fake',
+            llmConnectionSlug: 'test',
+            modelId: 'test',
+          },
+          configuration: {
+            cwd: sourcePath,
+            permissionMode: 'ask',
+            collaborationMode: 'agent',
+            orchestrationMode: 'default',
+            orchestrationSource: 'session',
+            toolMode: 'direct',
+            agentSwarmAuthorization: 'none',
+          },
+          root: { kind: 'user' },
+          source: {
+            kind: 'continuation',
+            sourceInvocationId: parent.identity.invocationId,
+            sourceRunId: parent.identity.runId,
+            sourceTurnId: parent.identity.turnId,
+            sourceRuntimeEventHighWater: parent.position.lastEventSeq,
+            claimId: 'inherited-claim',
+            boundaryDigest: boundary.manifestDigest,
+          },
+          lineage: { parentRunId: parent.identity.runId, parentTurnId: parent.identity.turnId },
+        },
+        claimedAt: Date.now(),
+      };
+      await stores.runtimeEventStore.claimContinuation({ claim });
+      await stores.runtimeEventStore.commitContinuationStart({
+        claim,
+        event: {
+          id: 'inherited-start',
+          ...claim.target,
+          ts: claim.claimedAt,
+          partial: false,
+          role: 'system',
+          author: 'system',
+          modelVisibility: 'hidden',
+          content: claim.targetOpening,
+          actions: {
+            continuationStart: {
+              protocol: 'continuation_start_v2',
+              provenance: 'runtime_admission',
+              claimId: claim.claimId,
+              boundaryDigest: claim.boundaryDigest,
+              immediateSource: {
+                ...parent.identity,
+                highWater: parent.position.lastEventSeq,
+                prefixDigest: parent.prefixDigest,
+              },
+              replayManifestDigest: boundary.manifestDigest,
+              providerProjectionVersion: claim.providerProjectionVersion,
+              providerReplayDigest: claim.providerReplayDigest,
+            },
+          },
+        },
+      });
+      // Exit without closing the stores/owner: a new process must authenticate
+      // the persisted claim/start and ancestor prefix, not any in-memory record.
+      process.exit(87);
+    }
+    if (mode === 'inspect-inherited-reopen') {
+      const inherited = await session.inspectContinuation({ sourceRunId: 'inherited-run' });
+      assert.equal(inherited.ref, observed.ref);
+      assert.equal(inherited.runtimeEventHighWater, 1);
+      assert.equal((await session.readAcceptedFile('hello.txt')).content, 'second result\n');
+    }
     if (mode === 'inspect-head-drift') {
       const sourceBefore = await stores.runtimeEventStore.readImmutableRuntimeEvents(
         input.sessionId,
@@ -189,6 +304,13 @@ if (mode === 'inspect-continuation' || mode === 'inspect-head-drift') {
       );
       const later = await session.inspectContinuation({ sourceRunId: 'later-run' });
       assert.notEqual(later.ref, observed.ref);
+      await assert.rejects(
+        session.inspectContinuation({
+          sourceRunId: 'inherited-run',
+          expectedRuntimeEventHighWater: 1,
+        }),
+        /Managed accepted head does not belong to the source Run/,
+      );
       assert.equal(
         (await session.readAcceptedFile('hello.txt')).content,
         'later accepted content\n',
