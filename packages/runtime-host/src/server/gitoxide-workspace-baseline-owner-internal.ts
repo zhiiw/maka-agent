@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto';
 import {
   verifyGitoxideCandidateSettlementInternal,
   type GitoxideCandidateSettlementInput,
+  type GitoxideNoChangeProof,
 } from './gitoxide-candidate-settlement-internal.js';
 import {
   openExecutionWorkspaceAuthority,
@@ -59,9 +60,7 @@ export function createGitoxideWorkspaceBaselineOwnerInternal(
 function createOwner(stores: InteractiveExecutionStoresWriter) {
   const proofs = new WeakMap<object, WorkspaceBaselineAuthorityInput>();
   const successors = new WeakMap<object, WorkspaceSuccessorAuthorityInput>();
-  const unavailable = (): never => {
-    throw new Error('Gitoxide mutation settlement is not connected');
-  };
+  const unchanged = new WeakMap<object, GitoxideNoChangeProof>();
   const verifiers = Object.freeze({
     baseline(proof: object) {
       const value = proofs.get(proof);
@@ -73,9 +72,30 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
       if (!value) throw new Error('Unrecognized Gitoxide successor proof');
       return value;
     },
-    noEffect: unavailable,
+    noEffect(proof: object) {
+      const value = unchanged.get(proof);
+      if (!value) throw new Error('Unrecognized Gitoxide no-change proof');
+      return value;
+    },
   });
   return Object.freeze({
+    async acceptUnchangedCandidate(
+      input: GitoxideCandidateSettlementInput,
+    ): ReturnType<ExecutionWorkspaceAuthority['commitNoEffect']> {
+      const verified = await verifyGitoxideCandidateSettlementInternal(
+        stores,
+        () => openExecutionWorkspaceAuthority(stores, verifiers),
+        input,
+        'no_change',
+      );
+      if (verified.kind !== 'no_change') throw new Error('Expected no-change settlement');
+      const proof = Object.freeze({});
+      unchanged.set(proof, verified.noEffect);
+      return verified.authority.commitNoEffect({
+        noEffectOutcome: proof,
+        toolOutcome: verified.toolOutcome,
+      });
+    },
     async acceptPublishedCandidate(
       input: GitoxideCandidateSettlementInput,
     ): ReturnType<ExecutionWorkspaceAuthority['commitSuccessor']> {
@@ -85,6 +105,7 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
         input,
       );
       const proof = Object.freeze({});
+      if (verified.kind !== 'successor') throw new Error('Expected successor settlement');
       successors.set(proof, verified.successor);
       return verified.authority.commitSuccessor({
         candidateOutcome: proof,

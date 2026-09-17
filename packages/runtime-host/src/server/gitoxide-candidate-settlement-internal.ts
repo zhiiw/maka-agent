@@ -35,24 +35,39 @@ export type GitoxideCandidateSettlementInput = Parameters<
   >[0]['toolOutcome'];
 };
 
+export interface GitoxideNoChangeProof {
+  readonly operationId: string;
+  readonly dispatchEventId: string;
+  readonly workspaceInstanceId: string;
+  readonly terminalKind: 'no_workspace_change';
+}
+
+type VerifiedCandidateSettlement = {
+  authority: ExecutionWorkspaceAuthority;
+  toolOutcome: GitoxideCandidateSettlementInput['toolOutcome'];
+} & (
+  | { kind: 'successor'; successor: WorkspaceSuccessorAuthorityInput }
+  | { kind: 'no_change'; noEffect: GitoxideNoChangeProof }
+);
+
 /** Internal composition only. Derive acceptance from durable T1, never a caller's successor descriptor. */
 export async function verifyGitoxideCandidateSettlementInternal(
   stores: InteractiveExecutionStoresWriter,
   openAuthority: () => Promise<ExecutionWorkspaceAuthority>,
   original: GitoxideCandidateSettlementInput,
-): Promise<{
-  authority: ExecutionWorkspaceAuthority;
-  successor: WorkspaceSuccessorAuthorityInput;
-  toolOutcome: GitoxideCandidateSettlementInput['toolOutcome'];
-}> {
+  expectedDisposition: 'published' | 'no_change' = 'published',
+): Promise<VerifiedCandidateSettlement> {
   const input = { ...original };
   const toolOutcome = {
     ...input.toolOutcome,
     runtimeEvent: encodeCanonicalRuntimeEvent(input.toolOutcome.runtimeEvent).event,
   };
   const candidate = requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal(input);
-  if (candidate.disposition !== 'published' || candidate.operationId !== toolOutcome.operationId)
-    throw new Error('Candidate is not a published successor for this operation');
+  if (
+    candidate.disposition !== expectedDisposition ||
+    candidate.operationId !== toolOutcome.operationId
+  )
+    throw new Error('Candidate disposition does not match settlement for this operation');
   if (!input.workspaceKey.trim() || Buffer.byteLength(input.workspaceKey) > 1024)
     throw new Error('Invalid managed workspace key');
   const id = digest(`maka-managed-files-workspace-v1\0${input.workspaceKey}`).slice(7, 39);
@@ -127,7 +142,7 @@ export async function verifyGitoxideCandidateSettlementInternal(
     .update(contentBytes)
     .digest('hex');
   if (
-    !result.changed ||
+    result.changed !== (expectedDisposition === 'published') ||
     digest(result.content) !== candidate.resultContentSha256 ||
     resultBlobOid !== candidate.resultBlobOid
   )
@@ -146,10 +161,28 @@ export async function verifyGitoxideCandidateSettlementInternal(
     !isDeepStrictEqual(event.content.result, expectedContent)
   )
     throw new Error('Candidate outcome does not match the durable operation result');
+  if (expectedDisposition === 'no_change') {
+    // The helper retains an operation-bound candidate commit even for no-op;
+    // it is the exact tree, not commit metadata, that must preserve the base.
+    if (candidate.candidateTreeOid !== candidate.baseTreeOid)
+      throw new Error('Unchanged candidate does not preserve the accepted base');
+    return {
+      kind: 'no_change',
+      authority,
+      toolOutcome,
+      noEffect: {
+        operationId: candidate.operationId,
+        dispatchEventId: dispatchEvent.id,
+        workspaceInstanceId: mutation.workspaceInstanceId,
+        terminalKind: 'no_workspace_change',
+      },
+    };
+  }
   const successorId = digest(
     `maka-gitoxide-successor-v1\0${epoch.workspaceEpochId}\0${candidate.operationId}`,
   ).slice(7, 39);
   return {
+    kind: 'successor',
     authority,
     toolOutcome,
     successor: {

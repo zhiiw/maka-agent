@@ -59,7 +59,14 @@ interface AdmittedHelper {
 
 let admittedHelperPromise: Promise<AdmittedHelper | undefined> | undefined;
 
-for (const mode of ['settle-wrong-content', 'crash-after-settlement', 'crash-after-new-file']) {
+for (const mode of [
+  'settle-wrong-content',
+  'settle-false-no-change',
+  'crash-after-settlement',
+  'crash-after-new-file',
+  'settle-no-change',
+  'crash-after-no-change',
+]) {
   test(`candidate settlement preserves durable truth: ${mode}`, { timeout: 30_000 }, async (t) => {
     if (!(await admittedHelper())) {
       t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
@@ -93,14 +100,30 @@ for (const mode of ['settle-wrong-content', 'crash-after-settlement', 'crash-aft
     };
     try {
       const first = run(mode);
-      assert.equal(first.status, mode === 'settle-wrong-content' ? 0 : 79, first.stderr);
+      assert.equal(first.status, mode.startsWith('crash-') ? 79 : 0, first.stderr);
       const reopened = run('read-settlement');
       assert.equal(reopened.status, 0, reopened.stderr);
       const state = JSON.parse(reopened.stdout);
-      if (mode === 'settle-wrong-content') {
+      if (mode === 'settle-wrong-content' || mode === 'settle-false-no-change') {
         assert.equal(state.outcomes.length, 0);
         assert.equal(state.successors.length, 0);
         assert.equal(state.unsettled.length, 1);
+      } else if (mode.endsWith('no-change')) {
+        const committed = JSON.parse(first.stdout);
+        assert.equal(state.outcomes.length, 1);
+        assert.equal(state.successors.length, 0);
+        assert.deepEqual(state.unsettled, []);
+        assert.equal(state.outcomes[0].content.isError, undefined);
+        assert.equal(
+          state.outcomes[0].actions.managedMutationTerminal.terminalKind,
+          'no_workspace_change',
+        );
+        assert.equal(committed.accepted.created, true);
+        if (mode === 'settle-no-change') assert.equal(committed.retry.created, false);
+        const reopened = run('reopen');
+        assert.equal(reopened.status, 0, reopened.stderr);
+        assert.equal(JSON.parse(reopened.stdout).commit, committed.proof.baseCommitOid);
+        assert.equal(JSON.parse(reopened.stdout).content, 'accepted original\n');
       } else {
         const committed = JSON.parse(first.stdout);
         assert.equal(state.outcomes.length, 1);

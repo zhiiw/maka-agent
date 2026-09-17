@@ -248,3 +248,21 @@ workflow 选择范围已纳入新 Host owner、child fixture 与 Storage 变更�
 真实 Rust 测试先 RED（`invalid_request`）再 GREEN，涵盖明确 absence、strict Read、缺 tree、缺 blob 和文件型父路径。真实 Host owner fixture 覆盖新文件 candidate/原子接受/精确重试，以及成功提交后 `exit(79)`、新进程检查唯一 T2/successor/无 unsettled operation；独立 Git oracle 核对新路径内容。仍没有启动完整 Host 服务或 Desktop，也未完成 stale accepted-ref 的修复。
 
 本机 Windows 验证：Rust **14 unit + 57 integration = 71/71**；Node helper invocation + repository admission **29 pass / 6 skip / 0 fail**，新文件/崩溃用例实际执行。6 个 skip 为 POSIX fake-helper fixture（含新 absence response correlation），不是恢复成功证据。Linux/macOS 使用现有三平台 gate，尚无本轮远程结果。下一步为 no-effect terminal 与 accepted-ref reconciliation。
+
+## 第九检查点：成功 no-op 的独立终态
+
+新增内部 `acceptUnchangedCandidate`，仅接受真实 helper 的 `no_change` capability；`acceptPublishedCandidate` 仍只接受 `published`。两入口共享同一 T1/epoch/helper/path/content/result 校验，不复制第二套验证规则；内部验证输出为显式 tagged union，不能按某字段是否存在选择 writer。
+
+主要不变量：**成功无变化只提交一次 `no_workspace_change` T2 并释放 reservation，不产生 accepted successor、不推进 workspace head/ref。**
+
+- Host owner 由 durable T1 参数和 accepted content 重算纯转换，必须 `changed === false`，精确 result digest/blob 及 candidate tree 均匹配 base。仅有 helper 的 no-change 标签不够；应产生变更的 T1 配上 unchanged candidate 也会拒绝。
+- helper 现有协议会保留 operation-bound candidate commit/ref 作为 exact-retry 证据；其 commit 元数据可以不同，但 tree 必须与 base 相同。该 candidate 不获得 accepted authority。本轮不引入清理行为。
+- outcome 必须为成功且精确匹配规范工具结果。Storage 还要求 `managedMutationTerminal` 与私有 no-change proof 的 operation/dispatch/instance/kind 一致；缺少 terminal fact 或错误成功状态拒绝。
+- **Owner**：仍为 execution group 的同一个 Host proof owner；no-effect proof 只在其 WeakMap 内传递。**原子边界**：复用 SQLite terminal/T2 + reservation release transaction，exact retry 不重复写入。无 schema 变更。
+- **失败/回滚**：错 owner、错 disposition、假 no-change、错结果、缺 terminal 均拒绝，reservation 留存；不自动 generic T2。撤销入口不会改写历史。`operation_failed_no_effect` 尚未接通，不能用任意异常冒充“已证明无副作用”。
+
+真实 helper + SQLite 测试先得到“入口未接通”的 RED，再实现 GREEN。覆盖成功 no-op、exact retry、提交后直接 `exit(79)`、新进程看到唯一成功 T2/零 successor/无 unsettled operation，并可正常 reopen 原 head/content；也覆盖假 no-change 不释放 reservation、两个 settlement 入口不可互换。
+
+Windows 本机：repository admission integration **19/19、0 skip**，Storage authority/纯转换 **46/46**，Host build、Biome、diff check 通过。Linux/macOS 已由同一既有三平台 workflow 选择，尚无本轮远程结果。测试仍是 Host owner 组合层，不是完整 ToolRuntime/Desktop；不承诺断电恢复。
+
+下一步：确定性纯转换失败的独立 terminal proof，以及 SQLite accepted head → Git accepted ref 的 reconciliation；之后才能进入 Runtime/产品执行闭环。

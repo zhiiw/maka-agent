@@ -95,6 +95,9 @@ if (mode === 'read-settlement') {
   process.exit(0);
 }
 const settling =
+  mode === 'settle-false-no-change' ||
+  mode === 'settle-no-change' ||
+  mode === 'crash-after-no-change' ||
   mode === 'crash-after-new-file' ||
   mode === 'settle-new-file' ||
   mode === 'settle-candidate' ||
@@ -146,7 +149,14 @@ try {
     const candidateOwnerToken = {};
     const operationId = 'crash-candidate-operation';
     const newFile = mode === 'settle-new-file' || mode === 'crash-after-new-file';
-    const args = { path: newFile ? 'new/nested.txt' : 'hello.txt', content: 'candidate result\n' };
+    const noChange =
+      mode === 'settle-no-change' ||
+      mode === 'crash-after-no-change' ||
+      mode === 'settle-false-no-change';
+    const args = {
+      path: newFile ? 'new/nested.txt' : 'hello.txt',
+      content: noChange && mode !== 'settle-false-no-change' ? file.content : 'candidate result\n',
+    };
     const identity = {
       sessionId: 'settlement-session',
       runId: 'settlement-run',
@@ -222,7 +232,9 @@ try {
       content:
         mode === 'conflicting-candidate' || mode === 'settle-wrong-content'
           ? 'conflicting result\n'
-          : 'candidate result\n',
+          : mode === 'settle-false-no-change'
+            ? file.content
+            : args.content,
     });
     const proof = requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal({
       acceptedRepositoryOwnerToken,
@@ -231,6 +243,12 @@ try {
       candidateOutcomeCapability: candidate.candidateOutcomeCapability,
     });
     if (settling) {
+      const transformed = transformManagedMutation({
+        toolName: 'Write',
+        canonicalPath: args.path,
+        baseContent: newFile ? null : file.content,
+        args,
+      });
       const toolOutcome = {
         operationId,
         journalEventId: `${operationId}_outcome`,
@@ -243,20 +261,31 @@ try {
           role: 'tool' as const,
           author: 'tool' as const,
           refs: { operationId, toolCallId: callId },
+          ...(noChange
+            ? {
+                actions: {
+                  managedMutationTerminal: {
+                    protocol: 'managed_mutation_terminal_v1' as const,
+                    operationId,
+                    dispatchEventId: 'settlement-dispatch-event',
+                    workspaceInstanceId: baseline!.head.workspaceEpochId.replace(
+                      'epoch_',
+                      'instance_',
+                    ),
+                    terminalKind: 'no_workspace_change' as const,
+                  },
+                },
+              }
+            : {}),
           content: {
             kind: 'function_response' as const,
             id: callId,
             name: 'Write',
-            result: transformManagedMutation({
-              toolName: 'Write',
-              canonicalPath: args.path,
-              baseContent: newFile ? null : file.content,
-              args,
-            }).providerResult,
+            result: transformed.providerResult,
           },
         },
       };
-      const accept = owner.acceptPublishedCandidate;
+      const accept = noChange ? owner.acceptUnchangedCandidate : owner.acceptPublishedCandidate;
       const input = {
         workspaceKey: 'crash-session',
         acceptedRepositoryOwnerToken,
@@ -265,7 +294,7 @@ try {
         candidateOutcomeCapability: candidate.candidateOutcomeCapability,
         toolOutcome,
       };
-      if (mode === 'settle-wrong-content') {
+      if (mode === 'settle-wrong-content' || mode === 'settle-false-no-change') {
         await assert.rejects(
           accept(input),
           /Candidate content does not match the durable operation/,
@@ -280,7 +309,31 @@ try {
           }),
         );
       } else {
+        await assert.rejects(
+          (noChange ? owner.acceptPublishedCandidate : owner.acceptUnchangedCandidate)(input),
+          /disposition does not match/,
+        );
         await assert.rejects(accept({ ...input, candidateOwnerToken: {} }));
+        if (noChange) {
+          await assert.rejects(
+            accept({
+              ...input,
+              toolOutcome: {
+                ...toolOutcome,
+                runtimeEvent: {
+                  ...toolOutcome.runtimeEvent,
+                  content: { ...toolOutcome.runtimeEvent.content, isError: true },
+                },
+              },
+            }),
+            /outcome does not match/,
+          );
+          const { actions: _terminal, ...withoutTerminal } = toolOutcome.runtimeEvent;
+          await assert.rejects(
+            accept({ ...input, toolOutcome: { ...toolOutcome, runtimeEvent: withoutTerminal } }),
+            /terminal fact is missing/,
+          );
+        }
         await assert.rejects(
           accept({
             ...input,
@@ -295,7 +348,11 @@ try {
           /outcome does not match/,
         );
         const accepted = await accept(input);
-        if (mode === 'crash-after-settlement' || mode === 'crash-after-new-file') {
+        if (
+          mode === 'crash-after-settlement' ||
+          mode === 'crash-after-new-file' ||
+          mode === 'crash-after-no-change'
+        ) {
           writeSync(1, JSON.stringify({ accepted, proof }));
           process.exit(79);
         }
