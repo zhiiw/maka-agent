@@ -781,3 +781,26 @@ Write → Edit → Read → 模型带三个工具结果发起尚未完成的请�
 Host 的 WorkHub disabled-resume 定向测试在清理临时 runtime.sqlite 时返回 EBUSY，本轮未改清理逻辑，不宣称该 Host suite 全绿。SessionManager 定向测试证明同一按 Session 策略允许指定任务、拒绝其他任务；原默认禁用测试继续通过。
 
 当前仅承诺这条有证据的受限路径：本 Run 已完成产生当前 accepted head 的 mutation，随后在模型等待阶段中断，可由用户显式 Continue。尚未覆盖 mutation T1 已落盘但 outcome 尚未接受、baseline/read-only source、仅从祖先继承 head、多次中断 lineage、自动启动续跑和断电。下一步优先补 head 推进/证据失效的负向产品测试与 read-only/祖先边界，不把本检查点称作无限制 Resume 或 M3 全部完成。
+
+## 第四十检查点：旧 Run 不能借用后来推进的 accepted head
+
+新增真实 helper/SQLite 子进程回归：先读取原 AiSdk Write/Edit/Read Run 的有效 checkpoint，再通过真实 ToolRuntime、session-bound mutation owner 和 Gitoxide 在同一 workspace 的另一个 Run 提交 Write。原 Run 的 immutable events 与 high-water 保持完全不变。再次请求原 checkpoint 必须因 head 不属于 source Run 而拒绝；新的 Run 则可以取得不同 accepted ref 的 checkpoint，且拒绝旧恢复不回退或覆盖新内容。
+
+这是既有 fail-closed 行为的补证，不修改生产状态机，不是完整 Electron 漂移 UI 测试。owner 仍是 source-bound checkpoint inspector；接受边界仍是已有 SQLite mutation transaction；拒绝观察不写 terminal、不重跑 Write/Edit、不删除任何历史。平台证据以本轮实际执行结果为准，不从 Windows 推断 macOS/Linux。
+
+本轮 Windows：Runtime Host build 通过；backend-live-sequence（含新 head 漂移断言）和 backend-crash-first 共 2/2 通过、0 skip。Linux/macOS 未执行。本轮没有重跑 Electron，不将前一检查点的窗口验收当作本轮新增测试。
+
+### Write/Edit Resume 剩余路线（不扩大到完整 coding agent）
+
+| 顺序 | 工作 | 完成判据 |
+| --- | --- | --- |
+| 1 | 只读/祖先 head 的 continuation 边界 | source 未产生新 successor 时，仍能从 durable invocation/lineage 证明它使用的 head；禁止直接采用最新 head。首次只读任务和恢复后只读再中断都能继续，head 漂移仍拒绝 |
+| 2 | 多次中断及重复 Continue | 两次以上真实 Host kill/restart；每次只有一个合法新 Run，既有 mutation 不重复，重复点击/并发 claim 不创建重复执行 |
+| 3 | mutation 内部崩溃的产品恢复 | 从真实 Host 在 T1 后、candidate 后、acceptance 后分别退出；有接受证据的只 adopt，证据不足的明确 park，不能把 storage 子进程测试等同于 Desktop 闭环 |
+| 4 | 可理解的 Desktop 拒绝与平台复跑 | head/profile/helper 漂移、active reservation、缺少证据时展示明确原因；macOS/Linux 运行同一真实 smoke，Windows 保留已有证据 |
+
+以上是四个验收工作包，不是承诺四个 commit 就完成。第一项需要先核对已有 invocation/lineage 是否足够表达初始 accepted 边界；若不足，应在新 Run admission 记录它，不能猜测或从可变当前状态补造旧事实。
+
+现有能力：成功 Write/Edit 已接受后，在等待模型期间中断，可以显式 Continue 并消费旧结果；源 checkout 不被修改。尚不能宣称任意 Write/Edit 中途都能自动恢复，也不能宣称只读任务、多轮反复中断已闭环。
+
+不作为这一交付前置：自动启动恢复、扫描优化、Bash/npm/tests、Publish/Undo、非 Git importer、长期 GC。它们分别属于自动化体验、额外执行能力或 workspace 生命周期，不应为了“Write/Edit Resume 完整”无止境扩张本轮范围。源码 checkout 的交付/发布也不是恢复成功的隐含行为。

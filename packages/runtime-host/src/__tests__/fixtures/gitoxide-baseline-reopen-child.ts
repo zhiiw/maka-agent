@@ -94,7 +94,7 @@ const stores = await openInteractiveExecutionStoresForWrite(leaseOwner.lease);
 const owner = createGitoxideWorkspaceBaselineOwnerInternal(stores);
 const acceptedRepositoryOwnerToken = {};
 const repositoryPath = join(rootPath, 'repository.git');
-if (mode === 'inspect-continuation') {
+if (mode === 'inspect-continuation' || mode === 'inspect-head-drift') {
   try {
     const inspect = owner.inspectContinuation.bind(owner);
     const input = {
@@ -130,6 +130,70 @@ if (mode === 'inspect-continuation') {
         expectedRuntimeEventHighWater: observed.runtimeEventHighWater - 1,
       }),
     );
+    if (mode === 'inspect-head-drift') {
+      const sourceBefore = await stores.runtimeEventStore.readImmutableRuntimeEvents(
+        input.sessionId,
+        input.sourceRunId,
+      );
+      let id = 0;
+      const runtime = new ToolRuntime({
+        sessionId: input.sessionId,
+        runId: 'later-run',
+        invocationId: 'later-invocation',
+        turnId: 'later-turn',
+        header: { id: input.sessionId, cwd: sourcePath, permissionMode: 'ask' } as SessionHeader,
+        connection: { slug: 'test', providerType: 'openai', defaultModel: 'test' },
+        modelId: 'test',
+        newId: () => `later-event-${++id}`,
+        now: () => ++id,
+        readExecutionBoundary: async () => createExternalExecutionBoundary(),
+        readPermissionMode: async () => 'ask',
+        getPermissionPauseTarget: () => null,
+        runtimeCommitSink: session.runtimeCommitSink,
+        prepareManagedMutation: (request) => session.prepareManagedMutation(request),
+      });
+      await runtime.settleToolCall({
+        tool: {
+          name: 'Write',
+          description: 'advance accepted head in another Run',
+          parameters: {},
+          impl() {
+            throw new Error('Checkout execution forbidden');
+          },
+        },
+        turnId: 'later-turn',
+        toolCallId: 'later-call',
+        input: { path: 'hello.txt', content: 'later accepted content\n' },
+        abortSignal: new AbortController().signal,
+        eventSink: { push() {}, async pushAndWaitUntilConsumed() {} },
+      });
+      assert.equal(
+        (await session.readAcceptedFile('hello.txt')).content,
+        'later accepted content\n',
+      );
+      // A valid old prefix still exists: rejection must be caused by head provenance,
+      // not by a missing Run, an altered prefix, or an invalid high-water.
+      assert.deepEqual(
+        await stores.runtimeEventStore.readImmutableRuntimeEvents(
+          input.sessionId,
+          input.sourceRunId,
+        ),
+        sourceBefore,
+      );
+      await assert.rejects(
+        session.inspectContinuation({
+          sourceRunId: input.sourceRunId,
+          expectedRuntimeEventHighWater: observed.runtimeEventHighWater,
+        }),
+        /Managed accepted head does not belong to the source Run/,
+      );
+      const later = await session.inspectContinuation({ sourceRunId: 'later-run' });
+      assert.notEqual(later.ref, observed.ref);
+      assert.equal(
+        (await session.readAcceptedFile('hello.txt')).content,
+        'later accepted content\n',
+      );
+    }
     writeSync(1, JSON.stringify(observed));
   } finally {
     await leaseOwner.close();

@@ -260,6 +260,8 @@ for (const mode of [
         const inspected = run('inspect-continuation');
         assert.equal(inspected.status, 0, inspected.stderr);
         assert.equal(JSON.parse(inspected.stdout).restored, true);
+        const drifted = run('inspect-head-drift');
+        assert.equal(drifted.status, 0, drifted.stderr);
       }
       assert.equal(await readFile(join(source, 'hello.txt'), 'utf8'), 'accepted original\n');
     } finally {
