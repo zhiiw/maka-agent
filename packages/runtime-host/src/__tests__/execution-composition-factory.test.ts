@@ -75,6 +75,29 @@ test('candidate composition rejects a forged managed helper before execution sta
   assert.equal(started, false);
 });
 
+test('candidate defers helper preparation until composition startup', async () => {
+  let prepared = 0;
+  let started = false;
+  const dependencies = {
+    prepareManagedFilesHelper: async () => {
+      prepared++;
+      throw new Error('helper admission stopped');
+    },
+    createComposition: async () => {
+      started = true;
+      return {} as ExecutionRuntimeHostComposition;
+    },
+  };
+  const source = await createExecutionRuntimeHostCompositionSource({}, dependencies);
+  assert.equal(prepared, 0);
+  await assert.rejects(
+    source.create({} as RuntimeHostCompositionContext),
+    /helper admission stopped/,
+  );
+  assert.equal(prepared, 1);
+  assert.equal(started, false);
+});
+
 test('candidate forwards its pinned helper and revalidates bytes at lazy startup', async (t) => {
   if (!process.env.MAKA_GITOXIDE_HELPER_PATH) {
     t.skip('MAKA_GITOXIDE_HELPER_PATH is required');

@@ -474,3 +474,16 @@ Windows 定向：两条真实进程 task 创建/重开 **2/2**；Host backend cr
 验证：先以 forged helper 重现旧 factory 静默忽略 dependency（本应拒绝但继续启动），再修复。factory 测试验证无 helper、伪造能力、真实 helper 文件的已签发能力转发、调用方 binding 后改不生效以及 same-size byte tamper 拒绝；该测试核验 artifact，不声称执行了 helper 命令。factory + 真实 candidate startup 回归 **7/7、0 skip**；CI gate policy **1/1**；Host build、Biome、diff check 通过。新文件进入三平台 gate 选择与测试清单。
 
 平台矩阵：Windows 为本机证据；Linux/macOS 由同一 workflow 调度，本轮未取得远程结果。没有新断电保证。下一步仍需真实发布/dev bootstrap 签发 helper capability、按实际可用能力设计客户端协商，再开放专门创建 handler；不能因为此内部转发已接通就打开 Desktop 按钮。
+
+## 第二十三检查点：显式开发 helper bootstrap
+
+增加独立的 `dist/test-only/managed-files-candidate-main.js` 开发入口。启动者通过 `MAKA_MANAGED_FILES_DEV_HELPER` 提供严格 JSON：`schemaVersion: 1`、绝对 `executablePath`、`expectedBytes`、带 `sha256:` 前缀的 `expectedSha256`、当前 `platform` 与 `arch`。入口捕获后立即删除该环境变量；不存在 PATH 发现、旁边 manifest 自动信任或 production entry 环境开关。
+
+- **Owner/权限**：这是开发者显式选择并固定二进制字节，不是已签名发行包身份，也不抵御恶意开发启动者。复用 artifact authority 签发 invocation capability，不代表新增了发行信任根。两个 test-only 模块都由发行过滤规则排除。
+- **生命周期**：candidate 赢得 root、建立 startup 生命周期后，lazy composition 才运行 prepare callback。loader 在首次异步 admission 前创建绝对 deadline，校验文件大小、摘要和平台；factory 再校验操作集合及 artifact。失败拒绝本次开发启动，不静默降级；没有 helper 的普通生产 Host 路径保持不变。已签发能力与 prepare callback 同时提供会拒绝，避免两套启动 owner。
+- **原子/回滚**：只建立进程内权限，无新 SQLite schema 或 durable 接受事实。删除开发入口或停止显式使用它即可撤回，不转换任何 Session mode。底层不可取消 Node 文件系统调用的既有限制不变；本次不承诺新的进程崩溃或断电收敛。
+- **证据**：loader 使用真实 helper 字节验证并拒绝错误摘要；真实 candidate 子进程在获得 root 后拒绝畸形配置，持有同 root 时则以 loser 状态退出且不读取配置。另保留真实 artifact 转发、篡改拒绝及 production module graph 不可达 test-only 的验证。这不等于完整 Host ready/IPC/模型/Executor/Electron 验收。
+
+Windows 本机 Host build、定向测试 **11/11、0 skip** 通过。Linux/macOS 纳入同一 helper gate，尚未取得本轮远程结果。该入口不自动接入 Desktop launcher；后续仍需 Host capability negotiation、经过产品授权的 managed task 创建 handler、Desktop 加号入口，以及独立的正式发布资源验证。
+
+CI gate policy **1/1**、发行文件策略组 **13/13** 通过；完整 release-cli-file-policy 文件执行为 **14 pass / 1 fail**，失败项是本地未生成 `packages/computer-use/dist/index.js`，不作为本切片全量验证通过的证据。Biome 与 diff check 通过。

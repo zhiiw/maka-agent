@@ -36,6 +36,7 @@ export interface ExecutionRuntimeHostCompositionSourceOptions {
 
 export interface ExecutionRuntimeHostCompositionDependencies {
   readonly managedFilesHelper?: HostManagedFilesHelper;
+  readonly prepareManagedFilesHelper?: () => Promise<HostManagedFilesHelper>;
   readonly createComposition?: (
     context: RuntimeHostCompositionContext,
     options: Parameters<typeof createExecutionRuntimeHostComposition>[1],
@@ -47,9 +48,12 @@ export async function createExecutionRuntimeHostCompositionSource(
   options: ExecutionRuntimeHostCompositionSourceOptions,
   dependencies: ExecutionRuntimeHostCompositionDependencies = {},
 ): Promise<RuntimeHostCompositionSource> {
-  const managedFilesHelper = dependencies.managedFilesHelper
+  const admittedHelper = dependencies.managedFilesHelper
     ? Object.freeze({ ...dependencies.managedFilesHelper })
     : undefined;
+  const prepareHelper = dependencies.prepareManagedFilesHelper;
+  if (admittedHelper && prepareHelper)
+    throw new Error('Managed helper has multiple startup owners');
   const override = dependencies.createComposition;
   const compositionOptions = {
     ...(options.initialization ? { initialization: options.initialization } : {}),
@@ -58,6 +62,8 @@ export async function createExecutionRuntimeHostCompositionSource(
       : {}),
   };
   return defineInteractiveRuntimeHostComposition(async (context) => {
+    const managedFilesHelper =
+      admittedHelper ?? (prepareHelper ? Object.freeze({ ...(await prepareHelper()) }) : undefined);
     if (managedFilesHelper) {
       const startedAt = performance.now();
       const {
