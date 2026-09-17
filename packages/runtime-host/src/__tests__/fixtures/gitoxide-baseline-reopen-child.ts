@@ -106,7 +106,9 @@ if (
   mode === 'crash-unsettled' ||
   mode === 'recover-unsettled' ||
   mode === 'publish-pending-candidate' ||
-  mode === 'recover-pending-candidate'
+  mode === 'recover-pending-candidate' ||
+  mode === 'settle-pending-candidate' ||
+  mode === 'retry-pending-settlement'
 ) {
   const sessionId = 'settlement-session';
   const runId = 'inherited-run';
@@ -165,11 +167,64 @@ if (
     throw new Error('T1 crash boundary was not reached');
   }
   const before = await stores.runtimeEventStore.readImmutableRuntimeEvents(sessionId, runId);
+  if (mode === 'settle-pending-candidate' || mode === 'retry-pending-settlement') {
+    const operationId = before.find((event) => event.actions?.toolDispatch?.managedMutation)!
+      .actions!.toolDispatch!.operationId;
+    const capability = await owner.reopen({
+      workspaceKey: 'crash-session',
+      repositoryPath,
+      invocationOwnerToken,
+      helperCapability,
+      acceptedRepositoryOwnerToken,
+    });
+    const result = await owner.recoverCandidate({
+      workspaceKey: 'crash-session',
+      sessionId,
+      runId,
+      operationId,
+      acceptedRepositoryOwnerToken,
+      acceptedRepositoryCapability: capability,
+    });
+    assert.equal(result.created, mode === 'settle-pending-candidate');
+    assert.equal(result.event.id, `${operationId}_recovered_response`);
+    assert.equal(result.event.actions?.stateDelta?.durationMs, undefined);
+    assert.equal(result.event.content?.kind, 'function_response');
+    if (mode === 'retry-pending-settlement')
+      assert.equal((await session.readAcceptedFile('hello.txt')).content, 'must not be executed\n');
+    const after = await stores.runtimeEventStore.readImmutableRuntimeEvents(sessionId, runId);
+    assert.equal(after.filter((event) => event.content?.kind === 'function_response').length, 1);
+    assert.equal((await stores.runtimeEventStore.listUnsettledToolOperations(sessionId)).length, 0);
+    if (mode === 'retry-pending-settlement') assert.deepEqual(after, before);
+    else assert.deepEqual(after.slice(0, before.length), before);
+    writeSync(1, JSON.stringify(result.event));
+    process.exit(mode === 'settle-pending-candidate' ? 90 : 0);
+  }
   assert.equal(
     before.some((event) => event.actions?.endInvocation),
     false,
   );
   const pendingBefore = await stores.runtimeEventStore.listUnsettledToolOperations(sessionId);
+  if (mode === 'recover-unsettled') {
+    const capability = await owner.reopen({
+      workspaceKey: 'crash-session',
+      repositoryPath,
+      invocationOwnerToken,
+      helperCapability,
+      acceptedRepositoryOwnerToken,
+    });
+    await assert.rejects(
+      owner.recoverCandidate({
+        workspaceKey: 'crash-session',
+        sessionId,
+        runId,
+        operationId: before.find((event) => event.actions?.toolDispatch?.managedMutation)!.actions!
+          .toolDispatch!.operationId,
+        acceptedRepositoryOwnerToken,
+        acceptedRepositoryCapability: capability,
+      }),
+      /candidate_missing/,
+    );
+  }
   assert.equal(pendingBefore.length, mode === 'recover-head-drift' ? 0 : 1);
   if (mode !== 'recover-head-drift') {
     assert.equal(before.filter((event) => event.content?.kind === 'function_call').length, 1);
@@ -906,6 +961,7 @@ const settling =
   mode === 'crash-after-edit-rejection' ||
   mode === 'settle-false-no-change' ||
   mode === 'settle-no-change' ||
+  mode === 'recover-no-change' ||
   mode === 'crash-after-no-change' ||
   mode === 'crash-after-new-file' ||
   mode === 'settle-new-file' ||
@@ -1411,6 +1467,7 @@ try {
     const operationId = 'crash-candidate-operation';
     const newFile = mode === 'settle-new-file' || mode === 'crash-after-new-file';
     const noChange =
+      mode === 'recover-no-change' ||
       mode === 'settle-no-change' ||
       mode === 'crash-after-no-change' ||
       mode === 'settle-false-no-change';
@@ -1652,6 +1709,20 @@ try {
       candidateOwnerToken,
       candidateOutcomeCapability: candidate.candidateOutcomeCapability,
     });
+    if (mode === 'recover-no-change') {
+      const input = {
+        workspaceKey: 'crash-session',
+        ...identity,
+        operationId,
+        acceptedRepositoryOwnerToken,
+        acceptedRepositoryCapability: capability,
+      };
+      const accepted = await owner.recoverCandidate(input);
+      const retry = await owner.recoverCandidate(input);
+      assert.deepEqual(accepted.event, retry.event);
+      writeSync(1, JSON.stringify({ accepted, retry, proof }));
+      process.exit(0);
+    }
     if (settling) {
       const transformed = transformManagedMutation({
         toolName: 'Write',

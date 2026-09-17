@@ -277,8 +277,27 @@ for (const mode of [
         const candidateOnly = run('publish-pending-candidate');
         assert.equal(candidateOnly.status, 89, candidateOnly.stderr);
         assert.match(JSON.parse(candidateOnly.stdout).candidateCommitOid, /^[a-f0-9]{40}$/);
+        const candidateRefPath = join(
+          stateRoot,
+          'repository.git',
+          JSON.parse(candidateOnly.stdout).candidateRef,
+        );
+        const candidateBytes = await readFile(candidateRefPath);
+        await writeFile(candidateRefPath, `${'0'.repeat(40)}\n`);
+        const corruptCandidate = run('settle-pending-candidate');
+        assert.equal(corruptCandidate.status, 1, corruptCandidate.stderr);
+        assert.match(corruptCandidate.stderr, /candidate_ref_target_invalid/);
+        await writeFile(candidateRefPath, candidateBytes);
         const parkedCandidate = run('recover-pending-candidate');
         assert.equal(parkedCandidate.status, 0, parkedCandidate.stderr);
+        const settledCandidate = run('settle-pending-candidate');
+        assert.equal(settledCandidate.status, 90, settledCandidate.stderr);
+        const repeatedSettlement = run('retry-pending-settlement');
+        assert.equal(repeatedSettlement.status, 0, repeatedSettlement.stderr);
+        assert.deepEqual(
+          JSON.parse(repeatedSettlement.stdout),
+          JSON.parse(settledCandidate.stdout),
+        );
       }
       assert.equal(await readFile(join(source, 'hello.txt'), 'utf8'), 'accepted original\n');
     } finally {
@@ -295,6 +314,7 @@ for (const mode of [
   'crash-after-settlement',
   'crash-after-new-file',
   'settle-no-change',
+  'recover-no-change',
   'crash-after-no-change',
   'crash-after-edit-rejection',
   'settle-false-rejection',
@@ -379,7 +399,8 @@ for (const mode of [
           'no_workspace_change',
         );
         assert.equal(committed.accepted.created, true);
-        if (mode === 'settle-no-change') assert.equal(committed.retry.created, false);
+        if (mode === 'settle-no-change' || mode === 'recover-no-change')
+          assert.equal(committed.retry.created, false);
         const reopened = run('reopen');
         assert.equal(reopened.status, 0, reopened.stderr);
         assert.equal(JSON.parse(reopened.stdout).commit, committed.proof.baseCommitOid);

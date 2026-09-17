@@ -18,6 +18,10 @@
  */
 
 import { createHash } from 'node:crypto';
+import {
+  prepareGitoxideCandidateRecoveryInternal,
+  type GitoxideCandidateRecoveryInput,
+} from './gitoxide-candidate-recovery-internal.js';
 import { continuationStartEventMatchesClaim } from '@maka/core/runtime-boundary';
 import {
   prepareGitoxideMutationInternal,
@@ -87,6 +91,30 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
     },
   });
   return Object.freeze({
+    async recoverCandidate(input: GitoxideCandidateRecoveryInput) {
+      const prepared = await prepareGitoxideCandidateRecoveryInternal(
+        stores,
+        () => openExecutionWorkspaceAuthority(stores, verifiers),
+        input,
+      );
+      if (prepared.kind === 'already_committed') return { created: false, event: prepared.event };
+      const { verified } = prepared;
+      const proof = Object.freeze({});
+      if (verified.kind === 'successor') {
+        successors.set(proof, verified.successor);
+        const committed = await verified.authority.commitSuccessor({
+          candidateOutcome: proof,
+          toolOutcome: verified.toolOutcome,
+        });
+        return { created: committed.created, event: prepared.event };
+      }
+      noEffects.set(proof, verified.noEffect);
+      const committed = await verified.authority.commitNoEffect({
+        noEffectOutcome: proof,
+        toolOutcome: verified.toolOutcome,
+      });
+      return { created: committed.created, event: prepared.event };
+    },
     prepareMutation(input: GitoxideMutationAdmissionInput) {
       return prepareGitoxideMutationInternal(
         () => openExecutionWorkspaceAuthority(stores, verifiers),

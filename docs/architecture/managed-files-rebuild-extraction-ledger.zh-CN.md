@@ -922,3 +922,21 @@ Owner 仍是原 repository admission authority。必须持有匹配的 accepted 
 平台范围：本轮仅 Windows，使用真实 Gitoxide helper、root owner、SQLite 和进程退出/reopen；不是 Desktop kill 后自动完成 T2 的验收。Linux/macOS 沿用同一测试代码，尚无本轮执行证据。下一步的 durable settlement 仍须从持久化 T1 冻结上下文重算结果、验证 reservation/base，使用已有原子接受 writer；不能把这一检查点描述成 candidate-only 自动恢复已经完成。
 
 验证：Host build、Biome、diff check 通过；真实候选验证/新进程重开 2/2 通过；补充 no-change 后，候选结算、成功/失败/no-op/crash 与原子 T2 重试定向 11/11 通过，0 skip。没有运行全量 CI，也没有改变 Desktop 的恢复策略。
+
+## 第四十七检查点：candidate-only 的内部原子恢复结算
+
+`GitoxideWorkspaceBaselineOwner.recoverCandidate` 现在拥有窄恢复入口。调用者只提交 workspace/session/run/operation 身份和真实 accepted repository capability，不能提交结果、candidate 描述或 successor。独占 root writer 经既有 execution authority 认证；本轮没有把此入口接到会接收新任务的 Host，只在独占重启测试中调用。未来启动接线必须在 admission 之前完成，不能把“持有 writer”误当成“没有活跃执行”。
+
+准备阶段有界读取 RuntimeEvents（16,384 条 / 32 MiB），用共享 tool-ledger scanner 检查因果与参数身份；只接受固定 managed pure-transform profile 的 Write/Edit T1，拒绝 recovery decision、缺失 reservation、已终结但没有 T2 的 Run、workspace/base 漂移。从 accepted tree 读取原始内容并运行纯转换，结果受 managed profile 大小限制；通过上一检查点的 verification-only 入口验证已有候选。不会执行工具 handler、写 checkout、生成缺失 candidate，也不解释 Bash 等副作用。
+
+恢复 outcome 使用稳定的 `<operationId>_recovered_response` ID；内容来自纯转换，model projection 使用现有默认 canonical encoder。事件时间是已读持久前缀最大时间加一的逻辑恢复时间，不伪造原进程的 duration。此入口不尝试恢复任意自定义 `toModelOutput`；仅面向固定 managed files profile。
+
+原子性边界没有另起一套：共享 candidate settlement verifier 再从 durable T1 验证结果和证据，由现有 `commitSuccessor` 原子提交 T2/successor/head/释放 reservation；no-change 用 `commitNoEffect` 原子提交成功 T2/terminal/释放 reservation，不推进 head。Git accepted-ref 仍是后续 reopen 的幂等投影。准备或验证失败不写新事实、不删除 candidate，reservation 保留；SQLite 事务失败整体回滚，禁止 generic T2 fallback。
+
+已结算重试返回原 RuntimeEvent，校验对应历史 successor origin 或 no-change terminal 和 reservation 释放，不重算、重写 outcome，也不要求历史 successor 仍是当前 head。原进程正常提交的另一种 outcome 不由此入口冒充为恢复结果。
+
+验收包含真实 ToolRuntime 提交 T1 后退出、独立进程留下 candidate、恢复进程原子接受后直接退出（不 close store）、新进程重开并读取相同唯一 T2；accepted Read 返回恢复内容，source checkout 不变。候选 ref 篡改必须拒绝，随后原负向恢复检查仍证明 T1/reservation 未变；T1-only 调用新入口返回 candidate_missing；no-change 证明没有 successor 且精确重试不重复提交。候选发布仍是分阶段 fixture，不宣称已覆盖正常 Host 每条机器指令的任意 kill 点。
+
+平台矩阵：Windows 本轮真实 helper/SQLite/进程退出重开验证；Linux、macOS 本轮未执行。无断电承诺，无 Desktop 按钮层的新证据。剩余工作是启动 owner 在新任务 admission 前调用此结算入口，再进行真实 Electron candidate-window kill/restart/Continue 验收；自动重启继续执行、T1-only 重做、扫描优化和 Bash/npm 均未开启。
+
+验证记录：先以未实现入口观察到真实新进程恢复测试 RED；实现后相关 3/3（恢复链、原 backend-crash-first、no-change）通过；补齐 profile/结果预算和候选篡改检查后重建并复跑最终恢复链/no-change 2/2，通过且 0 skip。Host build、Biome、diff check 通过，未宣称全量 CI 或三平台通过。
