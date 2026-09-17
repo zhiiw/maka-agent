@@ -100,7 +100,13 @@ const stores = await openInteractiveExecutionStoresForWrite(leaseOwner.lease);
 const owner = createGitoxideWorkspaceBaselineOwnerInternal(stores);
 const acceptedRepositoryOwnerToken = {};
 const repositoryPath = join(rootPath, 'repository.git');
-if (mode === 'recover-head-drift' || mode === 'crash-unsettled' || mode === 'recover-unsettled') {
+if (
+  mode === 'recover-head-drift' ||
+  mode === 'crash-unsettled' ||
+  mode === 'recover-unsettled' ||
+  mode === 'publish-pending-candidate' ||
+  mode === 'recover-pending-candidate'
+) {
   const sessionId = 'settlement-session';
   const runId = 'inherited-run';
   const session = requireGitoxideManagedSessionInternal(
@@ -163,8 +169,8 @@ if (mode === 'recover-head-drift' || mode === 'crash-unsettled' || mode === 'rec
     false,
   );
   const pendingBefore = await stores.runtimeEventStore.listUnsettledToolOperations(sessionId);
-  assert.equal(pendingBefore.length, mode === 'recover-unsettled' ? 1 : 0);
-  if (mode === 'recover-unsettled') {
+  assert.equal(pendingBefore.length, mode === 'recover-head-drift' ? 0 : 1);
+  if (mode !== 'recover-head-drift') {
     assert.equal(before.filter((event) => event.content?.kind === 'function_call').length, 1);
     assert.ok(before.some((event) => event.actions?.toolDispatch?.managedMutation));
     assert.equal(
@@ -172,6 +178,67 @@ if (mode === 'recover-head-drift' || mode === 'crash-unsettled' || mode === 'rec
       false,
     );
   }
+  if (mode === 'publish-pending-candidate') {
+    const call = before.find((event) => event.content?.kind === 'function_call');
+    const dispatch = before.find((event) => event.actions?.toolDispatch?.managedMutation);
+    assert.ok(call?.content?.kind === 'function_call');
+    const mutation = dispatch!.actions!.toolDispatch!.managedMutation!;
+    const operationId = dispatch!.actions!.toolDispatch!.operationId;
+    const base = await session.readAcceptedFile(mutation.expectedPath);
+    const result = transformManagedMutation({
+      toolName: 'Write',
+      canonicalPath: mutation.expectedPath,
+      baseContent: base.content,
+      args: call.content.args,
+    });
+    const capability = await owner.reopen({
+      workspaceKey: 'crash-session',
+      repositoryPath,
+      invocationOwnerToken,
+      helperCapability,
+      acceptedRepositoryOwnerToken,
+    });
+    const candidate = await createGitoxideCandidateInternal({
+      acceptedRepositoryOwnerToken,
+      acceptedRepositoryCapability: capability,
+      candidateOwnerToken: {},
+      operationId,
+      path: mutation.expectedPath,
+      content: result.content,
+    });
+    assert.equal(candidate.kind, 'candidate_published');
+    assert.equal((await session.readAcceptedFile('hello.txt')).content, 'later accepted content\n');
+    assert.deepEqual(
+      await stores.runtimeEventStore.readImmutableRuntimeEvents(sessionId, runId),
+      before,
+    );
+    writeSync(
+      1,
+      JSON.stringify({
+        candidateRef: candidate.candidateRef,
+        candidateCommitOid: candidate.candidateCommitOid,
+      }),
+    );
+    // Persisted Git candidate, but no owner acceptance/T2 and no graceful close.
+    process.exit(89);
+  }
+  const candidatePath =
+    mode === 'recover-pending-candidate'
+      ? join(
+          repositoryPath,
+          'refs',
+          'maka',
+          'candidates',
+          createHash('sha256')
+            .update(
+              before.find((event) => event.actions?.toolDispatch?.managedMutation)!.actions!
+                .toolDispatch!.operationId,
+            )
+            .digest('hex'),
+        )
+      : undefined;
+  const candidateBefore = candidatePath ? await readFile(candidatePath, 'utf8') : undefined;
+  if (candidateBefore) assert.match(candidateBefore.trim(), /^[a-f0-9]{40}$/);
   let inspected = 0;
   const manager = new SessionManager({
     store: stores.sessionStore,
@@ -203,6 +270,7 @@ if (mode === 'recover-head-drift' || mode === 'crash-unsettled' || mode === 'rec
       await stores.runtimeEventStore.listUnsettledToolOperations(sessionId),
       pendingBefore,
     );
+    if (candidatePath) assert.equal(await readFile(candidatePath, 'utf8'), candidateBefore);
   }
   assert.equal(inspected, mode === 'recover-head-drift' ? 2 : 0);
   assert.equal((await session.readAcceptedFile('hello.txt')).content, 'later accepted content\n');

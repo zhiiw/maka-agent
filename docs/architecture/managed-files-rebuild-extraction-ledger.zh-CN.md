@@ -882,3 +882,21 @@ Runtime/Host build、格式检查通过；continuation/resume/handoff 定向 32/
 剩余优先级：下一步验证 candidate 已固化但尚未接受的窗口，明确是接受已有证据还是继续 park；随后才做 T1-only 的恢复策略。首次纯只读任务和三平台 Desktop 证据仍待补齐。自动恢复、Bash/npm、发布与 GC 不纳入本轮。
 
 验证：Host build、Biome、diff check 通过；backend-live-sequence 与 backend-crash-first 定向 2/2 通过；增加精确 T1 形状断言后单独复跑 backend-live-sequence 1/1 通过。没有改生产代码，也没有本轮 Electron 反向验收或全量 CI 声明。
+
+## 第四十四检查点：candidate-only 崩溃状态不能冒充 accepted outcome
+
+在上一检查点真实 T1-only 状态上，另一个 fixture 子进程读取持久化 function_call 参数和 accepted base，通过生产纯转换函数及 Gitoxide candidate owner 固化候选物，然后在接受前直接退出（exit 89、不 close stores/lease）。没有调用 checkout Write/Edit，也没有提交 T2。独立恢复进程要求 candidate ref 已存在且指向合法 SHA-1，连续两次调用真实独占 Host recovery 后检查：
+
+- target 的完整 RuntimeEvents 不变，仍无 function_response / terminal；
+- unsettled operation 不变；
+- candidate ref 字节不变，不删除、不接受、不移动为 accepted；
+- accepted Read 仍返回之前已接受的内容，source checkout 不变；
+- tool-ledger 守卫先拒绝，不进入 continuation checkpoint inspector。
+
+这是分阶段制造真实持久化中间状态的 storage/runtime recovery 测试，**不是**在正常 Host 的 commitOutcome 内直接注入 kill，更不是 candidate-only 自动结算成功。此前 crash-after-candidate fixture 只证明 Git candidate 留存，不能代替这一条 continuation recovery 接线检查。
+
+当前缺口明确为 mutation recovery owner，而不是继续修改 continuation planner：Git candidate 仅证明候选内容，原 Runtime 的完整 provider outcome 尚未被 SQLite 接受，进程内 candidate capability 也不能跨进程复用。仅发现 ref 就 synthesize success 会越权。
+
+下一实现的最小合同应复用已有 authority：从未结算 T1 冻结参数/base/operation 身份，验证同一个 reservation；纯转换重算期望内容（不是执行工具 handler 或覆盖 checkout），重新验证已有 candidate 与该内容、base、policy 精确对应；由同一个 mutation owner 构造有明确恢复身份的结果，并使用既有 SQLite 原子接受入口提交 T2/successor/head/释放 reservation。任何证据不符仍 park；不能另设 accepted ledger、generic T2 fallback 或凭可变 source 文件猜测结果。候选物不存在的 T1-only 处理仍单独设计，不在这一检查点暗中生成并接受。
+
+平台与验证：Windows Host build 通过，Biome/diff check 通过，定向 2/2（含 candidate-only 新进程恢复和原 backend-crash-first）通过。Linux/macOS 本轮未运行；没有生产代码变更、没有扩展自动恢复承诺。下一步应实现并证明上述窄 reconciliation owner，而不是继续只补同类 park 测试。

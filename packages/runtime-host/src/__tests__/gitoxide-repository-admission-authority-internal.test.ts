@@ -273,6 +273,11 @@ for (const mode of [
         assert.equal(pending.status, 88, pending.stderr);
         const parkedPending = run('recover-unsettled');
         assert.equal(parkedPending.status, 0, parkedPending.stderr);
+        const candidateOnly = run('publish-pending-candidate');
+        assert.equal(candidateOnly.status, 89, candidateOnly.stderr);
+        assert.match(JSON.parse(candidateOnly.stdout).candidateCommitOid, /^[a-f0-9]{40}$/);
+        const parkedCandidate = run('recover-pending-candidate');
+        assert.equal(parkedCandidate.status, 0, parkedCandidate.stderr);
       }
       assert.equal(await readFile(join(source, 'hello.txt'), 'utf8'), 'accepted original\n');
     } finally {
