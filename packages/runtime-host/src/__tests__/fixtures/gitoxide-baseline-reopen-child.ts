@@ -18,6 +18,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { createExecutionRuntimeHostComposition } from '../../server/execution-composition.js';
 import {
   createRuntimeBoundaryCursor,
   runtimePrefixSegment,
@@ -101,6 +102,140 @@ const stores = await openInteractiveExecutionStoresForWrite(leaseOwner.lease);
 const owner = createGitoxideWorkspaceBaselineOwnerInternal(stores);
 const acceptedRepositoryOwnerToken = {};
 const repositoryPath = join(rootPath, 'repository.git');
+if (mode.startsWith('startup-candidate-')) {
+  const sessionId = 'startup-candidate-session';
+  const runId = 'startup-candidate-run';
+  const managedPath = join(
+    leaseOwner.lease.canonicalPath,
+    `managed-files-${createHash('sha256').update(sessionId).digest('hex')}.git`,
+  );
+  if (mode === 'startup-candidate-crash' || mode === 'startup-candidate-t1') {
+    const created = await createGitoxideManagedTaskInternal(leaseOwner.lease, {
+      sessionId,
+      sourcePath,
+      invocationOwnerToken,
+      helperCapability,
+      connectionId: 'test-connection',
+      connectionSlug: 'test',
+      model: 'test-model',
+      name: 'Startup recovery',
+    });
+    const session = requireGitoxideManagedSessionInternal(
+      created.capability,
+      sessionId,
+      stores.runtimeEventStore,
+    );
+    let id = 0;
+    const runtime = new ToolRuntime({
+      sessionId,
+      runId,
+      invocationId: 'startup-invocation',
+      turnId: 'startup-turn',
+      header: await stores.sessionStore.readHeader(sessionId),
+      connection: { slug: 'test', providerType: 'openai', defaultModel: 'test' },
+      modelId: 'test',
+      newId: () => `startup-event-${++id}`,
+      now: Date.now,
+      readExecutionBoundary: async () => createExternalExecutionBoundary(),
+      readPermissionMode: async () => 'ask',
+      getPermissionPauseTarget: () => null,
+      runtimeCommitSink: {
+        async commitToolPrepared(input) {
+          const result = await session.runtimeCommitSink.commitToolPrepared(input);
+          if (mode === 'startup-candidate-t1') process.exit(92);
+          return result;
+        },
+        async commitToolOutcome() {
+          throw new Error('Generic T2 forbidden');
+        },
+      },
+      prepareManagedMutation: async (request) => {
+        const prepared = await session.prepareManagedMutation(request);
+        return {
+          ...prepared,
+          async commitOutcome(outcome, result) {
+            assert.ok(result);
+            const token = {};
+            const cap = await owner.reopen({
+              workspaceKey: sessionId,
+              repositoryPath: managedPath,
+              invocationOwnerToken,
+              helperCapability,
+              acceptedRepositoryOwnerToken: token,
+            });
+            await createGitoxideCandidateInternal({
+              acceptedRepositoryOwnerToken: token,
+              acceptedRepositoryCapability: cap,
+              candidateOwnerToken: {},
+              operationId: outcome.operationId,
+              path: prepared.mutation.expectedPath,
+              content: result.content,
+            });
+            process.exit(91);
+          },
+        };
+      },
+    });
+    await runtime.settleToolCall({
+      tool: {
+        name: 'Write',
+        description: 'managed write',
+        parameters: {},
+        impl() {
+          throw new Error('Checkout execution forbidden');
+        },
+      },
+      turnId: 'startup-turn',
+      toolCallId: 'startup-call',
+      input: { path: 'hello.txt', content: 'startup recovered\n' },
+      abortSignal: new AbortController().signal,
+      eventSink: { push() {}, async pushAndWaitUntilConsumed() {} },
+    });
+    throw new Error('Crash boundary not reached');
+  }
+  const before = await stores.runtimeEventStore.readImmutableRuntimeEvents(sessionId, runId);
+  const composition = await createExecutionRuntimeHostComposition(
+    {
+      owner: leaseOwner,
+      hostEpoch: 'startup-test',
+      acquireResidency: () => ({ release() {} }),
+      retainUntilProcessExit() {},
+      requestDrain() {},
+    },
+    {},
+    {
+      ...(mode !== 'startup-candidate-no-helper'
+        ? { managedFilesHelper: { invocationOwnerToken, helperCapability } }
+        : {}),
+      primaryBackendFactory() {
+        throw new Error('Startup recovery must not run a model');
+      },
+    },
+  );
+  await composition.recover();
+  const after = await stores.runtimeEventStore.readImmutableRuntimeEvents(sessionId, runId);
+  const unsettled = await stores.runtimeEventStore.listUnsettledToolOperations(sessionId);
+  if (mode === 'startup-candidate-park' || mode === 'startup-candidate-no-helper') {
+    assert.deepEqual(after, before);
+    assert.equal(unsettled.length, 1);
+  } else {
+    assert.equal(after.filter((event) => event.content?.kind === 'function_response').length, 1);
+    assert.equal(unsettled.length, 0);
+    if (mode === 'startup-candidate-retry') assert.deepEqual(after, before);
+    const session = requireGitoxideManagedSessionInternal(
+      await reopenGitoxideManagedTaskInternal(leaseOwner.lease, {
+        sessionId,
+        invocationOwnerToken,
+        helperCapability,
+      }),
+      sessionId,
+      stores.runtimeEventStore,
+    );
+    assert.equal((await session.readAcceptedFile('hello.txt')).content, 'startup recovered\n');
+  }
+  writeSync(1, JSON.stringify(after));
+  process.exit(0);
+}
 if (
   mode === 'recover-head-drift' ||
   mode === 'crash-unsettled' ||

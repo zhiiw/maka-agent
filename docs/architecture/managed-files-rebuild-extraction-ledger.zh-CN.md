@@ -940,3 +940,21 @@ Owner 仍是原 repository admission authority。必须持有匹配的 accepted 
 平台矩阵：Windows 本轮真实 helper/SQLite/进程退出重开验证；Linux、macOS 本轮未执行。无断电承诺，无 Desktop 按钮层的新证据。剩余工作是启动 owner 在新任务 admission 前调用此结算入口，再进行真实 Electron candidate-window kill/restart/Continue 验收；自动重启继续执行、T1-only 重做、扫描优化和 Bash/npm 均未开启。
 
 验证记录：先以未实现入口观察到真实新进程恢复测试 RED；实现后相关 3/3（恢复链、原 backend-crash-first、no-change）通过；补齐 profile/结果预算和候选篡改检查后重建并复跑最终恢复链/no-change 2/2，通过且 0 skip。Host build、Biome、diff check 通过，未宣称全量 CI 或三平台通过。
+
+## 第四十八检查点：生产 Host 启动阶段消费候选恢复结算
+
+`execution` 模块的启动恢复在 coordinator/interactions 准备后、SessionManager interrupted-session 修复前调用 managed candidate recovery；仍早于 Host Ready、新任务 admission 和 schedulers。只处理 recovery session 列表内的 `managed-files-v1`、无外部 executor 的任务，且必须已取得 admitted helper。没有 helper 时不发现系统 Git、不切换工具模式，也不改变既有未结算事实。
+
+`recoverGitoxideManagedTaskCandidatesInternal` 持有真实 interactive write lease，从 durable Session header 校验模式，从 storage root 和 session ID 推导 repository path，不接受 caller 自报的 repository/workspace 路径。读取 prepared operation 后，仅尝试 Write/Edit reconcile；每次 reopen 都重新取得 repository capability，并在结算前重读 header。原子接受仍由第四十七检查点的 owner 和 SQLite writer 执行。本入口不暴露到 session tool capability 或 RPC。
+
+失败分层：root lease、header/ledger 枚举等基础访问失败仍传播；单个候选证据不完整或验证失败不阻止其他会话启动，只保留原证据与 reservation，输出需 ledger reconciliation 的警告。不调用工具、不创建候选、不写 generic T2、不自动开始新的 Run。警告不是新的 durable parked fact：若提交响应丢失，后续仍以 ledger 为准，不能靠日志覆盖已提交结果。
+
+新增真实子进程验收使用产品的 `createGitoxideManagedTaskInternal`（真实 header 与产品 repository 路径）、ToolRuntime、Gitoxide、SQLite 和完整 `createExecutionRuntimeHostComposition().recover()`。在真实 T1 之后分别直接退出；candidate 窗口通过测试适配器固化真实 candidate 后、原子接受前退出。新进程启动真实 composition 后验证唯一 T2、reservation 释放、accepted Read 为新内容；第二次启动事件逐条不变；用户 source checkout 始终不变。
+
+反向验收：没有 helper 时仍能完成 composition recovery 且 prepared 事实不变；候选 ref 篡改时 Host 启动成功但 operation 保留，恢复合法 ref 后才可结算；T1-only 连续两次启动均不创造 outcome。这些用例禁止 backend factory 被调用，证明启动修复不会偷偷启动模型。
+
+平台矩阵：Windows 本轮真实 Host composition/子进程/SQLite/Gitoxide 通过；Linux/macOS 未运行。不宣称已做真实 Electron UI kill 验收，也不承诺断电。此轮使用已经持有独占 root lease 的 production composition，但没有重测 IPC election/socket；candidate failpoint 是测试侧适配器，不是实际发布包中的任意机器指令 kill。
+
+下一步：真实 Desktop 的 candidate-window Host kill → 重启 → 手动 Continue 验收，并验证 transcript 与模型恢复只读取已接受的同一结果。仍不引入启动自动续跑、T1-only 重做、扫描优化或 Bash/npm。
+
+验证：新增真实 composition 用例先 RED（重启后 0 条 T2），接线后通过；含 helper 缺失/篡改/T1-only 的最终用例复跑通过。关联启动资源清理/可选 Store 故障等定向总计 4/4、0 skip；Host build、Biome、diff check 通过。无全量 CI 或其他平台通过声明。

@@ -228,6 +228,7 @@ import { HostSessionCatalogCoordinator } from './session-catalog-coordinator.js'
 import {
   publishPreparedGitoxideManagedTaskInternal,
   reopenGitoxideManagedTaskInternal,
+  recoverGitoxideManagedTaskCandidatesInternal,
   requireGitoxideManagedSessionInternal,
 } from './gitoxide-managed-session-internal.js';
 import { HostWorkspaceResolver } from './workspace-resolver.js';
@@ -2792,6 +2793,24 @@ export async function createExecutionRuntimeHostComposition(
           executions: async () => {
             await coordinator.prepareRecovery();
             await interactions.recoverPendingAfterHostRestart();
+            if (dependencies.managedFilesHelper) {
+              for (const session of recoverySessions) {
+                if (session.toolProfile !== 'managed-files-v1' || session.executorId) continue;
+                const results = await recoverGitoxideManagedTaskCandidatesInternal(
+                  context.owner.lease,
+                  {
+                    sessionId: session.id,
+                    ...dependencies.managedFilesHelper,
+                  },
+                );
+                for (const result of results) {
+                  if (result.state === 'parked')
+                    console.warn(
+                      `[startup] managed mutation requires ledger reconciliation: ${result.operationId}`,
+                    );
+                }
+              }
+            }
             await requireSessionManager(manager).recoverInterruptedSessionsAfterHostRestart(stores);
             await requireSessionManager(manager).recoverChildWorkspacePatches(
               recoverySessions.flatMap((session) =>

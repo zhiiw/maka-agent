@@ -541,6 +541,71 @@ for (const mode of ['settle-candidate', 'settle-new-file']) {
   });
 }
 
+test('production Host startup settles existing candidates and preserves missing-candidate reservations', {
+  timeout: 60_000,
+}, async (t) => {
+  if (!(await admittedHelper())) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
+    return;
+  }
+  const source = await createRepository(t, 'sha1');
+  await writeFile(join(source, 'hello.txt'), 'accepted original\n');
+  git(source, ['add', 'hello.txt']);
+  git(source, [
+    '-c',
+    'user.name=Test',
+    '-c',
+    'user.email=test@example.invalid',
+    'commit',
+    '-qm',
+    'fixture',
+  ]);
+  for (const candidate of [true, false]) {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'maka-startup-candidate-'));
+    const root = await resolveStorageRoot({ path: stateRoot, kind: 'interactive' });
+    const child = fileURLToPath(
+      new URL('./fixtures/gitoxide-baseline-reopen-child.js', import.meta.url),
+    );
+    const run = (mode: string) =>
+      spawnSync(process.execPath, [child, mode, stateRoot, source], {
+        encoding: 'utf8',
+        timeout: 20_000,
+        windowsHide: true,
+      });
+    try {
+      const crashed = run(candidate ? 'startup-candidate-crash' : 'startup-candidate-t1');
+      assert.equal(crashed.status, candidate ? 91 : 92, crashed.stderr);
+      const noHelper = run('startup-candidate-no-helper');
+      assert.equal(noHelper.status, 0, noHelper.stderr);
+      if (candidate) {
+        const repo = join(
+          stateRoot,
+          `managed-files-${createHash('sha256').update('startup-candidate-session').digest('hex')}.git`,
+        );
+        const ref = gitBare(repo, ['for-each-ref', '--format=%(refname)', 'refs/maka/candidates']);
+        const refPath = join(repo, ref);
+        const bytes = await readFile(refPath);
+        await writeFile(refPath, `${'0'.repeat(40)}\n`);
+        const corrupt = run('startup-candidate-park');
+        assert.equal(corrupt.status, 0, corrupt.stderr);
+        assert.match(corrupt.stderr, /managed mutation requires ledger reconciliation/);
+        assert.deepEqual(JSON.parse(corrupt.stdout), JSON.parse(noHelper.stdout));
+        await writeFile(refPath, bytes);
+      }
+      const recovered = run(candidate ? 'startup-candidate-recover' : 'startup-candidate-park');
+      assert.equal(recovered.status, 0, recovered.stderr);
+      const repeated = run(candidate ? 'startup-candidate-retry' : 'startup-candidate-park');
+      assert.equal(repeated.status, 0, repeated.stderr);
+      assert.deepEqual(JSON.parse(repeated.stdout), JSON.parse(recovered.stdout));
+      assert.equal(await readFile(join(source, 'hello.txt'), 'utf8'), 'accepted original\n');
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+      await rm(join(resolveRootControlNamespace(), root.rootId), { recursive: true, force: true });
+      await rm(join(resolveRootOwnershipNamespace(), root.rootId + '.lock'), { force: true });
+    }
+  }
+});
+
 test('revalidates a published candidate after process exit without advancing accepted truth', {
   timeout: 60_000,
 }, async (t) => {

@@ -107,6 +107,61 @@ function managedTaskRepositoryPath(root: string, sessionId: string): string {
   return join(root, `managed-files-${createHash('sha256').update(sessionId).digest('hex')}.git`);
 }
 
+/** Only the Host startup phase, before task admission, may consume this entry. */
+export async function recoverGitoxideManagedTaskCandidatesInternal(
+  lease: StorageRootLease<'interactive', 'write'>,
+  original: Pick<
+    ManagedSessionCreateInput,
+    'sessionId' | 'invocationOwnerToken' | 'helperCapability'
+  >,
+): Promise<readonly { operationId: string; state: 'settled' | 'parked' }[]> {
+  const input = { ...original };
+  return runWithStorageRootLease(lease, 'interactive', 'write', async (root) => {
+    const stores = await openInteractiveExecutionStoresForWrite(lease);
+    const header = await stores.sessionStore.readHeader(input.sessionId);
+    if (
+      header.id !== input.sessionId ||
+      header.toolProfile !== 'managed-files-v1' ||
+      header.executorId
+    )
+      throw new Error('Startup candidate recovery requires a managed files task');
+    const pending = await stores.runtimeEventStore.listUnsettledToolOperations(input.sessionId);
+    const owner = createGitoxideWorkspaceBaselineOwnerInternal(stores);
+    const results: { operationId: string; state: 'settled' | 'parked' }[] = [];
+    for (const operation of pending) {
+      if (operation.recoveryMode !== 'reconcile' || !['Write', 'Edit'].includes(operation.toolName))
+        continue;
+      try {
+        const acceptedRepositoryOwnerToken = {};
+        const acceptedRepositoryCapability = await owner.reopen({
+          workspaceKey: input.sessionId,
+          repositoryPath: managedTaskRepositoryPath(root, input.sessionId),
+          invocationOwnerToken: input.invocationOwnerToken,
+          helperCapability: input.helperCapability,
+          acceptedRepositoryOwnerToken,
+        });
+        const current = await stores.sessionStore.readHeader(input.sessionId);
+        if (current.toolProfile !== header.toolProfile || current.executorId !== header.executorId)
+          throw new Error('Managed task mode changed during recovery');
+        await owner.recoverCandidate({
+          workspaceKey: input.sessionId,
+          sessionId: input.sessionId,
+          runId: operation.runId,
+          operationId: operation.operationId,
+          acceptedRepositoryOwnerToken,
+          acceptedRepositoryCapability,
+        });
+        results.push({ operationId: operation.operationId, state: 'settled' });
+      } catch {
+        // No fallback, reservation release, candidate creation or tool retry.
+        // The ledger remains the authority even if a commit response was lost.
+        results.push({ operationId: operation.operationId, state: 'parked' });
+      }
+    }
+    return results;
+  });
+}
+
 export function createGitoxideManagedTaskInternal(
   lease: StorageRootLease<'interactive', 'write'>,
   input: Omit<ManagedSessionCreateInput, 'repositoryPath'>,
