@@ -51,6 +51,49 @@ interface SessionExecution {
 const sessions = new WeakMap<GitoxideManagedSessionCapability, SessionExecution>();
 const creations = new WeakMap<object, Promise<unknown>>();
 
+export async function reopenGitoxideManagedTaskInternal(
+  lease: StorageRootLease<'interactive', 'write'>,
+  input: Pick<
+    ManagedSessionCreateInput,
+    'sessionId' | 'invocationOwnerToken' | 'helperCapability' | 'abortSignal'
+  >,
+): Promise<GitoxideManagedSessionCapability> {
+  input = { ...input };
+  return runWithStorageRootLease(lease, 'interactive', 'write', async (root) => {
+    input.abortSignal?.throwIfAborted();
+    const repositoryPath = managedTaskRepositoryPath(root, input.sessionId);
+    const stores = await openInteractiveExecutionStoresForWrite(lease);
+    const header = await stores.sessionStore.readHeader(input.sessionId);
+    if (
+      header.id !== input.sessionId ||
+      header.toolProfile !== 'managed-files-v1' ||
+      header.executorId
+    )
+      throw new Error('Session is not a managed files task');
+    const capability = await openGitoxideManagedSessionInternal(stores, {
+      ...input,
+      repositoryPath,
+      workspaceKey: input.sessionId,
+    });
+    const current = await stores.sessionStore.readHeader(input.sessionId);
+    if (current.toolProfile !== header.toolProfile || current.executorId !== header.executorId)
+      throw new Error('Managed task mode changed during reopening');
+    input.abortSignal?.throwIfAborted();
+    return capability;
+  });
+}
+
+function managedTaskRepositoryPath(root: string, sessionId: string): string {
+  if (
+    typeof sessionId !== 'string' ||
+    !sessionId.trim() ||
+    sessionId.includes('\0') ||
+    Buffer.byteLength(sessionId) > 1024
+  )
+    throw new Error('Invalid managed session identity');
+  return join(root, `managed-files-${createHash('sha256').update(sessionId).digest('hex')}.git`);
+}
+
 export function createGitoxideManagedTaskInternal(
   lease: StorageRootLease<'interactive', 'write'>,
   input: Omit<ManagedSessionCreateInput, 'repositoryPath'>,
@@ -62,12 +105,7 @@ export function createGitoxideManagedTaskInternal(
     .then(() =>
       runWithStorageRootLease(lease, 'interactive', 'write', async (root) => {
         input.abortSignal?.throwIfAborted();
-        if (typeof input.sessionId !== 'string' || Buffer.byteLength(input.sessionId) > 1024)
-          throw new Error('Invalid managed session identity');
-        const repositoryPath = join(
-          root,
-          `managed-files-${createHash('sha256').update(input.sessionId).digest('hex')}.git`,
-        );
+        const repositoryPath = managedTaskRepositoryPath(root, input.sessionId);
         const request = { ...input, repositoryPath };
         const { requestFingerprint } = describeGitoxideManagedSessionCreateInternal(request);
         const stores = await openInteractiveExecutionStoresForWrite(lease);

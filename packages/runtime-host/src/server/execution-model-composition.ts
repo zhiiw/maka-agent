@@ -76,8 +76,35 @@ import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
 import type { HostRunComposer, HostRunComposerFactory } from './host-run-composer.js';
 import {
   requireGitoxideManagedSessionInternal,
+  reopenGitoxideManagedTaskInternal,
   type GitoxideManagedSessionCapability,
 } from './gitoxide-managed-session-internal.js';
+import type { StorageRootLease } from '@maka/storage/root-authority';
+import type { GitoxideHelperInvocationCapability } from './gitoxide-helper-artifact-authority-internal.js';
+
+export interface HostManagedFilesHelper {
+  readonly invocationOwnerToken: object;
+  readonly helperCapability: GitoxideHelperInvocationCapability;
+}
+
+/** Reconstruct managed authority from persisted state before touching provider credentials. */
+export async function prepareHostAiSdkBackendFromRoot(
+  lease: StorageRootLease<'interactive', 'write'>,
+  helper: HostManagedFilesHelper | undefined,
+  input: Omit<HostAiSdkBackendPreparationInput, 'managedFilesSession'>,
+): Promise<PreparedBackendActivation> {
+  input = { ...input };
+  if (input.context.header.toolProfile !== 'managed-files-v1')
+    return prepareHostAiSdkBackend(input);
+  if (!helper) throw new Error('Managed files helper is unavailable in this Host');
+  const capability = await reopenGitoxideManagedTaskInternal(lease, {
+    sessionId: input.context.sessionId,
+    invocationOwnerToken: helper.invocationOwnerToken,
+    helperCapability: helper.helperCapability,
+    abortSignal: input.context.abortSignal,
+  });
+  return prepareHostAiSdkBackend({ ...input, managedFilesSession: capability });
+}
 
 export interface HostAiSdkBackendInput {
   readonly managedFilesSession?: GitoxideManagedSessionCapability;

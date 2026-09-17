@@ -112,6 +112,7 @@ import {
 import {
   createHostAiSdkBackend,
   prepareHostAiSdkBackend,
+  prepareHostAiSdkBackendFromRoot,
   type HostAiSdkBackendInput,
 } from '../server/execution-model-composition.js';
 import {
@@ -5063,6 +5064,30 @@ async function publishConnectionModel(
   });
   assert.equal(committed.kind, 'committed');
 }
+
+test('root backend preparation keeps ordinary sessions independent of the managed helper', async () => {
+  let providerReads = 0;
+  const input = backendCreationFixture({
+    abortSignal: new AbortController().signal,
+    resolveExecutionConnection: async () => {
+      providerReads++;
+      throw new Error('provider reached');
+    },
+    readPricing: async () => ({ revision: 0, overrides: [] }),
+  });
+  const lease = {} as Parameters<typeof prepareHostAiSdkBackendFromRoot>[0];
+  await assert.rejects(
+    prepareHostAiSdkBackendFromRoot(lease, undefined, input),
+    /provider reached/,
+  );
+  assert.equal(providerReads, 1);
+  input.context.header.toolProfile = 'managed-files-v1';
+  await assert.rejects(
+    prepareHostAiSdkBackendFromRoot(lease, undefined, input),
+    /helper is unavailable/,
+  );
+  assert.equal(providerReads, 1);
+});
 
 test('rejects a managed profile without execution capability before provider credentials', async () => {
   const input = backendCreationFixture({

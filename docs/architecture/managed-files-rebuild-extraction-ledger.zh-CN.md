@@ -449,3 +449,16 @@ TDD 先复现未知 profile、managed profile 缺能力仍读取凭据、AiSdkBa
 验证：Rust **75/75**；Host publication/backend 定向 **7/7、0 skip**；跨语言错误协议 **1/1**；Host build、Biome、diff check 通过。平台矩阵：Windows 本机执行；Linux/macOS 由现有相同测试文件的 workflow 调度，本轮未取得远程结果。不承诺断电、helper 任意内部指令点恢复或半完成目录自动回收。
 
 下一步：live Host 创建 handler 和按持久化 Session 重建 capability 的接线，保持普通会话不受影响；完成真实 Host IPC/election 验证后，才开放 Desktop 加号菜单入口。该检查点仍是内部创建 owner，尚不能称为 Desktop 产品闭环。
+
+## 第二十一检查点：持久化 Session 重开与 Host backend preparation
+
+新增 `reopenGitoxideManagedTaskInternal`：只接收真实 root write lease、session ID 和已授权 helper，不再要求恢复调用者带回原始创建请求或 repository 路径。创建/重开共用 root + session ID 的目录规则；读取真实 Session，拒绝普通 profile 和 plugin executor，再根据 SQLite accepted head 及 Git 对象重建 capability。重开结束前重查 persisted mode 与取消状态。
+
+- **Owner/主要不变量**：持久化 Session 决定是否为 managed task，root authority 决定目录，workspace authority 决定 accepted 内容。cwd 不作为恢复内容来源；source checkout 外部修改不被导入、覆盖或当作当前 head。这里不自动切换 mode，也不发布新 baseline/Session。
+- **Host 接线**：默认 ai-sdk backend factory 现在调用 `prepareHostAiSdkBackendFromRoot`。managed profile 必须有内部组合层传入的真实 helper capability，先完成重开并验证同一个 runtime sink，才读取 provider 凭据；缺 helper 明确拒绝。普通 profile 继续走原 preparation，不要求 helper，不访问新 root 路由。传入的是能力对象，不增加 executable path、PATH discovery 或 IPC 自签发入口。
+- **原子/生命周期**：重开持有 root operation，沿原 accepted-ref reconciliation 与对象验证协议，不新增事务、schema 或接受事实。每次 backend preparation 重新构建，不持久缓存内存 token。错误不能回退 checkout/generic managed mutation；停止注入 helper 只关闭 managed 执行，不应让普通会话无法发送。
+- **验证边界**：真实 child-process 创建/退出后，新进程按 session ID 重开；source 被改成不同内容时仍读到 accepted 内容且不覆盖 source。普通 Session 重开被拒绝；真实 root/helper/sink 能走到 provider 边界，错误 sink 在该边界前被拒绝。provider 只以受控 sentinel 标记是否抵达，没有发真实网络请求。没有声称启动完整 Host election、IPC 或 Electron。
+
+Windows 定向：两条真实进程 task 创建/重开 **2/2**；Host backend creation/preparation 回归 **11/11**；CI gate policy **1/1**；Host build、Biome、diff check 通过。三平台 workflow 的选择范围加入 production execution-composition，测试 pattern 纳入 root preparation；Linux/macOS 本轮无远程结果。不扩大断电/完整任务自动恢复承诺。
+
+仍未开放产品入口：当前发行/bootstrap 尚未给 execution composition 提供 helper capability；默认未配置的 Host 会明确拒绝 managed profile。接下来需要明确 packaged/dev helper admission 与 Host capability negotiation，再将专门 task 创建 owner 接入经过 model/workspace 授权的 session handler。普通 session.create 的 managed 禁止规则保持不变，Desktop 按钮不提前开放。

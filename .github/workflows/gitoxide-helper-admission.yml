@@ -37,6 +37,7 @@ on:
       - 'packages/runtime-host/src/server/gitoxide-runtime-mutation-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-managed-session-internal.ts'
       - 'packages/runtime-host/src/server/execution-model-composition.ts'
+      - 'packages/runtime-host/src/server/execution-composition.ts'
       - 'packages/runtime-host/src/__tests__/execution-model-composition.test.ts'
       - 'packages/runtime/src/ai-sdk-backend.ts'
       - 'packages/runtime/src/read-page.ts'
@@ -71,6 +72,7 @@ on:
       - 'packages/runtime-host/src/server/gitoxide-runtime-mutation-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-managed-session-internal.ts'
       - 'packages/runtime-host/src/server/execution-model-composition.ts'
+      - 'packages/runtime-host/src/server/execution-composition.ts'
       - 'packages/runtime-host/src/__tests__/execution-model-composition.test.ts'
       - 'packages/runtime/src/ai-sdk-backend.ts'
       - 'packages/runtime/src/read-page.ts'
@@ -171,7 +173,7 @@ jobs:
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
       - name: Verify managed backend identity admission
         run: >-
-          node --test --test-name-pattern="managed profile|managed files|forged managed session|ordinary session creation cannot mint"
+          node --test --test-name-pattern="managed profile|managed files|forged managed session|ordinary session creation cannot mint|root backend preparation"
           packages/runtime-host/dist/__tests__/execution-model-composition.test.js
           packages/runtime-host/dist/__tests__/hosted-execution-tool-profile.test.js
           packages/runtime-host/dist/__tests__/session-catalog-coordinator.test.js

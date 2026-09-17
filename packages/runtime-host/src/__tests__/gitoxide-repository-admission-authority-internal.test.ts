@@ -124,6 +124,9 @@ for (const crashMode of [
         assert.equal(changed.status, 0, changed.stderr);
         assert.equal(changed.stdout, 'rejected');
       }
+      if (crashMode === 'task-create-exit') {
+        await writeFile(join(source, 'hello.txt'), 'external checkout edit\n');
+      }
       const retry = run(
         crashMode.startsWith('task-')
           ? 'task-retry'
@@ -139,7 +142,10 @@ for (const crashMode of [
         content: 'accepted original\n',
         facts: 2,
       });
-      assert.equal(await readFile(join(source, 'hello.txt'), 'utf8'), 'accepted original\n');
+      assert.equal(
+        await readFile(join(source, 'hello.txt'), 'utf8'),
+        crashMode === 'task-create-exit' ? 'external checkout edit\n' : 'accepted original\n',
+      );
     } finally {
       await rm(stateRoot, { recursive: true, force: true });
       await rm(join(resolveRootControlNamespace(), root.rootId), { recursive: true, force: true });

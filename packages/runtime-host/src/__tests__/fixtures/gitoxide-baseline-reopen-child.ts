@@ -26,10 +26,12 @@ import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import { transformManagedMutation } from '@maka/runtime/managed-mutation-transform';
 import { ToolRuntime } from '@maka/runtime/tool-runtime';
 import { AiSdkBackend } from '@maka/runtime/ai-sdk-backend';
+import { prepareHostAiSdkBackendFromRoot } from '../../server/execution-model-composition.js';
 import {
   openGitoxideManagedSessionInternal,
   createGitoxideManagedSessionInternal,
   createGitoxideManagedTaskInternal,
+  reopenGitoxideManagedTaskInternal,
   describeGitoxideManagedSessionCreateInternal,
   requireGitoxideManagedSessionInternal,
 } from '../../server/gitoxide-managed-session-internal.js';
@@ -155,12 +157,66 @@ if (mode.startsWith('task-')) {
     const result = results[0];
     assert.equal(results[1].created, false);
     if (mode === 'task-create-exit') process.exit(87);
+    const reopened = await reopenGitoxideManagedTaskInternal(leaseOwner.lease, {
+      sessionId: request.sessionId,
+      invocationOwnerToken,
+      helperCapability,
+    });
     const execution = requireGitoxideManagedSessionInternal(
-      result.capability,
+      reopened,
       request.sessionId,
       stores.runtimeEventStore,
     );
     const read = await execution.readAcceptedFile('hello.txt');
+    const ordinary = await stores.sessionStore.create({
+      cwd: sourcePath,
+      name: 'Ordinary task',
+      llmConnectionSlug: 'test',
+      permissionMode: 'ask',
+    });
+    await assert.rejects(
+      reopenGitoxideManagedTaskInternal(leaseOwner.lease, {
+        sessionId: ordinary.id,
+        invocationOwnerToken,
+        helperCapability,
+      }),
+      /not a managed files task/,
+    );
+    let providerReads = 0;
+    const backendInput = {
+      context: {
+        sessionId: request.sessionId,
+        header: await stores.sessionStore.readHeader(request.sessionId),
+        abortSignal: new AbortController().signal,
+      },
+      runtimeCommitSink: stores.runtimeEventStore,
+      runtimePolicy: {
+        operations: {
+          resolveExecutionConnection: async () => {
+            providerReads++;
+            throw new Error('verified managed provider boundary');
+          },
+        },
+      },
+    } as unknown as Parameters<typeof prepareHostAiSdkBackendFromRoot>[2];
+    await assert.rejects(
+      prepareHostAiSdkBackendFromRoot(
+        leaseOwner.lease,
+        { invocationOwnerToken, helperCapability },
+        backendInput,
+      ),
+      /verified managed provider boundary/,
+    );
+    assert.equal(providerReads, 1);
+    await assert.rejects(
+      prepareHostAiSdkBackendFromRoot(
+        leaseOwner.lease,
+        { invocationOwnerToken, helperCapability },
+        { ...backendInput, runtimeCommitSink: undefined },
+      ),
+      /Managed session does not match/,
+    );
+    assert.equal(providerReads, 1);
     await assert.rejects(
       createGitoxideManagedTaskInternal(leaseOwner.lease, { ...request, name: 'Changed request' }),
       /conflict/i,

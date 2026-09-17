@@ -148,7 +148,10 @@ import { HostContextCoordinator } from './context-coordinator.js';
 import { HostClientCapabilityCoordinator } from './client-capability-coordinator.js';
 import { HostDeepResearchCoordinator } from './deep-research-coordinator.js';
 import { HostDailyReviewCoordinator } from './daily-review-coordinator.js';
-import { prepareHostAiSdkBackend } from './execution-model-composition.js';
+import {
+  prepareHostAiSdkBackendFromRoot,
+  type HostManagedFilesHelper,
+} from './execution-model-composition.js';
 import {
   createInteractiveRunComposer,
   createInteractiveRunComposerFactory,
@@ -293,6 +296,7 @@ export interface CreateExecutionRuntimeHostCompositionOptions {
 }
 
 export interface ExecutionRuntimeHostCompositionDependencies {
+  readonly managedFilesHelper?: HostManagedFilesHelper;
   readonly executionPersistenceProvider?: ExecutionPersistenceProvider;
   readonly primaryBackendFactory?: BackendFactory;
   readonly workHubRoutingModel?: HostWorkHubRoutingModel;
@@ -1115,7 +1119,12 @@ export async function createExecutionRuntimeHostComposition(
     backends.register(
       'ai-sdk',
       dependencies.primaryBackendFactory ?? {
-        prepare: (backendContext) => prepareHostAiSdkBackend(hostAiSdkBackendInput(backendContext)),
+        prepare: (backendContext) =>
+          prepareHostAiSdkBackendFromRoot(
+            context.owner.lease,
+            dependencies.managedFilesHelper,
+            hostAiSdkBackendInput(backendContext),
+          ),
       },
     );
     backends.register('plugin-executor', {
