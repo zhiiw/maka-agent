@@ -179,7 +179,8 @@ for (const mode of [
   'backend-crash-first',
 ]) {
   test(`Runtime mutation preserves its owner outcome across publication/reopen: ${mode}`, {
-    timeout: 30_000,
+    // This case now includes independent claim, drift, T1-exit and recovery processes.
+    timeout: mode === 'backend-live-sequence' ? 60_000 : 30_000,
   }, async (t) => {
     if (!(await admittedHelper())) {
       t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
@@ -266,6 +267,12 @@ for (const mode of [
         assert.equal(inheritedReopen.status, 0, inheritedReopen.stderr);
         const drifted = run('inspect-head-drift');
         assert.equal(drifted.status, 0, drifted.stderr);
+        const parkedDrift = run('recover-head-drift');
+        assert.equal(parkedDrift.status, 0, parkedDrift.stderr);
+        const pending = run('crash-unsettled');
+        assert.equal(pending.status, 88, pending.stderr);
+        const parkedPending = run('recover-unsettled');
+        assert.equal(parkedPending.status, 0, parkedPending.stderr);
       }
       assert.equal(await readFile(join(source, 'hello.txt'), 'utf8'), 'accepted original\n');
     } finally {

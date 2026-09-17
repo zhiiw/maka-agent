@@ -867,3 +867,18 @@ Runtime/Host build、格式检查通过；continuation/resume/handoff 定向 32/
 | macOS | 本轮未运行，可用相同显式 smoke 参数复跑 |
 
 尚未承诺：任意 mutation T1 中途崩溃自动收敛、首次只读 fresh Run、无限次/无限长度历史、启动自动续跑、断电。下一优先项是此新入口对未结算 mutation/漂移的真实重启负向验收，然后才扩展 mutation 内部窗口，不扩大到 Bash/npm 或自动扫描优化。
+
+## 第四十三检查点：独占重启入口的 drift / 未结算 T1 反向验收
+
+本轮只补测试，不放宽生产恢复策略。复用真实 Gitoxide/SQLite 子进程链，给 continuation target 建立真实 managed Session header，再由新进程实例化使用同一 genuine execution writer 的 SessionManager，调用实际 recoverInterruptedSessionsAfterHostRestart，不用结构 mock 冒充独占能力。
+
+- **Head 漂移**：另一个 Run 通过真实 ToolRuntime 和 Gitoxide 正常接受新内容；旧 continuation 的 claim/start 仍完整。新进程连续执行两次启动恢复，必须均调用真实 source-bound inspector 并拒绝；target events 逐条不变、不增加 terminal、不创建执行，新 accepted 内容保持不变。
+- **T1-only**：同一 continuation 用真实 ToolRuntime 提交 managed Write 的 call/dispatch/reservation；在真正 commitToolPrepared 返回后、transform 之前子进程直接退出（不 close stores/lease）。新进程验证确有一个带 managedMutation 的 T1、没有 function_response、一个 unsettled operation。两次启动恢复后事件和 unsettled 记录完全不变；甚至不进入 checkpoint inspector，证明 tool-ledger 守卫先拒绝，而非仅因已有 head 漂移碰巧失败。accepted 内容和用户 source checkout 均不被该 Write 改写。
+
+此处 owner 是真实 root writer 下的 continuation claim recovery；没有新增状态写入或“无副作用”猜测，因此没有回滚动作。prepared reservation 保留意味着该任务仍需后续 reconciliation/人工处理，不把安全拒绝表述为 T1-only 自动恢复已经完成。
+
+平台范围：本轮 Windows 执行真实 helper、SQLite、新进程重开、真实 SessionManager 恢复入口；不是 Electron 按钮层的反向测试。Linux/macOS 本轮未执行。子进程保留 20 秒单次 timeout；含多个独立进程的 backend-live-sequence 总预算改为 60 秒，其余用例仍为 30 秒，避免约 29 秒的正常测试贴着旧上限波动。
+
+剩余优先级：下一步验证 candidate 已固化但尚未接受的窗口，明确是接受已有证据还是继续 park；随后才做 T1-only 的恢复策略。首次纯只读任务和三平台 Desktop 证据仍待补齐。自动恢复、Bash/npm、发布与 GC 不纳入本轮。
+
+验证：Host build、Biome、diff check 通过；backend-live-sequence 与 backend-crash-first 定向 2/2 通过；增加精确 T1 形状断言后单独复跑 backend-live-sequence 1/1 通过。没有改生产代码，也没有本轮 Electron 反向验收或全量 CI 声明。

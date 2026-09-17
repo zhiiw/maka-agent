@@ -35,6 +35,7 @@ import { join } from 'node:path';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import { transformManagedMutation } from '@maka/runtime/managed-mutation-transform';
 import { ToolRuntime } from '@maka/runtime/tool-runtime';
+import { SessionManager, BackendRegistry } from '@maka/runtime/session-manager';
 import { AiSdkBackend } from '@maka/runtime/ai-sdk-backend';
 import { prepareHostAiSdkBackendFromRoot } from '../../server/execution-model-composition.js';
 import {
@@ -99,6 +100,116 @@ const stores = await openInteractiveExecutionStoresForWrite(leaseOwner.lease);
 const owner = createGitoxideWorkspaceBaselineOwnerInternal(stores);
 const acceptedRepositoryOwnerToken = {};
 const repositoryPath = join(rootPath, 'repository.git');
+if (mode === 'recover-head-drift' || mode === 'crash-unsettled' || mode === 'recover-unsettled') {
+  const sessionId = 'settlement-session';
+  const runId = 'inherited-run';
+  const session = requireGitoxideManagedSessionInternal(
+    await openGitoxideManagedSessionInternal(stores, {
+      sessionId,
+      workspaceKey: 'crash-session',
+      repositoryPath,
+      invocationOwnerToken,
+      helperCapability,
+    }),
+    sessionId,
+    stores.runtimeEventStore,
+  );
+  if (mode === 'crash-unsettled') {
+    let id = 0;
+    const runtime = new ToolRuntime({
+      sessionId,
+      runId,
+      invocationId: 'inherited-invocation',
+      turnId: 'inherited-turn',
+      header: await stores.sessionStore.readHeader(sessionId),
+      connection: { slug: 'test', providerType: 'openai', defaultModel: 'test' },
+      modelId: 'test',
+      newId: () => `pending-event-${++id}`,
+      now: Date.now,
+      readExecutionBoundary: async () => createExternalExecutionBoundary(),
+      readPermissionMode: async () => 'ask',
+      getPermissionPauseTarget: () => null,
+      runtimeCommitSink: {
+        async commitToolPrepared(input) {
+          await session.runtimeCommitSink.commitToolPrepared(input);
+          process.exit(88);
+        },
+        async commitToolOutcome() {
+          throw new Error('Generic T2 forbidden');
+        },
+      },
+      prepareManagedMutation: (request) => session.prepareManagedMutation(request),
+    });
+    await runtime.settleToolCall({
+      tool: {
+        name: 'Write',
+        description: 'pending mutation',
+        parameters: {},
+        impl() {
+          throw new Error('Checkout execution forbidden');
+        },
+      },
+      turnId: 'inherited-turn',
+      toolCallId: 'pending-call',
+      input: { path: 'hello.txt', content: 'must not be executed\n' },
+      abortSignal: new AbortController().signal,
+      eventSink: { push() {}, async pushAndWaitUntilConsumed() {} },
+    });
+    throw new Error('T1 crash boundary was not reached');
+  }
+  const before = await stores.runtimeEventStore.readImmutableRuntimeEvents(sessionId, runId);
+  assert.equal(
+    before.some((event) => event.actions?.endInvocation),
+    false,
+  );
+  const pendingBefore = await stores.runtimeEventStore.listUnsettledToolOperations(sessionId);
+  assert.equal(pendingBefore.length, mode === 'recover-unsettled' ? 1 : 0);
+  if (mode === 'recover-unsettled') {
+    assert.equal(before.filter((event) => event.content?.kind === 'function_call').length, 1);
+    assert.ok(before.some((event) => event.actions?.toolDispatch?.managedMutation));
+    assert.equal(
+      before.some((event) => event.content?.kind === 'function_response'),
+      false,
+    );
+  }
+  let inspected = 0;
+  const manager = new SessionManager({
+    store: stores.sessionStore,
+    runStore: stores.agentRunStore,
+    runtimeEventStore: stores.runtimeEventStore,
+    backends: new BackendRegistry(),
+    inspectContinuationSafety: async (_sessionId, source) => {
+      inspected++;
+      assert.ok(source);
+      return {
+        workspaceIdentity: 'test-workspace',
+        availableToolNames: ['Read', 'Write', 'Edit'],
+        backgroundOperationsSettled: true,
+        workspaceCheckpoint: await session.inspectContinuation(source),
+      };
+    },
+    newId: () => {
+      throw new Error('Recovery must not create a new execution');
+    },
+    now: Date.now,
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await manager.recoverInterruptedSessionsAfterHostRestart(stores);
+    assert.deepEqual(
+      await stores.runtimeEventStore.readImmutableRuntimeEvents(sessionId, runId),
+      before,
+    );
+    assert.deepEqual(
+      await stores.runtimeEventStore.listUnsettledToolOperations(sessionId),
+      pendingBefore,
+    );
+  }
+  assert.equal(inspected, mode === 'recover-head-drift' ? 2 : 0);
+  assert.equal((await session.readAcceptedFile('hello.txt')).content, 'later accepted content\n');
+  writeSync(1, JSON.stringify({ parked: true, inspected, events: before.length }));
+  await leaseOwner.close();
+  process.exit(0);
+}
 if (
   mode === 'inspect-continuation' ||
   mode === 'inspect-head-drift' ||
@@ -141,6 +252,17 @@ if (
       }),
     );
     if (mode === 'inspect-inherited') {
+      await stores.sessionStore.createStableSession({
+        sessionId: input.sessionId,
+        requestFingerprint: `sha256:${'b'.repeat(64)}`,
+        input: {
+          cwd: sourcePath,
+          llmConnectionSlug: 'test',
+          permissionMode: 'ask',
+          toolProfile: 'managed-files-v1',
+          toolMode: 'direct',
+        },
+      });
       await stores.runtimeEventStore.appendRuntimeEvent(input.sessionId, input.sourceRunId, {
         id: 'source-terminal',
         sessionId: input.sessionId,
@@ -218,6 +340,7 @@ if (
           modelVisibility: 'hidden',
           content: claim.targetOpening,
           actions: {
+            runtimeProtocol: { toolBoundary: 't1_after_preflight_v1' },
             continuationStart: {
               protocol: 'continuation_start_v2',
               provenance: 'runtime_admission',
