@@ -611,3 +611,16 @@ publication 或 refresh 的非预期失败保留原证据、返回 outcome unkno
 4. 真 Electron 创建 → Read/Write/Edit → kill Host → restart → 内容/transcript/唯一终态验证。
 
 本次不表示 Desktop 已出现按钮，不表示 Glob/Grep、自动续跑、非 Git importer 或正式安装包 helper 发布已经完成。
+
+## 第三十一检查点：Desktop 开发态 candidate 选择
+
+第 2 步的启动选择已接入 Desktop：非 packaged、非 E2E 且显式设置 `MAKA_MANAGED_FILES_DEV_HELPER` 时，启动现有独立 dev candidate。该变量是 dev bootstrap 接受的完整 JSON manifest（schemaVersion、executablePath、expectedBytes、expectedSha256、platform、arch），不是 helper 路径，也不是发布签名。开发者必须明确选择文件并计算摘要；实际 admission 仍由 Host owner 在取得 root 后校验。空值或畸形值不静默退回普通 profile。
+
+- owner：Desktop 只选择启动入口；Host 持有 helper admission 与真实执行能力。没有新增 durable 写入、schema 或 T1 协议。
+- 默认未配置时继续普通 Host；E2E 使用自己的 fake-backend 入口；packaged 始终选择生产入口，不消费 dev manifest。
+- 选举仍优先复用已有 Host，不强杀、不替换，也不对所有聊天添加 managed 能力要求。已有普通 Host 不会因此自动获得 managed 能力；后续入口必须查询实际连接的能力并在不可用时提示，而非宣称新配置已经生效。
+- 回滚：撤回入口选择即可停止新 dev candidate 启动，不删除任何已创建任务或恢复证据。
+
+Windows 本地：启动选择 5/5，Host factory（含真实 helper）4/4，连接配置 6/6，共 15/15；Biome 与 diff check 通过。Linux/macOS 的选择逻辑相同，但本轮没有实际 Electron 启动证据。重建 UI/computer-use 依赖后，Desktop build:main 仍被未修改文件的两处 TS7006 阻断：app-shell-pending-attachments.test.ts:66 与 session-ui-selectors.ts:44；不将本轮报告为全量构建通过。
+
+第 2 步尚未完成能力提示/UI 接线；第 3 步加号入口和第 4 步真实 Electron kill/restart 验收仍待完成。当前仅证明入口选择与已有 helper admission 相容，不把 unit/factory 测试称为实际 Desktop 端到端测试。
