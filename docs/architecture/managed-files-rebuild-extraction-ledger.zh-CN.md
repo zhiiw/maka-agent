@@ -33,7 +33,7 @@
 
 旧 `execution-stores-workspace-authority-internal.ts` 主要是未来 Host 的桥接，不是现有调用路径的独立修复。直接复制会绕过当前 provider/lifecycle owner。故暂不恢复该模块、不公开其 package export，不为了“两个 PR”增加无消费者的生命周期包装。
 
-后续真实消费者需要 workspace authority 时，必须在当前一致性域内接线，并补关闭期间结算、跨 store/root、投影丢失时 root adoption 等测试。此次没有改变数据库，也没有证明未来 bridge 的正确性。
+后续真实消费者需要 workspace authority 时，必须在当前一致性域内接线，并补关闭期间结算、跨 store/root 等测试。本轮已在 Storage 私有边界重建显式 root adoption（见下文），但尚未公开 bridge；没有修改 schema，也没有证明未来 bridge 的正确性。
 
 ## 旧 #4265 commit 处置
 
@@ -60,9 +60,9 @@
 | `packages/storage/src/execution-stores.ts` | 完全不改；当前生命周期是后续接线约束 |
 | `packages/storage/src/execution-stores-workspace-authority-internal.ts` | 不移植；待真实消费者确定受限接口 |
 | 同名 Storage authority test | 不移植；旧 fake API 不能证明新 provider/lease 生命周期 |
-| `packages/storage/src/workspace-version-authority-internal.ts` | 完全不改；现有私有 SQLite authority 继续保留 |
-| `packages/storage/src/sqlite-runtime-store.ts` | 完全不改；不引入旧 root-adoption 路径 |
-| `workspace-version-authority-persistence.test.ts` | 运行现有测试，不为移植重写预期 |
+| `packages/storage/src/workspace-version-authority-internal.ts` | 新增显式、package-private 的 non-workspace state adoption；保留严格 binder 默认行为 |
+| `packages/storage/src/sqlite-runtime-store.ts` | 不复制旧 projection-only adoption；在同一事务内扫描 immutable ledger、核对投影并绑定 root |
+| `workspace-version-authority-persistence.test.ts` | 保留原 30 项；新增普通历史接管、四类 workspace residue 拒绝和两项真实子进程退出验证 |
 | 两份旧 pure-transform / settlement-proof 文档 | 作为历史设计来源，不复制其中已经失效的接线/平台完成声明 |
 | `managed-resume-mainline-rebuild-plan-2026-09.zh-CN.md` | 收录经用户确认的执行方案及显式入口决定 |
 
@@ -94,3 +94,24 @@ Write 的成功 no-op 和 Edit 的参数错误保持区分：相同 Write 内容
 先确定当前 ExecutionPersistence 与 workspace owner 的真实接线，再完成一条 Write 纵向路径；不得先把旧 Runtime 接口整套恢复后期待 Host 去适配。随后接 Edit/accepted reads 和真实 crash 测试，再加入 Desktop 加号入口。
 
 Windows 的 file-only profile 不依赖 Bash/npm command sandbox；启用前仍必须得到真实 Windows Host/helper 恢复证据。
+
+## 第二检查点：已有普通聊天数据库的显式接管
+
+问题：当前严格 binder 拒绝任何已存在的 operational state；新入口不能因此要求用户删除普通聊天数据库。
+
+- **Owner**：Storage 内部 workspace authority。未来由持有真实 root lease 的 execution composition 显式调用；当前没有公共 export 或自动启动接管。
+- **原子边界**：既有 SQLite write transaction 内，读取 root binding、扫描 canonical workspace ledger、检查投影、插入 binding。没有新 schema/version。
+- **允许状态**：尚无 workspace authority 的普通数据库。普通 RuntimeEvent 原样保留；绑定后重开仍只接受同一 root。
+- **拒绝状态**：不同 root、完整 workspace ledger、投影被删除后的 ledger、孤立投影或残缺 workspace event。不能以“投影为空”冒充“从未存在 workspace authority”。
+- **失败与回滚**：检查失败不插入 binding；事务前半段进程退出后仍未绑定；提交后进程退出则保留 binding，精确重试可继续。
+- **撤回本轮代码**：普通聊天路径未变。已显式写入的 binding 使用现有 schema 和格式，不通过删库/删 evidence 回滚。
+
+验证：普通历史接管先 RED（原严格 binder 拒绝），实现后 GREEN。Storage persistence 共 37 项通过，其中两项是真实 Node 子进程不关闭数据库直接退出，再独立 reopen；它们不是完整 Host/helper kill test，也不证明断电持久性。
+
+| 平台 | 当前证据 |
+| --- | --- |
+| Windows | 本地真实 SQLite、进程退出前/后 binding、重开和拒绝残缺 authority 已通过 |
+| Linux | 相同测试可运行；本检查点未实跑，不宣称平台完成 |
+| macOS | 相同测试可运行；本检查点未实跑，不宣称平台完成 |
+
+尚未完成：ExecutionPersistence 的受限 workspace facade、其 close/drain 接线、Gitoxide candidate 消费者、Runtime settlement、Desktop 加号入口。此检查点只是这些接线的数据库前置，不能宣称 Write/Edit Resume 已可用。
