@@ -99,6 +99,9 @@ if (mode.startsWith('task-')) {
       connectionSlug: 'test',
       model: 'test-model',
       name: 'Managed test',
+      projectId: 'managed-project',
+      labels: ['recovery-test'],
+      thinkingLevel: 'high' as const,
     };
     if (mode === 'task-import-exit') {
       const destinationRepositoryPath = join(
@@ -135,12 +138,29 @@ if (mode.startsWith('task-')) {
         /import_intent_mismatch/,
       );
       await assert.rejects(stores.sessionStore.readHeader(request.sessionId));
+      await assert.rejects(
+        createGitoxideManagedTaskInternal(leaseOwner.lease, {
+          ...request,
+          labels: ['changed-before-publication'],
+        }),
+        /import_intent_mismatch/,
+      );
       writeSync(1, 'rejected');
       await stores.sessionStore.close?.();
       await leaseOwner.close();
       process.exit(0);
     }
     await assert.rejects(createGitoxideManagedTaskInternal({ ...leaseOwner.lease }, request));
+    for (const change of [
+      { projectId: '' },
+      { labels: ['duplicate', 'duplicate'] },
+      { labels: Array.from({ length: 33 }, (_, index) => `label-${index}`) },
+    ]) {
+      assert.throws(
+        () => createGitoxideManagedTaskInternal(leaseOwner.lease, { ...request, ...change }),
+        /Invalid managed session/,
+      );
+    }
     const cancelled = new AbortController();
     cancelled.abort(new Error('cancel task creation'));
     await assert.rejects(
@@ -150,11 +170,18 @@ if (mode.startsWith('task-')) {
       }),
       /cancel task creation/,
     );
-    const results = await Promise.all([
+    const pending = [
       createGitoxideManagedTaskInternal(leaseOwner.lease, request),
       createGitoxideManagedTaskInternal(leaseOwner.lease, request),
-    ]);
+    ];
+    request.labels[0] = 'mutated-after-admission';
+    const results = await Promise.all(pending);
+    request.labels[0] = 'recovery-test';
     const result = results[0];
+    const createdHeader = await stores.sessionStore.readHeader(request.sessionId);
+    assert.equal(createdHeader.projectId, 'managed-project');
+    assert.deepEqual(createdHeader.labels, ['recovery-test']);
+    assert.equal(createdHeader.thinkingLevel, 'high');
     assert.equal(results[1].created, false);
     if (mode === 'task-create-exit') process.exit(87);
     const reopened = await reopenGitoxideManagedTaskInternal(leaseOwner.lease, {
@@ -221,6 +248,16 @@ if (mode.startsWith('task-')) {
       createGitoxideManagedTaskInternal(leaseOwner.lease, { ...request, name: 'Changed request' }),
       /conflict/i,
     );
+    for (const change of [
+      { projectId: 'another-project' },
+      { labels: ['another-label'] },
+      { thinkingLevel: 'low' as const },
+    ]) {
+      await assert.rejects(
+        createGitoxideManagedTaskInternal(leaseOwner.lease, { ...request, ...change }),
+        /conflict/i,
+      );
+    }
     const repeated = await Promise.all([
       createGitoxideManagedTaskInternal(leaseOwner.lease, request),
       createGitoxideManagedTaskInternal(leaseOwner.lease, request),

@@ -20,6 +20,7 @@ name: Gitoxide helper admission
 on:
   pull_request:
     paths:
+      - 'packages/runtime-host/src/protocol/session-catalog.ts'
       - 'packages/runtime-host/src/__tests__/handshake-compatibility.test.ts'
       - 'packages/runtime-host/src/control/endpoint.ts'
       - 'packages/runtime-host/src/client/connect-or-spawn.ts'
@@ -73,6 +74,7 @@ on:
     branches:
       - main
     paths:
+      - 'packages/runtime-host/src/protocol/session-catalog.ts'
       - 'packages/runtime-host/src/__tests__/handshake-compatibility.test.ts'
       - 'packages/runtime-host/src/control/endpoint.ts'
       - 'packages/runtime-host/src/client/connect-or-spawn.ts'

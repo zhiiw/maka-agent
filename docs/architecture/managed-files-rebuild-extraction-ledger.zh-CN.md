@@ -527,3 +527,16 @@ Windows 原失败场景修复后 **6/6**，再次与输入/env 套件合跑 **12
 不能直接把 catalog 的 `session.create.v4` 请求指纹与底层 `maka-managed-session-create-v1` 指纹串接：前者绑定原始 workspace/model selector、labels 和 policy-default 语义；后者绑定解析后 cwd/connection/model 以及固定 `ask/direct/agent/default` Session 字段。两者目前不是同一个创建请求。尤其 default model 或 policy 改变后，重试不得静默创建另一份 baseline/Session。
 
 接线顺序确定为：catalog admission 固定请求 → workspace/model/policy 授权并冻结完整 Session 输入 → 将唯一请求身份绑定 import intent、baseline 和 stable Session publication → continuity refresh → 返回 catalog item。首次失败保留原 attempt 身份；响应丢失后的重试必须先查原身份，不能先重新解析可变默认配置。现阶段继续关闭普通 `session.create` 的 managed profile 入口，不通过删除拒绝分支来宣称产品完成。
+
+## 第二十七检查点：创建元数据纳入 import/Session 同一请求快照
+
+managed 创建 owner 新增显式 `projectId`、`labels` 和 `thinkingLevel`，与 source/model/name 一起进入固定 Session 输入及原请求指纹；import intent 与 stable Session publication 使用同一 descriptor。不再静默丢弃这三类 catalog 元数据。本次没有宣称已统一原始 selector 与解析后 model 的两个创建协议。
+
+- **Owner/权限**：这些是上层授权后交给内部创建 owner 的值，不是 project/model 授权能力。Host handler 仍未开放，普通 `session.create` 仍拒绝 managed profile。thinking level 使用 core vocabulary；labels 复用 catalog 数量/字节限制，拒绝重复、空值、保留执行模式标签。实际模型是否支持某 thinking level 仍由 model admission 负责。
+- **冻结边界**：任务创建入队之前复制并冻结 labels，descriptor/publication 再保有独立冻结副本。调用者修改原数组不能改变待创建内容。project/labels/thinking 的任一变更进入不同指纹，不能借同 session ID 复用旧 import 或已发布 Session。
+- **原子/失败/回滚**：仍为 Git import intent → SQLite baseline → Session publication，不伪装成跨系统事务。非法元数据在 import 前拒绝；半完成 import 的不同标签重试 fail closed；既有 Session 的不同项目/标签/thinking 重试拒绝。不增加 schema、协议版本或实验数据迁移。撤回新增调用字段不等价于原请求重试；已有 managed Session 应走 session-ID reopen，不改写身份。
+- **证明**：先用真实 helper/child-process 场景复现创建后 projectId 丢失，再修复。子进程创建后退出、新进程重开保留元数据；import 后退出时改变标签被拒绝，原请求可继续。并发入队后修改调用方原数组仍持久化原值。加入非法项目、重复和超量标签，以及已发布后字段变化拒绝检查。
+
+当前仍固定 `ask/direct/agent/default`，没有悄悄支持 Plan/Swarm/plugin 或通用 policy defaults。下一步需要在 catalog admission 中固定解析结果与原始 request identity 的关联，补默认模型/策略变化时的 durable retry，再接正式 handler；本检查点只是接线前的数据保真与身份保护，不是 Desktop 创建完成。
+
+验证：Windows 本机 Host build、真实 helper/child-process 创建恢复 **5/5、0 skip**、CI gate policy **1/1**、Biome 和 diff check 通过。Linux/macOS 继续由同一 helper gate 调度，本轮未取得远程结果。仅覆盖命名进程退出边界，不扩大为任意指令点或断电保证。

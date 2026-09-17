@@ -13,6 +13,12 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import { lstat } from 'node:fs/promises';
+import { isThinkingLevel, type ThinkingLevel } from '@maka/core/model-thinking';
+import { isSessionStartModeLabel } from '@maka/core/session-start-mode';
+import {
+  SESSION_CATALOG_LABEL_MAX_ITEMS,
+  SESSION_CATALOG_LABEL_MAX_BYTES,
+} from '../protocol/session-catalog.js';
 import type { MakaTool, ToolRuntimeInput } from '@maka/runtime/tool-runtime';
 import type { RuntimeCommitSink } from '@maka/runtime/runtime-commit-sink';
 import { readPage, readParameters, resolveReadInput } from '@maka/runtime/read-page';
@@ -98,7 +104,7 @@ export function createGitoxideManagedTaskInternal(
   lease: StorageRootLease<'interactive', 'write'>,
   input: Omit<ManagedSessionCreateInput, 'repositoryPath'>,
 ): Promise<{ readonly created: boolean; readonly capability: GitoxideManagedSessionCapability }> {
-  input = { ...input };
+  input = snapshotManagedCreateMetadata(input);
   const previous = creations.get(lease) ?? Promise.resolve();
   const pending = previous
     .catch(() => undefined)
@@ -171,10 +177,47 @@ export type ManagedSessionCreateInput = Omit<
   readonly connectionSlug: string;
   readonly model: string;
   readonly name: string;
+  readonly projectId?: string;
+  readonly labels?: readonly string[];
+  readonly thinkingLevel?: ThinkingLevel;
 };
 
+function snapshotManagedCreateMetadata<
+  T extends Pick<ManagedSessionCreateInput, 'projectId' | 'labels' | 'thinkingLevel'>,
+>(input: T): T {
+  if (
+    input.projectId !== undefined &&
+    (typeof input.projectId !== 'string' ||
+      !input.projectId.trim() ||
+      input.projectId.includes('\0') ||
+      Buffer.byteLength(input.projectId) > 4096)
+  )
+    throw new Error('Invalid managed session project identity');
+  if (input.thinkingLevel !== undefined && !isThinkingLevel(input.thinkingLevel))
+    throw new Error('Invalid managed session thinking level');
+  if (
+    input.labels !== undefined &&
+    (!Array.isArray(input.labels) ||
+      input.labels.length > SESSION_CATALOG_LABEL_MAX_ITEMS ||
+      input.labels.some(
+        (label) =>
+          typeof label !== 'string' ||
+          !label.trim() ||
+          label.includes('\0') ||
+          Buffer.byteLength(label) > SESSION_CATALOG_LABEL_MAX_BYTES ||
+          isSessionStartModeLabel(label),
+      ) ||
+      new Set(input.labels).size !== input.labels.length)
+  )
+    throw new Error('Invalid managed session labels');
+  return {
+    ...input,
+    ...(input.labels === undefined ? {} : { labels: Object.freeze([...input.labels]) }),
+  };
+}
+
 export function describeGitoxideManagedSessionCreateInternal(input: ManagedSessionCreateInput) {
-  input = { ...input };
+  input = snapshotManagedCreateMetadata(input);
   for (const value of [
     input.sessionId,
     input.sourcePath,
@@ -198,6 +241,9 @@ export function describeGitoxideManagedSessionCreateInternal(input: ManagedSessi
   const createInput = Object.freeze({
     cwd: input.sourcePath,
     name: input.name,
+    ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+    ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
+    ...(input.labels === undefined ? {} : { labels: [...input.labels] }),
     llmConnectionId: input.connectionId,
     llmConnectionSlug: input.connectionSlug,
     model: input.model,
@@ -207,6 +253,7 @@ export function describeGitoxideManagedSessionCreateInternal(input: ManagedSessi
     collaborationMode: 'agent' as const,
     orchestrationMode: 'default' as const,
   });
+  if (createInput.labels) Object.freeze(createInput.labels);
   const requestFingerprint: `sha256:${string}` = `sha256:${createHash('sha256')
     .update(
       JSON.stringify([
@@ -225,7 +272,7 @@ export async function createGitoxideManagedSessionInternal(
   stores: InteractiveExecutionStoresWriter,
   input: ManagedSessionCreateInput,
 ): Promise<{ readonly created: boolean; readonly capability: GitoxideManagedSessionCapability }> {
-  input = { ...input };
+  input = snapshotManagedCreateMetadata(input);
   const { createInput, requestFingerprint } = describeGitoxideManagedSessionCreateInternal(input);
   const probe = await stores.sessionStore.probeStableSessionCreate(
     input.sessionId,
