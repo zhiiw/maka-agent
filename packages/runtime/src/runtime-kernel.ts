@@ -111,6 +111,7 @@ import {
   RuntimeContinuationRevalidationError,
   type RuntimeContinuation,
   type RuntimeContinuationSafetyObservation,
+  type RuntimeContinuationSafetyInspector,
 } from './runtime-resume.js';
 import {
   buildContinuationReplayPlan,
@@ -283,7 +284,7 @@ export interface RuntimeKernelDeps {
   resolveChildTools?: (sessionId: string) => Promise<ResolvedChildToolActivation>;
   shellRuns?: ShellRunProcessManager;
   cleanupHistoryCompactArtifacts?: (input: HistoryCompactCleanupRequest) => Promise<void>;
-  inspectContinuationSafety?: (sessionId: string) => Promise<RuntimeContinuationSafetyObservation>;
+  inspectContinuationSafety?: RuntimeContinuationSafetyInspector;
   safeBoundaryResumeEnabled?: boolean;
   continuationFailpoint?: (point: RuntimeContinuationFailpoint) => Promise<void>;
   runBackendActivation?: BackendActivationBoundary;
@@ -1637,7 +1638,13 @@ export class RuntimeKernel implements RuntimeKernelLike {
     if (!this.deps.inspectContinuationSafety) {
       throw new Error('Runtime continuation requires an authoritative safety inspector');
     }
-    const observation = await this.deps.inspectContinuationSafety(continuation.sessionId);
+    const observation = await this.deps.inspectContinuationSafety(
+      continuation.sessionId,
+      Object.freeze({
+        sourceRunId: continuation.sourceRunId,
+        expectedRuntimeEventHighWater: continuation.sourceRuntimeEventHighWater,
+      }),
+    );
     assertContinuationSafetyUnchanged(
       continuation,
       availableToolNames ? { ...observation, availableToolNames } : observation,

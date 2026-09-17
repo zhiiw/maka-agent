@@ -727,3 +727,16 @@ node scripts/desktop-managed-files-smoke.mjs --interrupt-turn
 4. 用当前真实 Electron 屏障把负向断言提升为显式 Continue 成功；增加 accepted head 漂移的拒绝用例，再讨论默认开放。自动启动续跑、扫描优化仍不在本轮范围。
 
 平台：Windows 本轮真实验证该中断/拒绝路径；Linux/macOS 尚未执行。没有新增生产代码、schema、协议版本或平台恢复承诺，也没有测试 T1 已写但工具尚未完成的崩溃窗口。
+
+## 第三十七检查点：continuation safety 传递 Runtime 选定的 source 边界
+
+现有 inspectContinuationSafety(sessionId) 无法区分普通新 Run 的 workspace identity 查询与恢复某个指定 source Run。直接在 Host 回调中查询“最新 head”不能证明它属于要恢复的历史。本次先扩展同一个 inspector seam：可选 source 参数包含 sourceRunId 和 expectedRuntimeEventHighWater，不增加第二个 planner 或第二套 claim。
+
+- owner：SessionManager 读取指定 source invocation 后传入其 runId，并保留调用方要求的 high-water；规划输入在第一次 await 前复制。RuntimeKernel 使用规划产物的 sourceRunId/sourceRuntimeEventHighWater，在原有执行前及 backend activation barrier 内再次调用同一个 inspector。传递对象冻结，不能被 callback 改写。
+- 普通新 Run 不带 source；local safety inspector 将 source 原样传给可选 readWorkspaceCheckpoint。现有普通 workspace inspector 不受影响，不强迫它实现 managed 语义。
+- 原子边界不变：Runtime 的 immutable prefix、continuation claim 与 start writer 仍拥有原有事务；source 参数不是新 durable fact，也不是 accepted-head 证明或开放恢复的能力。
+- 失败/回滚不变：inspection 抛错仍 park/fail-stop；工具目录或 workspace 漂移仍阻止 backend activation。撤回本参数传递不修改磁盘数据；没有 schema/protocol 升版。
+
+先让真实 SessionManager 测试断言收到 sourceRunId，确认 RED（原实现只传 sessionId），再实现。补充 execution 两次复验的固定 high-water/冻结参数断言，以及 local inspector 转发到 checkpoint owner 的测试。Windows Runtime/Host build 通过；continuation/resume/handoff 定向 **32/32**，包含真实子进程 SIGKILL 后的 continuation claim/start/terminal prefix 修复测试。该 crash harness 使用原有测试 backend，不等同于 Gitoxide/真实 Desktop 中断恢复闭环。Linux/macOS 本轮未执行。
+
+下一步仍是 Host managed accepted-head owner：消费这个 source 边界，验证 epoch、accepted event/tree 与 Runtime prefix 的因果对应，并在 activation 时重验。该校验尚未接入；全局恢复开关、Desktop 中断场景的默认拒绝维持不变。

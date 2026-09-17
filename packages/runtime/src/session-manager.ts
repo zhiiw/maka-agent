@@ -238,6 +238,7 @@ import {
   type RuntimeContinuation,
   type RuntimeContinuationPlannerInput,
   type RuntimeContinuationSafetyObservation,
+  type RuntimeContinuationSafetyInspector,
   type SafeBoundaryContinuationPlan,
 } from './runtime-resume.js';
 
@@ -860,7 +861,7 @@ interface SessionManagerBaseDeps {
   isParentRunActive?: (sessionId: string, runId: string, turnId: string) => boolean;
   shellRuns?: ShellRunProcessManager;
   cleanupHistoryCompactArtifacts?: (input: HistoryCompactCleanupRequest) => Promise<void>;
-  inspectContinuationSafety?: (sessionId: string) => Promise<RuntimeContinuationSafetyObservation>;
+  inspectContinuationSafety?: RuntimeContinuationSafetyInspector;
   continuationFailpoint?: (point: RuntimeContinuationFailpoint) => Promise<void>;
   runBackendActivation?: BackendActivationBoundary;
   /** Host policy for a fresh turn; continuations retain their invocation snapshot. */
@@ -2355,6 +2356,7 @@ export class SessionManager {
     input: PlanAuthoritativeSafeBoundaryContinuationInput,
     preview?: RuntimeEvent,
   ): Promise<SafeBoundaryContinuationPlan> {
+    input = { ...input };
     if (input.purpose !== 'handoff' && this.deps.safeBoundaryResumeEnabled !== true) {
       const plan = resumeFeatureDisabledPlan();
       this.recordContinuationPlan(sessionId, input.sourceRunId, plan);
@@ -2405,7 +2407,15 @@ export class SessionManager {
     const header = await this.deps.store.readHeader(sessionId);
     let observation: RuntimeContinuationSafetyObservation;
     try {
-      observation = await this.deps.inspectContinuationSafety(sessionId);
+      observation = await this.deps.inspectContinuationSafety(
+        sessionId,
+        Object.freeze({
+          sourceRunId: sourceRun.runId,
+          ...(input.expectedRuntimeEventHighWater !== undefined
+            ? { expectedRuntimeEventHighWater: input.expectedRuntimeEventHighWater }
+            : {}),
+        }),
+      );
     } catch {
       const plan: SafeBoundaryContinuationPlan = {
         disposition: 'park',
