@@ -115,7 +115,8 @@ export function createGitoxideManagedTaskInternal(
         input.abortSignal?.throwIfAborted();
         const repositoryPath = managedTaskRepositoryPath(root, input.sessionId);
         const request = { ...input, repositoryPath };
-        const { requestFingerprint } = describeGitoxideManagedSessionCreateInternal(request);
+        const { requestFingerprint, createInput } =
+          describeGitoxideManagedSessionCreateInternal(request);
         const stores = await openInteractiveExecutionStoresForWrite(lease);
         const probe = await stores.sessionStore.probeStableSessionCreate(
           input.sessionId,
@@ -141,16 +142,27 @@ export function createGitoxideManagedTaskInternal(
           },
         );
         const acceptedRepositoryOwnerToken = {};
-        const imported = await (exists
-          ? verifyAdmittedGitoxideImportInternal
-          : importAdmittedGitoxideRepositoryInternal)({
+        const importRequest = {
           admissionOwnerToken,
           repositoryCapability: admitted.capability,
           acceptedRepositoryOwnerToken,
           destinationRepositoryPath: repositoryPath,
           requestFingerprint,
           abortSignal: input.abortSignal,
+        };
+        // Existing import intent is already an owner of this identity. Validate
+        // it before adding a claim, so a mismatched retry cannot poison recovery.
+        const verified = exists
+          ? await verifyAdmittedGitoxideImportInternal(importRequest)
+          : undefined;
+        const prepared = await stores.sessionStore.prepareStableSessionCreate({
+          sessionId: input.sessionId,
+          requestFingerprint,
+          input: createInput,
         });
+        if (prepared.kind !== 'prepared') throw new Error('Managed session creation conflict');
+        const imported =
+          verified ?? (await importAdmittedGitoxideRepositoryInternal(importRequest));
         input.abortSignal?.throwIfAborted();
         await createGitoxideWorkspaceBaselineOwnerInternal(stores).acceptImport({
           workspaceKey: input.sessionId,

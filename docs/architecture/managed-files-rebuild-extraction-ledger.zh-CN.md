@@ -553,3 +553,30 @@ managed 创建 owner 新增显式 `projectId`、`labels` 和 `thinkingLevel`，�
 本轮不是创建 handler 接通：默认 selector 到已解析输入的 durable 绑定尚未完成。下一步先确定复用现有 stable-create claim 的方式及 crash/retry 合同，再接 catalog admission、continuity refresh 和 Desktop 显式入口；不能通过去掉 managed-profile 拒绝分支跳过这条边界。
 
 验证：Host build、创建恢复 5/5（0 skip）、CI gate policy 1/1、Biome、diff check 通过。相邻 catalog coordinator 全套为 53 pass / 2 fail：两个失败均在 Windows fixture 创建 symlink 时返回 EPERM，尚未进入业务断言；不修改权限、不跳过用例，也不宣称该全套通过。
+
+## 第二十九检查点：prepared creation 与 stable claim 同一持久化 owner
+
+### 本次落地
+
+metadata schema **39 → 40**：只在现有 `session_create_claims` 增加可选 `prepared_header_json`，不另建创建日志，不改 RuntimeEvent schema。主线已存在的 39 不被改写；旧 claim 升级后字段为 NULL，不猜测历史默认值。新增字段有 JSON 有效性及 64 KiB 数据库约束。
+
+`prepareStableSessionCreate` 在 `BEGIN IMMEDIATE` 内检查请求身份并首次写入已解析 header；同 Session 的主键与已有 request fingerprint 决定唯一归属。相同请求后续传入不同模型/配置，仍返回第一份快照；不同请求返回 conflict。`readPreparedStableSessionCreate` 允许上层在重新解析可变默认值**之前**读取原准备结果。快照尚未发布为 `session_metadata`，不进入 Session catalog。
+
+stable publication 必须使用这份快照，而不是重试方重新提供的 header。所有 metadata insert 都经过同一 private writer：存在 prepared claim 时，普通 create/其他 insert 路径不能绕过 stable publication；返回给调用者的 header 只是独立解码副本，修改它不会改写数据库。prepared 路径暂不支持自定义 genesis boundary、conversation copy 或 subagent lifecycle，不能把这些独立的 authority 混入快照。
+
+### 当前消费者与失败顺序
+
+root-owned managed task 已在 fresh import 前消费 preparation。顺序为：验证 source；若 destination 已存在，先验证原 import intent 的请求归属；固定创建快照；必要时 import；接受 baseline；发布 Session。existing import 验证失败时不写入新 claim，防止错误重试先占住原请求身份。这一错误顺序由原有真实 helper 崩溃恢复测试暴露，修复后保持原断言，不把冲突消息改宽来遮掩。
+
+- **原子边界**：claim 与快照同一个 SQLite transaction；Session publication 仍是后续 transaction；Git 与 SQLite 没有跨系统原子事务。
+- **失败状态**：prepared-only、imported、baseline accepted、Session published 均按已有持久化证据继续。准备后出错保留同一身份，不重新选择模型，不静默 fallback。
+- **回滚/取消**：当前不提供 prepared claim 的通用删除。generic discard 拒绝抹除它，避免失去既有 import 的请求身份；需要放弃时应使用新任务身份，自动 GC/显式取消协议不在本次承诺内。
+- **范围限制**：任务 owner 当前仍使用解析后 descriptor 指纹；catalog 的 raw selector 指纹与它的关联还未接通。因此本次证明的是存储层“首次解析快照不被重试覆盖”，不是已经完成 default-model selector 的产品级重试。下一步 handler 必须先按 raw request identity 读取 preparation、重新验证授权，再从固定快照构造 import 身份，不能先解析新的默认模型。
+
+### 证据与平台
+
+Storage/SessionStore 相邻套件 **106/106**；真实 helper/root-owner 创建恢复 **6/6**（新增 prepared commit 后子进程直接退出、重新取得 root owner 后完成 import/publication）；另有独立 SQLite 子进程不 close 即退出后重开测试。覆盖 39→40 含旧 pending claim 的升级、错误请求冲突、返回值别名修改、普通 writer 绕过及 generic discard 拒绝。legacy rewind fixtures 同步移除新增字段后再降低版本，不为测试伪旧库放宽生产迁移。
+
+Windows 本地执行通过；Linux/macOS 调度同一 helper workflow 与新增 prepared persistence step，尚无本轮远程执行结论。不声称覆盖任意指令点断电或完整跨进程竞争矩阵。内存测试 adapter 明确拒绝 prepared API，恢复测试使用真实 SQLite owner。
+
+Desktop 正式入口仍关闭，不能把本次基础闭环描述为 Desktop managed task 已可用。没有新增自动恢复、扫描优化或第三种文件 checkpoint 模式。

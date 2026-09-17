@@ -20,6 +20,12 @@ name: Gitoxide helper admission
 on:
   pull_request:
     paths:
+      - 'packages/storage/src/sqlite-session-metadata-store.ts'
+      - 'packages/storage/src/sqlite-session-metadata-schema.ts'
+      - 'packages/storage/src/session-store.ts'
+      - 'packages/storage/src/session-store-contract.ts'
+      - 'packages/storage/src/execution-stores.ts'
+      - 'packages/storage/src/__tests__/sqlite-session-metadata-store.test.ts'
       - 'packages/runtime-host/src/protocol/session-catalog.ts'
       - 'packages/runtime-host/src/protocol/codec.ts'
       - 'packages/runtime-host/src/protocol/workspace.ts'
@@ -76,6 +82,12 @@ on:
     branches:
       - main
     paths:
+      - 'packages/storage/src/sqlite-session-metadata-store.ts'
+      - 'packages/storage/src/sqlite-session-metadata-schema.ts'
+      - 'packages/storage/src/session-store.ts'
+      - 'packages/storage/src/session-store-contract.ts'
+      - 'packages/storage/src/execution-stores.ts'
+      - 'packages/storage/src/__tests__/sqlite-session-metadata-store.test.ts'
       - 'packages/runtime-host/src/protocol/session-catalog.ts'
       - 'packages/runtime-host/src/protocol/codec.ts'
       - 'packages/runtime-host/src/protocol/workspace.ts'
@@ -233,3 +245,7 @@ jobs:
           packages/runtime-host/dist/__tests__/session-catalog-coordinator.test.js
           packages/storage/dist/__tests__/sqlite-session-metadata-store.test.js
           packages/runtime/dist/__tests__/ai-sdk-backend.test.js
+      - name: Verify prepared creation persistence
+        run: >-
+          node --test --test-name-pattern="prepared create|metadata 39 upgrade|stable create"
+          packages/storage/dist/__tests__/sqlite-session-metadata-store.test.js

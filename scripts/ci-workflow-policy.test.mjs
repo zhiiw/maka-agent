@@ -887,6 +887,12 @@ test('the Gitoxide gate owns repository admission changes', () => {
   for (const path of [
     'packages/runtime-host/src/server/gitoxide-runtime-mutation-internal.ts',
     'packages/runtime-host/src/server/gitoxide-managed-session-internal.ts',
+    'packages/storage/src/sqlite-session-metadata-store.ts',
+    'packages/storage/src/sqlite-session-metadata-schema.ts',
+    'packages/storage/src/session-store.ts',
+    'packages/storage/src/session-store-contract.ts',
+    'packages/storage/src/execution-stores.ts',
+    'packages/storage/src/__tests__/sqlite-session-metadata-store.test.ts',
     'packages/core/src/session.ts',
     'packages/runtime-host/src/server/hosted-execution-tool-profile.ts',
     'packages/runtime-host/src/server/session-catalog-coordinator.ts',

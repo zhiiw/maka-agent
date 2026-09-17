@@ -103,15 +103,25 @@ if (mode.startsWith('task-')) {
       labels: ['recovery-test'],
       thinkingLevel: 'high' as const,
     };
-    if (mode === 'task-import-exit') {
+    if (mode === 'task-import-exit' || mode === 'task-prepared-exit') {
       const destinationRepositoryPath = join(
         leaseOwner.lease.canonicalPath,
         `managed-files-${createHash('sha256').update(request.sessionId).digest('hex')}.git`,
       );
-      const { requestFingerprint } = describeGitoxideManagedSessionCreateInternal({
+      const { requestFingerprint, createInput } = describeGitoxideManagedSessionCreateInternal({
         ...request,
         repositoryPath: destinationRepositoryPath,
       });
+      if (mode === 'task-prepared-exit') {
+        const prepared = await stores.sessionStore.prepareStableSessionCreate({
+          sessionId: request.sessionId,
+          requestFingerprint,
+          input: createInput,
+        });
+        assert.equal(prepared.kind, 'prepared');
+        await assert.rejects(stores.sessionStore.readHeader(request.sessionId));
+        process.exit(89);
+      }
       const admissionOwnerToken = {};
       const admitted = await admitGitoxideRepositoryInternal({
         invocationOwnerToken,

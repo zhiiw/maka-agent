@@ -65,6 +65,7 @@ for (const crashMode of [
   'session-import-exit',
   'task-create-exit',
   'task-import-exit',
+  'task-prepared-exit',
 ]) {
   test(`managed session publication resumes after ${crashMode}`, { timeout: 30_000 }, async (t) => {
     if (!(await admittedHelper())) {
@@ -102,15 +103,17 @@ for (const crashMode of [
       assert.ifError(crashed.error);
       assert.equal(
         crashed.status,
-        crashMode === 'task-import-exit'
-          ? 88
-          : crashMode === 'task-create-exit'
-            ? 87
-            : crashMode === 'session-baseline-exit'
-              ? 85
-              : crashMode === 'session-import-exit'
-                ? 86
-                : 84,
+        crashMode === 'task-prepared-exit'
+          ? 89
+          : crashMode === 'task-import-exit'
+            ? 88
+            : crashMode === 'task-create-exit'
+              ? 87
+              : crashMode === 'session-baseline-exit'
+                ? 85
+                : crashMode === 'session-import-exit'
+                  ? 86
+                  : 84,
         crashed.stderr,
       );
       if (crashMode === 'session-baseline-exit') {
