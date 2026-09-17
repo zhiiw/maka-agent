@@ -91,6 +91,7 @@ interface AdmissionCapabilityRecord {
 }
 
 interface AcceptedRepositoryCapabilityRecord {
+  readonly importObservation: Readonly<GitoxideSourceImportObservationV1>;
   readonly acceptedRepositoryOwnerToken: object;
   readonly invocationOwnerToken: object;
   readonly helperCapability: GitoxideHelperInvocationCapability;
@@ -216,6 +217,7 @@ export async function importAdmittedGitoxideRepositoryInternal(input: {
     );
   }
   const acceptedRepositoryCapability = issueAcceptedRepositoryCapability({
+    importObservation: Object.freeze({ ...result }),
     acceptedRepositoryOwnerToken: input.acceptedRepositoryOwnerToken,
     invocationOwnerToken: admission.invocationOwnerToken,
     helperCapability: admission.helperCapability,
@@ -226,6 +228,23 @@ export async function importAdmittedGitoxideRepositoryInternal(input: {
     managedTreePolicyVersion: result.managedTreePolicyVersion,
   });
   return Object.freeze({ ...result, acceptedRepositoryCapability });
+}
+
+/** Read only owner-issued evidence; a caller-supplied import response is not authority. */
+export function requireGitoxideImportedRepositoryInternal(
+  ownerToken: object,
+  capability: GitoxideAcceptedRepositoryCapability,
+) {
+  const record = requireAcceptedRepositoryRecord(ownerToken, capability);
+  const artifact = requireGitoxideHelperArtifactIdentityInternal(
+    record.invocationOwnerToken,
+    record.helperCapability,
+  );
+  return Object.freeze({
+    ...record.importObservation,
+    repositoryPath: record.repositoryPath,
+    helperArtifactSha256: artifact.sha256,
+  });
 }
 
 export async function createGitoxideCandidateInternal(input: {

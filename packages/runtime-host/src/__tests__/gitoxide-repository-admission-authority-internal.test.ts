@@ -24,6 +24,14 @@ import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
+import {
+  resolveStorageRoot,
+  tryAcquireInteractiveRootOwner,
+  resolveRootControlNamespace,
+  resolveRootOwnershipNamespace,
+} from '@maka/storage/root-authority';
+import { createGitoxideWorkspaceBaselineOwnerInternal } from '../server/gitoxide-workspace-baseline-owner-internal.js';
 import {
   admitGitoxideHelperArtifactInternal,
   GitoxideHelperArtifactAuthorityError,
@@ -49,6 +57,130 @@ interface AdmittedHelper {
 }
 
 let admittedHelperPromise: Promise<AdmittedHelper | undefined> | undefined;
+
+test('commits a real imported Gitoxide baseline through the root-owned execution group', async (t) => {
+  const helper = await admittedHelper();
+  if (!helper) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
+    return;
+  }
+  const source = await createRepository(t, 'sha1');
+  await writeFile(join(source, 'hello.txt'), 'immutable source\n');
+  git(source, ['add', 'hello.txt']);
+  git(source, [
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=test@example.invalid',
+    'commit',
+    '-qm',
+    'fixture',
+  ]);
+  const stateRoot = await mkdtemp(join(tmpdir(), 'maka-gitoxide-baseline-store-'));
+  const root = await resolveStorageRoot({ path: stateRoot, kind: 'interactive' });
+  const rootOwner = await tryAcquireInteractiveRootOwner(root);
+  assert.ok(rootOwner);
+  let stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+  try {
+    const admissionOwnerToken = {};
+    const admission = await admitGitoxideRepositoryInternal({
+      ...helper,
+      admissionOwnerToken,
+      repositoryPath: source,
+    });
+    assert.equal(admission.kind, 'accepted');
+    if (admission.kind !== 'accepted') return;
+    const acceptedRepositoryOwnerToken = {};
+    const imported = await importAdmittedGitoxideRepositoryInternal({
+      admissionOwnerToken,
+      repositoryCapability: admission.capability,
+      acceptedRepositoryOwnerToken,
+      destinationRepositoryPath: join(stateRoot, 'repository.git'),
+    });
+    const owner = createGitoxideWorkspaceBaselineOwnerInternal(stores);
+    const input = {
+      workspaceKey: 'session-baseline',
+      acceptedRepositoryOwnerToken,
+      acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+    };
+    assert.equal(createGitoxideWorkspaceBaselineOwnerInternal(stores), owner);
+    await assert.rejects(
+      owner.acceptImport({ ...input, acceptedRepositoryOwnerToken: {} }),
+      GitoxideRepositoryAdmissionAuthorityError,
+    );
+    await assert.rejects(
+      owner.acceptImport({
+        ...input,
+        acceptedRepositoryCapability: { kind: 'gitoxide_accepted_repository_capability_v1' },
+      }),
+      GitoxideRepositoryAdmissionAuthorityError,
+    );
+    const accepted = await owner.acceptImport(input);
+    assert.equal(accepted.created, true);
+    assert.equal(accepted.head.commitOid, imported.baselineCommitOid);
+    assert.equal(accepted.head.treeOid, imported.baselineTreeOid);
+    assert.equal((await owner.acceptImport(input)).created, false);
+    await stores.sessionStore.close!();
+    await assert.rejects(owner.acceptImport(input));
+    stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
+    const reopened = createGitoxideWorkspaceBaselineOwnerInternal(stores);
+    // This only reopens SQLite. Main's import protocol cannot reissue a capability
+    // for an existing destination; full process recovery requires a separate reopen owner.
+    await assert.rejects(
+      importAdmittedGitoxideRepositoryInternal({
+        admissionOwnerToken,
+        repositoryCapability: admission.capability,
+        acceptedRepositoryOwnerToken,
+        destinationRepositoryPath: join(stateRoot, 'repository.git'),
+      }),
+      (error) =>
+        error instanceof GitoxideHelperInvocationError &&
+        error.helperReason === 'import_destination_not_fresh',
+    );
+    const retried = await reopened.acceptImport(input);
+    assert.equal(retried.created, false);
+    assert.deepEqual(retried.head, accepted.head);
+
+    // A new source observation cannot silently replace the same workspace epoch.
+    await writeFile(join(source, 'hello.txt'), 'source advanced\n');
+    git(source, ['add', 'hello.txt']);
+    git(source, [
+      '-c',
+      'user.name=Maka Test',
+      '-c',
+      'user.email=test@example.invalid',
+      'commit',
+      '-qm',
+      'advance',
+    ]);
+    const advanced = await admitGitoxideRepositoryInternal({
+      ...helper,
+      admissionOwnerToken,
+      repositoryPath: source,
+    });
+    assert.equal(advanced.kind, 'accepted');
+    if (advanced.kind !== 'accepted') return;
+    const advancedImport = await importAdmittedGitoxideRepositoryInternal({
+      admissionOwnerToken,
+      repositoryCapability: advanced.capability,
+      acceptedRepositoryOwnerToken,
+      destinationRepositoryPath: join(stateRoot, 'advanced.git'),
+    });
+    await assert.rejects(
+      reopened.acceptImport({
+        ...input,
+        acceptedRepositoryCapability: advancedImport.acceptedRepositoryCapability,
+      }),
+    );
+    assert.deepEqual((await reopened.acceptImport(input)).head, accepted.head);
+  } finally {
+    await stores.sessionStore.close?.();
+    await rootOwner.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(join(resolveRootControlNamespace(), root.rootId), { recursive: true, force: true });
+    await rm(join(resolveRootOwnershipNamespace(), root.rootId + '.lock'), { force: true });
+  }
+});
 
 test('applies admission cancellation before repository path preflight', async () => {
   const controller = new AbortController();

@@ -84,7 +84,7 @@ export function registerExecutionWorkspaceAuthorityInternal(
   );
 }
 
-/** Authentic group required. Intentionally absent from package exports until Host composition lands. */
+/** Authentic group required. Consumed through the execution-stores composition surface. */
 export async function openExecutionWorkspaceAuthorityInternal(
   stores: object,
   verifiers: ExecutionWorkspaceProofVerifiers,

@@ -1,0 +1,118 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+import { createHash } from 'node:crypto';
+import {
+  openExecutionWorkspaceAuthority,
+  type InteractiveExecutionStoresWriter,
+} from '@maka/storage/execution-stores';
+import {
+  WORKSPACE_MATERIALIZATION_SEMANTICS_V1,
+  type WorkspaceBaselineCommitResult,
+  type WorkspaceBaselineAuthorityInput,
+} from '@maka/core/workspace-version-authority';
+import {
+  requireGitoxideImportedRepositoryInternal,
+  type GitoxideAcceptedRepositoryCapability,
+} from './gitoxide-repository-admission-authority-internal.js';
+
+const owners = new WeakMap<InteractiveExecutionStoresWriter, ReturnType<typeof createOwner>>();
+
+export function createGitoxideWorkspaceBaselineOwnerInternal(
+  stores: InteractiveExecutionStoresWriter,
+) {
+  let owner = owners.get(stores);
+  if (!owner) {
+    owner = createOwner(stores);
+    owners.set(stores, owner);
+  }
+  return owner;
+}
+
+function createOwner(stores: InteractiveExecutionStoresWriter) {
+  const proofs = new WeakMap<object, WorkspaceBaselineAuthorityInput>();
+  const unavailable = (): never => {
+    throw new Error('Gitoxide mutation settlement is not connected');
+  };
+  const verifiers = Object.freeze({
+    baseline(proof: object) {
+      const value = proofs.get(proof);
+      if (!value) throw new Error('Unrecognized Gitoxide baseline proof');
+      return value;
+    },
+    successor: unavailable,
+    noEffect: unavailable,
+  });
+  return Object.freeze({
+    async acceptImport(input: {
+      workspaceKey: string;
+      acceptedRepositoryOwnerToken: object;
+      acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
+    }): Promise<WorkspaceBaselineCommitResult> {
+      if (!input.workspaceKey.trim() || Buffer.byteLength(input.workspaceKey) > 1024) {
+        throw new Error('Invalid managed workspace key');
+      }
+      const imported = requireGitoxideImportedRepositoryInternal(
+        input.acceptedRepositoryOwnerToken,
+        input.acceptedRepositoryCapability,
+      );
+      const id = hash(`maka-managed-files-workspace-v1\0${input.workspaceKey}`).slice(7, 39);
+      const repositoryId = hash(
+        `maka-managed-files-repository-v1\0${imported.repositoryPath}`,
+      ).slice(7, 39);
+      const materializationProfileDigest = hash(
+        `maka-gitoxide-import-v3\0${imported.helperArtifactSha256}`,
+      );
+      const policyHash = hash(`maka-managed-files-policy-v3\0${materializationProfileDigest}`);
+      const proof = Object.freeze({});
+      proofs.set(proof, {
+        epochOpenedEventId: `workspace-epoch-${id}`,
+        baselineAcceptedEventId: `workspace-baseline-${id}`,
+        committedAt: 0,
+        epoch: {
+          repositoryId: `repository_${repositoryId}`,
+          workspaceId: `workspace_${id}`,
+          workspaceEpochId: `epoch_${id}`,
+          workspaceInstanceId: `instance_${id}`,
+          mode: 'managed_worktree',
+          objectFormat: 'sha1',
+          sourceCommitOid: imported.sourceHeadCommitOid,
+          sourceTreeOid: imported.sourceTreeOid,
+          materializationProfileDigest,
+          materializationSemantics: WORKSPACE_MATERIALIZATION_SEMANTICS_V1,
+          policyHash,
+        },
+        baseline: {
+          workspaceVersionId: `version_${id}`,
+          commitOid: imported.baselineCommitOid,
+          treeOid: imported.baselineTreeOid,
+          treeDeltaDigest: hash(`maka-gitoxide-baseline-tree-v1\0${imported.baselineTreeOid}`),
+          changedFileCount: imported.filesImported,
+          deletedFileCount: 0,
+        },
+      });
+      const authority = await openExecutionWorkspaceAuthority(stores, verifiers);
+      return authority.commitBaseline(proof);
+    },
+  });
+}
+
+function hash(value: string): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(value, 'utf8').digest('hex')}`;
+}

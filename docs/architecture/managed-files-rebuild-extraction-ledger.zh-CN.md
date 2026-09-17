@@ -131,3 +131,25 @@ Windows 的 file-only profile 不依赖 Bash/npm command sandbox；启用前仍�
 新增 6 项真实 provider 合同测试：窄接口/关闭、固定 proof owner 与 baseline reopen、不支持的 provider 与伪造 group、close drain、root 撤权、uncertain open。首项先 RED（Local 未提供该域）再 GREEN。provider 合同全集 93 项，加 Storage persistence、Runtime durable boundary 和纯转换，共 161 项通过、无跳过；Storage/Runtime build、Biome 和 diff check 通过。
 
 平台证据仍仅为本机 Windows；没有宣称 Linux/macOS、完整 Host/helper crash 或 Desktop 验收完成。下一步才是 Host Gitoxide proof owner 消费这一窄接口，并接一次真实 Write 的 terminal settlement。
+
+## 第四检查点：真实 Gitoxide import proof 接入 SQLite baseline
+
+Host 新增 `gitoxide-workspace-baseline-owner-internal.ts`，使用现有 execution-stores 子路径上的受限接口，没有导出原始 SQLite writer。每个 execution group 一个 baseline proof owner；多 workspace 共用该 owner，不能由每个 session 另换 verifier。
+
+acceptImport 只消费 owner-bound repository capability。Gitoxide admission 模块保留 helper 实际返回的 immutable import observation，由 WeakMap 验证 owner 后读取；不接受调用者重新提交的 commit/tree/count 描述。baseline 的 source/commit/tree/count 来自该 observation，事件 ID 与 workspace key 确定，时间戳固定为 0 作为确定性 import 事实（不冒充实际执行时间）。相同 epoch 的不同 import 由 SQLite exact-retry 检查拒绝。
+
+真实测试完成：helper import → baseline commit → 同 proof 精确重试 → SQLite group 关闭/重开 → 原 capability 重试；错误 owner、伪造 capability、source 更新后替换同一 epoch 均拒绝。Gitoxide admission 9/9，无跳过，Windows 本机执行。此测试没有启动 Desktop 或完整 Runtime Host 服务。
+
+### 新确认的恢复前置缺口
+
+主线 import 只允许 fresh destination。真实第二次 import 报 `import_destination_not_fresh`，不能重新取得已导入 repository 的 capability。测试明确保留这一拒绝，并只将 retained capability 下的 SQLite reopen 标为通过，**不称为跨进程恢复通过**。
+
+下一步必须增加有独立证据的 managed repository reopen owner：验证目标目录归属、helper/policy、Git graph 与 SQLite accepted identity，再重新发行进程内 capability；不能删除目标目录、重复 import 或信任磁盘旁边的自报描述。随后再接 candidate settlement 和 accepted-ref reconciliation。当前 helper 也未开放 accepted-ref 推进，不能通过调用 Git CLI 绕过该缺口。
+
+本轮不接启动流程、不开工具、不启用 Desktop；successor/no-effect verifier 显式不可用。Git/SQLite 两存储间不是原子事务：import 完成、baseline 未提交的孤立 artifact 恢复仍是下轮 gate。仓库目录规划、source admission 以及跨进程恢复生命周期尚未接入产品，因此这是重建检查点，不是 Resume 可交付状态。
+
+### 本机 helper 验证环境
+
+复用已有 `C:/Users/wzy/.local/llvm-mingw-20260616/llvm-mingw-20260616-ucrt-x86_64/bin`，仅加入构建进程 PATH。Rust 使用 `1.98.0-x86_64-pc-windows-gnullvm`，linker 为 `x86_64-w64-mingw32-clang`，最终 binary 使用 `cargo rustc --locked --manifest-path native/gitoxide-helper/Cargo.toml --bin maka-gitoxide-helper -- -C target-feature=+crt-static`。
+
+默认 MSVC 缺少 link.exe；普通 GNU LLVM 构建又依赖 libunwind.dll，受限 helper 的空 PATH 下无法启动。静态 runtime 构建后依赖表不再含 libunwind.dll，同一真实调用测试由 1/8 改为 8/8，通过后本轮增加 baseline 集成为 9/9。该二进制仅是本地测试产物，不是签名发布产物；不改变正式平台发布配置。
