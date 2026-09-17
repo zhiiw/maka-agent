@@ -33,6 +33,8 @@ use unicode_normalization::UnicodeNormalization;
 
 const PROTOCOL_VERSION: u8 = 1;
 const MANAGED_TREE_POLICY_VERSION: u8 = 3;
+const IMPORT_INTENT_REF: &str = "refs/maka/import-intent";
+const MAX_IMPORT_INTENT_BYTES: u64 = 64 * 1024;
 const MAX_ENCODED_CONTENT_BYTES: u64 = MAX_IMPORT_FILE_BYTES.div_ceil(3) * 4;
 const MAX_REQUEST_BYTES: u64 = MAX_ENCODED_CONTENT_BYTES + 64 * 1024;
 const MAX_REPOSITORY_METADATA_BYTES: u64 = 1024 * 1024;
@@ -81,6 +83,10 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     "commit_object_limit_exceeded",
     "baseline_commit_write_failed",
     "baseline_publish_failed",
+    "import_intent_mismatch",
+    "import_intent_unavailable",
+    "import_intent_invalid",
+    "import_intent_write_failed",
     "baseline_ref_outside_maka_namespace",
     "base_commit_unavailable",
     "base_commit_identity_mismatch",
@@ -750,6 +756,9 @@ fn import_source_head(
     if !baseline_ref.starts_with("refs/maka/") {
         return Err("baseline_ref_outside_maka_namespace");
     }
+    if baseline_ref == IMPORT_INTENT_REF {
+        return Err("invalid_baseline_ref");
+    }
     gix::refs::FullName::try_from(baseline_ref.as_str()).map_err(|_| "invalid_baseline_ref")?;
     if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
         return Err("unsupported_managed_tree_policy");
@@ -802,6 +811,33 @@ fn import_source_head(
     drop(stats);
 
     assert_import_destination_parent(&destination_repository_path)?;
+    // The baseline commit binds the tree, not the original source commit or request.
+    // Persist that identity separately before copying any source objects. This is
+    // recovery evidence in the private repository, never a filesystem-delete capability.
+    let canonical_destination = fs::canonicalize(
+        destination_repository_path
+            .parent()
+            .ok_or("import_destination_parent_untrusted")?,
+    )
+    .map_err(|_| "import_destination_parent_untrusted")?
+    .join(
+        destination_repository_path
+            .file_name()
+            .ok_or("import_destination_parent_untrusted")?,
+    );
+    let intent = serde_json::to_vec(&(
+        "maka-source-import-intent-v1",
+        fs::canonicalize(source.git_dir()).map_err(|_| "repository_open_failed")?,
+        expected_source_head.to_string(),
+        source_tree.to_string(),
+        canonical_destination,
+        &baseline_ref,
+        managed_tree_policy_version,
+    ))
+    .map_err(|_| "import_intent_invalid")?;
+    if intent.len() as u64 > MAX_IMPORT_INTENT_BYTES {
+        return Err("import_intent_invalid");
+    }
     if verify_only {
         let metadata = fs::symlink_metadata(&destination_repository_path)
             .map_err(|_| "repository_open_failed")?;
@@ -814,6 +850,26 @@ fn import_source_head(
         let destination = open_repository(destination_repository_path)?;
         if !destination.is_bare() || destination.object_hash() != gix::hash::Kind::Sha1 {
             return Err("repository_open_failed");
+        }
+        let intent_reference = destination
+            .find_reference(IMPORT_INTENT_REF)
+            .map_err(|_| "import_intent_unavailable")?;
+        let intent_id = intent_reference
+            .try_id()
+            .ok_or("import_intent_invalid")?
+            .detach();
+        let stored_intent = load_verified_object(
+            &destination,
+            intent_id,
+            gix::objs::Kind::Blob,
+            MAX_IMPORT_INTENT_BYTES,
+            "import_intent_unavailable",
+            "import_intent_invalid",
+            "import_intent_invalid",
+            "import_intent_invalid",
+        )?;
+        if stored_intent.data != intent {
+            return Err("import_intent_mismatch");
         }
         let commit_id = read_direct_commit_ref(
             &destination,
@@ -877,6 +933,18 @@ fn import_source_head(
     if destination.object_hash() != gix::hash::Kind::Sha1 {
         return Err("import_destination_object_format_mismatch");
     }
+    let intent_id = destination
+        .write_blob(&intent)
+        .map_err(|_| "import_intent_write_failed")?
+        .detach();
+    destination
+        .reference(
+            IMPORT_INTENT_REF,
+            intent_id,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "maka source import intent",
+        )
+        .map_err(|_| "import_intent_write_failed")?;
 
     let mut copy_stats = ManagedTreeStats::default();
     walk_verified_source_tree(

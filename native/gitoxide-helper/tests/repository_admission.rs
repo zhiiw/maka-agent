@@ -570,6 +570,40 @@ fn reopen_validates_the_exact_accepted_tree_without_reimporting() {
 }
 
 #[test]
+fn import_retry_rejects_a_new_source_commit_with_the_same_tree() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let destination = fixture.root.join("original-intent.git");
+    let original = fixture.git_output(["rev-parse", "HEAD"]);
+    let tree = fixture.git_output(["rev-parse", "HEAD^{tree}"]);
+    assert!(
+        invoke_import(&fixture.root, &original, &destination)
+            .status
+            .success()
+    );
+    fixture.git_output([
+        "commit",
+        "--allow-empty",
+        "-m",
+        "new identity, unchanged tree",
+    ]);
+    let changed = fixture.git_output(["rev-parse", "HEAD"]);
+    assert_ne!(original, changed);
+    assert_eq!(tree, fixture.git_output(["rev-parse", "HEAD^{tree}"]));
+    let before = fs::read(destination.join("refs/maka/baseline")).unwrap();
+    let result = invoke_request(serde_json::json!({
+        "protocolVersion": 1, "operation": "verify_source_import",
+        "sourceRepositoryPath": fixture.root, "expectedSourceHeadCommitOid": changed,
+        "destinationRepositoryPath": destination, "baselineRef": "refs/maka/baseline",
+        "managedTreePolicyVersion": 3,
+    }));
+    assert_helper_error(&result, "import_intent_mismatch");
+    assert_eq!(
+        fs::read(destination.join("refs/maka/baseline")).unwrap(),
+        before
+    );
+}
+
+#[test]
 fn verifies_completed_import_in_a_fresh_helper_without_rewriting_it() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let destination = fixture.root.join("verify-import.git");
@@ -607,6 +641,9 @@ fn import_verification_rejects_partial_or_tampered_artifacts_without_repair() {
         "missing_blob",
         "foreign_commit",
         "symbolic_ref",
+        "missing_intent",
+        "symbolic_intent",
+        "oversized_intent",
     ] {
         let fixture = RepositoryFixture::sha1_with_commit();
         let destination = fixture.root.join("verify-damaged.git");
@@ -637,9 +674,31 @@ fn import_verification_rejects_partial_or_tampered_artifacts_without_repair() {
                 fs::write(&ref_path, format!("{source_head}\n")).unwrap();
             }
             "symbolic_ref" => fs::write(&ref_path, "ref: refs/heads/other\n").unwrap(),
+            "missing_intent" => {
+                fs::remove_file(destination.join("refs/maka/import-intent")).unwrap()
+            }
+            "symbolic_intent" => fs::write(
+                destination.join("refs/maka/import-intent"),
+                "ref: refs/maka/baseline\n",
+            )
+            .unwrap(),
+            "oversized_intent" => {
+                let blob_path = fixture.root.join("oversized-intent.txt");
+                fs::write(&blob_path, vec![b'x'; 65 * 1024]).unwrap();
+                let output = Command::new("git")
+                    .arg("--git-dir")
+                    .arg(&destination)
+                    .args(["hash-object", "-w"])
+                    .arg(&blob_path)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                fs::write(destination.join("refs/maka/import-intent"), &output.stdout).unwrap();
+            }
             _ => unreachable!(),
         }
         let before = fs::read(&ref_path).ok();
+        let intent_before = fs::read(destination.join("refs/maka/import-intent")).ok();
         let result = invoke_request(serde_json::json!({
             "protocolVersion": 1, "operation": "verify_source_import",
             "sourceRepositoryPath": fixture.root, "expectedSourceHeadCommitOid": source_head,
@@ -648,6 +707,10 @@ fn import_verification_rejects_partial_or_tampered_artifacts_without_repair() {
         }));
         assert_eq!(result.status.code(), Some(1), "damage {damage}");
         assert_eq!(fs::read(&ref_path).ok(), before);
+        assert_eq!(
+            fs::read(destination.join("refs/maka/import-intent")).ok(),
+            intent_before
+        );
         if damage == "missing_blob" {
             let oid = fixture.git_output(["rev-parse", "HEAD:hello.txt"]);
             assert!(

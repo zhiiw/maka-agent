@@ -419,3 +419,18 @@ TDD 先复现未知 profile、managed profile 缺能力仍读取凭据、AiSdkBa
 验证：Rust 全套 **74/74**；Host publication/backend/独立操作授权定向 **6/6、0 skip**；Host build、Biome、diff check 通过。平台矩阵：Windows 本机验证；Linux/macOS 沿现有三平台 workflow 调度同一测试文件，本轮没有远程运行证据。仅证明已完成 import 后的进程退出窗口，不承诺断电或 helper 内部任意指令点退出后都能恢复。
 
 下一步：持久化原始 import 创建意图与 destination 所有权，明确半完成 artifact 的隔离/重建协议，再接 live Host 路由。当前仍未开放 Desktop 创建入口，不宣称整个 managed task 创建恢复已完成。
+
+## 第十九检查点：import 原始身份记录
+
+先用真实 helper 复现：source 产生一个同 tree 的新 commit 后，旧 import 可以被上一检查点的只读核验接受为新 source observation。本轮在 fresh destination 内增加 `refs/maka/import-intent`，指向固定字段序列的 JSON blob，绑定规范 source gitdir、原始 source commit/tree、规范 destination、baseline ref 和 policy。记录在 source 对象复制和 baseline 发布之前创建，使用 MustNotExist ref 写入，不允许本路径覆盖已有 intent。
+
+- **Owner/主要不变量**：import helper 拥有该准备记录；verify 必须读取 direct intent ref，按 64 KiB 上限校验 blob 类型、checksum 和精确字节，再验证 baseline/object graph。相同 tree 不再允许 source commit 身份偷换。intent 只描述创建请求，不代表 accepted workspace，SQLite RuntimeEvents 仍是 accepted truth。
+- **原子边界**：intent blob/ref、source 对象复制和 baseline ref 发布仍是分阶段操作，不声称统一事务。intent 不存在、未写完整、对象缺失或 baseline 缺失都拒绝；未完成状态不会被升级为成功。当前只读核验不恢复 intent，不重写 ref。
+- **权限/回滚**：该记录不是目录 inode/OS 所有权 capability，也不授予 rename/delete 权限。失败保留残留，不删除用户文件，不自动重建。移走 repository 或替换 source 身份会拒绝。此未发布实验切片不兼容缺少 intent 的旧实验 import；可保留旧目录另建新实验任务，不建设迁移或降级框架。
+- **创建意图范围**：记录尚未绑定 session ID、model/name 或 storage-root owner。已有 Session stable-create fingerprint 仍负责 baseline 后的请求一致性；两者尚未合成为用户可调用的完整创建 owner。不能凭此开放普通 session.create 或宣称半完成 import 自动恢复。
+
+验证：同 tree/新 source commit 回归先 RED（旧实现接受）后 GREEN（import_intent_mismatch）；增加 missing/symbolic/oversized intent 拒绝且不修补的检查。Rust 全套 **75/75**，真实 Host fixture publication/backend 进程测试 **5/5**，Rust/TypeScript error contract **1/1**，Host build、Biome、diff check 通过。import 后退出的新进程核验现已实际消费 intent。
+
+平台矩阵：Windows 本机通过；Linux/macOS 由既有同文件三平台 workflow 调度，本轮无远程结果。承诺范围仍是被测试的进程退出恢复，不包含断电持久性、任意 helper 内部指令点收敛或不可信本机进程篡改整个私有 repository。
+
+下一步：由 storage-root/session 创建 owner 固定完整请求与 repository 路由，明确未完成 attempt 的身份与隔离方式，再接 live Host。这里不增加自动清理、全盘扫描或 Desktop fallback。
