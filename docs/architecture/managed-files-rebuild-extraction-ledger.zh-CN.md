@@ -900,3 +900,13 @@ Runtime/Host build、格式检查通过；continuation/resume/handoff 定向 32/
 下一实现的最小合同应复用已有 authority：从未结算 T1 冻结参数/base/operation 身份，验证同一个 reservation；纯转换重算期望内容（不是执行工具 handler 或覆盖 checkout），重新验证已有 candidate 与该内容、base、policy 精确对应；由同一个 mutation owner 构造有明确恢复身份的结果，并使用既有 SQLite 原子接受入口提交 T2/successor/head/释放 reservation。任何证据不符仍 park；不能另设 accepted ledger、generic T2 fallback 或凭可变 source 文件猜测结果。候选物不存在的 T1-only 处理仍单独设计，不在这一检查点暗中生成并接受。
 
 平台与验证：Windows Host build 通过，Biome/diff check 通过，定向 2/2（含 candidate-only 新进程恢复和原 backend-crash-first）通过。Linux/macOS 本轮未运行；没有生产代码变更、没有扩展自动恢复承诺。下一步应实现并证明上述窄 reconciliation owner，而不是继续只补同类 park 测试。
+
+## 第四十五检查点：恢复验证不能创建缺失的 candidate
+
+落地 reconciliation 的第一个必要原语：Rust helper 的 candidate 请求支持 `requireExisting: true`。该模式复用原有完整 candidate receipt/tree/blob 验证，但在候选 ref 不存在时返回稳定 `candidate_missing`，在任何 object/ref 写入之前停止。没有通过 Host 的“先检查文件存在、再调用 create”来模拟这一保证。普通创建请求保持原行为，验证模式不参与 candidate 身份摘要，因此同一已固化候选返回完全相同的证明。
+
+Owner 是 Gitoxide helper；此步骤不提交 SQLite、不释放 reservation、不推进 accepted ref。失败没有新候选物需要回滚，缺少或不匹配的证据继续由上层 park。此原语本身不提供跨进程排他权限；调用方仍须持有真实 repository/root owner，后续接受仍须通过 SQLite 原子 writer。
+
+真实 helper 回归覆盖：缺失候选被拒绝且 ref 不出现；普通创建后验证返回同一响应且 ref 字节不变；不同内容的验证被拒绝且 ref 不变。先观察到 `invalid_request` 的 RED，再加入实现。Windows repository admission 全套 63/63 通过，其中 candidate 相关 17/17；helper 使用静态 CRT 构建，子进程 PATH 清空。Linux/macOS 本轮未运行，不宣称跨平台新证据。
+
+本轮尚未接入 Host verification-only capability，也未增加恢复 T2 writer 或自动结算。下一步按顺序接入：Host 验证入口 → 从持久 T1 重建 exact outcome → 原子接受与新进程重复恢复测试。T1-only 仍不得创建 candidate；Desktop 的现有已结算 Write/Edit Continue 能力不变。
