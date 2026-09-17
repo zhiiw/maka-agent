@@ -190,6 +190,14 @@ enum Request {
         baseline_ref: String,
         managed_tree_policy_version: u8,
     },
+    VerifySourceImport {
+        protocol_version: u8,
+        source_repository_path: PathBuf,
+        expected_source_head_commit_oid: String,
+        destination_repository_path: PathBuf,
+        baseline_ref: String,
+        managed_tree_policy_version: u8,
+    },
     CreateCandidate {
         protocol_version: u8,
         repository_path: PathBuf,
@@ -403,6 +411,25 @@ fn run() -> Result<ExitCode, &'static str> {
                 destination_repository_path,
                 baseline_ref,
                 managed_tree_policy_version,
+                false,
+            )
+        }
+        Request::VerifySourceImport {
+            protocol_version,
+            source_repository_path,
+            expected_source_head_commit_oid,
+            destination_repository_path,
+            baseline_ref,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            import_source_head(
+                source_repository_path,
+                expected_source_head_commit_oid,
+                destination_repository_path,
+                baseline_ref,
+                managed_tree_policy_version,
+                true,
             )
         }
         Request::CreateCandidate {
@@ -716,6 +743,7 @@ fn import_source_head(
     destination_repository_path: PathBuf,
     baseline_ref: String,
     managed_tree_policy_version: u8,
+    verify_only: bool,
 ) -> Result<ExitCode, &'static str> {
     use gix::bstr::ByteSlice;
 
@@ -774,6 +802,77 @@ fn import_source_head(
     drop(stats);
 
     assert_import_destination_parent(&destination_repository_path)?;
+    if verify_only {
+        let metadata = fs::symlink_metadata(&destination_repository_path)
+            .map_err(|_| "repository_open_failed")?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || is_windows_reparse_point(&metadata)
+        {
+            return Err("repository_open_failed");
+        }
+        let destination = open_repository(destination_repository_path)?;
+        if !destination.is_bare() || destination.object_hash() != gix::hash::Kind::Sha1 {
+            return Err("repository_open_failed");
+        }
+        let commit_id = read_direct_commit_ref(
+            &destination,
+            &baseline_ref,
+            "accepted_ref_not_direct",
+            "accepted_ref_target_invalid",
+        )?;
+        let commit = load_verified_object(
+            &destination,
+            commit_id,
+            gix::objs::Kind::Commit,
+            MANAGED_TREE_POLICY_V3.max_commit_object_bytes,
+            "base_commit_unavailable",
+            "base_commit_unavailable",
+            "commit_object_limit_exceeded",
+            "base_commit_identity_mismatch",
+        )?;
+        let expected_commit = format!(
+            "tree {source_tree}\nauthor Maka Workspace Service <workspace@maka.invalid> 946684800 +0000\ncommitter Maka Workspace Service <workspace@maka.invalid> 946684800 +0000\n\nmaka managed workspace baseline v2"
+        );
+        if commit.data != expected_commit.as_bytes() {
+            return Err("base_commit_identity_mismatch");
+        }
+        let mut verified_stats = ManagedTreeStats::default();
+        walk_verified_source_tree(
+            &destination,
+            None,
+            source_tree,
+            "",
+            0,
+            MANAGED_TREE_POLICY_V3,
+            &mut verified_stats,
+        )?;
+        if verified_stats.files != expected_files || verified_stats.bytes != expected_bytes {
+            return Err("source_tree_observation_mismatch");
+        }
+        if read_direct_commit_ref(
+            &destination,
+            &baseline_ref,
+            "accepted_ref_not_direct",
+            "accepted_ref_target_invalid",
+        )? != commit_id
+        {
+            return Err("accepted_ref_target_invalid");
+        }
+        write_response(&Response::SourceImported {
+            protocol_version: PROTOCOL_VERSION,
+            object_format: "sha1",
+            source_head_commit_oid: expected_source_head.to_string(),
+            source_tree_oid: source_tree.to_string(),
+            baseline_commit_oid: commit_id.to_string(),
+            baseline_tree_oid: source_tree.to_string(),
+            baseline_ref,
+            managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+            files_imported: verified_stats.files,
+            bytes_imported: verified_stats.bytes,
+        });
+        return Ok(ExitCode::SUCCESS);
+    }
     let destination = claim_fresh_import_destination(&destination_repository_path)?;
     if destination.object_hash() != gix::hash::Kind::Sha1 {
         return Err("import_destination_object_format_mismatch");

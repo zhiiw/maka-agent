@@ -27,6 +27,7 @@ import {
   createCandidateWithGitoxideHelperInternal,
   GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL,
   importSourceHeadWithGitoxideHelperInternal,
+  verifySourceImportWithGitoxideHelperInternal,
   inspectCanonicalRepositoryWithGitoxideHelperInternal,
   readTreeFileWithGitoxideHelperInternal,
   reopenRepositoryWithGitoxideHelperInternal,
@@ -182,17 +183,32 @@ export function requireGitoxideRepositoryAdmissionInternal(
   return requireAdmissionRecord(admissionOwnerToken, capability).state;
 }
 
-export async function importAdmittedGitoxideRepositoryInternal(input: {
+interface AdmittedImportInput {
   readonly admissionOwnerToken: object;
   readonly repositoryCapability: GitoxideRepositoryAdmissionCapability;
   readonly acceptedRepositoryOwnerToken: object;
   readonly destinationRepositoryPath: string;
   readonly abortSignal?: AbortSignal;
-}): Promise<
+}
+
+export function importAdmittedGitoxideRepositoryInternal(input: AdmittedImportInput) {
+  return observeAdmittedImport(input, importSourceHeadWithGitoxideHelperInternal);
+}
+
+/** Read-only recovery after publication; partial or changed destinations are never repaired. */
+export function verifyAdmittedGitoxideImportInternal(input: AdmittedImportInput) {
+  return observeAdmittedImport(input, verifySourceImportWithGitoxideHelperInternal);
+}
+
+async function observeAdmittedImport(
+  input: AdmittedImportInput,
+  observe: typeof importSourceHeadWithGitoxideHelperInternal,
+): Promise<
   GitoxideSourceImportObservationV1 & {
     readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
   }
 > {
+  input = { ...input };
   const admission = requireAdmissionRecord(input.admissionOwnerToken, input.repositoryCapability);
   const source = admission.state;
   requireGitoxideHelperOperationsInternal(
@@ -200,7 +216,7 @@ export async function importAdmittedGitoxideRepositoryInternal(input: {
     admission.helperCapability,
     ['create_candidate', 'read_tree_file'],
   );
-  const result = await importSourceHeadWithGitoxideHelperInternal({
+  const result = await observe({
     invocationOwnerToken: admission.invocationOwnerToken,
     capability: admission.helperCapability,
     sourceRepositoryPath: source.repositoryPath,

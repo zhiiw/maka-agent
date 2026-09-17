@@ -404,3 +404,18 @@ TDD 先复现未知 profile、managed profile 缺能力仍读取凭据、AiSdkBa
 验证：新增 publication 两例及既有 backend 连续执行/退出恢复 **4/4、0 skip**；Host backend 定向 **11/11**；CI policy **1/1**；Host build、Biome、diff check 通过。三平台 workflow 已调度该测试文件。Windows 为本机证据，Linux/macOS 本轮未取得远程执行结果；不承诺断电或 import 内部任意指令点恢复。
 
 尚未完成：半完成 import 的可信 intent/重验/隔离协议；source admission 与完整创建请求的绑定；根据 storage root/session ID 重建 repository 路由；live Host 创建和 reopen 接线。当前 API 接收可信内部调用者提供的已接受 repository 路径，尚不是用户创建 API，普通 session.create 的 managed 禁止规则保持不变。下一步优先闭合 import 前半段，而不是提前开放 Desktop。
+
+## 第十八检查点：已完成 import 的只读重验
+
+新增独立授权的 `verify_source_import`，覆盖 helper 已发布完整对象图与 baseline ref、但 Host 尚未接受 baseline 或收到结果的窗口。原 `import_source_head` 仍只接受 fresh destination；不因新增核验操作而给旧 import capability 扩权。
+
+- **Owner/主要不变量**：Rust helper 重验源 observation、目标 bare SHA-1 repository、direct baseline ref、精确 deterministic baseline commit 字节及完整 tree/blob 图。Host 只从经过 admission 的 source capability 发起核验，并将验证结果转换为原有 owner-bound accepted repository capability；目录存在或 tree 相同本身都不构成成功。
+- **原子边界**：本操作不写对象、ref、receipt 或 Session，也不补齐缺失内容。核验后 baseline/Session 发布继续由既有 authority 负责，未新增跨 Git/SQLite 事务。
+- **失败/回滚**：缺 ref、缺 blob、symbolic ref、同 tree 但不同 baseline commit 均拒绝，残留保持原样。失败不尝试删除目录、不重新 import、不降级到 source checkout。取消/deadline 复用现有 helper invocation owner。
+- **证据边界**：核验只证明目标与本次显式 source observation 一致，不能倒推出丢失请求的原始 source commit。baseline commit 绑定 tree；source 若产生相同 tree 的新 commit，原创建意图仍需要未来 durable import intent 保留，不能把当前重验当作历史意图恢复。
+
+真实进程测试新增 import 完成后直接退出（尚未接受 baseline），新进程通过只读核验再发布 baseline/Session，并验证 exact retry、唯一 baseline facts 和 source 不变。Rust 回归覆盖完整 import 跨 helper 进程核验，以及四类损坏不被修补。旧 helper 操作授权集合不能调用新核验操作。
+
+验证：Rust 全套 **74/74**；Host publication/backend/独立操作授权定向 **6/6、0 skip**；Host build、Biome、diff check 通过。平台矩阵：Windows 本机验证；Linux/macOS 沿现有三平台 workflow 调度同一测试文件，本轮没有远程运行证据。仅证明已完成 import 后的进程退出窗口，不承诺断电或 helper 内部任意指令点退出后都能恢复。
+
+下一步：持久化原始 import 创建意图与 destination 所有权，明确半完成 artifact 的隔离/重建协议，再接 live Host 路由。当前仍未开放 Desktop 创建入口，不宣称整个 managed task 创建恢复已完成。

@@ -59,7 +59,7 @@ interface AdmittedHelper {
 
 let admittedHelperPromise: Promise<AdmittedHelper | undefined> | undefined;
 
-for (const crashMode of ['session-baseline-exit', 'session-publish-exit']) {
+for (const crashMode of ['session-baseline-exit', 'session-publish-exit', 'session-import-exit']) {
   test(`managed session publication resumes after ${crashMode}`, { timeout: 30_000 }, async (t) => {
     if (!(await admittedHelper())) {
       t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
@@ -94,17 +94,23 @@ for (const crashMode of ['session-baseline-exit', 'session-publish-exit']) {
       assert.equal(missing.status, 0, missing.stderr);
       const crashed = run(crashMode);
       assert.ifError(crashed.error);
-      assert.equal(crashed.status, crashMode === 'session-baseline-exit' ? 85 : 84, crashed.stderr);
+      assert.equal(
+        crashed.status,
+        crashMode === 'session-baseline-exit' ? 85 : crashMode === 'session-import-exit' ? 86 : 84,
+        crashed.stderr,
+      );
       if (crashMode === 'session-baseline-exit') {
         const aborted = run('session-preabort');
         assert.ifError(aborted.error);
         assert.equal(aborted.status, 0, aborted.stderr);
       }
-      const retry = run('session-retry');
+      const retry = run(
+        crashMode === 'session-import-exit' ? 'session-import-recover' : 'session-retry',
+      );
       assert.ifError(retry.error);
       assert.equal(retry.status, 0, retry.stderr);
       assert.deepEqual(JSON.parse(retry.stdout), {
-        created: crashMode === 'session-baseline-exit',
+        created: crashMode !== 'session-publish-exit',
         profile: 'managed-files-v1',
         content: 'accepted original\n',
         facts: 2,

@@ -51,6 +51,7 @@ import {
 import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
+  verifyAdmittedGitoxideImportInternal,
   readGitoxideTreeFileInternal,
   createGitoxideCandidateInternal,
   requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal,
@@ -126,7 +127,8 @@ if (
   mode === 'crash-after-baseline' ||
   settling ||
   mode === 'session-baseline-exit' ||
-  mode === 'session-publish-exit'
+  mode === 'session-publish-exit' ||
+  mode === 'session-import-exit'
 ) {
   const admissionOwnerToken = {};
   const admitted = await admitGitoxideRepositoryInternal({
@@ -142,6 +144,7 @@ if (
     acceptedRepositoryOwnerToken,
     destinationRepositoryPath: repositoryPath,
   });
+  if (mode === 'session-import-exit') process.exit(86);
   baseline = await owner.acceptImport({
     workspaceKey: mode.startsWith('session-') ? 'managed-created-session' : 'crash-session',
     acceptedRepositoryOwnerToken,
@@ -153,6 +156,27 @@ if (
 }
 if (mode.startsWith('session-')) {
   try {
+    if (mode === 'session-import-recover') {
+      const admissionOwnerToken = {};
+      const admitted = await admitGitoxideRepositoryInternal({
+        invocationOwnerToken,
+        helperCapability,
+        admissionOwnerToken,
+        repositoryPath: sourcePath,
+      });
+      if (admitted.kind !== 'accepted') throw new Error(admitted.reason);
+      const recovered = await verifyAdmittedGitoxideImportInternal({
+        admissionOwnerToken,
+        repositoryCapability: admitted.capability,
+        acceptedRepositoryOwnerToken,
+        destinationRepositoryPath: repositoryPath,
+      });
+      await owner.acceptImport({
+        workspaceKey: 'managed-created-session',
+        acceptedRepositoryOwnerToken,
+        acceptedRepositoryCapability: recovered.acceptedRepositoryCapability,
+      });
+    }
     const request = {
       sessionId: 'managed-created-session',
       sourcePath,

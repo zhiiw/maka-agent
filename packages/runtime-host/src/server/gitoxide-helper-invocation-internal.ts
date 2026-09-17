@@ -387,7 +387,7 @@ function invocationTimedOut(): GitoxideHelperInvocationError {
   );
 }
 
-export async function importSourceHeadWithGitoxideHelperInternal(input: {
+interface SourceImportInput {
   readonly invocationOwnerToken: object;
   readonly capability: GitoxideHelperInvocationCapability;
   readonly sourceRepositoryPath: string;
@@ -396,7 +396,21 @@ export async function importSourceHeadWithGitoxideHelperInternal(input: {
   readonly baselineRef: string;
   readonly managedTreePolicyVersion: 3;
   readonly abortSignal?: AbortSignal;
-}): Promise<GitoxideSourceImportObservationV1> {
+}
+
+export function importSourceHeadWithGitoxideHelperInternal(input: SourceImportInput) {
+  return observeSourceImport(input, 'import_source_head');
+}
+
+export function verifySourceImportWithGitoxideHelperInternal(input: SourceImportInput) {
+  return observeSourceImport(input, 'verify_source_import');
+}
+
+async function observeSourceImport(
+  input: SourceImportInput,
+  operation: 'import_source_head' | 'verify_source_import',
+): Promise<GitoxideSourceImportObservationV1> {
+  input = { ...input };
   const deadlineAt =
     performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.importSourceHeadMs;
   const { artifact, sourceRepositoryPath } = await runGitoxideOperationWithinDeadlineInternal({
@@ -404,7 +418,7 @@ export async function importSourceHeadWithGitoxideHelperInternal(input: {
     abortSignal: input.abortSignal,
     operation: async () => {
       requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.capability, [
-        'import_source_head',
+        operation,
       ]);
       if (
         !isAbsolute(input.sourceRepositoryPath) ||
@@ -436,7 +450,7 @@ export async function importSourceHeadWithGitoxideHelperInternal(input: {
   const request = Buffer.from(
     JSON.stringify({
       protocolVersion: artifact.protocolVersion,
-      operation: 'import_source_head',
+      operation,
       sourceRepositoryPath,
       expectedSourceHeadCommitOid: input.expectedSourceHeadCommitOid,
       destinationRepositoryPath: input.destinationRepositoryPath,

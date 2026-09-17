@@ -570,6 +570,98 @@ fn reopen_validates_the_exact_accepted_tree_without_reimporting() {
 }
 
 #[test]
+fn verifies_completed_import_in_a_fresh_helper_without_rewriting_it() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let destination = fixture.root.join("verify-import.git");
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let imported = invoke_import(&fixture.root, &source_head, &destination);
+    assert!(imported.status.success());
+    let expected: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let before = fs::read(destination.join("refs/maka/baseline")).unwrap();
+    let verified = invoke_request(serde_json::json!({
+        "protocolVersion": 1, "operation": "verify_source_import",
+        "sourceRepositoryPath": fixture.root,
+        "expectedSourceHeadCommitOid": source_head,
+        "destinationRepositoryPath": destination,
+        "baselineRef": "refs/maka/baseline", "managedTreePolicyVersion": 3,
+    }));
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stdout)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&verified.stdout).unwrap(),
+        expected
+    );
+    assert_eq!(
+        fs::read(destination.join("refs/maka/baseline")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn import_verification_rejects_partial_or_tampered_artifacts_without_repair() {
+    for damage in [
+        "missing_ref",
+        "missing_blob",
+        "foreign_commit",
+        "symbolic_ref",
+    ] {
+        let fixture = RepositoryFixture::sha1_with_commit();
+        let destination = fixture.root.join("verify-damaged.git");
+        let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+        assert!(
+            invoke_import(&fixture.root, &source_head, &destination)
+                .status
+                .success()
+        );
+        let ref_path = destination.join("refs/maka/baseline");
+        match damage {
+            "missing_ref" => fs::remove_file(&ref_path).unwrap(),
+            "missing_blob" => {
+                let oid = fixture.git_output(["rev-parse", "HEAD:hello.txt"]);
+                fs::remove_file(destination.join("objects").join(&oid[..2]).join(&oid[2..]))
+                    .unwrap();
+            }
+            "foreign_commit" => {
+                let relative = PathBuf::from("objects")
+                    .join(&source_head[..2])
+                    .join(&source_head[2..]);
+                fs::create_dir_all(destination.join(&relative).parent().unwrap()).unwrap();
+                fs::copy(
+                    fixture.root.join(".git").join(&relative),
+                    destination.join(relative),
+                )
+                .unwrap();
+                fs::write(&ref_path, format!("{source_head}\n")).unwrap();
+            }
+            "symbolic_ref" => fs::write(&ref_path, "ref: refs/heads/other\n").unwrap(),
+            _ => unreachable!(),
+        }
+        let before = fs::read(&ref_path).ok();
+        let result = invoke_request(serde_json::json!({
+            "protocolVersion": 1, "operation": "verify_source_import",
+            "sourceRepositoryPath": fixture.root, "expectedSourceHeadCommitOid": source_head,
+            "destinationRepositoryPath": destination, "baselineRef": "refs/maka/baseline",
+            "managedTreePolicyVersion": 3,
+        }));
+        assert_eq!(result.status.code(), Some(1), "damage {damage}");
+        assert_eq!(fs::read(&ref_path).ok(), before);
+        if damage == "missing_blob" {
+            let oid = fixture.git_output(["rev-parse", "HEAD:hello.txt"]);
+            assert!(
+                !destination
+                    .join("objects")
+                    .join(&oid[..2])
+                    .join(&oid[2..])
+                    .exists()
+            );
+        }
+    }
+}
+
+#[test]
 fn publishes_and_exactly_retries_an_operation_candidate_without_advancing_accepted() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let source_head = fixture.git_output(["rev-parse", "HEAD"]);
