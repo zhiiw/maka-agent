@@ -69,6 +69,8 @@ await git(
   'baseline',
 );
 const requests = [];
+const interruptTurn = process.argv.includes('--interrupt-turn');
+let waitingForCompletion = false;
 let operationStep = 0;
 const operations = [
   { name: 'Write', input: { path: 'tracked.txt', content: 'written\n' } },
@@ -101,6 +103,12 @@ const server = createServer(async (req, res) => {
         usage: { input_tokens: 1, output_tokens: 1 },
       }),
     );
+    return;
+  }
+  if (interruptTurn && !restarted && operationStep === operations.length) {
+    // A real model request containing all tool results is our observable barrier.
+    // Leave the response open: the turn cannot finish before the Host is killed.
+    waitingForCompletion = true;
     return;
   }
   const operation = restarted
@@ -218,6 +226,8 @@ try {
   );
   await createSettingsStore(workspace).update({ personalization: { uiLocale: 'en' } });
   const env = buildFixtureEnv(userData, home);
+  // Exercise the shipped/default resume gate, not a developer's inherited opt-in.
+  delete env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME;
   for (const key of Object.keys(env)) if (key.startsWith('MAKA_E2E')) delete env[key];
   delete env.ELECTRON_RUN_AS_NODE;
   env.MAKA_MANAGED_SMOKE_ROOT = root;
@@ -259,9 +269,13 @@ try {
     .fill('Write tracked.txt to written, edit written to edited, then read it.');
   await expect(page.locator('.maka-composer button[type="submit"]')).toBeEnabled();
   await page.locator('.maka-composer button[type="submit"]').click();
-  await expect(page.getByText('MANAGED_DESKTOP_SMOKE_OK', { exact: true })).toBeVisible({
-    timeout: 30000,
-  });
+  if (interruptTurn) {
+    await expect.poll(() => waitingForCompletion, { timeout: 30000 }).toBe(true);
+  } else {
+    await expect(page.getByText('MANAGED_DESKTOP_SMOKE_OK', { exact: true })).toBeVisible({
+      timeout: 30000,
+    });
+  }
   assert.ok(requests.length > 0);
   const finalRequest = requests.filter(({ body }) => body.stream).at(-1);
   const results = finalRequest.body.messages
@@ -357,27 +371,45 @@ try {
     .getByText('Managed files smoke task', { exact: true })
     .first()
     .click({ timeout: 30000 });
-  await expect(page.getByText('MANAGED_DESKTOP_SMOKE_OK', { exact: true })).toBeVisible({
-    timeout: 30000,
-  });
-  await page
-    .locator('.maka-composer-editor [contenteditable="true"]')
-    .fill('Read tracked.txt after restarting. Do not write or edit.');
-  await page.locator('.maka-composer button[type="submit"]').click();
-  await expect(page.getByText('MANAGED_DESKTOP_REOPEN_OK', { exact: true })).toBeVisible({
-    timeout: 30000,
-  });
-  const afterRequest = requests.filter(({ body }) => body.stream).at(-1);
-  const afterResults = afterRequest.body.messages
-    .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
-    .filter((part) => part.type === 'tool_result');
-  assert.equal(
-    afterResults.length,
-    4,
-    'Reopened model history includes the three durable results and new Read',
-  );
-  assert.match(JSON.stringify(afterResults.at(-1)), /edited/);
-  assert.equal(Boolean(afterResults.at(-1)?.is_error), false);
+  if (interruptTurn) {
+    await page
+      .getByRole('button', { name: 'Continue this turn', exact: true })
+      .click({ timeout: 30000 });
+    await expect(
+      page
+        .locator('.maka-turn-failed-banner')
+        .getByText('Resuming interrupted tasks is not enabled.', { exact: true }),
+    ).toBeVisible({ timeout: 10000 });
+    assert.equal(
+      requests.filter(({ body }) => body.stream).length,
+      4,
+      'Disabled continuation must not launch another model invocation',
+    );
+  } else {
+    await expect(page.getByText('MANAGED_DESKTOP_SMOKE_OK', { exact: true })).toBeVisible({
+      timeout: 30000,
+    });
+    await page
+      .locator('.maka-composer-editor [contenteditable="true"]')
+      .fill('Read tracked.txt after restarting. Do not write or edit.');
+    await page.locator('.maka-composer button[type="submit"]').click();
+  }
+  if (!interruptTurn) {
+    await expect(page.getByText('MANAGED_DESKTOP_REOPEN_OK', { exact: true })).toBeVisible({
+      timeout: 30000,
+    });
+    const afterRequest = requests.filter(({ body }) => body.stream).at(-1);
+    const afterResults = afterRequest.body.messages
+      .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+      .filter((part) => part.type === 'tool_result');
+    assert.equal(
+      afterResults.length,
+      4,
+      'Reopened model history includes the three durable results and new Read',
+    );
+    assert.match(JSON.stringify(afterResults.at(-1)), /edited/);
+    assert.equal(Boolean(afterResults.at(-1)?.is_error), false);
+  }
   assert.deepEqual(
     readMutations(),
     mutationsBefore,
@@ -395,14 +427,16 @@ try {
         oldEpoch: registration.hostEpoch,
         newEpoch: reopened.hostEpoch,
         mutationEvents: mutationsBefore.map((event) => event.id),
-        checkpoint: 'completed turn; not an in-flight mutation crash',
+        checkpoint: interruptTurn
+          ? 'tool results durable; model completion pending; Continue rejected by default resume gate'
+          : 'completed turn; not an in-flight mutation crash',
       },
       null,
       2,
     ),
   );
   console.log(
-    'PASS: completed Write/Edit survives Host kill and Desktop restart; transcript/accepted Read preserved, mutation events unchanged.',
+    `PASS: ${interruptTurn ? 'interrupted turn remains safely blocked by resume gate' : 'completed turn reopens with accepted Read'} after Host kill and Desktop restart; mutation events unchanged.`,
   );
 } catch (error) {
   if (page && !page.isClosed()) {

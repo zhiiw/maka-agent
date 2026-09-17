@@ -704,3 +704,26 @@ node scripts/desktop-managed-files-smoke.mjs
 | macOS | 同脚本可运行，尚未本轮实跑 |
 
 本次只增加测试与文档，没有改变 writer、原子边界或恢复策略。失败保留证据，关闭流程仍有超时；回滚脚本不影响产品数据。**尚未证明** T1 后或 acceptance 后、模型收到结果前的执行中断恢复，也不证明自动 continuation、断电恢复或任意 process-tree kill。下一步应在真实模型请求/持久化边界设置可观察屏障，再验证中断任务的恢复，而不是把本次已完成任务重开当作自动 Resume 闭环。
+
+## 第三十六检查点：中断任务实际恢复入口与剩余门控
+
+真实 Desktop 新增 `--interrupt-turn` 场景：本机模型已收到 Write/Edit/Read 的三个结果，但最后的模型请求保持未响应；在此可观察屏障强杀隔离 Host、重启 Desktop、打开原任务并点击 Continue this turn。该屏障不依赖 sleep 或调度次数，也没有手工写 T1/T2。
+
+首轮以“恢复成功”作为预期时真实失败：UI 明确返回 `resume_feature_disabled`。原因是 execution-composition 仅以 MAKA_RUNTIME_SAFE_BOUNDARY_RESUME=1 打开通用恢复，SessionManager 的两个 authoritative resume 入口均受其控制。当前开发 helper 能力只接通任务创建、accepted Read/Write/Edit，不等于已经接通 continuation。生产 safety inspector 当前仍读取 source cwd/marker，没有消费 managed accepted-head checkpoint。因此本次**没有打开全局开关**或把测试环境变量伪装成产品能力。
+
+脚本现在对当前默认合同做明确的负向验收：
+
+```text
+node scripts/desktop-managed-files-smoke.mjs --interrupt-turn
+```
+
+它主动清除继承的 MAKA_RUNTIME_SAFE_BOUNDARY_RESUME，要求中断提示与禁用原因真实出现、没有新的模型请求、原 Write/Edit call/result/successor 逐条不变、source 内容不变。测试通过表示 fail-closed 有效，**绝不表示中断任务已经可以继续**。不带参数仍验证已完成任务强杀后的重开和 accepted Read。证据中记录两种不同 checkpoint。
+
+### 接下来的实现顺序
+
+1. 明确 managed continuation owner：从持久化 Session profile/binding 判定适用范围；不因某个 Host 有 helper 就对所有普通会话打开恢复。
+2. 将 source Run 的 RuntimeEvent high-water、workspace epoch、accepted event/head 与实际工具 profile 绑定成恢复观察。不能直接把“此刻最新 head”当作被中断 Run 的 head；检测不匹配时 park。
+3. 在同一恢复 claim/admission 中复验上述边界，再创建新 Run，消费已持久化工具结果，不走新消息/重新 Write/Edit 的替代路径。复用既有 claim owner，避免新增第二套 recovery ledger。
+4. 用当前真实 Electron 屏障把负向断言提升为显式 Continue 成功；增加 accepted head 漂移的拒绝用例，再讨论默认开放。自动启动续跑、扫描优化仍不在本轮范围。
+
+平台：Windows 本轮真实验证该中断/拒绝路径；Linux/macOS 尚未执行。没有新增生产代码、schema、协议版本或平台恢复承诺，也没有测试 T1 已写但工具尚未完成的崩溃窗口。
