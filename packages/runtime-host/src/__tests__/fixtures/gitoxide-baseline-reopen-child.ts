@@ -25,6 +25,15 @@ import { join } from 'node:path';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import { transformManagedMutation } from '@maka/runtime/managed-mutation-transform';
 import { ToolRuntime } from '@maka/runtime/tool-runtime';
+import { AiSdkBackend } from '@maka/runtime/ai-sdk-backend';
+import {
+  openGitoxideManagedSessionInternal,
+  requireGitoxideManagedSessionInternal,
+} from '../../server/gitoxide-managed-session-internal.js';
+import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
+import type { LanguageModelV4StreamPart } from '@ai-sdk/provider';
+import { z } from 'zod';
+import type { RuntimeEvent } from '@maka/core/runtime-event';
 import { createExternalExecutionBoundary } from '@maka/core/sandbox-boundary';
 import type { SessionHeader } from '@maka/core/session';
 import { prepareGitoxideRuntimeMutationInternal } from '../../server/gitoxide-runtime-mutation-internal.js';
@@ -99,6 +108,7 @@ if (mode === 'read-settlement') {
   process.exit(0);
 }
 const settling =
+  mode?.startsWith('backend-') ||
   mode?.startsWith('runtime-') ||
   mode === 'settle-false-rejection' ||
   mode === 'crash-after-edit-rejection' ||
@@ -159,6 +169,223 @@ try {
     path: 'hello.txt',
   });
   if (mode === 'crash-after-reopen') process.exit(80);
+  if (mode === 'backend-live-sequence' || mode === 'backend-crash-first') {
+    let step = 0;
+    const sessionCapability = await openGitoxideManagedSessionInternal(stores, {
+      sessionId: 'settlement-session',
+      workspaceKey: 'crash-session',
+      repositoryPath,
+      invocationOwnerToken,
+      helperCapability,
+    });
+    const session = requireGitoxideManagedSessionInternal(
+      sessionCapability,
+      'settlement-session',
+      stores.runtimeEventStore,
+    );
+    assert.throws(
+      () =>
+        requireGitoxideManagedSessionInternal(
+          { ...sessionCapability },
+          'settlement-session',
+          stores.runtimeEventStore,
+        ),
+      /does not match/,
+    );
+    assert.throws(
+      () =>
+        requireGitoxideManagedSessionInternal(
+          sessionCapability,
+          'other-session',
+          stores.runtimeEventStore,
+        ),
+      /does not match/,
+    );
+    assert.throws(
+      () =>
+        requireGitoxideManagedSessionInternal(sessionCapability, 'settlement-session', {
+          commitToolPrepared: (...args) => stores.runtimeEventStore.commitToolPrepared(...args),
+          commitToolOutcome: (...args) => stores.runtimeEventStore.commitToolOutcome(...args),
+        }),
+      /does not match/,
+    );
+    const aborted = new AbortController();
+    aborted.abort(new Error('cancel before session read'));
+    await assert.rejects(
+      session.readAcceptedFile('hello.txt', aborted.signal),
+      /cancel before session read/,
+    );
+    await assert.rejects(
+      session.prepareManagedMutation({
+        sessionId: 'other-session',
+        toolName: 'Write',
+        args: { path: 'hello.txt', content: 'wrong session' },
+        abortSignal: new AbortController().signal,
+      }),
+      /does not belong/,
+    );
+    const head: RuntimeEvent = {
+      id: 'backend-user',
+      sessionId: 'settlement-session',
+      runId: 'settlement-run',
+      invocationId: 'settlement-invocation',
+      turnId: 'settlement-turn',
+      ts: 1,
+      partial: false,
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text: 'Update the file twice' },
+    };
+    await stores.runtimeEventStore.appendRuntimeEvent(head.sessionId, head.runId!, head);
+    const backend = new AiSdkBackend({
+      sessionId: head.sessionId,
+      header: {
+        id: head.sessionId,
+        cwd: sourcePath,
+        permissionMode: 'ask',
+        toolMode: 'direct',
+      } as SessionHeader,
+      connection: { slug: 'test', providerType: 'anthropic', defaultModel: 'test' },
+      apiKey: 'offline',
+      modelId: 'test',
+      maxSteps: 3,
+      readExecutionBoundary: async () => createExternalExecutionBoundary(),
+      readPermissionMode: async () => 'ask',
+      loadTurnRuntimeEvents: () =>
+        stores.runtimeEventStore.readImmutableRuntimeEvents(head.sessionId, head.runId!),
+      runtimeCommitSink: session.runtimeCommitSink,
+      prepareManagedMutation: async (input) => {
+        const prepared = await session.prepareManagedMutation(input);
+        return {
+          ...prepared,
+          async commitOutcome(...args) {
+            await assert.rejects(
+              prepared.commitOutcome(
+                {
+                  ...args[0],
+                  runtimeEvent: { ...args[0].runtimeEvent, sessionId: 'other-session' },
+                },
+                args[1],
+              ),
+              /does not belong/,
+            );
+            const event = await prepared.commitOutcome(...args);
+            if (mode === 'backend-crash-first') process.exit(83);
+            return event;
+          },
+        };
+      },
+      tools: [
+        {
+          name: 'Write',
+          description: 'write accepted content',
+          parameters: z.object({ path: z.string(), content: z.string() }),
+          impl() {
+            throw new Error('Checkout Write forbidden');
+          },
+        },
+        {
+          name: 'Edit',
+          description: 'edit accepted content',
+          parameters: z.object({
+            path: z.string(),
+            old_string: z.string(),
+            new_string: z.string(),
+          }),
+          impl() {
+            throw new Error('Checkout Edit forbidden');
+          },
+        },
+      ],
+      modelFactory: () =>
+        new MockLanguageModelV4({
+          doStream: async () => {
+            const current = step++;
+            const usage = {
+              inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+              outputTokens: { total: 1, text: 1, reasoning: 0 },
+            };
+            return {
+              stream: simulateReadableStream<LanguageModelV4StreamPart>({
+                chunks:
+                  current < 2
+                    ? [
+                        { type: 'stream-start', warnings: [] },
+                        {
+                          type: 'tool-call',
+                          toolCallId: `backend-call-${current}`,
+                          toolName: current === 0 ? 'Write' : 'Edit',
+                          input: JSON.stringify(
+                            current === 0
+                              ? { path: 'hello.txt', content: 'first result\n' }
+                              : {
+                                  path: 'hello.txt',
+                                  old_string: 'first result',
+                                  new_string: 'second result',
+                                },
+                          ),
+                        },
+                        {
+                          type: 'finish',
+                          finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+                          usage,
+                        },
+                      ]
+                    : [
+                        { type: 'stream-start', warnings: [] },
+                        { type: 'text-start', id: 'done' },
+                        { type: 'text-delta', id: 'done', delta: 'Done' },
+                        { type: 'text-end', id: 'done' },
+                        { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage },
+                      ],
+              }),
+            };
+          },
+        }),
+    });
+    const events = [];
+    try {
+      for await (const event of backend.send({
+        text: 'Update the file twice',
+        context: [],
+        runtimeContext: [head],
+        headAnchorRuntimeEvent: head,
+        turnId: head.turnId!,
+        runId: head.runId,
+        invocationId: head.invocationId,
+      }))
+        events.push(event);
+    } finally {
+      await backend.dispose();
+    }
+    assert.equal(
+      events.filter((event) => event.type === 'tool_result').length,
+      2,
+      JSON.stringify(events),
+    );
+    assert.equal(
+      events.some((event) => event.type === 'error'),
+      false,
+      JSON.stringify(events),
+    );
+    assert.equal((await session.readAcceptedFile('hello.txt')).content, 'second result\n');
+    writeSync(
+      1,
+      JSON.stringify({ results: events.filter((event) => event.type === 'tool_result') }),
+    );
+    await stores.sessionStore.close?.();
+    await assert.rejects(session.readAcceptedFile('hello.txt'));
+    await assert.rejects(
+      session.prepareManagedMutation({
+        sessionId: 'settlement-session',
+        toolName: 'Write',
+        args: { path: 'hello.txt', content: 'after close' },
+        abortSignal: new AbortController().signal,
+      }),
+    );
+    await leaseOwner.close();
+    process.exit(0);
+  }
   if (mode?.startsWith('runtime-')) {
     let id = 0;
     let published: unknown;

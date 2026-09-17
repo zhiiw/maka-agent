@@ -5064,6 +5064,27 @@ async function publishConnectionModel(
   assert.equal(committed.kind, 'committed');
 }
 
+test('rejects a forged managed session before resolving provider credentials', async () => {
+  let providerReads = 0;
+  const input = backendCreationFixture({
+    abortSignal: new AbortController().signal,
+    resolveExecutionConnection: async () => {
+      providerReads++;
+      throw new Error('provider must not be read');
+    },
+    readPricing: async () => ({ revision: 0, overrides: [] }),
+  });
+  for (const create of [createHostAiSdkBackend, prepareHostAiSdkBackend])
+    await assert.rejects(
+      create({
+        ...input,
+        managedFilesSession: { kind: 'gitoxide_managed_files_session' },
+      }),
+      /Managed session does not match/,
+    );
+  assert.equal(providerReads, 0);
+});
+
 function backendCreationFixture(input: {
   abortSignal: AbortSignal;
   connectionId?: string;

@@ -29,6 +29,10 @@ on:
       - 'packages/runtime-host/src/server/gitoxide-candidate-settlement-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-mutation-admission-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-runtime-mutation-internal.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-session-internal.ts'
+      - 'packages/runtime-host/src/server/execution-model-composition.ts'
+      - 'packages/runtime-host/src/__tests__/execution-model-composition.test.ts'
+      - 'packages/runtime/src/ai-sdk-backend.ts'
       - 'packages/runtime/src/tool-runtime.ts'
       - 'packages/runtime/src/__tests__/tool-runtime-durable-boundary.test.ts'
       - 'packages/runtime/src/managed-mutation-transform.ts'
@@ -52,6 +56,10 @@ on:
       - 'packages/runtime-host/src/server/gitoxide-candidate-settlement-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-mutation-admission-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-runtime-mutation-internal.ts'
+      - 'packages/runtime-host/src/server/gitoxide-managed-session-internal.ts'
+      - 'packages/runtime-host/src/server/execution-model-composition.ts'
+      - 'packages/runtime-host/src/__tests__/execution-model-composition.test.ts'
+      - 'packages/runtime/src/ai-sdk-backend.ts'
       - 'packages/runtime/src/tool-runtime.ts'
       - 'packages/runtime/src/__tests__/tool-runtime-durable-boundary.test.ts'
       - 'packages/runtime/src/managed-mutation-transform.ts'
@@ -147,3 +155,7 @@ jobs:
           packages/runtime-host/dist/__tests__/gitoxide-helper-artifact-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-helper-invocation-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
+      - name: Verify managed backend identity admission
+        run: >-
+          node --test --test-name-pattern="rejects a forged managed session"
+          packages/runtime-host/dist/__tests__/execution-model-composition.test.js

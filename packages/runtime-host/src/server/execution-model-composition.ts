@@ -74,8 +74,13 @@ import {
 } from './execution-model-authority.js';
 import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
 import type { HostRunComposer, HostRunComposerFactory } from './host-run-composer.js';
+import {
+  requireGitoxideManagedSessionInternal,
+  type GitoxideManagedSessionCapability,
+} from './gitoxide-managed-session-internal.js';
 
 export interface HostAiSdkBackendInput {
+  readonly managedFilesSession?: GitoxideManagedSessionCapability;
   readonly context: BackendFactoryContext;
   readonly runtimePolicy: HostExecutionRuntimePolicyAuthority;
   readonly oauthCredentials: HostOAuthExecutionAuthority;
@@ -117,6 +122,8 @@ type HostExecutionUsageAuthority = {
 
 /** Builds one real provider backend from canonical Host state. */
 export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Promise<AiSdkBackend> {
+  input = { ...input };
+  managedSessionForBackend(input);
   const createFetchTransport = input.createFetchTransport ?? createProxiedFetchTransport;
   const target = await readDuringBackendCreation(
     () =>
@@ -135,6 +142,7 @@ async function buildHostAiSdkBackend(
   input: HostAiSdkBackendInput,
   target: ResolvedExecutionTarget,
 ): Promise<AiSdkBackend> {
+  const managedSession = managedSessionForBackend(input);
   const createFetchTransport = input.createFetchTransport ?? createProxiedFetchTransport;
   const pricingSnapshot = await readDuringBackendCreation(
     () => input.usage.pricing.snapshot(),
@@ -482,6 +490,9 @@ async function buildHostAiSdkBackend(
         assertModelCallAccountingReady,
         recordToolInvocation: (event) => recordToolInvocation({ repo: telemetry }, event),
         ...(input.runtimeCommitSink ? { runtimeCommitSink: input.runtimeCommitSink } : {}),
+        ...(managedSession
+          ? { prepareManagedMutation: managedSession.prepareManagedMutation }
+          : {}),
         newId: randomUUID,
         now: Date.now,
       },
@@ -501,6 +512,8 @@ async function buildHostAiSdkBackend(
 export async function prepareHostAiSdkBackend(
   input: HostAiSdkBackendPreparationInput,
 ): Promise<PreparedBackendActivation> {
+  input = { ...input };
+  managedSessionForBackend(input);
   const createFetchTransport = input.createFetchTransport ?? createProxiedFetchTransport;
   const preparedTarget = await readDuringBackendCreation(
     () =>
@@ -523,6 +536,20 @@ export async function prepareHostAiSdkBackend(
         preparedTarget,
       ),
   };
+}
+
+function managedSessionForBackend(input: {
+  readonly managedFilesSession?: GitoxideManagedSessionCapability;
+  readonly runtimeCommitSink?: RuntimeCommitSink;
+  readonly context: { readonly sessionId: string };
+}) {
+  return input.managedFilesSession === undefined
+    ? undefined
+    : requireGitoxideManagedSessionInternal(
+        input.managedFilesSession,
+        input.context.sessionId,
+        input.runtimeCommitSink,
+      );
 }
 
 class HostAiSdkBackend extends AiSdkBackend {

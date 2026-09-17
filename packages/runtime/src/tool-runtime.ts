@@ -390,6 +390,7 @@ function composeChildAbortSignal(
 export interface ToolRuntimeInput {
   /** Explicit managed session composition; never inferred from tool names alone. */
   prepareManagedMutation?: (input: {
+    sessionId: string;
     toolName: 'Write' | 'Edit';
     args: unknown;
     abortSignal: AbortSignal;
@@ -1447,6 +1448,7 @@ export class ToolRuntime {
       clientCapabilityBoundary = await this.readExecutionBoundary();
       clientCapabilityPermissionMode = await this.livePermissionMode(clientCapabilityBoundary);
       const prepared = await this.input.prepareManagedMutation({
+        sessionId: this.input.sessionId,
         toolName: tool.name,
         args: structuredClone(executionArgs),
         abortSignal: ctx.abortSignal,

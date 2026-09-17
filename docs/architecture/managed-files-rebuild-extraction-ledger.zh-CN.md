@@ -340,3 +340,19 @@ Windows 本机：repository admission integration **19/19、0 skip**，Storage a
 本轮验证：Runtime durable-boundary + Host repository/admission 集成 **55/55、0 skip**；CI workflow policy **1/1**；Runtime/Host build、Biome、diff check 通过。额外普通 settlement/SQLite/sandbox/纯转换/Edit matcher 回归 **66 pass / 1 fail**：失败是原有 sandbox fixture 创建 symlink 时 Windows `EPERM`，尚未进入被测逻辑；本轮不修改该 fixture，也不宣称完整平台测试全绿。
 
 下一步：live Host/session composition 每次从 accepted head reopen，接入同一代码世界的 Read/Glob/Grep；随后才开放加号菜单的显式 managed 文件任务入口，并补真实 Host/Electron kill/restart。当前不能宣称整个 coding task 已可恢复。
+
+## 第十四检查点：session 绑定与真实 backend 连续执行
+
+本轮增加 Host 内部 managed session capability，将既有 workspace epoch 绑定到 session ID 和同一个 Execution Stores runtime sink。每次 mutation/read 都从 SQLite 当前 accepted head reopen，不缓存首次 admission 的旧 head。真实 AiSdkBackend 将显式 managed port 传入 ToolRuntime，普通会话不注入时保持原行为。
+
+- **Owner/权限**：WeakMap 签发并验证 session capability；伪造、浅拷贝、跨 session、不同 sink 均拒绝。Host backend 创建/准备在读取 provider credentials 前校验，activation 再按实际 context 校验。Runtime 把 session ID 传到 preparation；Host 在创建 candidate 前拒绝跨 session outcome。
+- **原子边界**：session capability 本身不创建 epoch、不写 T1，也不新建事务协议。每次操作继续使用既有 SQLite T1 reservation 与 terminal transaction；head 在 reopen 后变化仍由 T1 base CAS 拒绝。此次没有 schema/profile 迁移。
+- **失败/回滚**：关闭 execution stores 后的新 admission/read 被拒绝；缺失或错误 capability 不得降级为普通模式。撤回显式注入不删除已接受事实，也不能把已有 managed T1 改走 generic writer。Host 产品接线仍须先 drain 活跃执行再关闭 stores，不能把这些检查当作任意在途 callback 的完整撤权证明。
+- **测试证据**：先复现 backend 丢失 managed port，再复现复用旧 repository capability 导致第二次 Edit 失败。修复后，同一真实 AiSdkBackend 连续 Write→Edit→accepted read 得到第二个结果；另一个子进程在首次 T2 后、结果发布前直接退出，新进程 reopen 得到首次已接受内容，ledger/reservation 收敛且源 checkout 不变。只有外部模型使用模拟输出；Runtime、Gitoxide helper、SQLite 均真实运行。
+- **尚未接通**：未启动完整 Host IPC/election 或 Electron。当前 session→epoch 关联由内部调用方提供，尚未写入产品 session/profile 创建协议；accepted read 是内部 owner 方法，不是完整 Read/Glob/Grep 工具组合。不能称为 Desktop 或整任务自动 Resume 完成。
+
+平台矩阵：Windows 本机上述两条真实 backend/process-exit 测试通过；Linux/macOS 由同一三平台 workflow 调度，本轮尚无远程证据。不承诺断电或任意 Gitoxide 内部指令点崩溃恢复。
+
+定向验证：backend 连续执行/退出恢复 **2/2**；Host backend 创建/activation/伪造能力 **10/10**；Runtime durable boundary **28/28**；AiSdkBackend durable 回归 **18/18**；CI policy **1/1**。这些是定向结果，不代表全量测试或完整产品能力通过。
+
+下一步：持久化的显式 managed session/profile 创建与 Host 能力协商，接同一 accepted world 的读取工具，再开放 Desktop 加号菜单入口和真实 Host/Electron crash 验收。不恢复旧 StoredMessage 双写，不引入系统 Git/npm 依赖。

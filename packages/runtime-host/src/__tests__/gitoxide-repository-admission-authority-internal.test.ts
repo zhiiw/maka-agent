@@ -66,6 +66,8 @@ for (const mode of [
   'runtime-live-write',
   'runtime-live-noop',
   'runtime-live-rejection',
+  'backend-live-sequence',
+  'backend-crash-first',
 ]) {
   test(`Runtime mutation preserves its owner outcome across publication/reopen: ${mode}`, {
     timeout: 30_000,
@@ -102,30 +104,47 @@ for (const mode of [
     };
     try {
       const first = run(mode);
-      assert.equal(first.status, mode.includes('crash') ? 81 : 0, first.stderr);
+      assert.equal(
+        first.status,
+        mode === 'backend-crash-first' ? 83 : mode.includes('crash') ? 81 : 0,
+        first.stderr,
+      );
       const state = run('read-settlement');
       assert.equal(state.status, 0, state.stderr);
       const durable = JSON.parse(state.stdout);
-      assert.equal(durable.outcomes.length, 1);
-      assert.equal(durable.successors.length, mode.endsWith('write') ? 1 : 0);
+      assert.equal(durable.outcomes.length, mode === 'backend-live-sequence' ? 2 : 1);
+      assert.equal(
+        durable.successors.length,
+        mode === 'backend-live-sequence'
+          ? 2
+          : mode.endsWith('write') || mode === 'backend-crash-first'
+            ? 1
+            : 0,
+      );
       assert.deepEqual(durable.unsettled, []);
       assert.ok(durable.outcomes[0].content.modelProjection);
       assert.equal(
         durable.outcomes[0].content.isError,
         mode.endsWith('rejection') ? true : undefined,
       );
-      if (!mode.endsWith('write'))
+      if (!mode.endsWith('write') && !mode.startsWith('backend-'))
         assert.equal(
           durable.outcomes[0].actions.managedMutationTerminal.terminalKind,
           mode.endsWith('noop') ? 'no_workspace_change' : 'operation_failed_no_effect',
         );
-      if (mode.includes('live'))
+      if (mode.includes('live') && mode !== 'backend-live-sequence')
         assert.deepEqual(JSON.parse(first.stdout).published, durable.outcomes[0].content.result);
       const reopened = run('reopen');
       assert.equal(reopened.status, 0, reopened.stderr);
       assert.equal(
         JSON.parse(reopened.stdout).content,
-        mode.endsWith('write') ? 'runtime result\n' : 'accepted original\n',
+        mode === 'backend-live-sequence'
+          ? 'second result\n'
+          : mode === 'backend-crash-first'
+            ? 'first result\n'
+            : mode.endsWith('write')
+              ? 'runtime result\n'
+              : 'accepted original\n',
       );
       assert.deepEqual(JSON.parse(run('read-settlement').stdout), durable);
       assert.equal(await readFile(join(source, 'hello.txt'), 'utf8'), 'accepted original\n');
