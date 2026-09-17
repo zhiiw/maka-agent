@@ -39,6 +39,7 @@ import { createProjectCatalog } from '@maka/storage/project-catalog';
 import { createSettingsStore } from '@maka/storage/settings-store';
 import { buildFixtureEnv } from './fixture-env.mjs';
 import { closeElectronApplication } from './electron-lifecycle.mjs';
+import { armCandidateBreakpoint } from './desktop-managed-candidate-breakpoint.mjs';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..');
 const helperPath = process.env.MAKA_GITOXIDE_HELPER_PATH;
@@ -77,9 +78,7 @@ assert.ok(
 );
 const candidateInterrupt = candidateEditInterrupt || process.argv.includes('--candidate-interrupt');
 const candidateToolName = candidateEditInterrupt ? 'Edit' : 'Write';
-// Manual diagnostic, not a CI gate: the external SQLite writer lock can also
-// block unrelated Host writes before candidate creation. A missed window fails
-// explicitly; it must not be retried silently or reported as recovery evidence.
+// Manual real-process breakpoint test; does not claim arbitrary-instruction crash coverage.
 assert.ok(
   !(candidateInterrupt && repeatInterrupt),
   'Candidate interruption is a single-restart test',
@@ -200,7 +199,7 @@ const server = createServer(async (req, res) => {
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 let app;
 let page;
-let candidateLock;
+let candidateDebugger;
 let candidateEvidence;
 const logs = [];
 try {
@@ -267,6 +266,8 @@ try {
   for (const key of Object.keys(env)) if (key.startsWith('MAKA_E2E')) delete env[key];
   delete env.ELECTRON_RUN_AS_NODE;
   env.MAKA_MANAGED_SMOKE_ROOT = root;
+  delete env.MAKA_MANAGED_SMOKE_DEBUG_HOST;
+  if (candidateInterrupt) env.MAKA_MANAGED_SMOKE_DEBUG_HOST = '1';
   env.MAKA_MANAGED_FILES_DEV_HELPER = JSON.stringify({
     schemaVersion: 1,
     executablePath,
@@ -308,79 +309,55 @@ try {
         : 'Write tracked.txt to written, edit written to edited, then read it.',
     );
   await expect(page.locator('.maka-composer button[type="submit"]')).toBeEnabled();
+  if (candidateInterrupt) candidateDebugger = await armCandidateBreakpoint(root, repo);
   await page.locator('.maka-composer button[type="submit"]').click();
   if (candidateInterrupt) {
-    candidateLock = new DatabaseSync(join(workspace, 'runtime.sqlite'));
-    candidateLock.exec('PRAGMA busy_timeout=0');
-    await expect
-      .poll(
-        () => {
-          const events = candidateLock
-            .prepare('SELECT payload_json FROM runtime_events ORDER BY rowid')
-            .all()
-            .map(({ payload_json }) => JSON.parse(payload_json));
-          const dispatch = events.find((event) => event.actions?.toolDispatch?.managedMutation);
-          if (!dispatch) return false;
-          assert.equal(
-            events.some(
-              (event) =>
-                event.refs?.operationId === dispatch.actions.toolDispatch.operationId &&
-                event.content?.kind === 'function_response',
-            ),
-            false,
-            'Missed the candidate/T2 window',
-          );
-          try {
-            candidateLock.exec('BEGIN IMMEDIATE');
-          } catch (error) {
-            if (String(error).includes('locked')) return false;
-            throw error;
-          }
-          // Re-read after acquiring the lock: a concurrent T2 must not slip past our first read.
-          const lockedEvents = candidateLock
-            .prepare('SELECT payload_json FROM runtime_events ORDER BY rowid')
-            .all()
-            .map(({ payload_json }) => JSON.parse(payload_json));
-          const operationId = dispatch.actions.toolDispatch.operationId;
-          assert.ok(
-            lockedEvents.some(
-              (event) =>
-                event.refs?.operationId === operationId &&
-                event.content?.kind === 'function_call' &&
-                event.content.name === candidateToolName,
-            ),
-            'The interrupted operation must be the requested tool',
-          );
-          assert.equal(
-            lockedEvents.some(
-              (event) =>
-                event.refs?.operationId === operationId &&
-                event.content?.kind === 'function_response',
-            ),
-            false,
-            'T2 won the write-lock race',
-          );
-          assert.equal(
-            candidateLock
-              .prepare(
-                'SELECT COUNT(*) AS count FROM runtime_managed_mutation_reservations WHERE operation_id = ?',
-              )
-              .get(operationId).count,
-            1,
-          );
-          candidateEvidence = {
-            toolName: candidateToolName,
-            operationId,
-            sessionId: dispatch.sessionId,
-            turnId: dispatch.turnId,
-            dispatchId: dispatch.id,
-            before: lockedEvents,
-          };
-          return true;
-        },
-        { timeout: 10000, intervals: [1, 2, 5] },
-      )
-      .toBe(true);
+    const breakpoint = await candidateDebugger.wait();
+    const db = new DatabaseSync(join(workspace, 'runtime.sqlite'), { readOnly: true });
+    try {
+      const events = db
+        .prepare('SELECT payload_json FROM runtime_events ORDER BY rowid')
+        .all()
+        .map(({ payload_json }) => JSON.parse(payload_json));
+      const dispatch = events.find((event) => event.actions?.toolDispatch?.managedMutation);
+      assert.ok(dispatch, 'Paused Host must have a durable T1');
+      const operationId = dispatch.actions.toolDispatch.operationId;
+      assert.ok(
+        events.some(
+          (event) =>
+            event.refs?.operationId === operationId &&
+            event.content?.kind === 'function_call' &&
+            event.content.name === candidateToolName,
+        ),
+      );
+      assert.equal(
+        events.some(
+          (event) =>
+            event.refs?.operationId === operationId && event.content?.kind === 'function_response',
+        ),
+        false,
+        'T2 must not exist at the breakpoint',
+      );
+      assert.equal(
+        db
+          .prepare(
+            'SELECT COUNT(*) AS count FROM runtime_managed_mutation_reservations WHERE operation_id = ?',
+          )
+          .get(operationId).count,
+        1,
+      );
+      candidateEvidence = {
+        toolName: candidateToolName,
+        operationId,
+        sessionId: dispatch.sessionId,
+        turnId: dispatch.turnId,
+        dispatchId: dispatch.id,
+        breakpoint,
+        before: events,
+      };
+    } finally {
+      db.close();
+    }
     const candidateRefPath = join(
       workspace,
       `managed-files-${createHash('sha256').update(candidateEvidence.sessionId).digest('hex')}.git`,
@@ -482,10 +459,10 @@ try {
     assert.ok(command.includes(capability.rootId), 'Host must name the isolated root ID');
     assert.ok(command.includes(workspace), 'Host must name the isolated workspace path');
     assert.ok(command.includes('--expected-root-id'), 'Host must use verified-root startup');
+    if (candidateDebugger) assert.equal(candidateDebugger.pid, registration.pid);
     process.kill(registration.pid, 'SIGKILL');
-    if (candidateLock) {
-      // Wait for death before releasing the writer lock; otherwise the old Host
-      // could commit T2 while SIGKILL delivery is still pending.
+    if (candidateDebugger) {
+      // Observe real process death before detaching the debugger.
       await expect
         .poll(
           () => {
@@ -500,9 +477,9 @@ try {
           { timeout: 10000 },
         )
         .toBe(true);
-      candidateLock.exec('ROLLBACK');
-      candidateLock.close();
-      candidateLock = undefined;
+      candidateDebugger.close();
+      candidateDebugger = undefined;
+      delete env.MAKA_MANAGED_SMOKE_DEBUG_HOST;
       assert.deepEqual(readMutations(), mutationsBefore, 'Killed Host must not have committed T2');
     }
     await closeElectronApplication(app, 5000);
@@ -666,7 +643,7 @@ try {
           newEpoch: reopened.hostEpoch,
           mutationEvents: mutationsBefore.map((event) => event.id),
           checkpoint: candidateInterrupt
-            ? 'candidate durable; SQLite T2 blocked; Host killed; startup settlement; explicit Continue'
+            ? 'candidate verified; debugger before SQLite T2; Host killed; startup settlement; explicit Continue'
             : interruptTurn
               ? 'tool results durable; model completion pending; explicit source-bound Continue'
               : 'completed turn; not an in-flight mutation crash',
@@ -686,12 +663,7 @@ try {
   throw error;
 } finally {
   try {
-    if (candidateLock) {
-      try {
-        candidateLock.exec('ROLLBACK');
-      } catch {}
-      candidateLock.close();
-    }
+    candidateDebugger?.close();
     if (app) await closeElectronApplication(app, 5000);
   } finally {
     server.closeAllConnections();

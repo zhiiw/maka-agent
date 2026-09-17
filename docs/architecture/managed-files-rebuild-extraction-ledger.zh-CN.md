@@ -982,3 +982,17 @@ Windows 两次显式独立运行均通过，证据分别位于 `C:/Users/wzy/App
 未解决事项不变：外部 SQLite 全局 writer lock 的编排仍可能阻塞候选生成前其他写入。源码确认 Host SQLite 使用同步连接并设置 5 秒 busy timeout，但目前尚未定位上一轮失败中具体被阻塞的写入，因此不能宣称已找到完整根因或已稳定测试；本轮 2/2 也不覆盖该问题。下一步需要捕获阻塞点或采用可观测的候选发布握手，保持超时显式失败，不将本脚本提升为 CI gate。
 
 本轮仅改测试和文档；Linux/macOS 未运行，不新增断电保证、自动续跑、T1-only redo 或产品可用性声明。Write 与 Edit 的已发布 candidate 恢复已有 Windows Desktop 执行证据；no-op、失败/no-effect、缺失或损坏 candidate 的 Desktop 级矩阵及跨平台证据仍需补齐。
+
+## 第五十一检查点：用可观测断点替代 SQLite 全局写锁编排
+
+第四十九/五十检查点的外部 writer lock 已从候选窗口脚本删除。它会阻塞同一 DB 的所有写入，不能精确代表 candidate→T2 seam；旧超时的具体竞争写入仍未查明，本轮不把它误报为生产恢复 bug 已修复。新编排不再依赖这类竞争条件。
+
+仅测试 launcher 在加载实际 Desktop 前，为匹配隔离 workspace 和 `--expected-root-id` 的 Host spawn 加入本机随机端口 debugger。产品 launcher、Runtime、Gitoxide、SQLite 均未改动；常规 smoke 和重启后的 Host 不开启此入口。端点/PID 通过隔离目录中的原子文件发布；测试连接 loopback debugger，按当前构建文件中唯一的 `return verified.authority.commitSuccessor` 语句设置断点。源码结构变化时测试明确失败，需要重新审视位置，不猜行号、不退回 sleep。
+
+测试先设置断点再点击发送。收到实际 `Debugger.paused` 后必须匹配断点 ID 和 `acceptPublishedCandidate` frame，再用只读 SQLite connection 验证真实 T1、唯一 reservation、无 T2，验证 candidate ref 存在。断点位于 candidate settlement verifier 之后、SQLite 原子接受之前。确认暂停进程 PID 等于 elected Host registration，并核验原有 root/命令行约束后 SIGKILL；确认进程死亡才断开 debugger，随后按原真实 Desktop 重启/Continue 链验收。没有改 schema、写业务事实、伪造 candidate 或延迟整个 DB。
+
+此证据证明的是**指定生产边界暂停后真实进程死亡与新进程恢复**，不是自然调度下的随机 kill、任意机器指令崩溃或断电。测试进程可控制 debugger 是显式的测试能力，不作为发布安全边界或生产 API。断点/连接均有 deadline，连接关闭会回收未完成请求，失败不静默重试。
+
+平台矩阵：Windows 本轮实际运行 Write（`maka-managed-electron-ol92bv`）与 Edit（`maka-managed-electron-WbiHAh`）均通过，包含恢复 outcome/model/transcript 精确一致、唯一 successor、Continue 前后 mutation facts 不变及 source checkout 不变。Linux/macOS 本轮未运行，暂不加入默认 CI。后续仍需 no-op/失败及损坏证据的 Desktop 级矩阵；不因此引入自动续跑或扩大恢复策略。
+
+最终补跑 Write（`maka-managed-electron-xp1iCn`）通过，本轮三次显式运行 3/3；最终脚本语法、Biome 和 diff check 通过。仅测试/launcher/文档改动，无需重新编译产品，不宣称全量 CI 或长期调度稳定性已证明。
