@@ -266,3 +266,21 @@ workflow 选择范围已纳入新 Host owner、child fixture 与 Storage 变更�
 Windows 本机：repository admission integration **19/19、0 skip**，Storage authority/纯转换 **46/46**，Host build、Biome、diff check 通过。Linux/macOS 已由同一既有三平台 workflow 选择，尚无本轮远程结果。测试仍是 Host owner 组合层，不是完整 ToolRuntime/Desktop；不承诺断电恢复。
 
 下一步：确定性纯转换失败的独立 terminal proof，以及 SQLite accepted head → Git accepted ref 的 reconciliation；之后才能进入 Runtime/产品执行闭环。
+
+## 第十检查点：确定性 Edit 拒绝的无副作用终态
+
+新增内部 `acceptRejectedOperation`。它不接受 caller 声明的“无副作用”，也不为失败制造 candidate：从同一 execution group 的 durable T1 与 owner-bound accepted repository 读取原始参数和 immutable base，再运行纯转换。只有明确的 `ManagedMutationRejectedError` 才能形成 `operation_failed_no_effect` proof。
+
+- **Owner**：Runtime 纯转换标记明确的 Edit 业务拒绝（缺少目标、匹配缺失/歧义、安全匹配限制等）；Host 从持久输入重验；Storage 私有 proof verifier 消费证明。普通异常、参数损坏、helper/object 读取失败不转为业务失败。
+- **唯一结果**：失败 response 必须为 `isError: true`，其 canonical text 与重验得到的错误精确一致；terminal fact 由既有 SQLite writer 验证。伪造错误、缺 terminal、跨 owner 与成功操作冒充失败均不能释放 reservation。
+- **原子边界**：沿用 SQLite T2/terminal + reservation release 的单事务，exact retry 不重复发布。无新 schema，无 accepted successor，无 Git ref 推进。
+- **失败/回滚**：证据不足时保留 reservation、拒绝结算；不 fallback generic T2。撤销新入口不改写既有终态。该 proof 只适用于 immutable-input 纯转换，不能用于 filesystem worker、Bash 或任意外部工具。
+- **结构**：成功、no-op、失败共享有界 T1/epoch/base 验证；保留不同 terminal writer 入口。Edit matcher 的明确拒绝改用 Error 子类，消息和匹配算法不变；未知异常原样传播。
+
+真实 helper + SQLite 回归先 RED（没有失败结算 owner），再 GREEN：从实际 Edit matcher 得到失败，提交后子进程直接退出，不做 store/lease cleanup；新进程验证唯一失败 T2、零 successor、零 active reservation，原 head/content 可正常 reopen。还验证成功 Write 不能冒充失败，无需创建 candidate。此测试仍为 Host owner 组合层，不是完整 ToolRuntime/Desktop。
+
+平台能力：Windows 本机执行真实 helper/process-exit 测试；Linux/macOS 由既有三平台 Gitoxide workflow 调度同一文件，但本轮未取得远程运行证据。不宣称断电恢复。
+
+验证：Runtime matcher/纯转换 **29/29**，Host repository admission **21/21、0 skip**；Runtime/Host build、Biome、diff check 通过。workflow 的路径选择同时纳入共享 Edit matcher，避免后续匹配语义变化漏跑结算回归。
+
+下一步不变：accepted-ref reconciliation，覆盖 SQLite 已接受而 Git ref 仍旧的重启状态；随后才接真实 Runtime/Host 与 Desktop。

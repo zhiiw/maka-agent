@@ -95,6 +95,8 @@ if (mode === 'read-settlement') {
   process.exit(0);
 }
 const settling =
+  mode === 'settle-false-rejection' ||
+  mode === 'crash-after-edit-rejection' ||
   mode === 'settle-false-no-change' ||
   mode === 'settle-no-change' ||
   mode === 'crash-after-no-change' ||
@@ -156,7 +158,11 @@ try {
     const args = {
       path: newFile ? 'new/nested.txt' : 'hello.txt',
       content: noChange && mode !== 'settle-false-no-change' ? file.content : 'candidate result\n',
+      ...(mode === 'crash-after-edit-rejection'
+        ? { old_string: 'missing snippet', new_string: 'replacement' }
+        : {}),
     };
+    const toolName = mode === 'crash-after-edit-rejection' ? 'Edit' : 'Write';
     const identity = {
       sessionId: 'settlement-session',
       runId: 'settlement-run',
@@ -171,8 +177,8 @@ try {
         operationId,
         journalEventId: `${operationId}_prepared`,
         providerToolCallId: callId,
-        toolName: 'Write',
-        canonicalArgsHash: canonicalToolArgsHash('Write', args),
+        toolName,
+        canonicalArgsHash: canonicalToolArgsHash(toolName, args),
         recoveryMode: 'reconcile',
         committedAt: 1,
         runtimeEvent: {
@@ -182,7 +188,7 @@ try {
           partial: false,
           role: 'model',
           author: 'agent',
-          content: { kind: 'function_call', id: callId, name: 'Write', args },
+          content: { kind: 'function_call', id: callId, name: toolName, args },
           refs: { operationId, toolCallId: callId },
         },
         dispatchRuntimeEvent: {
@@ -198,8 +204,8 @@ try {
               protocol: 't1_after_preflight_v1',
               operationId,
               providerToolCallId: callId,
-              toolName: 'Write',
-              canonicalArgsHash: canonicalToolArgsHash('Write', args),
+              toolName,
+              canonicalArgsHash: canonicalToolArgsHash(toolName, args),
               recoveryMode: 'reconcile',
               managedMutation: {
                 protocol: 'managed_mutation_v2',
@@ -222,6 +228,90 @@ try {
           },
         },
       });
+    }
+    if (mode === 'crash-after-edit-rejection' || mode === 'settle-false-rejection') {
+      const accept = owner.acceptRejectedOperation;
+      const input: Parameters<typeof accept>[0] = {
+        workspaceKey: 'crash-session',
+        acceptedRepositoryOwnerToken,
+        acceptedRepositoryCapability: capability,
+        toolOutcome: {
+          operationId,
+          journalEventId: `${operationId}_outcome`,
+          committedAt: 2,
+          runtimeEvent: {
+            id: 'settlement-outcome-event',
+            ...identity,
+            ts: 2,
+            partial: false,
+            role: 'tool',
+            author: 'tool',
+            refs: { operationId, toolCallId: callId },
+            actions: {
+              managedMutationTerminal: {
+                protocol: 'managed_mutation_terminal_v1',
+                operationId,
+                dispatchEventId: 'settlement-dispatch-event',
+                workspaceInstanceId: baseline!.head.workspaceEpochId.replace('epoch_', 'instance_'),
+                terminalKind: 'operation_failed_no_effect',
+              },
+            },
+            content: {
+              kind: 'function_response',
+              id: callId,
+              name: toolName,
+              isError: true,
+              result: {
+                kind: 'text',
+                text: "old_string not found in hello.txt; it must match the file's text including whitespace and indentation",
+              },
+            },
+          },
+        },
+      };
+      if (mode === 'settle-false-rejection') {
+        await assert.rejects(accept(input), /Operation has no deterministic rejection/);
+        writeSync(1, JSON.stringify({ rejected: true }));
+        process.exit(0);
+      }
+      await assert.rejects(accept({ ...input, acceptedRepositoryOwnerToken: {} }));
+      await assert.rejects(
+        accept({
+          ...input,
+          toolOutcome: {
+            ...input.toolOutcome,
+            runtimeEvent: {
+              ...input.toolOutcome.runtimeEvent,
+              content: {
+                kind: 'function_response',
+                id: callId,
+                name: toolName,
+                isError: true,
+                result: { kind: 'text', text: 'unverified error' },
+              },
+            },
+          },
+        }),
+        /Rejected outcome does not match/,
+      );
+      const { actions: _terminal, ...withoutTerminal } = input.toolOutcome.runtimeEvent;
+      await assert.rejects(
+        accept({
+          ...input,
+          toolOutcome: { ...input.toolOutcome, runtimeEvent: withoutTerminal },
+        }),
+        /terminal fact is missing/,
+      );
+      assert.equal(
+        (await stores.runtimeEventStore.listUnsettledToolOperations(identity.sessionId)).length,
+        1,
+      );
+      const accepted = await accept(input);
+      const retry = await accept(input);
+      assert.equal(accepted.created, true);
+      assert.equal(retry.created, false);
+      writeSync(1, JSON.stringify({ accepted, retry }));
+      process.exit(79);
     }
     const candidate = await createGitoxideCandidateInternal({
       acceptedRepositoryOwnerToken,

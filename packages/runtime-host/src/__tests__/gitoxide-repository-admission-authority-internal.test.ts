@@ -66,6 +66,8 @@ for (const mode of [
   'crash-after-new-file',
   'settle-no-change',
   'crash-after-no-change',
+  'crash-after-edit-rejection',
+  'settle-false-rejection',
 ]) {
   test(`candidate settlement preserves durable truth: ${mode}`, { timeout: 30_000 }, async (t) => {
     if (!(await admittedHelper())) {
@@ -104,10 +106,38 @@ for (const mode of [
       const reopened = run('read-settlement');
       assert.equal(reopened.status, 0, reopened.stderr);
       const state = JSON.parse(reopened.stdout);
-      if (mode === 'settle-wrong-content' || mode === 'settle-false-no-change') {
+      if (
+        mode === 'settle-wrong-content' ||
+        mode === 'settle-false-no-change' ||
+        mode === 'settle-false-rejection'
+      ) {
         assert.equal(state.outcomes.length, 0);
         assert.equal(state.successors.length, 0);
         assert.equal(state.unsettled.length, 1);
+      } else if (mode === 'crash-after-edit-rejection') {
+        assert.equal(
+          gitBare(join(stateRoot, 'repository.git'), [
+            'for-each-ref',
+            '--format=%(refname)',
+            'refs/maka/candidates',
+          ]),
+          '',
+        );
+        assert.equal(state.outcomes.length, 1);
+        assert.equal(state.successors.length, 0);
+        assert.deepEqual(state.unsettled, []);
+        assert.equal(state.outcomes[0].content.isError, true);
+        assert.equal(
+          state.outcomes[0].actions.managedMutationTerminal.terminalKind,
+          'operation_failed_no_effect',
+        );
+        assert.deepEqual(state.outcomes[0].content.result, {
+          kind: 'text',
+          text: "old_string not found in hello.txt; it must match the file's text including whitespace and indentation",
+        });
+        const reopened = run('reopen');
+        assert.equal(reopened.status, 0, reopened.stderr);
+        assert.equal(JSON.parse(reopened.stdout).content, 'accepted original\n');
       } else if (mode.endsWith('no-change')) {
         const committed = JSON.parse(first.stdout);
         assert.equal(state.outcomes.length, 1);

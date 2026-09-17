@@ -17,13 +17,20 @@
  * under the License.
  */
 
-import { computeEditedSource } from './edit-replace.js';
+import { computeEditedSource, EditMatchRejectedError } from './edit-replace.js';
 import { createEditUnifiedDiff, createUnifiedDiff } from './unified-diff.js';
 
 export interface ManagedMutationTransformResult {
   readonly content: string;
   readonly providerResult: unknown;
   readonly changed: boolean;
+}
+
+export class ManagedMutationRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManagedMutationRejectedError';
+  }
 }
 
 /**
@@ -64,16 +71,25 @@ export function transformManagedMutation(input: {
             }),
     });
   }
-  if (input.baseContent === null) throw new Error('Managed Edit target does not exist');
+  if (input.baseContent === null)
+    throw new ManagedMutationRejectedError('Managed Edit target does not exist');
   if (typeof args.old_string !== 'string' || typeof args.new_string !== 'string') {
     throw new Error('Managed Edit arguments are invalid');
   }
-  const edited = computeEditedSource(
-    input.baseContent,
-    args.old_string,
-    args.new_string,
-    input.canonicalPath,
-  );
+  const edited = (() => {
+    try {
+      return computeEditedSource(
+        input.baseContent,
+        args.old_string,
+        args.new_string,
+        input.canonicalPath,
+      );
+    } catch (error) {
+      if (error instanceof EditMatchRejectedError)
+        throw new ManagedMutationRejectedError(error.message);
+      throw error;
+    }
+  })();
   const diff = createEditUnifiedDiff(
     input.canonicalPath,
     input.baseContent,

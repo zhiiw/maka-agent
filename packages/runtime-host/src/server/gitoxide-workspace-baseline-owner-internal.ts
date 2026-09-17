@@ -20,8 +20,10 @@
 import { createHash } from 'node:crypto';
 import {
   verifyGitoxideCandidateSettlementInternal,
+  verifyGitoxideRejectedOperationInternal,
+  type GitoxideRejectedOperationInput,
   type GitoxideCandidateSettlementInput,
-  type GitoxideNoChangeProof,
+  type GitoxideNoEffectProof,
 } from './gitoxide-candidate-settlement-internal.js';
 import {
   openExecutionWorkspaceAuthority,
@@ -60,7 +62,7 @@ export function createGitoxideWorkspaceBaselineOwnerInternal(
 function createOwner(stores: InteractiveExecutionStoresWriter) {
   const proofs = new WeakMap<object, WorkspaceBaselineAuthorityInput>();
   const successors = new WeakMap<object, WorkspaceSuccessorAuthorityInput>();
-  const unchanged = new WeakMap<object, GitoxideNoChangeProof>();
+  const noEffects = new WeakMap<object, GitoxideNoEffectProof>();
   const verifiers = Object.freeze({
     baseline(proof: object) {
       const value = proofs.get(proof);
@@ -73,12 +75,27 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
       return value;
     },
     noEffect(proof: object) {
-      const value = unchanged.get(proof);
-      if (!value) throw new Error('Unrecognized Gitoxide no-change proof');
+      const value = noEffects.get(proof);
+      if (!value) throw new Error('Unrecognized Gitoxide no-effect proof');
       return value;
     },
   });
   return Object.freeze({
+    async acceptRejectedOperation(
+      input: GitoxideRejectedOperationInput,
+    ): ReturnType<ExecutionWorkspaceAuthority['commitNoEffect']> {
+      const verified = await verifyGitoxideRejectedOperationInternal(
+        stores,
+        () => openExecutionWorkspaceAuthority(stores, verifiers),
+        input,
+      );
+      const proof = Object.freeze({});
+      noEffects.set(proof, verified.noEffect);
+      return verified.authority.commitNoEffect({
+        noEffectOutcome: proof,
+        toolOutcome: verified.toolOutcome,
+      });
+    },
     async acceptUnchangedCandidate(
       input: GitoxideCandidateSettlementInput,
     ): ReturnType<ExecutionWorkspaceAuthority['commitNoEffect']> {
@@ -90,7 +107,7 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
       );
       if (verified.kind !== 'no_change') throw new Error('Expected no-change settlement');
       const proof = Object.freeze({});
-      unchanged.set(proof, verified.noEffect);
+      noEffects.set(proof, verified.noEffect);
       return verified.authority.commitNoEffect({
         noEffectOutcome: proof,
         toolOutcome: verified.toolOutcome,

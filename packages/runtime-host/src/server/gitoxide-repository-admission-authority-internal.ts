@@ -413,6 +413,24 @@ export async function readGitoxideTreeFileInternal(
   return result;
 }
 
+/** Exposes immutable identity, never the invocation capability or mutable owner state. */
+export function requireGitoxideAcceptedIdentityInternal(
+  ownerToken: object,
+  capability: GitoxideAcceptedRepositoryCapability,
+) {
+  const record = requireAcceptedRepositoryRecord(ownerToken, capability);
+  const artifact = requireGitoxideHelperArtifactIdentityInternal(
+    record.invocationOwnerToken,
+    record.helperCapability,
+  );
+  return Object.freeze({
+    repositoryPath: record.repositoryPath,
+    helperArtifactSha256: artifact.sha256,
+    baseCommitOid: record.acceptedCommitOid,
+    baseTreeOid: record.acceptedTreeOid,
+  });
+}
+
 export function requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal(input: {
   readonly acceptedRepositoryOwnerToken: object;
   readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;

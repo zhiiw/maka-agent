@@ -21,6 +21,35 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { transformManagedMutation } from '../managed-mutation-transform.js';
 
+test('marks deterministic Edit rejection without classifying unexpected exceptions as no-effect', () => {
+  assert.throws(
+    () =>
+      transformManagedMutation({
+        toolName: 'Edit',
+        canonicalPath: 'notes.txt',
+        baseContent: 'before\nbefore\n',
+        args: { path: 'notes.txt', old_string: 'before', new_string: 'after' },
+      }),
+    (error: unknown) => error instanceof Error && error.name === 'ManagedMutationRejectedError',
+  );
+  const failure = new Error('unexpected argument access failure');
+  assert.throws(
+    () =>
+      transformManagedMutation({
+        toolName: 'Write',
+        canonicalPath: 'notes.txt',
+        baseContent: null,
+        args: {
+          path: 'notes.txt',
+          get content() {
+            throw failure;
+          },
+        },
+      }),
+    (error: unknown) => error === failure,
+  );
+});
+
 test('derives Write from the immutable Git base without touching a checkout', () => {
   const result = transformManagedMutation({
     toolName: 'Write',
