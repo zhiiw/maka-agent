@@ -624,3 +624,18 @@ publication 或 refresh 的非预期失败保留原证据、返回 outcome unkno
 Windows 本地：启动选择 5/5，Host factory（含真实 helper）4/4，连接配置 6/6，共 15/15；Biome 与 diff check 通过。Linux/macOS 的选择逻辑相同，但本轮没有实际 Electron 启动证据。重建 UI/computer-use 依赖后，Desktop build:main 仍被未修改文件的两处 TS7006 阻断：app-shell-pending-attachments.test.ts:66 与 session-ui-selectors.ts:44；不将本轮报告为全量构建通过。
 
 第 2 步尚未完成能力提示/UI 接线；第 3 步加号入口和第 4 步真实 Electron kill/restart 验收仍待完成。当前仅证明入口选择与已有 helper admission 相容，不把 unit/factory 测试称为实际 Desktop 端到端测试。
+
+## 第三十二检查点：Desktop managed 创建意图与 Host 能力检查
+
+第 2 步的创建边界现已接通。此前 Desktop mapper 丢弃 `toolProfile`，显式 managed 请求可能变成普通创建；现在 Desktop IPC 只接受显式 `managed-files-v1` 或不指定 profile，拒绝未知和内部专用 profile，保留该字段交给 Host。进入异步 project resolution 前复制请求；client 在异步能力查询前再次固定发往 Host 的请求。
+
+- owner：Desktop client 只做产品可用性预检；实际 profile、授权、prepared claim 与 publication 仍由 Host catalog/root owner 决定。能力查询不是可传递的执行授权。
+- 原子边界：不增加持久化事务。managed 创建先查询同一 connection 的 execution capabilities，要求 epoch 匹配、ready、managedFilesResume=true，再调用原 session.create writer；Host 仍须在创建时重验，不能依赖先前查询消除竞态。
+- 失败状态：不支持、draining 或错误 epoch 时不发送 session.create；不关闭或替换 resident Host，不转成普通任务。连接失败仍按现有错误处理，不把所有失败伪装成“不支持”。稳定的 unavailable 错误经 Electron 文本包装后映射为简中、繁中、英文提示，明确普通聊天仍可使用。
+- 普通创建：不做 managed 查询，沿用原路径。撤回本接线不删除任务/claim/RuntimeEvent；不支持 managed 的 Host 不会因为 Desktop 启动而被自动升级。
+
+验证：先确认 mapper 丢 profile、client 缺少查询、UI 只有通用错误三个 RED，再实现对应接线。Windows Desktop 主进程构建通过；client/catalog/提示/入口相邻测试 **52/52，0 skip**。包含 incapable Host 拒绝 managed 后继续普通创建、epoch/state 不匹配拒绝、查询等待期间 caller 改参数不影响固定请求。此处 client 测试用协议 connection double，不宣称是真实 Electron/Host 端到端证明；Linux/macOS 本轮未执行。没有新增恢复算法或平台文件系统承诺。
+
+上轮两处 TS7006 已确认来自过期 TypeScript 增量缓存：同源 no-incremental 检查成功，使用仓库 clean:main 后 build:main 成功，没有通过类型断言或修改业务代码掩盖问题。
+
+接下来是第 3 步加号菜单显式入口，再做第 4 步真实 Electron 创建与 kill/restart。当前没有可点击的新按钮，不能把 IPC 可用描述为用户已可使用整个产品流程。
