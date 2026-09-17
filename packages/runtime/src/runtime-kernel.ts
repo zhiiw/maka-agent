@@ -285,7 +285,7 @@ export interface RuntimeKernelDeps {
   shellRuns?: ShellRunProcessManager;
   cleanupHistoryCompactArtifacts?: (input: HistoryCompactCleanupRequest) => Promise<void>;
   inspectContinuationSafety?: RuntimeContinuationSafetyInspector;
-  safeBoundaryResumeEnabled?: boolean;
+  safeBoundaryResumeEnabled?: boolean | ((sessionId: string) => Promise<boolean>);
   continuationFailpoint?: (point: RuntimeContinuationFailpoint) => Promise<void>;
   runBackendActivation?: BackendActivationBoundary;
   /** Host policy for a fresh turn; continuations retain their invocation snapshot. */

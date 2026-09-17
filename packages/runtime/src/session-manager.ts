@@ -866,7 +866,7 @@ interface SessionManagerBaseDeps {
   runBackendActivation?: BackendActivationBoundary;
   /** Host policy for a fresh turn; continuations retain their invocation snapshot. */
   resolveFreshTurnToolMode?: (header: SessionHeader) => Promise<ToolMode | undefined>;
-  safeBoundaryResumeEnabled?: boolean;
+  safeBoundaryResumeEnabled?: boolean | ((sessionId: string) => Promise<boolean>);
   /** Hosted composition capability. Omit for the production embedded queue. */
   messageAuthority?: RuntimeMessageAuthority;
   /** Trusted Host-owned graph readers. Hosted graph execution fails closed without them. */
@@ -2351,13 +2351,18 @@ export class SessionManager {
     return plan;
   }
 
+  private async isSafeBoundaryResumeEnabled(sessionId: string): Promise<boolean> {
+    const policy = this.deps.safeBoundaryResumeEnabled;
+    return typeof policy === 'function' ? (await policy(sessionId)) === true : policy === true;
+  }
+
   async planAuthoritativeSafeBoundaryContinuation(
     sessionId: string,
     input: PlanAuthoritativeSafeBoundaryContinuationInput,
     preview?: RuntimeEvent,
   ): Promise<SafeBoundaryContinuationPlan> {
     input = { ...input };
-    if (input.purpose !== 'handoff' && this.deps.safeBoundaryResumeEnabled !== true) {
+    if (input.purpose !== 'handoff' && !(await this.isSafeBoundaryResumeEnabled(sessionId))) {
       const plan = resumeFeatureDisabledPlan();
       this.recordContinuationPlan(sessionId, input.sourceRunId, plan);
       return plan;
@@ -2454,7 +2459,7 @@ export class SessionManager {
   async planLatestAuthoritativeSafeBoundaryContinuation(
     sessionId: string,
   ): Promise<SafeBoundaryContinuationPlan> {
-    if (this.deps.safeBoundaryResumeEnabled !== true) {
+    if (!(await this.isSafeBoundaryResumeEnabled(sessionId))) {
       const plan = resumeFeatureDisabledPlan();
       this.recordContinuationPlan(sessionId, '', plan);
       return plan;

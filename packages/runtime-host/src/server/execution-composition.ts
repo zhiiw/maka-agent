@@ -1405,7 +1405,12 @@ export async function createExecutionRuntimeHostComposition(
       },
       newId: randomUUID,
       now: Date.now,
-      safeBoundaryResumeEnabled: process.env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME === '1',
+      safeBoundaryResumeEnabled: async (sessionId) => {
+        if (process.env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME === '1') return true;
+        if (!dependencies.managedFilesHelper) return false;
+        const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
+        return header.toolProfile === 'managed-files-v1' && !header.executorId;
+      },
       inspectContinuationSafety: createLocalContinuationSafetyInspector({
         readSessionCwd: async (sessionId) =>
           (await stores.sessionStore.readHeaderSnapshot(sessionId)).cwd,

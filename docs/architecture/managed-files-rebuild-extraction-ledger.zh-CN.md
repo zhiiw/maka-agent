@@ -755,3 +755,29 @@ Gitoxide baseline owner 新增 inspectContinuation，复用同 execution-stores 
 先通过真实 helper/SQLite 子进程 fixture 复现缺少 inspect owner 的 RED，再实现。正常 AiSdk Write/Edit/Read 后新进程校验通过；错误 Run、错误 Session、过期 high-water 拒绝；session-bound capability 返回相同 checkpoint。相邻 backend 在第一次 durable outcome 后直接退出的原恢复用例继续通过。Windows 执行；Linux/macOS 本轮未执行。不将这些 fixture 称为完整 Desktop Continue 验收。
 
 恢复开关保持关闭。下一步是限定 managed profile 的启用策略与真实 Desktop Continue 正向验收，并补 source-bound head 之后发生推进时的拒绝证据；不打开所有普通会话的通用恢复开关，也不新增 schema/protocol。
+
+## 第三十九检查点：限定 managed Resume 与真实 Continue 正向验收
+
+恢复门控现在允许 Host 提供按 Session 求值的策略，而不只支持进程级 boolean。两个 authoritative 规划入口均先 await 同一策略。Host 在没有显式全局 opt-in 时，只对拥有 admitted managed helper、持久化 profile 为 managed-files-v1、没有 plugin executor 的 Session 放行；普通会话默认仍关闭。原有 MAKA_RUNTIME_SAFE_BOUNDARY_RESUME=1 显式 opt-in 保留，不由测试偷偷注入。
+
+门控只允许进入规划，不是 workspace authority：仍必须经过上一检查点的 source-bound accepted checkpoint、Runtime prefix/claim，以及 activation 中的 safety 重验。没有新增 schema、claim 表或 T1 后 fallback。策略读取失败不会创建恢复 Run；checkpoint 证据不足或漂移仍 park。关闭门控可停止新的恢复规划，但不删除已提交结果或 continuation 历史。
+
+真实 Windows Electron 的 `--interrupt-turn` 已从第三十六检查点的负向 gate 验收升级为正向流程：
+
+```text
+Write → Edit → Read → 模型带三个工具结果发起尚未完成的请求
+→ SIGKILL 隔离 Host → 重启 Desktop → 点击 Continue this turn
+→ 新 continuation Run → accepted Read → 模型结束
+```
+
+验收没有发送替代用户消息，没有开启全局恢复环境变量。新 Run 的 opening.source 为 continuation，绑定原 sourceRunId、claimId、high-water 和 boundaryDigest；总共两个 Run，而不是多个重试 Run。恢复后的模型历史包含原三个工具结果，新 Read 返回 edited，原 Write/Edit call/result/successor 逐条不变，source checkout 仍是 baseline。该流程本轮真实窗口两次通过（第二次包含新增 lineage 断言）。
+
+| 平台 | 本轮证据 |
+| --- | --- |
+| Windows | 真实 Desktop/Host Continue 正向通过；Runtime/Host build 通过；Runtime continuation/resume/handoff 32/32（含 SIGKILL harness） |
+| Linux | 未在本轮运行 |
+| macOS | 未在本轮运行，可使用同一脚本，不视作已验证 |
+
+Host 的 WorkHub disabled-resume 定向测试在清理临时 runtime.sqlite 时返回 EBUSY，本轮未改清理逻辑，不宣称该 Host suite 全绿。SessionManager 定向测试证明同一按 Session 策略允许指定任务、拒绝其他任务；原默认禁用测试继续通过。
+
+当前仅承诺这条有证据的受限路径：本 Run 已完成产生当前 accepted head 的 mutation，随后在模型等待阶段中断，可由用户显式 Continue。尚未覆盖 mutation T1 已落盘但 outcome 尚未接受、baseline/read-only source、仅从祖先继承 head、多次中断 lineage、自动启动续跑和断电。下一步优先补 head 推进/证据失效的负向产品测试与 read-only/祖先边界，不把本检查点称作无限制 Resume 或 M3 全部完成。

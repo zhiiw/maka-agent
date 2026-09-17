@@ -375,16 +375,6 @@ try {
     await page
       .getByRole('button', { name: 'Continue this turn', exact: true })
       .click({ timeout: 30000 });
-    await expect(
-      page
-        .locator('.maka-turn-failed-banner')
-        .getByText('Resuming interrupted tasks is not enabled.', { exact: true }),
-    ).toBeVisible({ timeout: 10000 });
-    assert.equal(
-      requests.filter(({ body }) => body.stream).length,
-      4,
-      'Disabled continuation must not launch another model invocation',
-    );
   } else {
     await expect(page.getByText('MANAGED_DESKTOP_SMOKE_OK', { exact: true })).toBeVisible({
       timeout: 30000,
@@ -394,7 +384,7 @@ try {
       .fill('Read tracked.txt after restarting. Do not write or edit.');
     await page.locator('.maka-composer button[type="submit"]').click();
   }
-  if (!interruptTurn) {
+  {
     await expect(page.getByText('MANAGED_DESKTOP_REOPEN_OK', { exact: true })).toBeVisible({
       timeout: 30000,
     });
@@ -415,6 +405,27 @@ try {
     mutationsBefore,
     'Reopen must preserve the exact Write/Edit outcomes and successors',
   );
+  if (interruptTurn) {
+    const db = new DatabaseSync(join(workspace, 'runtime.sqlite'), { readOnly: true });
+    try {
+      const openings = db
+        .prepare('SELECT payload_json FROM runtime_events ORDER BY rowid')
+        .all()
+        .map(({ payload_json }) => JSON.parse(payload_json))
+        .filter((event) => event.content?.kind === 'invocation_opened');
+      assert.equal(openings.length, 2, 'Continue creates exactly one new Run');
+      assert.equal(openings[0].content.source.kind, 'fresh');
+      const source = openings[1].content.source;
+      assert.equal(source.kind, 'continuation', 'Resume must not degrade to a fresh message');
+      assert.equal(source.sourceRunId, openings[0].runId);
+      assert.notEqual(openings[1].runId, openings[0].runId);
+      assert.ok(source.claimId);
+      assert.ok(source.sourceRuntimeEventHighWater > 0);
+      assert.match(source.boundaryDigest, /^sha256:[a-f0-9]{64}$/);
+    } finally {
+      db.close();
+    }
+  }
   const reopened = JSON.parse(await readFile(join(controlDirectory, 'registration.json'), 'utf8'));
   assert.equal(reopened.rootId, capability.rootId);
   assert.notEqual(reopened.hostEpoch, registration.hostEpoch);
@@ -428,7 +439,7 @@ try {
         newEpoch: reopened.hostEpoch,
         mutationEvents: mutationsBefore.map((event) => event.id),
         checkpoint: interruptTurn
-          ? 'tool results durable; model completion pending; Continue rejected by default resume gate'
+          ? 'tool results durable; model completion pending; explicit source-bound Continue'
           : 'completed turn; not an in-flight mutation crash',
       },
       null,
@@ -436,7 +447,7 @@ try {
     ),
   );
   console.log(
-    `PASS: ${interruptTurn ? 'interrupted turn remains safely blocked by resume gate' : 'completed turn reopens with accepted Read'} after Host kill and Desktop restart; mutation events unchanged.`,
+    `PASS: ${interruptTurn ? 'interrupted turn continues with accepted Read' : 'completed turn reopens with accepted Read'} after Host kill and Desktop restart; mutation events unchanged.`,
   );
 } catch (error) {
   if (page && !page.isClosed()) {

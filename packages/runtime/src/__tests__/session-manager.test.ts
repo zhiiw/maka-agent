@@ -5853,7 +5853,7 @@ describe('SessionManager permission mode updates', () => {
       runStore,
       runtimeEventStore: runStore,
       backends,
-      safeBoundaryResumeEnabled: true,
+      safeBoundaryResumeEnabled: async (sessionId) => sessionId === 'session-1',
       inspectContinuationSafety: async (...args) => {
         inspected.push(args);
         return {
@@ -5914,6 +5914,16 @@ describe('SessionManager permission mode updates', () => {
 
     assert.strictEqual(plan.disposition, 'continue');
     assert.deepStrictEqual(inspected, [[session.id, { sourceRunId }]]);
+    assert.deepEqual(
+      (await manager.planLatestAuthoritativeSafeBoundaryContinuation('not-enabled'))
+        .rejectionReasons,
+      ['resume_feature_disabled'],
+    );
+    assert.deepEqual(
+      (await manager.planAuthoritativeSafeBoundaryContinuation('not-enabled', { sourceRunId }))
+        .rejectionReasons,
+      ['resume_feature_disabled'],
+    );
     assert.deepStrictEqual(plan.continuation?.safetySnapshot, {
       workspaceIdentity: 'workspace-authoritative',
       backgroundOperationsSettled: true,
