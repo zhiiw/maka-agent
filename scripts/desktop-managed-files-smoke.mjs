@@ -70,7 +70,13 @@ await git(
 );
 const requests = [];
 const repeatInterrupt = process.argv.includes('--repeat-interrupt');
-const candidateInterrupt = process.argv.includes('--candidate-interrupt');
+const candidateEditInterrupt = process.argv.includes('--candidate-edit-interrupt');
+assert.ok(
+  !(candidateEditInterrupt && process.argv.includes('--candidate-interrupt')),
+  'Choose either Write or Edit candidate interruption',
+);
+const candidateInterrupt = candidateEditInterrupt || process.argv.includes('--candidate-interrupt');
+const candidateToolName = candidateEditInterrupt ? 'Edit' : 'Write';
 // Manual diagnostic, not a CI gate: the external SQLite writer lock can also
 // block unrelated Host writes before candidate creation. A missed window fails
 // explicitly; it must not be retried silently or reported as recovery evidence.
@@ -80,13 +86,25 @@ assert.ok(
 );
 const interruptTurn =
   candidateInterrupt || repeatInterrupt || process.argv.includes('--interrupt-turn');
-const expectedContent = candidateInterrupt ? /written/ : /edited/;
+const expectedContent = candidateInterrupt && !candidateEditInterrupt ? /written/ : /edited/;
 let restartNumber = 0;
 let waitingForCompletion = false;
 let operationStep = 0;
 const operations = [
-  { name: 'Write', input: { path: 'tracked.txt', content: 'written\n' } },
-  { name: 'Edit', input: { path: 'tracked.txt', old_string: 'written', new_string: 'edited' } },
+  ...(candidateEditInterrupt
+    ? [
+        {
+          name: 'Edit',
+          input: { path: 'tracked.txt', old_string: 'baseline', new_string: 'edited' },
+        },
+      ]
+    : [
+        { name: 'Write', input: { path: 'tracked.txt', content: 'written\n' } },
+        {
+          name: 'Edit',
+          input: { path: 'tracked.txt', old_string: 'written', new_string: 'edited' },
+        },
+      ]),
   { name: 'Read', input: { path: 'tracked.txt' } },
 ];
 let restarted = false;
@@ -284,7 +302,11 @@ try {
   await page.keyboard.press('Escape');
   await page
     .locator('.maka-composer-editor [contenteditable="true"]')
-    .fill('Write tracked.txt to written, edit written to edited, then read it.');
+    .fill(
+      candidateEditInterrupt
+        ? 'Edit tracked.txt from baseline to edited, then read it.'
+        : 'Write tracked.txt to written, edit written to edited, then read it.',
+    );
   await expect(page.locator('.maka-composer button[type="submit"]')).toBeEnabled();
   await page.locator('.maka-composer button[type="submit"]').click();
   if (candidateInterrupt) {
@@ -320,6 +342,15 @@ try {
             .all()
             .map(({ payload_json }) => JSON.parse(payload_json));
           const operationId = dispatch.actions.toolDispatch.operationId;
+          assert.ok(
+            lockedEvents.some(
+              (event) =>
+                event.refs?.operationId === operationId &&
+                event.content?.kind === 'function_call' &&
+                event.content.name === candidateToolName,
+            ),
+            'The interrupted operation must be the requested tool',
+          );
           assert.equal(
             lockedEvents.some(
               (event) =>
@@ -338,6 +369,7 @@ try {
             1,
           );
           candidateEvidence = {
+            toolName: candidateToolName,
             operationId,
             sessionId: dispatch.sessionId,
             turnId: dispatch.turnId,
@@ -519,6 +551,7 @@ try {
         );
         const response = recovered.find((event) => event.content?.kind === 'function_response');
         assert.equal(response.id, `${candidateEvidence.operationId}_recovered_response`);
+        assert.equal(response.content.name, candidateToolName);
         const successors = recovered.filter(
           (event) => event.actions?.workspaceFact?.kind === 'maka.workspace.version_accepted',
         );

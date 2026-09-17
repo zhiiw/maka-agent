@@ -972,3 +972,13 @@ Windows 本轮完整通过证据目录：`C:/Users/wzy/AppData/Local/Temp/maka-m
 当前新增的 UI 崩溃窗口只覆盖首次 Write 的 candidate 已存在而 T2 未提交；不宣称覆盖 Edit/no-op 的所有窗口、任意机器指令崩溃或断电。Linux/macOS 本轮未运行。启动自动结算已有候选不等于自动续跑模型，用户仍需 Continue；T1-only 继续保留未结算状态，不创建缺失候选。下一步优先稳定候选窗口的验收编排并补 Edit 对称场景；自动续跑、扫描优化和 Bash/npm 不扩大到本轮。
 
 原 `--interrupt-turn` 回归也通过（`maka-managed-electron-p3kcIQ`）：真实 Write/Edit/Read 已完成后杀 Host，重启并 Continue，原 mutation facts 不变。Runtime Host、Desktop main/resources 构建通过，脚本语法、Biome 与 diff check 通过。本轮仅改验收脚本和记录，没有生产代码变更。
+
+## 第五十检查点：Edit 候选窗口的 Desktop 对称验收
+
+新增手工命令 `node scripts/desktop-managed-files-smoke.mjs --candidate-edit-interrupt`。首个真实工具是 Edit，针对 accepted baseline 执行 `baseline → edited`；不是用 Write 的恢复结果冒充 Edit。测试在 T1/reservation 和重启后的 recovered response 两端均断言工具名称为 Edit，其他核验复用第四十九检查点：候选已存在且 T2 未提交、杀 elected Host、重启唯一结算、手动 Continue 后 accepted Read 返回 edited、模型 projection 与 Desktop transcript 和 durable result 一致、source checkout 不变。
+
+Windows 两次显式独立运行均通过，证据分别位于 `C:/Users/wzy/AppData/Local/Temp/maka-managed-electron-jTLQOC` 和 `C:/Users/wzy/AppData/Local/Temp/maka-managed-electron-xEdw1U`。第一次 Host epoch 从 `eb5be33f-fefa-4326-89e9-e26bf291b27e` 变为 `914b0ef3-2fee-4ab9-be3b-c8e77e024ad3`，恢复 transcript 的 diff 精确为 baseline 到 edited。不是脚本失败后内部自动重试。
+
+未解决事项不变：外部 SQLite 全局 writer lock 的编排仍可能阻塞候选生成前其他写入。源码确认 Host SQLite 使用同步连接并设置 5 秒 busy timeout，但目前尚未定位上一轮失败中具体被阻塞的写入，因此不能宣称已找到完整根因或已稳定测试；本轮 2/2 也不覆盖该问题。下一步需要捕获阻塞点或采用可观测的候选发布握手，保持超时显式失败，不将本脚本提升为 CI gate。
+
+本轮仅改测试和文档；Linux/macOS 未运行，不新增断电保证、自动续跑、T1-only redo 或产品可用性声明。Write 与 Edit 的已发布 candidate 恢复已有 Windows Desktop 执行证据；no-op、失败/no-effect、缺失或损坏 candidate 的 Desktop 级矩阵及跨平台证据仍需补齐。
