@@ -910,3 +910,15 @@ Owner 是 Gitoxide helper；此步骤不提交 SQLite、不释放 reservation、
 真实 helper 回归覆盖：缺失候选被拒绝且 ref 不出现；普通创建后验证返回同一响应且 ref 字节不变；不同内容的验证被拒绝且 ref 不变。先观察到 `invalid_request` 的 RED，再加入实现。Windows repository admission 全套 63/63 通过，其中 candidate 相关 17/17；helper 使用静态 CRT 构建，子进程 PATH 清空。Linux/macOS 本轮未运行，不宣称跨平台新证据。
 
 本轮尚未接入 Host verification-only capability，也未增加恢复 T2 writer 或自动结算。下一步按顺序接入：Host 验证入口 → 从持久 T1 重建 exact outcome → 原子接受与新进程重复恢复测试。T1-only 仍不得创建 candidate；Desktop 的现有已结算 Write/Edit Continue 能力不变。
+
+## 第四十六检查点：Host 可以重新签发已有 candidate 的 owner-bound proof
+
+新增内部 `verifyExistingGitoxideCandidateInternal`，与普通创建入口分开命名；两者共享验证和 capability 签发实现，验证入口固定要求 helper 的 `requireExisting`，调用方不能通过额外字段把它降级成创建。Host 同步识别稳定的 `candidate_missing` reason。调用开始即复制参数，防止异步验证期间调用方改变字符串字段后签出与请求不符的 proof。
+
+Owner 仍是原 repository admission authority。必须持有匹配的 accepted repository capability 和 owner token；只有真实 helper 完整验证通过才签发新的内存 capability。恢复不复制原进程的 capability，不接受 caller 自报的 candidate proof。此步骤不写 RuntimeEvents/SQLite，不移动 accepted ref，不释放 reservation，失败也不降级为创建或 generic T2。
+
+真实子进程测试改为消费验证入口：先在没有候选物时用新进程验证，必须返回 `candidate_missing`；另一进程发布 candidate 后直接退出；随后两个独立进程分别 reopen 并重新验证，输出相同证明内容，但能力由各自进程重新签发。冲突请求被拒绝，accepted content/ref 保持原值。同进程回归同时验证新 capability 与原 capability 内容一致、对象身份不同、错误 owner 被拒绝，并覆盖 no-change candidate。
+
+平台范围：本轮仅 Windows，使用真实 Gitoxide helper、root owner、SQLite 和进程退出/reopen；不是 Desktop kill 后自动完成 T2 的验收。Linux/macOS 沿用同一测试代码，尚无本轮执行证据。下一步的 durable settlement 仍须从持久化 T1 冻结上下文重算结果、验证 reservation/base，使用已有原子接受 writer；不能把这一检查点描述成 candidate-only 自动恢复已经完成。
+
+验证：Host build、Biome、diff check 通过；真实候选验证/新进程重开 2/2 通过；补充 no-change 后，候选结算、成功/失败/no-op/crash 与原子 T2 重试定向 11/11 通过，0 skip。没有运行全量 CI，也没有改变 Desktop 的恢复策略。

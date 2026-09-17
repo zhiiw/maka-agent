@@ -43,6 +43,7 @@ import {
 import {
   admitGitoxideRepositoryInternal,
   createGitoxideCandidateInternal,
+  verifyExistingGitoxideCandidateInternal,
   GitoxideRepositoryAdmissionAuthorityError,
   importAdmittedGitoxideRepositoryInternal,
   readGitoxideTreeFileInternal,
@@ -557,6 +558,9 @@ test('revalidates a published candidate after process exit without advancing acc
     assert.equal(baseline.status, 77, baseline.stderr);
     const initial = run('reopen');
     assert.equal(initial.status, 0, initial.stderr);
+    const absent = run('retry-candidate');
+    assert.equal(absent.status, 1, absent.stderr);
+    assert.match(absent.stderr, /candidate_missing/u);
     const crashed = run('crash-after-candidate');
     assert.equal(crashed.status, 78, crashed.stderr);
     const first = JSON.parse(crashed.stdout);
@@ -566,6 +570,9 @@ test('revalidates a published candidate after process exit without advancing acc
     const retried = run('retry-candidate');
     assert.equal(retried.status, 0, retried.stderr);
     assert.deepEqual(JSON.parse(retried.stdout), first);
+    const repeated = run('retry-candidate');
+    assert.equal(repeated.status, 0, repeated.stderr);
+    assert.deepEqual(JSON.parse(repeated.stdout), first);
     const conflict = run('conflicting-candidate');
     assert.equal(conflict.status, 1);
     assert.match(conflict.stderr, /candidate_request_conflict/u);
@@ -1039,6 +1046,29 @@ test('publishes an operation-bound candidate without advancing accepted authorit
   });
 
   const candidateOwnerToken = {};
+  const verificationRequest = {
+    acceptedRepositoryOwnerToken,
+    acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+    candidateOwnerToken,
+    operationId: 'operation-1',
+    path: 'docs/result.txt',
+    content: 'candidate result\n',
+  };
+  await assert.rejects(
+    verifyExistingGitoxideCandidateInternal(verificationRequest),
+    (error) =>
+      error instanceof GitoxideHelperInvocationError && error.helperReason === 'candidate_missing',
+  );
+  await assert.rejects(
+    stat(
+      join(
+        destinationRepositoryPath,
+        'refs/maka/candidates',
+        createHash('sha256').update('operation-1').digest('hex'),
+      ),
+    ),
+    { code: 'ENOENT' },
+  );
   const candidate = await createGitoxideCandidateInternal({
     acceptedRepositoryOwnerToken,
     acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
@@ -1049,6 +1079,29 @@ test('publishes an operation-bound candidate without advancing accepted authorit
   });
   assert.equal(candidate.kind, 'candidate_published');
   if (candidate.kind !== 'candidate_published') return;
+  const verified = await verifyExistingGitoxideCandidateInternal(verificationRequest);
+  assert.deepEqual(verified, candidate);
+  assert.notEqual(verified.candidateOutcomeCapability, candidate.candidateOutcomeCapability);
+  assert.deepEqual(
+    requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal({
+      ...verificationRequest,
+      candidateOutcomeCapability: verified.candidateOutcomeCapability,
+    }),
+    requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal({
+      ...verificationRequest,
+      candidateOutcomeCapability: candidate.candidateOutcomeCapability,
+    }),
+  );
+  await assert.rejects(
+    verifyExistingGitoxideCandidateInternal({ ...verificationRequest, content: 'wrong\n' }),
+  );
+  await assert.rejects(
+    verifyExistingGitoxideCandidateInternal({
+      ...verificationRequest,
+      acceptedRepositoryOwnerToken: {},
+    }),
+    GitoxideRepositoryAdmissionAuthorityError,
+  );
 
   assert.equal(candidate.baseCommitOid, imported.baselineCommitOid);
   assert.equal(candidate.baseTreeOid, imported.baselineTreeOid);
@@ -1129,6 +1182,15 @@ test('publishes an operation-bound candidate without advancing accepted authorit
     content: 'hello from candidate authority\n',
   });
   assert.equal(noChange.kind, 'candidate_no_change');
+  const verifiedNoChange = await verifyExistingGitoxideCandidateInternal({
+    acceptedRepositoryOwnerToken,
+    acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+    candidateOwnerToken,
+    operationId: noChangeOperationId,
+    path: 'hello.txt',
+    content: 'hello from candidate authority\n',
+  });
+  assert.deepEqual(verifiedNoChange, noChange);
   assert.equal(
     gitBare(destinationRepositoryPath, ['rev-parse', noChange.candidateRef]),
     noChange.candidateCommitOid,

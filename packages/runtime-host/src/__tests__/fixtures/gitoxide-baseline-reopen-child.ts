@@ -70,6 +70,7 @@ import {
   verifyAdmittedGitoxideImportInternal,
   readGitoxideTreeFileInternal,
   createGitoxideCandidateInternal,
+  verifyExistingGitoxideCandidateInternal,
   requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal,
 } from '../../server/gitoxide-repository-admission-authority-internal.js';
 
@@ -1630,7 +1631,9 @@ try {
       writeSync(1, JSON.stringify({ accepted, retry }));
       process.exit(79);
     }
-    const candidate = await createGitoxideCandidateInternal({
+    const candidate = await (mode === 'retry-candidate' || mode === 'conflicting-candidate'
+      ? verifyExistingGitoxideCandidateInternal
+      : createGitoxideCandidateInternal)({
       acceptedRepositoryOwnerToken,
       acceptedRepositoryCapability: capability,
       candidateOwnerToken,
