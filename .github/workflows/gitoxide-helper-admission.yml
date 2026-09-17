@@ -20,6 +20,9 @@ name: Gitoxide helper admission
 on:
   pull_request:
     paths:
+      - 'packages/runtime-host/src/client/connect-or-spawn.ts'
+      - 'packages/runtime-host/src/client/index.ts'
+      - 'packages/runtime-host/src/__tests__/connect-or-spawn-env.test.ts'
       - 'packages/runtime-host/src/protocol/host-status.ts'
       - 'packages/runtime-host/src/protocol/index.ts'
       - 'packages/runtime-host/src/protocol/operations.ts'
@@ -68,6 +71,9 @@ on:
     branches:
       - main
     paths:
+      - 'packages/runtime-host/src/client/connect-or-spawn.ts'
+      - 'packages/runtime-host/src/client/index.ts'
+      - 'packages/runtime-host/src/__tests__/connect-or-spawn-env.test.ts'
       - 'packages/runtime-host/src/protocol/host-status.ts'
       - 'packages/runtime-host/src/protocol/index.ts'
       - 'packages/runtime-host/src/protocol/operations.ts'
@@ -202,9 +208,10 @@ jobs:
           packages/runtime-host/dist/__tests__/managed-files-dev-bootstrap.test.js
       - name: Verify managed backend identity admission
         run: >-
-          node --test --test-name-pattern="execution capability query|elects one owner, serves status|serves bootstrap operations during recovery"
+          node --test --test-name-pattern="execution capability query|elects one owner, serves status|serves bootstrap operations during recovery|managed resume requirement"
           packages/runtime-host/dist/__tests__/protocol.test.js
           packages/runtime-host/dist/__tests__/host-kernel.test.js
+          packages/runtime-host/dist/__tests__/connect-or-spawn-env.test.js
       - name: Verify managed backend session admission
         run: >-
           node --test --test-name-pattern="managed profile|managed files|forged managed session|ordinary session creation cannot mint|root backend preparation"

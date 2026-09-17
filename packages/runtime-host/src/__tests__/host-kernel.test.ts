@@ -892,6 +892,52 @@ describe('non-serving Runtime Host kernel', () => {
     });
   });
 
+  test('managed resume requirement rejects an ordinary resident Host without replacement', async () => {
+    await withHostPaths(async (paths) => {
+      const winner = await startTestRuntimeHostCandidate(paths, {
+        rootPath: paths.root,
+        idleGraceMs: 10_000,
+      });
+      assert.equal(winner.kind, 'winner');
+      if (winner.kind !== 'winner') return;
+      let launches = 0;
+      try {
+        const input = {
+          rootPath: paths.root,
+          protocol: CURRENT_PROTOCOL,
+          compositionId: 'maka.interactive',
+          candidateEntrypoint: KERNEL_CANDIDATE_ENTRYPOINT,
+          requireManagedFilesResume: true as const,
+          electionDeadlineMs: 5_000,
+        };
+        await assert.rejects(async () => {
+          const result = await connectOrSpawnRuntimeHostWithDependencies(input, {
+            random: Math.random,
+            env: {},
+            launchCandidate: () => {
+              launches++;
+              throw new Error('Must not replace the resident Host');
+            },
+          });
+          if (result.kind === 'connected') await result.connection.close();
+          return result;
+        }, /managed_files_resume_unavailable/);
+        assert.equal(launches, 0);
+        const ordinary = await retryConnect(paths, CURRENT_PROTOCOL);
+        assert.equal(ordinary.kind, 'connected');
+        if (ordinary.kind === 'connected') {
+          assert.equal(ordinary.connection.hostEpoch, winner.host.hostEpoch);
+          const status = await ordinary.connection.status();
+          assert.equal(status.state, 'ready');
+          assert.equal(status.connections, 1);
+          await ordinary.connection.close();
+        }
+      } finally {
+        await winner.host.close();
+      }
+    });
+  });
+
   test('serves bootstrap operations during recovery and rejects ready-only operations', async () => {
     await withHostPaths(async (paths) => {
       const capability = await resolveStorageRoot({ path: paths.root, kind: 'interactive' });
@@ -1026,6 +1072,28 @@ describe('non-serving Runtime Host kernel', () => {
         ) {
           assert.equal(ready.result.managedFilesResume, true);
           assert.equal(ready.result.hostEpoch, host.hostEpoch);
+        }
+        const capable = await connectOrSpawnRuntimeHostWithDependencies(
+          {
+            rootPath: paths.root,
+            protocol: CURRENT_PROTOCOL,
+            compositionId: 'maka.interactive',
+            candidateEntrypoint: KERNEL_CANDIDATE_ENTRYPOINT,
+            requireManagedFilesResume: true,
+            electionDeadlineMs: 5_000,
+          },
+          {
+            random: Math.random,
+            env: {},
+            launchCandidate: () => {
+              throw new Error('Capable resident Host must be reused');
+            },
+          },
+        );
+        assert.equal(capable.kind, 'connected');
+        if (capable.kind === 'connected') {
+          assert.equal(capable.connection.hostEpoch, host.hostEpoch);
+          await capable.connection.close();
         }
       } finally {
         releaseFactory();

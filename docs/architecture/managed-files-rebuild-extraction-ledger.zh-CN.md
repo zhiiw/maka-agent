@@ -500,3 +500,16 @@ CI gate policy **1/1**、发行文件策略组 **13/13** 通过；完整 release
 Windows：Host build、协议/dispatcher/connection/peer stream/factory **125/125**，真实 kernel 定向 **2/2**，CI gate policy **1/1**，Biome、diff check 通过。Linux/macOS 使用同一 gate 新增的查询/生命周期用例，本轮未取得远程结果。未新增 crash 或断电保证，未运行 Electron。
 
 下一步：让 Desktop/任务创建调用者在同一连接上消费此查询并明确处理不可用，再接经过 connection/model/workspace 授权的专用创建 handler。当前只完成可观察的能力报告，不能称为客户端协商闭环，更不能提前展示可点击的 managed 创建按钮。
+
+## 第二十五检查点：客户端显式要求 managed resume
+
+`connectOrSpawnRuntimeHost` 增加可选的 `requireManagedFilesResume: true`。未提供时不增加查询、不改变普通连接行为；提供时在连接到 ready Host 后，使用同一 connection 查询 `host.execution-capabilities.query`，同时核验响应 Host epoch、ready 状态与 resume 标志。这是现有 session 的 resume 条件，不是创建权限。
+
+- **Owner/边界**：client election owner 在首次异步操作前固定要求，非法 false/string/number 输入在访问 storage 前拒绝。query 与 ready 等待共用 election 剩余 deadline，并接入原 AbortSignal；不能重开一个完整超时窗口。响应无法证明执行权限，后续操作仍以服务端逐次 admission 为准。
+- **失败**：明确缺能力、非 ready 或 epoch 不同会抛出带稳定 `managed_files_resume_unavailable` code 的错误，关闭本次连接，且不把它吞成普通 ready-wait retry。没有静默 fallback、没有杀死或替换 resident Host。传输失败仍沿原选举期限处理，不能返回未经验证的 connected。调用方未要求时不受此门槛影响。
+- **原子/回滚**：只在返回 connected 前增加检查，无 durable 写、schema 或 protocol epoch 变动。撤回调用方要求恢复普通连接行为，但不能更改 Session 的持久化 mode。当前 Desktop 尚未设置该参数；并未声称完成 Desktop 创建/恢复 UI。
+- **证据**：真实 root owner/listener/client 测试先重现旧行为无视要求而返回 connected（RED），再验证 ordinary resident 被拒绝、零 candidate launch、失败连接释放，普通客户端仍连接同一 ready epoch。已支持的 ready Host 则复用，无新进程。recovering→ready 使用同一真实 Host 验证。
+
+Windows 本机：Host build、定向能力/生命周期测试 **4/4**、输入/env 测试 **6/6**、CI gate policy **1/1**、Biome、diff check 通过。另执行历史 handshake compatibility suite，**2 pass / 4 fail**（`read_eof`），本轮未定位，不能声称连接全套通过。Linux/macOS gate 已加入新增选择路径和用例，尚无本轮远程证据。没有新增 crash/断电承诺。
+
+创建链审计确认 `HostSessionCatalogCoordinator` 已拥有 Session admission、workspace usage、模型/connection 解析、runtime policy 默认值和 stable-create 指纹。下一步应从这一 owner 接专用 managed 创建，而不是暴露 `createGitoxideManagedTaskInternal` 为裸 IPC。现有普通 `session.create` 对 managed profile 的拒绝必须保留，直到上述授权、Git baseline acceptance 与 Session publication 在同一交付中接通。
