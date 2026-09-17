@@ -18,6 +18,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import { createDefaultRuntimePolicy } from '@maka/core/runtime-policy';
+import { HostSessionCatalogCoordinator } from '../../server/session-catalog-coordinator.js';
+import { SessionAdmissionGate } from '../../server/session-admission-gate.js';
+import { HostProjectMembershipGate } from '../../server/project-membership-gate.js';
+import { HostWorkspaceResolver } from '../../server/workspace-resolver.js';
 import assert from 'node:assert/strict';
 import { readFile, realpath } from 'node:fs/promises';
 import { writeSync } from 'node:fs';
@@ -33,6 +38,7 @@ import {
   createGitoxideManagedTaskInternal,
   reopenGitoxideManagedTaskInternal,
   describeGitoxideManagedSessionCreateInternal,
+  publishPreparedGitoxideManagedTaskInternal,
   requireGitoxideManagedSessionInternal,
 } from '../../server/gitoxide-managed-session-internal.js';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
@@ -88,6 +94,143 @@ const stores = await openInteractiveExecutionStoresForWrite(leaseOwner.lease);
 const owner = createGitoxideWorkspaceBaselineOwnerInternal(stores);
 const acceptedRepositoryOwnerToken = {};
 const repositoryPath = join(rootPath, 'repository.git');
+if (mode.startsWith('catalog-')) {
+  const sessionId = 'catalog-created-session';
+  const existed = await stores.sessionStore.readHeader(sessionId).then(
+    () => true,
+    () => false,
+  );
+  const connection = {
+    connectionId: 'test-connection',
+    slug: 'test',
+    name: 'Test',
+    revision: 1,
+    providerType: 'openai' as const,
+    enabled: true,
+    enabledModelIds: ['first-model', 'changed-default'],
+    models: [{ id: 'first-model' }, { id: 'changed-default' }],
+    modelSource: 'fetched' as const,
+  };
+  const policy = createDefaultRuntimePolicy();
+  let refreshed = false;
+  const catalog = new HostSessionCatalogCoordinator({
+    stores: stores.sessionStore,
+    managedCreation: {
+      stores: stores.sessionStore,
+      publish: async (id, requestFingerprint) => {
+        if (mode === 'catalog-prepared-exit') process.exit(90);
+        await publishPreparedGitoxideManagedTaskInternal(leaseOwner.lease, {
+          sessionId: id,
+          requestFingerprint,
+          invocationOwnerToken,
+          helperCapability,
+        });
+        if (mode === 'catalog-published-exit') process.exit(91);
+      },
+    },
+    runtimePolicy: {
+      connectionCatalog: {
+        getSnapshot: async () => ({
+          revision: 1,
+          connections: [connection],
+          defaultTarget: {
+            connectionId: connection.connectionId,
+            modelId: mode === 'catalog-retry' ? 'changed-default' : 'first-model',
+          },
+        }),
+      },
+      runtimePolicy: { getSnapshot: async () => ({ revision: 1, policy }) },
+      operations: {
+        resolveExecutionConnection: async () => ({
+          kind: 'ready',
+          connection,
+          secretMaterial: {},
+          networkProxy: policy.networkProxy,
+        }),
+      },
+    },
+    turnIndex: {
+      readDurableRecords: async () => ({ throughSequence: null, records: [], nextPosition: null }),
+      readDurableTurnContributions: async () => ({
+        throughSequence: null,
+        contributions: [],
+        nextPosition: null,
+      }),
+      readDurableTurnLandmarks: async () => ({ throughSequence: null, landmarks: [] }),
+    },
+    manager: {
+      runningTurnIds: () => [],
+      transitionSessionConfiguration: async () => {
+        throw new Error('not used');
+      },
+      relocateSessionWorkspace: async () => {
+        throw new Error('not used');
+      },
+    },
+    admission: new SessionAdmissionGate(),
+    continuity: {
+      refreshCanonical: async () => {
+        refreshed = true;
+      },
+    },
+    workspaceResolver: new HostWorkspaceResolver(
+      {
+        list: async () => [],
+        touch: async () => {
+          throw new Error('not used');
+        },
+      },
+      new HostProjectMembershipGate(),
+      () => {},
+    ),
+    requestDrain: () => {},
+  });
+  try {
+    const outcome = await catalog.handlers['session.create'](
+      {
+        sessionId,
+        workspace: { kind: 'host_path', path: sourcePath },
+        modelTarget: { kind: 'default' },
+        toolProfile: 'managed-files-v1',
+      },
+      {
+        hostEpoch: 'test',
+        connectionId: 'test',
+        principal: 'local_os_user',
+        acquireResidency: () => ({ release: () => {} }),
+      },
+    );
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+    assert.equal(refreshed, true);
+    const header = await stores.sessionStore.readHeader(sessionId);
+    assert.equal(header.model, 'first-model');
+    const cap = await reopenGitoxideManagedTaskInternal(leaseOwner.lease, {
+      sessionId,
+      invocationOwnerToken,
+      helperCapability,
+    });
+    const read = await requireGitoxideManagedSessionInternal(
+      cap,
+      sessionId,
+      stores.runtimeEventStore,
+    ).readAcceptedFile('hello.txt');
+    writeSync(
+      1,
+      JSON.stringify({
+        created: !existed,
+        profile: header.toolProfile,
+        content: read.content,
+        facts: (
+          await stores.runtimeEventStore.readSessionRuntimeEvents(WORKSPACE_AUTHORITY_SESSION_ID)
+        ).length,
+      }),
+    );
+  } finally {
+    await stores.sessionStore.close?.();
+    await leaseOwner.close();
+  }
+  process.exit(0);
+}
 if (mode.startsWith('task-')) {
   try {
     const request = {

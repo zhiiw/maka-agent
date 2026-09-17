@@ -66,6 +66,8 @@ for (const crashMode of [
   'task-create-exit',
   'task-import-exit',
   'task-prepared-exit',
+  'catalog-prepared-exit',
+  'catalog-published-exit',
 ]) {
   test(`managed session publication resumes after ${crashMode}`, { timeout: 30_000 }, async (t) => {
     if (!(await admittedHelper())) {
@@ -103,17 +105,21 @@ for (const crashMode of [
       assert.ifError(crashed.error);
       assert.equal(
         crashed.status,
-        crashMode === 'task-prepared-exit'
-          ? 89
-          : crashMode === 'task-import-exit'
-            ? 88
-            : crashMode === 'task-create-exit'
-              ? 87
-              : crashMode === 'session-baseline-exit'
-                ? 85
-                : crashMode === 'session-import-exit'
-                  ? 86
-                  : 84,
+        crashMode === 'catalog-prepared-exit'
+          ? 90
+          : crashMode === 'catalog-published-exit'
+            ? 91
+            : crashMode === 'task-prepared-exit'
+              ? 89
+              : crashMode === 'task-import-exit'
+                ? 88
+                : crashMode === 'task-create-exit'
+                  ? 87
+                  : crashMode === 'session-baseline-exit'
+                    ? 85
+                    : crashMode === 'session-import-exit'
+                      ? 86
+                      : 84,
         crashed.stderr,
       );
       if (crashMode === 'session-baseline-exit') {
@@ -131,16 +137,21 @@ for (const crashMode of [
         await writeFile(join(source, 'hello.txt'), 'external checkout edit\n');
       }
       const retry = run(
-        crashMode.startsWith('task-')
-          ? 'task-retry'
-          : crashMode === 'session-import-exit'
-            ? 'session-import-recover'
-            : 'session-retry',
+        crashMode.startsWith('catalog-')
+          ? 'catalog-retry'
+          : crashMode.startsWith('task-')
+            ? 'task-retry'
+            : crashMode === 'session-import-exit'
+              ? 'session-import-recover'
+              : 'session-retry',
       );
       assert.ifError(retry.error);
       assert.equal(retry.status, 0, retry.stderr);
       assert.deepEqual(JSON.parse(retry.stdout), {
-        created: crashMode !== 'session-publish-exit' && crashMode !== 'task-create-exit',
+        created:
+          crashMode !== 'session-publish-exit' &&
+          crashMode !== 'task-create-exit' &&
+          crashMode !== 'catalog-published-exit',
         profile: 'managed-files-v1',
         content: 'accepted original\n',
         facts: 2,

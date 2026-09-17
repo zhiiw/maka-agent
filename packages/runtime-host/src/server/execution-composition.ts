@@ -225,6 +225,7 @@ import { startHostModelMetadataRefresh } from './model-metadata-refresh.js';
 import { HostRuntimeResourceCoordinator } from './runtime-resource-coordinator.js';
 import { SessionAdmissionGate } from './session-admission-gate.js';
 import { HostSessionCatalogCoordinator } from './session-catalog-coordinator.js';
+import { publishPreparedGitoxideManagedTaskInternal } from './gitoxide-managed-session-internal.js';
 import { HostWorkspaceResolver } from './workspace-resolver.js';
 import { HostSessionRetirementCoordinator } from './session-retirement-coordinator.js';
 import { HostStorageMaintenance } from './storage-maintenance.js';
@@ -2041,6 +2042,20 @@ export async function createExecutionRuntimeHostComposition(
       onCommittedMutation: registerConfigurationMutation,
     });
     const sessionCatalog = new HostSessionCatalogCoordinator({
+      ...(dependencies.managedFilesHelper
+        ? {
+            managedCreation: {
+              stores: stores.sessionStore,
+              publish: async (sessionId: string, requestFingerprint: string) => {
+                await publishPreparedGitoxideManagedTaskInternal(context.owner.lease, {
+                  ...dependencies.managedFilesHelper!,
+                  sessionId,
+                  requestFingerprint,
+                });
+              },
+            },
+          }
+        : {}),
       stores: stores.sessionStore,
       turnIndex: requireTranscriptReader(transcriptReader),
       runtimePolicy: runtimePolicyStores,

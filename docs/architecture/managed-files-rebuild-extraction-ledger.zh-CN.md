@@ -580,3 +580,34 @@ Storage/SessionStore 相邻套件 **106/106**；真实 helper/root-owner 创建�
 Windows 本地执行通过；Linux/macOS 调度同一 helper workflow 与新增 prepared persistence step，尚无本轮远程执行结论。不声称覆盖任意指令点断电或完整跨进程竞争矩阵。内存测试 adapter 明确拒绝 prepared API，恢复测试使用真实 SQLite owner。
 
 Desktop 正式入口仍关闭，不能把本次基础闭环描述为 Desktop managed task 已可用。没有新增自动恢复、扫描优化或第三种文件 checkpoint 模式。
+
+## 第三十检查点：catalog 授权创建 → prepared snapshot → Gitoxide publication
+
+四步产品接线中的**第 1 步**已接通服务端代码：`HostSessionCatalogCoordinator` 消费现有 Session admission gate、workspace resolver、connection/model 授权，先以原始请求指纹查 preparation，再按首次已解析快照发布 managed task。重试不重新选择 default model；仍重新验证固定模型当前是否启用、thinking level 是否允许，以及 workspace/project 是否仍匹配。
+
+### Owner 与身份
+
+- catalog owner 固定原始请求（进入异步操作前复制），复用 `session.create.v4` 的 workspace/model selector/name/labels/profile 身份。managed 默认权限明确规范为 `ask`，不用可变 runtime policy 默认值；实际创建固定 `direct/agent/default`，Plan、Swarm、Deep Research、plugin executor 和其他 permission 组合在写 claim 前拒绝。
+- SQLite preparation 固定解析后的 Session header。root-owned `publishPreparedGitoxideManagedTaskInternal` 只接受 session ID、请求指纹和内部 helper 能力，自己从同 root 的 preparation 读取 source/model/metadata；不接受上层再传一份可替换的已解析字段。
+- 原始请求指纹继续绑定 Git import intent 和 stable Session publication。standalone 内部创建仍使用原 descriptor 指纹，不假装两种调用身份可以互换。没有新 schema/协议 epoch；本次沿用 metadata 40。
+- Host production composition 仅在安装已验证的 helper 时提供该创建 port；无 helper 的普通 Host 继续明确拒绝 managed profile。查询能力仍是提示，创建和重开仍逐次验证真实 authority。
+
+### 事务、失败与回滚
+
+Session admission → 原请求查 preparation → workspace/model 授权 → prepared claim → root-owned import/baseline → stable publication → continuity refresh → catalog result。SQLite 与 Git 依旧不是同一事务。相同请求恢复原快照，不同请求 conflict；原模型撤权时拒绝而不改选新默认模型。已经发布的请求只刷新 canonical catalog，不再次 import。
+
+publication 或 refresh 的非预期失败保留原证据、返回 outcome unknown 并请求 Host drain，不执行 generic 创建或改写 mode。撤回本次 handler 接线只关闭新建路径，不删除 preparation/import/baseline/Session；既有 managed Session 仍需原恢复 owner。prepared claim 的显式取消/GC 仍未交付。
+
+### 验证与范围
+
+- real SQLite catalog 用例：首次 publication 中断，close/reopen 后 default model 改变，仍发布第一份模型；撤销第一份模型的 enabled 状态时拒绝，不能触达 publication；改变 name 的请求冲突；已发布重试不二次 import。模型/凭据端口使用确定性测试目录，不访问真实 provider。
+- 真实 child process：运行 catalog handler、root lease、Gitoxide helper、SQLite；分别在 prepared commit 后、Session publication 后直接退出，新进程重新经过 handler 完成或读取原 Session。accepted Read 返回原 source 内容，baseline facts 不重复。continuity 的调用在 fixture 中被观察，不把它描述成完整 Host/Electron UI 测试。
+- Windows 本机：创建恢复 **8/8、0 skip**，factory **4/4**，定向 catalog **2/2**，Host build、Biome、CI gate policy、diff check 通过。catalog 全套 **54 pass / 2 fail**，仍是两条 symlink fixture 的 EPERM，未改变权限或跳过。Linux/macOS 由同一 helper workflow 调度；尚未取得本轮远程结果。不承诺断电或任意 Git 指令点崩溃。
+
+### 接下来仅剩的三步 Desktop 最小验收
+
+2. Desktop 启动/复用支持 managed 的 Host：显式开发 helper 启动、能力要求与不可用提示；普通聊天不受影响。
+3. 加号菜单 managed 文件任务入口：创建、发送、已有任务重开及“内容位于内部 accepted tree”的说明。
+4. 真 Electron 创建 → Read/Write/Edit → kill Host → restart → 内容/transcript/唯一终态验证。
+
+本次不表示 Desktop 已出现按钮，不表示 Glob/Grep、自动续跑、非 Git importer 或正式安装包 helper 发布已经完成。

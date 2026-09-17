@@ -106,6 +106,64 @@ export function createGitoxideManagedTaskInternal(
   lease: StorageRootLease<'interactive', 'write'>,
   input: Omit<ManagedSessionCreateInput, 'repositoryPath'>,
 ): Promise<{ readonly created: boolean; readonly capability: GitoxideManagedSessionCapability }> {
+  return createBoundManagedTask(lease, input);
+}
+
+/** Consume a durable catalog preparation; callers cannot replace its resolved inputs. */
+export async function publishPreparedGitoxideManagedTaskInternal(
+  lease: StorageRootLease<'interactive', 'write'>,
+  input: Pick<
+    ManagedSessionCreateInput,
+    'sessionId' | 'invocationOwnerToken' | 'helperCapability' | 'abortSignal'
+  > & { readonly requestFingerprint: string },
+): Promise<void> {
+  input = { ...input };
+  if (!/^sha256:[0-9a-f]{64}$/.test(input.requestFingerprint))
+    throw new Error('Invalid managed creation request fingerprint');
+  const fingerprint = input.requestFingerprint as `sha256:${string}`;
+  await runWithStorageRootLease(lease, 'interactive', 'write', async () => {
+    const stores = await openInteractiveExecutionStoresForWrite(lease);
+    const prepared = await stores.sessionStore.readPreparedStableSessionCreate(
+      input.sessionId,
+      input.requestFingerprint,
+    );
+    if (prepared.kind !== 'prepared')
+      throw new Error('Managed publication requires a prepared creation');
+    const header = prepared.header;
+    if (
+      !header.cwd ||
+      !header.llmConnectionId ||
+      header.toolProfile !== 'managed-files-v1' ||
+      header.executorId ||
+      header.permissionMode !== 'ask' ||
+      header.toolMode !== 'direct' ||
+      header.collaborationMode !== 'agent' ||
+      header.orchestrationMode !== 'default'
+    )
+      throw new Error('Invalid prepared managed task binding');
+    await createBoundManagedTask(
+      lease,
+      {
+        ...input,
+        sourcePath: header.cwd,
+        connectionId: header.llmConnectionId,
+        connectionSlug: header.llmConnectionSlug,
+        model: header.model,
+        name: header.name,
+        ...(header.projectId == null ? {} : { projectId: header.projectId }),
+        ...(header.labels === undefined ? {} : { labels: header.labels }),
+        ...(header.thinkingLevel === undefined ? {} : { thinkingLevel: header.thinkingLevel }),
+      },
+      fingerprint,
+    );
+  });
+}
+
+function createBoundManagedTask(
+  lease: StorageRootLease<'interactive', 'write'>,
+  input: Omit<ManagedSessionCreateInput, 'repositoryPath'>,
+  catalogFingerprint?: `sha256:${string}`,
+): Promise<{ readonly created: boolean; readonly capability: GitoxideManagedSessionCapability }> {
   input = snapshotManagedCreateMetadata(input);
   const previous = creations.get(lease) ?? Promise.resolve();
   const pending = previous
@@ -115,15 +173,17 @@ export function createGitoxideManagedTaskInternal(
         input.abortSignal?.throwIfAborted();
         const repositoryPath = managedTaskRepositoryPath(root, input.sessionId);
         const request = { ...input, repositoryPath };
-        const { requestFingerprint, createInput } =
+        const { requestFingerprint: descriptorFingerprint, createInput } =
           describeGitoxideManagedSessionCreateInternal(request);
+        const requestFingerprint = catalogFingerprint ?? descriptorFingerprint;
         const stores = await openInteractiveExecutionStoresForWrite(lease);
         const probe = await stores.sessionStore.probeStableSessionCreate(
           input.sessionId,
           requestFingerprint,
         );
         if (probe.kind === 'conflict') throw new Error('Managed session creation conflict');
-        if (probe.kind === 'existing') return createGitoxideManagedSessionInternal(stores, request);
+        if (probe.kind === 'existing')
+          return publishManagedSession(stores, request, catalogFingerprint);
         const admissionOwnerToken = {};
         const admitted = await admitGitoxideRepositoryInternal({
           invocationOwnerToken: input.invocationOwnerToken,
@@ -169,7 +229,7 @@ export function createGitoxideManagedTaskInternal(
           acceptedRepositoryOwnerToken,
           acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
         });
-        return createGitoxideManagedSessionInternal(stores, request);
+        return publishManagedSession(stores, request, catalogFingerprint);
       }),
     );
   creations.set(lease, pending);
@@ -318,8 +378,18 @@ export async function createGitoxideManagedSessionInternal(
   stores: InteractiveExecutionStoresWriter,
   input: ManagedSessionCreateInput,
 ): Promise<{ readonly created: boolean; readonly capability: GitoxideManagedSessionCapability }> {
+  return publishManagedSession(stores, input);
+}
+
+async function publishManagedSession(
+  stores: InteractiveExecutionStoresWriter,
+  input: ManagedSessionCreateInput,
+  catalogFingerprint?: `sha256:${string}`,
+): Promise<{ readonly created: boolean; readonly capability: GitoxideManagedSessionCapability }> {
   input = snapshotManagedCreateMetadata(input);
-  const { createInput, requestFingerprint } = describeGitoxideManagedSessionCreateInternal(input);
+  const { createInput, requestFingerprint: descriptorFingerprint } =
+    describeGitoxideManagedSessionCreateInternal(input);
+  const requestFingerprint = catalogFingerprint ?? descriptorFingerprint;
   const probe = await stores.sessionStore.probeStableSessionCreate(
     input.sessionId,
     requestFingerprint,

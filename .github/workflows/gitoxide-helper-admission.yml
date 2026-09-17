@@ -45,6 +45,7 @@ on:
       - 'packages/core/src/session.ts'
       - 'packages/runtime-host/src/server/hosted-execution-tool-profile.ts'
       - 'packages/runtime-host/src/server/session-catalog-coordinator.ts'
+      - 'packages/runtime-host/src/server/workspace-resolver.ts'
       - 'packages/runtime-host/src/__tests__/hosted-execution-tool-profile.test.ts'
       - 'packages/runtime-host/src/__tests__/session-catalog-coordinator.test.ts'
       - 'packages/runtime/src/__tests__/ai-sdk-backend.test.ts'
@@ -107,6 +108,7 @@ on:
       - 'packages/core/src/session.ts'
       - 'packages/runtime-host/src/server/hosted-execution-tool-profile.ts'
       - 'packages/runtime-host/src/server/session-catalog-coordinator.ts'
+      - 'packages/runtime-host/src/server/workspace-resolver.ts'
       - 'packages/runtime-host/src/__tests__/hosted-execution-tool-profile.test.ts'
       - 'packages/runtime-host/src/__tests__/session-catalog-coordinator.test.ts'
       - 'packages/runtime/src/__tests__/ai-sdk-backend.test.ts'
@@ -239,7 +241,7 @@ jobs:
           packages/runtime-host/dist/__tests__/connect-or-spawn-env.test.js
       - name: Verify managed backend session admission
         run: >-
-          node --test --test-name-pattern="managed profile|managed files|forged managed session|ordinary session creation cannot mint|root backend preparation"
+          node --test --test-name-pattern="managed profile|managed files|managed catalog retries|forged managed session|ordinary session creation cannot mint|root backend preparation"
           packages/runtime-host/dist/__tests__/execution-model-composition.test.js
           packages/runtime-host/dist/__tests__/hosted-execution-tool-profile.test.js
           packages/runtime-host/dist/__tests__/session-catalog-coordinator.test.js
