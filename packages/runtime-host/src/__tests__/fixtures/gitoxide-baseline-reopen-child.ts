@@ -24,6 +24,10 @@ import { writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import { transformManagedMutation } from '@maka/runtime/managed-mutation-transform';
+import { ToolRuntime } from '@maka/runtime/tool-runtime';
+import { createExternalExecutionBoundary } from '@maka/core/sandbox-boundary';
+import type { SessionHeader } from '@maka/core/session';
+import { prepareGitoxideRuntimeMutationInternal } from '../../server/gitoxide-runtime-mutation-internal.js';
 import type { WorkspaceBaselineCommitResult } from '@maka/core/workspace-version-authority';
 import { WORKSPACE_AUTHORITY_SESSION_ID } from '@maka/core/workspace-version-authority';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
@@ -95,6 +99,7 @@ if (mode === 'read-settlement') {
   process.exit(0);
 }
 const settling =
+  mode?.startsWith('runtime-') ||
   mode === 'settle-false-rejection' ||
   mode === 'crash-after-edit-rejection' ||
   mode === 'settle-false-no-change' ||
@@ -154,6 +159,80 @@ try {
     path: 'hello.txt',
   });
   if (mode === 'crash-after-reopen') process.exit(80);
+  if (mode?.startsWith('runtime-')) {
+    let id = 0;
+    let published: unknown;
+    const runtime = new ToolRuntime({
+      sessionId: 'settlement-session',
+      runId: 'settlement-run',
+      invocationId: 'settlement-invocation',
+      turnId: 'settlement-turn',
+      header: { id: 'settlement-session', cwd: sourcePath, permissionMode: 'ask' } as SessionHeader,
+      connection: { slug: 'test', providerType: 'openai', defaultModel: 'test' },
+      modelId: 'test',
+      newId: () => `runtime-event-${++id}`,
+      now: () => ++id,
+      readExecutionBoundary: async () => createExternalExecutionBoundary(),
+      readPermissionMode: async () => 'ask',
+      getPermissionPauseTarget: () => null,
+      runtimeCommitSink: {
+        commitToolPrepared: (input) => stores.runtimeEventStore.commitToolPrepared(input),
+        commitToolOutcome: async () => {
+          throw new Error('Generic T2 must not run');
+        },
+      },
+      prepareManagedMutation: async (input) => {
+        const prepared = await prepareGitoxideRuntimeMutationInternal(stores, {
+          ...input,
+          workspaceKey: 'crash-session',
+          acceptedRepositoryOwnerToken,
+          acceptedRepositoryCapability: capability,
+        });
+        return {
+          ...prepared,
+          async commitOutcome(...args) {
+            const durable = await prepared.commitOutcome(...args);
+            // Real Runtime-built T2 committed; no result has been published yet.
+            if (mode.includes('crash')) process.exit(81);
+            return durable;
+          },
+        };
+      },
+    });
+    const settled = await runtime.settleToolCall({
+      tool: {
+        name: mode.endsWith('rejection') ? 'Edit' : 'Write',
+        description: 'managed mutation',
+        parameters: {},
+        impl() {
+          throw new Error('Checkout impl forbidden');
+        },
+      },
+      turnId: 'settlement-turn',
+      toolCallId: 'settlement-call',
+      input: mode.endsWith('rejection')
+        ? { path: 'hello.txt', old_string: 'missing snippet', new_string: 'replacement' }
+        : {
+            path: 'hello.txt',
+            content: mode.endsWith('noop') ? 'accepted original\n' : 'runtime result\n',
+          },
+      abortSignal: new AbortController().signal,
+      eventSink: {
+        push(event) {
+          if (event.type === 'tool_result') {
+            if (mode.includes('crash')) throw new Error('Result published before crash');
+            published = event.content;
+          }
+        },
+        async pushAndWaitUntilConsumed() {},
+      },
+    });
+    assert.ok(published);
+    writeSync(1, JSON.stringify({ published, result: settled.result }));
+    await stores.sessionStore.close?.();
+    await leaseOwner.close();
+    process.exit(0);
+  }
   if (mode !== 'reopen') {
     const candidateOwnerToken = {};
     const operationId = 'crash-candidate-operation';

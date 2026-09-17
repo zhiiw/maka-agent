@@ -320,3 +320,23 @@ Windows 本机：repository admission integration **19/19、0 skip**，Storage a
 验证：Host admission/settlement/reopen 集成 **21/21、0 skip**，Gitoxide CI policy **1/1**；Host build、Biome、diff check 通过。
 
 下一步：由 ToolRuntime 在 T1 前消费该 admission，冻结 managed/generic mode，并沿主线统一 modelProjection/commit-before-publish 路径结算。Desktop 开关仍不得先启用。
+
+## 第十三检查点：真实 ToolRuntime → Gitoxide/SQLite settlement
+
+本轮不搬回旧 ToolRuntime：在当前单权威 transcript 路径内，增加显式注入的 managed mutation preparation port 和内部 Host adapter。普通会话未注入该 port 时行为不变；尚未接 live Host session composition 或 Desktop。
+
+- **主要不变量/owner**：Runtime 持有原始参数、纯转换和 provider result；Host 只持有 repository/candidate/terminal 提交权限。Host 不接收 operation callback，不得替换 Runtime 的结果。结果由既有纯转换生成并冻结，不克隆任意工具实现返回的对象；使用冻结 profile 的 1 MiB result 上限（nested caller 上限更低时取较低值）。
+- **T1 前**：完成 execution boundary、permission mode、Host admission，校验参数 hash 与 canonical path，快照 mutation/base。实际执行与 T1 使用同一原始参数，Host 不能改写 Write content 或 Edit 字符串。完整 dispatch envelope 校验后，SQLite 原子写 T1/reservation；recovery mode 固定为 reconcile。
+- **T1 后**：不调用 checkout-backed `tool.impl`，直接从 accepted base 计算结果。Runtime 构建完整 function_response/modelProjection；Host 创建 candidate，再从 durable T1 重验内容并调用原有 successor/no-effect writer。返回的 durable event 必须与 Runtime 隔离保存的完整 envelope 精确相等，之后才发布 tool_result。无 StoredMessage 双写，无新 schema。
+- **终态**：changed success → successor/T2；no-op success → no_workspace_change/T2；明确的 Edit matcher 拒绝 → operation_failed_no_effect/T2。拒绝文本与 Host 重验使用同一脱敏/截断函数。三种 terminal 均由 SQLite 同事务释放 reservation。
+- **失败状态**：缺失/变造 outcome、owner throw、未知 transform/projection/publication 错误均 fail-stop，不走 generic T2 或 checkout compensation。若 T2 已提交而发布失败，接受事实仍然成功，不生成第二个失败结果。
+- **取消**：T1 前 abort 拒绝；T1 后允许这次无外部执行副作用的纯转换完成有界 helper/SQLite 结算，不把已经取消的 signal 传给 terminal writer。不是 Bash/网络副作用的取消合同，也不承诺即时停止。helper 启动/执行仍受既有 deadline 约束。
+- **回滚**：撤回 port 的产品接线不会删除已接受历史；含未决 managed T1 的任务不能改走 generic 执行。产品接线前仍保持内部能力，不开放 Desktop 按钮。
+
+验证由两层组成：Runtime boundary 覆盖 T1 绑定、owner-only T2、missing/changed/throw fail-stop、T1 前 boundary 失败和 T1 后取消；真实 child 使用 ToolRuntime、内部 Host adapter、Gitoxide helper 和 SQLite，覆盖 Write/no-op/Edit 拒绝的正常发布与 T2 后直接退出，新进程验证结果/terminal/reservation、accepted-ref 修复和源 checkout 不变。
+
+**平台矩阵**：Windows 本机执行上述真实进程测试；Linux/macOS 由三平台 Gitoxide workflow 调度相同文件，本轮未取得远程执行证据。仅证明已设置的进程退出边界，不证明断电、helper 内任意指令点退出或遗留 ref lock 自动回收。测试尚未启动完整 Runtime Host 服务或 Electron，因此不能称为 Desktop resume 验收。
+
+本轮验证：Runtime durable-boundary + Host repository/admission 集成 **55/55、0 skip**；CI workflow policy **1/1**；Runtime/Host build、Biome、diff check 通过。额外普通 settlement/SQLite/sandbox/纯转换/Edit matcher 回归 **66 pass / 1 fail**：失败是原有 sandbox fixture 创建 symlink 时 Windows `EPERM`，尚未进入被测逻辑；本轮不修改该 fixture，也不宣称完整平台测试全绿。
+
+下一步：live Host/session composition 每次从 accepted head reopen，接入同一代码世界的 Read/Glob/Grep；随后才开放加号菜单的显式 managed 文件任务入口，并补真实 Host/Electron kill/restart。当前不能宣称整个 coding task 已可恢复。

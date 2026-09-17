@@ -60,6 +60,84 @@ interface AdmittedHelper {
 let admittedHelperPromise: Promise<AdmittedHelper | undefined> | undefined;
 
 for (const mode of [
+  'runtime-crash-write',
+  'runtime-crash-noop',
+  'runtime-crash-rejection',
+  'runtime-live-write',
+  'runtime-live-noop',
+  'runtime-live-rejection',
+]) {
+  test(`Runtime mutation preserves its owner outcome across publication/reopen: ${mode}`, {
+    timeout: 30_000,
+  }, async (t) => {
+    if (!(await admittedHelper())) {
+      t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
+      return;
+    }
+    const source = await createRepository(t, 'sha1');
+    await writeFile(join(source, 'hello.txt'), 'accepted original\n');
+    git(source, ['add', '.']);
+    git(source, [
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.invalid',
+      'commit',
+      '-qm',
+      'base',
+    ]);
+    const stateRoot = await mkdtemp(join(tmpdir(), 'maka-runtime-mutation-'));
+    const root = await resolveStorageRoot({ path: stateRoot, kind: 'interactive' });
+    const child = fileURLToPath(
+      new URL('./fixtures/gitoxide-baseline-reopen-child.js', import.meta.url),
+    );
+    const run = (mode: string) => {
+      const result = spawnSync(process.execPath, [child, mode, stateRoot, source], {
+        encoding: 'utf8',
+        timeout: 20_000,
+        windowsHide: true,
+      });
+      assert.ifError(result.error);
+      return result;
+    };
+    try {
+      const first = run(mode);
+      assert.equal(first.status, mode.includes('crash') ? 81 : 0, first.stderr);
+      const state = run('read-settlement');
+      assert.equal(state.status, 0, state.stderr);
+      const durable = JSON.parse(state.stdout);
+      assert.equal(durable.outcomes.length, 1);
+      assert.equal(durable.successors.length, mode.endsWith('write') ? 1 : 0);
+      assert.deepEqual(durable.unsettled, []);
+      assert.ok(durable.outcomes[0].content.modelProjection);
+      assert.equal(
+        durable.outcomes[0].content.isError,
+        mode.endsWith('rejection') ? true : undefined,
+      );
+      if (!mode.endsWith('write'))
+        assert.equal(
+          durable.outcomes[0].actions.managedMutationTerminal.terminalKind,
+          mode.endsWith('noop') ? 'no_workspace_change' : 'operation_failed_no_effect',
+        );
+      if (mode.includes('live'))
+        assert.deepEqual(JSON.parse(first.stdout).published, durable.outcomes[0].content.result);
+      const reopened = run('reopen');
+      assert.equal(reopened.status, 0, reopened.stderr);
+      assert.equal(
+        JSON.parse(reopened.stdout).content,
+        mode.endsWith('write') ? 'runtime result\n' : 'accepted original\n',
+      );
+      assert.deepEqual(JSON.parse(run('read-settlement').stdout), durable);
+      assert.equal(await readFile(join(source, 'hello.txt'), 'utf8'), 'accepted original\n');
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+      await rm(join(resolveRootControlNamespace(), root.rootId), { recursive: true, force: true });
+      await rm(join(resolveRootOwnershipNamespace(), root.rootId + '.lock'), { force: true });
+    }
+  });
+}
+
+for (const mode of [
   'settle-wrong-content',
   'settle-false-no-change',
   'crash-after-settlement',

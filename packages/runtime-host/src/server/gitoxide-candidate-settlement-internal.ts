@@ -13,6 +13,7 @@
 
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { formatSyntheticToolErrorText } from '@maka/runtime/tool-runtime';
 import { encodeCanonicalRuntimeEvent } from '@maka/core/canonical-runtime-event';
 import { decodeCanonicalToolResultContent } from '@maka/core/tool-result-record-schema';
 import type { WorkspaceSuccessorAuthorityInput } from '@maka/core/workspace-version-authority';
@@ -79,7 +80,10 @@ export async function verifyGitoxideRejectedOperationInternal(
   if (
     response?.kind !== 'function_response' ||
     response.isError !== true ||
-    !isDeepStrictEqual(response.result, { kind: 'text', text: failure.message })
+    !isDeepStrictEqual(response.result, {
+      kind: 'text',
+      text: formatSyntheticToolErrorText(failure),
+    })
   )
     throw new Error('Rejected outcome does not match the durable operation result');
   return {

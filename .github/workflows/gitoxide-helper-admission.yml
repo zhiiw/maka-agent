@@ -28,8 +28,10 @@ on:
       - 'packages/runtime-host/src/server/gitoxide-workspace-baseline-owner-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-candidate-settlement-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-mutation-admission-internal.ts'
+      - 'packages/runtime-host/src/server/gitoxide-runtime-mutation-internal.ts'
+      - 'packages/runtime/src/tool-runtime.ts'
+      - 'packages/runtime/src/__tests__/tool-runtime-durable-boundary.test.ts'
       - 'packages/runtime/src/managed-mutation-transform.ts'
-      - 'packages/runtime/src/edit-replace.ts'
       - 'packages/runtime/src/edit-replace.ts'
       - 'packages/runtime/src/unified-diff.ts'
       - 'packages/runtime/package.json'
@@ -49,8 +51,10 @@ on:
       - 'packages/runtime-host/src/server/gitoxide-workspace-baseline-owner-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-candidate-settlement-internal.ts'
       - 'packages/runtime-host/src/server/gitoxide-mutation-admission-internal.ts'
+      - 'packages/runtime-host/src/server/gitoxide-runtime-mutation-internal.ts'
+      - 'packages/runtime/src/tool-runtime.ts'
+      - 'packages/runtime/src/__tests__/tool-runtime-durable-boundary.test.ts'
       - 'packages/runtime/src/managed-mutation-transform.ts'
-      - 'packages/runtime/src/edit-replace.ts'
       - 'packages/runtime/src/edit-replace.ts'
       - 'packages/runtime/src/unified-diff.ts'
       - 'packages/runtime/package.json'
@@ -139,6 +143,7 @@ jobs:
           MAKA_GITOXIDE_HELPER_PATH: ${{ github.workspace }}/native/gitoxide-helper/target/debug/maka-gitoxide-helper${{ runner.os == 'Windows' && '.exe' || '' }}
         run: >-
           node --test
+          packages/runtime/dist/__tests__/tool-runtime-durable-boundary.test.js
           packages/runtime-host/dist/__tests__/gitoxide-helper-artifact-authority-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-helper-invocation-internal.test.js
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
