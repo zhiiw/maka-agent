@@ -20,6 +20,8 @@ name: Gitoxide helper admission
 on:
   pull_request:
     paths:
+      - 'packages/runtime-host/src/__tests__/handshake-compatibility.test.ts'
+      - 'packages/runtime-host/src/control/endpoint.ts'
       - 'packages/runtime-host/src/client/connect-or-spawn.ts'
       - 'packages/runtime-host/src/client/index.ts'
       - 'packages/runtime-host/src/__tests__/connect-or-spawn-env.test.ts'
@@ -71,6 +73,8 @@ on:
     branches:
       - main
     paths:
+      - 'packages/runtime-host/src/__tests__/handshake-compatibility.test.ts'
+      - 'packages/runtime-host/src/control/endpoint.ts'
       - 'packages/runtime-host/src/client/connect-or-spawn.ts'
       - 'packages/runtime-host/src/client/index.ts'
       - 'packages/runtime-host/src/__tests__/connect-or-spawn-env.test.ts'
@@ -207,6 +211,9 @@ jobs:
           packages/runtime-host/dist/__tests__/execution-candidate-main.test.js
           packages/runtime-host/dist/__tests__/managed-files-dev-bootstrap.test.js
       - name: Verify managed backend identity admission
+        run: >-
+          node --test packages/runtime-host/dist/__tests__/handshake-compatibility.test.js
+      - name: Verify managed execution availability
         run: >-
           node --test --test-name-pattern="execution capability query|elects one owner, serves status|serves bootstrap operations during recovery|managed resume requirement"
           packages/runtime-host/dist/__tests__/protocol.test.js

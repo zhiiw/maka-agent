@@ -513,3 +513,17 @@ Windows：Host build、协议/dispatcher/connection/peer stream/factory **125/12
 Windows 本机：Host build、定向能力/生命周期测试 **4/4**、输入/env 测试 **6/6**、CI gate policy **1/1**、Biome、diff check 通过。另执行历史 handshake compatibility suite，**2 pass / 4 fail**（`read_eof`），本轮未定位，不能声称连接全套通过。Linux/macOS gate 已加入新增选择路径和用例，尚无本轮远程证据。没有新增 crash/断电承诺。
 
 创建链审计确认 `HostSessionCatalogCoordinator` 已拥有 Session admission、workspace usage、模型/connection 解析、runtime policy 默认值和 stable-create 指纹。下一步应从这一 owner 接专用 managed 创建，而不是暴露 `createGitoxideManagedTaskInternal` 为裸 IPC。现有普通 `session.create` 对 managed profile 的拒绝必须保留，直到上述授权、Git baseline acceptance 与 Session publication 在同一交付中接通。
+
+## 第二十六检查点：关闭 Windows 握手测试的维护连接误判
+
+上一检查点的四项 `read_eof` 已定位：`prepareAfterListen()` 在 Windows 通过真实 PowerShell `Get-Item`/ACL 设置访问 named pipe；测试 peer 在这一阶段已把每条 socket 送入 Client hello parser。该维护连接不发送 hello，关闭时错误地完成/拒绝了测试唯一的 server promise。四个失败用例均运行端点准备；绕过端点准备的 root-mismatch 用例不失败。
+
+fixture 现在区分 endpoint preparation 与握手 admission：准备期间仅排空 socket，不登记 Client 身份；ACL 完成后才接受协议连接。保留真实 ACL 设置，不改生产 listener、timeout、兼容策略或 resume 行为。断言真实 Windows 准备连接被观察到，并且每个需要连接的用例仅有一个真正握手，不能靠忽略所有 EOF 让测试通过。
+
+Windows 原失败场景修复后 **6/6**，再次与输入/env 套件合跑 **12/12**；真实 kernel 的能力拒绝/复用/恢复阶段测试 **3/3**。新回归进入三平台 helper gate；Linux/macOS 本轮无执行证据。这关闭的是测试编排缺口，不代表新增 Windows mutation crash 或 Desktop resume 保证。
+
+### 下一段创建接线的已知约束
+
+不能直接把 catalog 的 `session.create.v4` 请求指纹与底层 `maka-managed-session-create-v1` 指纹串接：前者绑定原始 workspace/model selector、labels 和 policy-default 语义；后者绑定解析后 cwd/connection/model 以及固定 `ask/direct/agent/default` Session 字段。两者目前不是同一个创建请求。尤其 default model 或 policy 改变后，重试不得静默创建另一份 baseline/Session。
+
+接线顺序确定为：catalog admission 固定请求 → workspace/model/policy 授权并冻结完整 Session 输入 → 将唯一请求身份绑定 import intent、baseline 和 stable Session publication → continuity refresh → 返回 catalog item。首次失败保留原 attempt 身份；响应丢失后的重试必须先查原身份，不能先重新解析可变默认配置。现阶段继续关闭普通 `session.create` 的 managed profile 入口，不通过删除拒绝分支来宣称产品完成。
