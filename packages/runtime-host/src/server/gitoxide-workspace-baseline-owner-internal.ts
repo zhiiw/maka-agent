@@ -19,13 +19,19 @@
 
 import { createHash } from 'node:crypto';
 import {
+  verifyGitoxideCandidateSettlementInternal,
+  type GitoxideCandidateSettlementInput,
+} from './gitoxide-candidate-settlement-internal.js';
+import {
   openExecutionWorkspaceAuthority,
   type InteractiveExecutionStoresWriter,
+  type ExecutionWorkspaceAuthority,
 } from '@maka/storage/execution-stores';
 import {
   WORKSPACE_MATERIALIZATION_SEMANTICS_V1,
   type WorkspaceBaselineCommitResult,
   type WorkspaceBaselineAuthorityInput,
+  type WorkspaceSuccessorAuthorityInput,
 } from '@maka/core/workspace-version-authority';
 import {
   requireGitoxideImportedRepositoryInternal,
@@ -52,6 +58,7 @@ export function createGitoxideWorkspaceBaselineOwnerInternal(
 
 function createOwner(stores: InteractiveExecutionStoresWriter) {
   const proofs = new WeakMap<object, WorkspaceBaselineAuthorityInput>();
+  const successors = new WeakMap<object, WorkspaceSuccessorAuthorityInput>();
   const unavailable = (): never => {
     throw new Error('Gitoxide mutation settlement is not connected');
   };
@@ -61,10 +68,29 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
       if (!value) throw new Error('Unrecognized Gitoxide baseline proof');
       return value;
     },
-    successor: unavailable,
+    successor(proof: object) {
+      const value = successors.get(proof);
+      if (!value) throw new Error('Unrecognized Gitoxide successor proof');
+      return value;
+    },
     noEffect: unavailable,
   });
   return Object.freeze({
+    async acceptPublishedCandidate(
+      input: GitoxideCandidateSettlementInput,
+    ): ReturnType<ExecutionWorkspaceAuthority['commitSuccessor']> {
+      const verified = await verifyGitoxideCandidateSettlementInternal(
+        stores,
+        () => openExecutionWorkspaceAuthority(stores, verifiers),
+        input,
+      );
+      const proof = Object.freeze({});
+      successors.set(proof, verified.successor);
+      return verified.authority.commitSuccessor({
+        candidateOutcome: proof,
+        toolOutcome: verified.toolOutcome,
+      });
+    },
     async reopen(input: {
       workspaceKey: string;
       repositoryPath: string;

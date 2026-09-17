@@ -18,9 +18,14 @@
  */
 
 import { createHash } from 'node:crypto';
+import assert from 'node:assert/strict';
 import { readFile, realpath } from 'node:fs/promises';
 import { writeSync } from 'node:fs';
 import { join } from 'node:path';
+import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
+import { transformManagedMutation } from '@maka/runtime/managed-mutation-transform';
+import type { WorkspaceBaselineCommitResult } from '@maka/core/workspace-version-authority';
+import { WORKSPACE_AUTHORITY_SESSION_ID } from '@maka/core/workspace-version-authority';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
 import { createGitoxideWorkspaceBaselineOwnerInternal } from '../../server/gitoxide-workspace-baseline-owner-internal.js';
@@ -64,7 +69,37 @@ const stores = await openInteractiveExecutionStoresForWrite(leaseOwner.lease);
 const owner = createGitoxideWorkspaceBaselineOwnerInternal(stores);
 const acceptedRepositoryOwnerToken = {};
 const repositoryPath = join(rootPath, 'repository.git');
-if (mode === 'crash-after-baseline') {
+if (mode === 'read-settlement') {
+  try {
+    const events = await stores.runtimeEventStore.readImmutableRuntimeEvents(
+      'settlement-session',
+      'settlement-run',
+    );
+    const workspace = await stores.runtimeEventStore.readSessionRuntimeEvents(
+      WORKSPACE_AUTHORITY_SESSION_ID,
+    );
+    writeSync(
+      1,
+      JSON.stringify({
+        outcomes: events.filter((event) => event.content?.kind === 'function_response'),
+        successors: workspace.filter(
+          (event) => event.actions?.workspaceFact?.kind === 'maka.workspace.version_accepted',
+        ),
+        unsettled: await stores.runtimeEventStore.listUnsettledToolOperations('settlement-session'),
+      }),
+    );
+  } finally {
+    await stores.sessionStore.close?.();
+    await leaseOwner.close();
+  }
+  process.exit(0);
+}
+const settling =
+  mode === 'settle-candidate' ||
+  mode === 'settle-wrong-content' ||
+  mode === 'crash-after-settlement';
+let baseline: WorkspaceBaselineCommitResult | undefined;
+if (mode === 'crash-after-baseline' || settling) {
   const admissionOwnerToken = {};
   const admitted = await admitGitoxideRepositoryInternal({
     invocationOwnerToken,
@@ -79,15 +114,18 @@ if (mode === 'crash-after-baseline') {
     acceptedRepositoryOwnerToken,
     destinationRepositoryPath: repositoryPath,
   });
-  await owner.acceptImport({
+  baseline = await owner.acceptImport({
     workspaceKey: 'crash-session',
     acceptedRepositoryOwnerToken,
     acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
   });
   // Deliberately bypass store/lease cleanup. Next process must reacquire and revalidate.
-  process.exit(77);
+  if (mode === 'crash-after-baseline') process.exit(77);
 }
-if (!['reopen', 'crash-after-candidate', 'retry-candidate', 'conflicting-candidate'].includes(mode))
+if (
+  !settling &&
+  !['reopen', 'crash-after-candidate', 'retry-candidate', 'conflicting-candidate'].includes(mode)
+)
   throw new Error('Unknown child mode');
 try {
   const capability = await owner.reopen({
@@ -104,13 +142,84 @@ try {
   });
   if (mode !== 'reopen') {
     const candidateOwnerToken = {};
+    const operationId = 'crash-candidate-operation';
+    const args = { path: 'hello.txt', content: 'candidate result\n' };
+    const identity = {
+      sessionId: 'settlement-session',
+      runId: 'settlement-run',
+      invocationId: 'settlement-invocation',
+      turnId: 'settlement-turn',
+    };
+    const callId = 'settlement-call';
+    if (settling) {
+      if (!baseline) throw new Error('Missing fixture baseline');
+      const head = baseline.head;
+      await stores.runtimeEventStore.commitToolPrepared({
+        operationId,
+        journalEventId: `${operationId}_prepared`,
+        providerToolCallId: callId,
+        toolName: 'Write',
+        canonicalArgsHash: canonicalToolArgsHash('Write', args),
+        recoveryMode: 'reconcile',
+        committedAt: 1,
+        runtimeEvent: {
+          id: 'settlement-call-event',
+          ...identity,
+          ts: 1,
+          partial: false,
+          role: 'model',
+          author: 'agent',
+          content: { kind: 'function_call', id: callId, name: 'Write', args },
+          refs: { operationId, toolCallId: callId },
+        },
+        dispatchRuntimeEvent: {
+          id: 'settlement-dispatch-event',
+          ...identity,
+          ts: 1,
+          partial: false,
+          role: 'system',
+          author: 'system',
+          refs: { operationId, toolCallId: callId },
+          actions: {
+            toolDispatch: {
+              protocol: 't1_after_preflight_v1',
+              operationId,
+              providerToolCallId: callId,
+              toolName: 'Write',
+              canonicalArgsHash: canonicalToolArgsHash('Write', args),
+              recoveryMode: 'reconcile',
+              managedMutation: {
+                protocol: 'managed_mutation_v2',
+                repositoryId: head.repositoryId,
+                workspaceId: head.workspaceId,
+                workspaceEpochId: head.workspaceEpochId,
+                workspaceInstanceId: head.workspaceEpochId.replace('epoch_', 'instance_'),
+                objectFormat: 'sha1',
+                baseWorkspaceVersionId: head.workspaceVersionId,
+                baseAcceptedEventId: head.acceptedEventId,
+                baseHeadRevision: head.revision,
+                baseCommitOid: head.commitOid,
+                baseTreeOid: head.treeOid,
+                expectedPath: args.path,
+                pathPolicyVersion: 3,
+                executionProfileDigest:
+                  'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825',
+              },
+            },
+          },
+        },
+      });
+    }
     const candidate = await createGitoxideCandidateInternal({
       acceptedRepositoryOwnerToken,
       acceptedRepositoryCapability: capability,
       candidateOwnerToken,
-      operationId: 'crash-candidate-operation',
+      operationId,
       path: 'hello.txt',
-      content: mode === 'conflicting-candidate' ? 'conflicting result\n' : 'candidate result\n',
+      content:
+        mode === 'conflicting-candidate' || mode === 'settle-wrong-content'
+          ? 'conflicting result\n'
+          : 'candidate result\n',
     });
     const proof = requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal({
       acceptedRepositoryOwnerToken,
@@ -118,8 +227,92 @@ try {
       candidateOwnerToken,
       candidateOutcomeCapability: candidate.candidateOutcomeCapability,
     });
-    writeSync(1, JSON.stringify({ proof, acceptedContent: file.content }));
-    if (mode === 'crash-after-candidate') process.exit(78);
+    if (settling) {
+      const toolOutcome = {
+        operationId,
+        journalEventId: `${operationId}_outcome`,
+        committedAt: 2,
+        runtimeEvent: {
+          id: 'settlement-outcome-event',
+          ...identity,
+          ts: 2,
+          partial: false,
+          role: 'tool' as const,
+          author: 'tool' as const,
+          refs: { operationId, toolCallId: callId },
+          content: {
+            kind: 'function_response' as const,
+            id: callId,
+            name: 'Write',
+            result: transformManagedMutation({
+              toolName: 'Write',
+              canonicalPath: args.path,
+              baseContent: file.content,
+              args,
+            }).providerResult,
+          },
+        },
+      };
+      const accept = owner.acceptPublishedCandidate;
+      const input = {
+        workspaceKey: 'crash-session',
+        acceptedRepositoryOwnerToken,
+        acceptedRepositoryCapability: capability,
+        candidateOwnerToken,
+        candidateOutcomeCapability: candidate.candidateOutcomeCapability,
+        toolOutcome,
+      };
+      if (mode === 'settle-wrong-content') {
+        await assert.rejects(
+          accept(input),
+          /Candidate content does not match the durable operation/,
+        );
+        writeSync(
+          1,
+          JSON.stringify({
+            rejected: true,
+            unsettled: await stores.runtimeEventStore.listUnsettledToolOperations(
+              identity.sessionId,
+            ),
+          }),
+        );
+      } else {
+        await assert.rejects(accept({ ...input, candidateOwnerToken: {} }));
+        await assert.rejects(
+          accept({
+            ...input,
+            toolOutcome: {
+              ...toolOutcome,
+              runtimeEvent: {
+                ...toolOutcome.runtimeEvent,
+                content: { ...toolOutcome.runtimeEvent.content, result: { fake: 'success' } },
+              },
+            },
+          }),
+          /outcome does not match/,
+        );
+        const accepted = await accept(input);
+        if (mode === 'crash-after-settlement') {
+          writeSync(1, JSON.stringify({ accepted, proof }));
+          process.exit(79);
+        }
+        const retry = await accept(input);
+        writeSync(
+          1,
+          JSON.stringify({
+            accepted,
+            retry,
+            proof,
+            unsettled: await stores.runtimeEventStore.listUnsettledToolOperations(
+              identity.sessionId,
+            ),
+          }),
+        );
+      }
+    } else {
+      writeSync(1, JSON.stringify({ proof, acceptedContent: file.content }));
+      if (mode === 'crash-after-candidate') process.exit(78);
+    }
   } else {
     writeSync(
       1,

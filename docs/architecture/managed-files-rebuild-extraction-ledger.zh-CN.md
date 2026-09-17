@@ -205,3 +205,32 @@ workflow 选择范围已纳入新 Host owner、child fixture 与 Storage 变更�
 本机 Windows：Runtime Host build 通过；真实 helper admission suite **11/11、0 skip**，Biome 与 diff check 通过。Linux/macOS：既有三平台 workflow 已包含此 suite/fixture，当前尚未取得本轮远程执行证据。
 
 下一步接线仍需一次闭合：从 durable T1 reservation 取得 operation/base/path/profile，绑定 Runtime-owned 纯转换结果与 helper candidate proof，构造 successor 并原子提交 T2；no-change/failed-no-effect 必须使用各自终态。之后独立完成 accepted-ref reconciliation，再开放 Desktop。不能提前把裸 candidate capability 当作足够的 terminal authority。
+
+## 第七检查点：已发布 candidate 的成功 settlement
+
+本轮实际接通 Host proof owner → execution-group authority → SQLite successor/T2，不再仅是 candidate 测试。新 `acceptPublishedCandidate` 不接受 successor descriptor；与 baseline 共用每个 execution group 唯一的 verifier owner。
+
+主要不变量：**只有与 durable T1 的操作及精确内容相符的 candidate，才能和成功 T2 一起被接受。**
+
+- candidate 必须为真实 helper 发行且绑定正确 repository/owner 的 published capability；no-change capability 不能进入此入口。
+- Host 从 canonical epoch 和有界 RuntimeEvent 读取（16,384 条 / 32 MiB）取得唯一 T1、原始 Write/Edit 参数及 base/path/profile；repository、helper artifact profile、policy、workspace instance 均须匹配。读取超限明确拒绝，不以较弱证据 fallback。
+- 从 accepted Git tree 读取原文件，用现有纯转换重算结果；同时比较 result content SHA-256 与 Git blob OID，阻止相同路径不同内容进入 successor。工具结果以 Runtime 的 durable ToolResultContent 表示进行精确比较，不信任 caller 提供的成功描述。
+- outcome 在第一次 await 前经 canonical RuntimeEvent 编码断开可变引用；successor 字段由验证过的事实生成，私有 proof 仅在当前 owner 的 WeakMap 内传给 SQLite。调用者不能自行提供 commit/tree/version/profile 替换它们。
+- **原子边界**仍是已有 SQLite transaction：T2、successor fact、version/head projection 和 reservation 释放全成或全败。head CAS、T1 reservation 和 exact retry 由 Storage 再验证；本轮没有新增 schema 或第二事实源。
+- **失败状态**：证明缺失、内容不符、错误 owner、结果不符、Store 关闭或事务失败都拒绝；不补 generic T2、不删除 reservation。**回滚**：停止组合该内部入口，保留已写 immutable facts，不降级/改写历史。
+
+### 证据及未完成范围
+
+真实 helper + execution group integration 从未接通入口的 RED 开始，补实现后 GREEN。覆盖成功接受、精确重试、伪造 owner/结果拒绝、错误内容拒绝，以及 SQLite 接受后真实子进程 `exit(79)` 不清理再由新进程读取。新进程确认唯一 T2/successor 和无 active operation；accepted Git ref 仍保持原 base，reopen 对该 stale ref 明确拒绝。这不是“ref 已恢复”的证据。
+
+本轮尚未接 ToolRuntime 的 managed execution/adoption、Desktop 或完整 Host 服务。测试中的 T1/T2 由 fixture 通过真实存储 API 构造，不宣称模型/工具生产闭环。
+
+当前入口仅能证明 **已有 UTF-8 文件的成功变更**。新建路径不能把 `tree_file_unavailable` 当作“文件不存在”：该错误也可能表示缺对象，需先增加 helper 的显式 absence proof。no-op 与 failed-no-effect verifier 仍关闭。没有支持 Delete、Bash/npm，没有放宽权限，也没有重新执行文件系统副作用。
+
+| 平台 | 本轮证据 |
+| --- | --- |
+| Windows | 本机真实 helper/进程退出 integration 14/14；Storage authority + pure transform 46/46；Host build、Biome、Gitoxide workflow policy 通过 |
+| Linux | 已有 workflow 执行相同 suite，新 settlement/transform 变更也触发 gate；尚无本轮远程结果 |
+| macOS | 同 Linux，不以本机 Windows 测试替代平台验证 |
+
+下一步：显式 absent-file proof 与 no-effect terminal；accepted-ref reconciliation；随后连接 Runtime 的单次 operation/result authority 并补完整 Host crash test。完成这些之前不开放 Desktop managed 文件执行。
