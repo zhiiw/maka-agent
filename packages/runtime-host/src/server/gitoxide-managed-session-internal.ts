@@ -16,9 +16,11 @@ import { lstat } from 'node:fs/promises';
 import { isThinkingLevel, type ThinkingLevel } from '@maka/core/model-thinking';
 import { isSessionStartModeLabel } from '@maka/core/session-start-mode';
 import {
+  decodeSessionCreateInput,
   SESSION_CATALOG_LABEL_MAX_ITEMS,
   SESSION_CATALOG_LABEL_MAX_BYTES,
 } from '../protocol/session-catalog.js';
+import { requireEntityId } from '../protocol/codec.js';
 import type { MakaTool, ToolRuntimeInput } from '@maka/runtime/tool-runtime';
 import type { RuntimeCommitSink } from '@maka/runtime/runtime-commit-sink';
 import { readPage, readParameters, resolveReadInput } from '@maka/runtime/read-page';
@@ -183,8 +185,40 @@ export type ManagedSessionCreateInput = Omit<
 };
 
 function snapshotManagedCreateMetadata<
-  T extends Pick<ManagedSessionCreateInput, 'projectId' | 'labels' | 'thinkingLevel'>,
+  T extends Pick<
+    ManagedSessionCreateInput,
+    | 'sessionId'
+    | 'sourcePath'
+    | 'connectionId'
+    | 'connectionSlug'
+    | 'model'
+    | 'name'
+    | 'projectId'
+    | 'labels'
+    | 'thinkingLevel'
+  >,
 >(input: T): T {
+  // Internal publication must remain readable through the public catalog. Reuse
+  // its wire vocabulary before queueing/import rather than maintaining wider limits.
+  try {
+    decodeSessionCreateInput({
+      sessionId: input.sessionId,
+      workspace: { kind: 'host_path', path: input.sourcePath },
+      modelTarget: {
+        kind: 'explicit',
+        connectionId: input.connectionId,
+        connectionSlug: input.connectionSlug,
+        model: input.model,
+      },
+      name: input.name,
+      ...(input.labels === undefined ? {} : { labels: input.labels }),
+      ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
+      toolProfile: 'managed-files-v1',
+    });
+    if (input.projectId !== undefined) requireEntityId(input.projectId, 'Workspace project id');
+  } catch (cause) {
+    throw new Error('Invalid managed session catalog input', { cause });
+  }
   if (
     input.projectId !== undefined &&
     (typeof input.projectId !== 'string' ||

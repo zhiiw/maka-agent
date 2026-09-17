@@ -540,3 +540,16 @@ managed 创建 owner 新增显式 `projectId`、`labels` 和 `thinkingLevel`，�
 当前仍固定 `ask/direct/agent/default`，没有悄悄支持 Plan/Swarm/plugin 或通用 policy defaults。下一步需要在 catalog admission 中固定解析结果与原始 request identity 的关联，补默认模型/策略变化时的 durable retry，再接正式 handler；本检查点只是接线前的数据保真与身份保护，不是 Desktop 创建完成。
 
 验证：Windows 本机 Host build、真实 helper/child-process 创建恢复 **5/5、0 skip**、CI gate policy **1/1**、Biome 和 diff check 通过。Linux/macOS 继续由同一 helper gate 调度，本轮未取得远程结果。仅覆盖命名进程退出边界，不扩大为任意指令点或断电保证。
+
+## 第二十八检查点：创建与 catalog 读取共用字段合同
+
+接线审计发现内部 descriptor 对 name/model/connection slug 一律允许 4096 bytes，项目与会话身份也没有使用 catalog entity-ID 语法。这会让内部成功创建的元数据超出公共 catalog 协议的读取能力。真实 helper 子进程测试先证明 321-byte 中文名称未被拒绝，再收紧创建边界。
+
+- **Owner**：catalog 协议继续拥有字段语法和字节上限；managed 创建直接调用同一 decoder，不复制一套限额。内部额外的非空、NUL、保留标签检查继续生效。解码只验证形状，不授予 project/model 访问权限。
+- **失败与原子边界**：排队前同步验证；不合格输入不进入 import/baseline/Session publication。Session、connection、project ID 使用公共 entity-ID 规则。name 为 320 bytes、model 为 512 bytes、connection slug 为 256 bytes；测试同时覆盖上限合法值和超限拒绝。
+- **重试/回滚**：合法输入的 descriptor 和请求哈希不改变，不增加数据库 schema 或迁移。新边界不删除旧数据；已有任务仍走 session-ID reopen，不以重新创建来修复既有元数据。
+- **平台证据**：使用原三平台真实 helper/进程退出恢复测试；Windows 本地验证，Linux/macOS 仅声明 CI 调度，不冒充本地实测。将 decoder 与 workspace 协议源码加入 helper gate 触发清单，避免公共规则变更漏跑创建测试。
+
+本轮不是创建 handler 接通：默认 selector 到已解析输入的 durable 绑定尚未完成。下一步先确定复用现有 stable-create claim 的方式及 crash/retry 合同，再接 catalog admission、continuity refresh 和 Desktop 显式入口；不能通过去掉 managed-profile 拒绝分支跳过这条边界。
+
+验证：Host build、创建恢复 5/5（0 skip）、CI gate policy 1/1、Biome、diff check 通过。相邻 catalog coordinator 全套为 53 pass / 2 fail：两个失败均在 Windows fixture 创建 symlink 时返回 EPERM，尚未进入业务断言；不修改权限、不跳过用例，也不宣称该全套通过。

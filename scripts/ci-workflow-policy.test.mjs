@@ -895,6 +895,8 @@ test('the Gitoxide gate owns repository admission changes', () => {
     'packages/runtime-host/src/server/execution-composition-factory.ts',
     'packages/runtime-host/src/server/execution-candidate.ts',
     'packages/runtime-host/src/protocol/session-catalog.ts',
+    'packages/runtime-host/src/protocol/codec.ts',
+    'packages/runtime-host/src/protocol/workspace.ts',
     'packages/runtime-host/src/__tests__/handshake-compatibility.test.ts',
     'packages/runtime-host/src/control/endpoint.ts',
     'packages/runtime-host/src/client/connect-or-spawn.ts',

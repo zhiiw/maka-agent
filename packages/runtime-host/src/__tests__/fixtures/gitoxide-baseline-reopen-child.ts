@@ -153,6 +153,12 @@ if (mode.startsWith('task-')) {
     await assert.rejects(createGitoxideManagedTaskInternal({ ...leaseOwner.lease }, request));
     for (const change of [
       { projectId: '' },
+      { name: '界'.repeat(107) },
+      { model: 'm'.repeat(513) },
+      { connectionSlug: 's'.repeat(257) },
+      { connectionId: 'connection/invalid' },
+      { projectId: 'project/invalid' },
+      { sessionId: 'session/invalid' },
       { labels: ['duplicate', 'duplicate'] },
       { labels: Array.from({ length: 33 }, (_, index) => `label-${index}`) },
     ]) {
@@ -161,6 +167,21 @@ if (mode.startsWith('task-')) {
         /Invalid managed session/,
       );
     }
+    const boundary = describeGitoxideManagedSessionCreateInternal({
+      ...request,
+      repositoryPath,
+      name: `${'界'.repeat(106)}ab`,
+      model: 'm'.repeat(512),
+      connectionSlug: 's'.repeat(256),
+      connectionId: 'c'.repeat(128),
+      projectId: 'p'.repeat(128),
+      sessionId: 'i'.repeat(128),
+    });
+    assert.equal(Buffer.byteLength(boundary.createInput.name), 320);
+    assert.equal(boundary.createInput.model.length, 512);
+    assert.equal(boundary.createInput.llmConnectionSlug.length, 256);
+    if (mode === 'task-create-exit')
+      await assert.rejects(stores.sessionStore.readHeader(request.sessionId));
     const cancelled = new AbortController();
     cancelled.abort(new Error('cancel task creation'));
     await assert.rejects(
