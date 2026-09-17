@@ -59,6 +59,77 @@ interface AdmittedHelper {
 
 let admittedHelperPromise: Promise<AdmittedHelper | undefined> | undefined;
 
+test('revalidates a published candidate after process exit without advancing accepted truth', {
+  timeout: 60_000,
+}, async (t) => {
+  if (!(await admittedHelper())) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
+    return;
+  }
+  const source = await createRepository(t, 'sha1');
+  await writeFile(join(source, 'hello.txt'), 'accepted original\n');
+  git(source, ['add', 'hello.txt']);
+  git(source, [
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=test@example.invalid',
+    'commit',
+    '-qm',
+    'fixture',
+  ]);
+  const stateRoot = await mkdtemp(join(tmpdir(), 'maka-gitoxide-candidate-crash-'));
+  const root = await resolveStorageRoot({ path: stateRoot, kind: 'interactive' });
+  const child = fileURLToPath(
+    new URL('./fixtures/gitoxide-baseline-reopen-child.js', import.meta.url),
+  );
+  const run = (mode: string) => {
+    const result = spawnSync(process.execPath, [child, mode, stateRoot, source], {
+      encoding: 'utf8',
+      timeout: 15_000,
+      windowsHide: true,
+    });
+    assert.ifError(result.error);
+    return result;
+  };
+  try {
+    const baseline = run('crash-after-baseline');
+    assert.equal(baseline.status, 77, baseline.stderr);
+    const initial = run('reopen');
+    assert.equal(initial.status, 0, initial.stderr);
+    const crashed = run('crash-after-candidate');
+    assert.equal(crashed.status, 78, crashed.stderr);
+    const first = JSON.parse(crashed.stdout);
+    assert.equal(first.proof.disposition, 'published');
+    assert.equal(first.acceptedContent, 'accepted original\n');
+    assert.notEqual(first.proof.candidateCommitOid, first.proof.baseCommitOid);
+    const retried = run('retry-candidate');
+    assert.equal(retried.status, 0, retried.stderr);
+    assert.deepEqual(JSON.parse(retried.stdout), first);
+    const conflict = run('conflicting-candidate');
+    assert.equal(conflict.status, 1);
+    assert.match(conflict.stderr, /candidate_request_conflict/u);
+    const after = run('reopen');
+    assert.equal(after.status, 0, after.stderr);
+    assert.deepEqual(JSON.parse(after.stdout), JSON.parse(initial.stdout));
+    assert.equal(
+      gitBare(join(stateRoot, 'repository.git'), [
+        'show',
+        `${first.proof.candidateCommitOid}:hello.txt`,
+      ]),
+      'candidate result',
+    );
+    assert.equal(
+      gitBare(join(stateRoot, 'repository.git'), ['rev-parse', first.proof.candidateRef]),
+      first.proof.candidateCommitOid,
+    );
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(join(resolveRootControlNamespace(), root.rootId), { recursive: true, force: true });
+    await rm(join(resolveRootOwnershipNamespace(), root.rootId + '.lock'), { force: true });
+  }
+});
+
 test('reopens durable baseline in a fresh process after the importing owner exits without cleanup', {
   timeout: 45_000,
 }, async (t) => {

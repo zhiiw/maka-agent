@@ -33,6 +33,8 @@ import {
   admitGitoxideRepositoryInternal,
   importAdmittedGitoxideRepositoryInternal,
   readGitoxideTreeFileInternal,
+  createGitoxideCandidateInternal,
+  requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal,
 } from '../../server/gitoxide-repository-admission-authority-internal.js';
 
 const [mode, rootPath, sourcePath] = process.argv.slice(2);
@@ -85,7 +87,8 @@ if (mode === 'crash-after-baseline') {
   // Deliberately bypass store/lease cleanup. Next process must reacquire and revalidate.
   process.exit(77);
 }
-if (mode !== 'reopen') throw new Error('Unknown child mode');
+if (!['reopen', 'crash-after-candidate', 'retry-candidate', 'conflicting-candidate'].includes(mode))
+  throw new Error('Unknown child mode');
 try {
   const capability = await owner.reopen({
     workspaceKey: 'crash-session',
@@ -99,14 +102,34 @@ try {
     acceptedRepositoryCapability: capability,
     path: 'hello.txt',
   });
-  writeSync(
-    1,
-    JSON.stringify({
-      content: file.content,
-      commit: file.acceptedCommitOid,
-      tree: file.acceptedTreeOid,
-    }),
-  );
+  if (mode !== 'reopen') {
+    const candidateOwnerToken = {};
+    const candidate = await createGitoxideCandidateInternal({
+      acceptedRepositoryOwnerToken,
+      acceptedRepositoryCapability: capability,
+      candidateOwnerToken,
+      operationId: 'crash-candidate-operation',
+      path: 'hello.txt',
+      content: mode === 'conflicting-candidate' ? 'conflicting result\n' : 'candidate result\n',
+    });
+    const proof = requireGitoxideCandidateOutcomeForAcceptedRepositoryInternal({
+      acceptedRepositoryOwnerToken,
+      acceptedRepositoryCapability: capability,
+      candidateOwnerToken,
+      candidateOutcomeCapability: candidate.candidateOutcomeCapability,
+    });
+    writeSync(1, JSON.stringify({ proof, acceptedContent: file.content }));
+    if (mode === 'crash-after-candidate') process.exit(78);
+  } else {
+    writeSync(
+      1,
+      JSON.stringify({
+        content: file.content,
+        commit: file.acceptedCommitOid,
+        tree: file.acceptedTreeOid,
+      }),
+    );
+  }
 } finally {
   await stores.sessionStore.close?.();
   await leaseOwner.close();

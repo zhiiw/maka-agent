@@ -187,3 +187,21 @@ acceptImport 只消费 owner-bound repository capability。Gitoxide admission �
 workflow 选择范围已纳入新 Host owner、child fixture 与 Storage 变更，避免只改接线时漏跑恢复测试。下一步仍是 candidate → Runtime terminal → SQLite acceptance → accepted-ref reconciliation；Desktop 加号入口尚未启用。
 
 本轮验证记录：Rust 14 个 unit + 55 个 integration 全通过；三组 Host helper 定向测试 27 通过、5 个既有 Windows 条件跳过，新跨进程 reopen 用例实际通过；Storage provider/persistence 定向测试 93/93；Gitoxide workflow policy 定向测试 1/1；Storage、Runtime Host build 与改动 TypeScript 的 Biome check 通过。完整 workflow-policy suite 另有 Windows Bash 路径失败（`shared comparison drives every diff gate on refreshed merges, pushes and dispatches`），不将该 suite 宣称为全绿，也不在本次修改无关脚本。
+
+## 第六检查点：candidate 发布后退出的恢复前置证据
+
+在连接 terminal writer 前，新增真实进程测试证明 candidate 与 accepted truth 没有混淆：
+
+1. 进程 A import 并提交 SQLite baseline，直接退出，不执行关闭清理。
+2. 进程 B 经 SQLite identity reopen，调用真实 helper 发布 operation-bound candidate，输出 owner 验证后的证明，再以 78 退出，不执行关闭清理。
+3. 进程 C 重新获得 root ownership 和 repository capability，用相同 operation/path/content 重验 candidate；新进程发行的证明与原证明完全一致。
+4. 同一 operation 改为另一内容时明确拒绝 `candidate_request_conflict`；candidate ref 不被替换。
+5. 再次从 SQLite reopen 的 accepted commit/tree/content 与最初完全一致；独立 Git fixture oracle 读取 candidate 内容，确认它包含新内容、但尚不是 accepted truth。
+
+**Owner 与原子边界**：Gitoxide owner 负责 immutable candidate/ref 及 exact-request retry；SQLite 仍独占 accepted truth。两者不是一个原子事务，本测试没有越权推进 accepted ref。**失败与回滚**：冲突拒绝并保留 candidate，不删除 accepted 数据；撤回这组测试不改变生产行为。
+
+这是测试性检查点，复用已有 helper 协议，不增加 production API、schema 或第二份 receipt。重试的是 immutable candidate construction/verification，不是重新执行 Write/Edit。尚未提交 managed T1/reservation，没有运行 Runtime settlement，不能据此声称完整 mutation crash recovery 已完成，也不覆盖 helper 在写对象/ref 内部被 kill 或断电。
+
+本机 Windows：Runtime Host build 通过；真实 helper admission suite **11/11、0 skip**，Biome 与 diff check 通过。Linux/macOS：既有三平台 workflow 已包含此 suite/fixture，当前尚未取得本轮远程执行证据。
+
+下一步接线仍需一次闭合：从 durable T1 reservation 取得 operation/base/path/profile，绑定 Runtime-owned 纯转换结果与 helper candidate proof，构造 successor 并原子提交 T2；no-change/failed-no-effect 必须使用各自终态。之后独立完成 accepted-ref reconciliation，再开放 Desktop。不能提前把裸 candidate capability 当作足够的 terminal authority。
