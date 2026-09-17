@@ -1356,6 +1356,46 @@ fn refuses_to_read_a_tree_file_from_an_unavailable_commit_identity() {
 }
 
 #[test]
+fn proves_path_absence_without_treating_missing_objects_as_absence() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let head = fixture.git_output(["rev-parse", "HEAD"]);
+    let tree = fixture.git_output(["rev-parse", "HEAD^{tree}"]);
+    let request = serde_json::json!({
+        "protocolVersion": 1, "operation": "read_tree_file",
+        "repositoryPath": fixture.root, "acceptedCommitOid": head,
+        "path": "new/nested.txt", "managedTreePolicyVersion": 3,
+        "allowMissing": true,
+    });
+    let output = invoke_request(request.clone());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        response,
+        serde_json::json!({
+            "protocolVersion": 1, "kind": "tree_file_absent", "objectFormat": "sha1",
+            "acceptedCommitOid": head, "acceptedTreeOid": tree,
+            "path": "new/nested.txt", "managedTreePolicyVersion": 3,
+        })
+    );
+    let mut strict = request.clone();
+    strict.as_object_mut().unwrap().remove("allowMissing");
+    assert_helper_error(&invoke_request(strict), "tree_file_unavailable");
+    fs::remove_file(
+        fixture
+            .root
+            .join(".git/objects")
+            .join(&tree[..2])
+            .join(&tree[2..]),
+    )
+    .unwrap();
+    assert_helper_error(&invoke_request(request), "tree_file_unavailable");
+}
+
+#[test]
 fn imports_maka_attributes_under_managed_tree_policy_v3() {
     let fixture = RepositoryFixture::sha1_with_commit();
     fs::write(
@@ -1398,6 +1438,29 @@ fn imports_maka_attributes_under_managed_tree_policy_v3() {
     assert_eq!(response["sourceTreeOid"], source_tree);
     assert_eq!(response["baselineTreeOid"], source_tree);
     assert_eq!(response["managedTreePolicyVersion"], 3);
+}
+
+#[test]
+fn absence_lookup_rejects_file_parents_and_missing_target_blobs() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let head = fixture.git_output(["rev-parse", "HEAD"]);
+    let request = serde_json::json!({
+        "protocolVersion": 1, "operation": "read_tree_file", "repositoryPath": fixture.root,
+        "acceptedCommitOid": head, "path": "hello.txt/child", "managedTreePolicyVersion": 3, "allowMissing": true,
+    });
+    assert_helper_error(&invoke_request(request.clone()), "tree_file_invalid");
+    let blob = fixture.git_output(["rev-parse", "HEAD:hello.txt"]);
+    fs::remove_file(
+        fixture
+            .root
+            .join(".git/objects")
+            .join(&blob[..2])
+            .join(&blob[2..]),
+    )
+    .unwrap();
+    let mut missing_blob = request;
+    missing_blob["path"] = serde_json::json!("hello.txt");
+    assert_helper_error(&invoke_request(missing_blob), "tree_file_unavailable");
 }
 
 #[test]

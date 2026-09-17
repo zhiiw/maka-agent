@@ -95,6 +95,8 @@ if (mode === 'read-settlement') {
   process.exit(0);
 }
 const settling =
+  mode === 'crash-after-new-file' ||
+  mode === 'settle-new-file' ||
   mode === 'settle-candidate' ||
   mode === 'settle-wrong-content' ||
   mode === 'crash-after-settlement';
@@ -143,7 +145,8 @@ try {
   if (mode !== 'reopen') {
     const candidateOwnerToken = {};
     const operationId = 'crash-candidate-operation';
-    const args = { path: 'hello.txt', content: 'candidate result\n' };
+    const newFile = mode === 'settle-new-file' || mode === 'crash-after-new-file';
+    const args = { path: newFile ? 'new/nested.txt' : 'hello.txt', content: 'candidate result\n' };
     const identity = {
       sessionId: 'settlement-session',
       runId: 'settlement-run',
@@ -215,7 +218,7 @@ try {
       acceptedRepositoryCapability: capability,
       candidateOwnerToken,
       operationId,
-      path: 'hello.txt',
+      path: args.path,
       content:
         mode === 'conflicting-candidate' || mode === 'settle-wrong-content'
           ? 'conflicting result\n'
@@ -247,7 +250,7 @@ try {
             result: transformManagedMutation({
               toolName: 'Write',
               canonicalPath: args.path,
-              baseContent: file.content,
+              baseContent: newFile ? null : file.content,
               args,
             }).providerResult,
           },
@@ -292,7 +295,7 @@ try {
           /outcome does not match/,
         );
         const accepted = await accept(input);
-        if (mode === 'crash-after-settlement') {
+        if (mode === 'crash-after-settlement' || mode === 'crash-after-new-file') {
           writeSync(1, JSON.stringify({ accepted, proof }));
           process.exit(79);
         }

@@ -103,9 +103,13 @@ export async function verifyGitoxideCandidateSettlementInternal(
     mutation.expectedPath !== candidate.path
   )
     throw new Error('Candidate does not match durable mutation admission');
-  // Missing paths are not inferred from a generic helper read error. Until the
-  // helper has explicit absence evidence, creation of new files fails closed here.
-  const base = await readGitoxideTreeFileInternal({ ...input, path: candidate.path });
+  // Only a verified tree_file_absent response permits a null base. Missing
+  // objects, malformed trees and read errors remain failures, never absence.
+  const base = await readGitoxideTreeFileInternal({
+    ...input,
+    path: candidate.path,
+    allowMissing: true,
+  });
   if (
     base.acceptedCommitOid !== mutation.baseCommitOid ||
     base.acceptedTreeOid !== mutation.baseTreeOid
@@ -114,7 +118,7 @@ export async function verifyGitoxideCandidateSettlementInternal(
   const result = transformManagedMutation({
     toolName: call.name,
     canonicalPath: candidate.path,
-    baseContent: base.content,
+    baseContent: base.kind === 'tree_file_read' ? base.content : null,
     args: call.args,
   });
   const contentBytes = Buffer.from(result.content, 'utf8');

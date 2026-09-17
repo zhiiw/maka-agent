@@ -59,7 +59,7 @@ interface AdmittedHelper {
 
 let admittedHelperPromise: Promise<AdmittedHelper | undefined> | undefined;
 
-for (const mode of ['settle-wrong-content', 'crash-after-settlement']) {
+for (const mode of ['settle-wrong-content', 'crash-after-settlement', 'crash-after-new-file']) {
   test(`candidate settlement preserves durable truth: ${mode}`, { timeout: 30_000 }, async (t) => {
     if (!(await admittedHelper())) {
       t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
@@ -93,7 +93,7 @@ for (const mode of ['settle-wrong-content', 'crash-after-settlement']) {
     };
     try {
       const first = run(mode);
-      assert.equal(first.status, mode === 'crash-after-settlement' ? 79 : 0, first.stderr);
+      assert.equal(first.status, mode === 'settle-wrong-content' ? 0 : 79, first.stderr);
       const reopened = run('read-settlement');
       assert.equal(reopened.status, 0, reopened.stderr);
       const state = JSON.parse(reopened.stdout);
@@ -111,6 +111,17 @@ for (const mode of ['settle-wrong-content', 'crash-after-settlement']) {
           committed.proof.candidateCommitOid,
         );
         assert.equal(state.outcomes[0].content.isError, undefined);
+        const expectedPath = mode === 'crash-after-new-file' ? 'new/nested.txt' : 'hello.txt';
+        assert.deepEqual(state.successors[0].actions.workspaceFact.payload.changedPaths, [
+          expectedPath,
+        ]);
+        assert.equal(
+          gitBare(join(stateRoot, 'repository.git'), [
+            'show',
+            `${committed.proof.candidateCommitOid}:${expectedPath}`,
+          ]),
+          'candidate result',
+        );
         assert.equal(
           gitBare(join(stateRoot, 'repository.git'), ['rev-parse', 'refs/maka/accepted']),
           committed.proof.baseCommitOid,
@@ -129,54 +140,63 @@ for (const mode of ['settle-wrong-content', 'crash-after-settlement']) {
   });
 }
 
-test('accepts a real candidate with T2 exactly once through the execution group', {
-  timeout: 30_000,
-}, async (t) => {
-  if (!(await admittedHelper())) {
-    t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
-    return;
-  }
-  const source = await createRepository(t, 'sha1');
-  await writeFile(join(source, 'hello.txt'), 'accepted original\n');
-  git(source, ['add', 'hello.txt']);
-  git(source, [
-    '-c',
-    'user.name=Maka Test',
-    '-c',
-    'user.email=test@example.invalid',
-    'commit',
-    '-qm',
-    'fixture',
-  ]);
-  const stateRoot = await mkdtemp(join(tmpdir(), 'maka-gitoxide-settlement-'));
-  const root = await resolveStorageRoot({ path: stateRoot, kind: 'interactive' });
-  try {
-    const child = fileURLToPath(
-      new URL('./fixtures/gitoxide-baseline-reopen-child.js', import.meta.url),
-    );
-    const result = spawnSync(process.execPath, [child, 'settle-candidate', stateRoot, source], {
-      encoding: 'utf8',
-      timeout: 20_000,
-      windowsHide: true,
-    });
-    assert.ifError(result.error);
-    assert.equal(result.status, 0, result.stderr);
-    const outcome = JSON.parse(result.stdout);
-    assert.equal(outcome.accepted.created, true);
-    assert.equal(outcome.retry.created, false);
-    assert.deepEqual(outcome.accepted.committedSuccessor, outcome.retry.committedSuccessor);
-    assert.equal(outcome.accepted.committedSuccessor.commitOid, outcome.proof.candidateCommitOid);
-    assert.deepEqual(outcome.unsettled, []);
-    assert.equal(
-      gitBare(join(stateRoot, 'repository.git'), ['rev-parse', 'refs/maka/accepted']),
-      outcome.proof.baseCommitOid,
-    );
-  } finally {
-    await rm(stateRoot, { recursive: true, force: true });
-    await rm(join(resolveRootControlNamespace(), root.rootId), { recursive: true, force: true });
-    await rm(join(resolveRootOwnershipNamespace(), root.rootId + '.lock'), { force: true });
-  }
-});
+for (const mode of ['settle-candidate', 'settle-new-file']) {
+  test(`accepts a real candidate with T2 exactly once through the execution group: ${mode}`, {
+    timeout: 30_000,
+  }, async (t) => {
+    if (!(await admittedHelper())) {
+      t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
+      return;
+    }
+    const source = await createRepository(t, 'sha1');
+    await writeFile(join(source, 'hello.txt'), 'accepted original\n');
+    git(source, ['add', 'hello.txt']);
+    git(source, [
+      '-c',
+      'user.name=Maka Test',
+      '-c',
+      'user.email=test@example.invalid',
+      'commit',
+      '-qm',
+      'fixture',
+    ]);
+    const stateRoot = await mkdtemp(join(tmpdir(), 'maka-gitoxide-settlement-'));
+    const root = await resolveStorageRoot({ path: stateRoot, kind: 'interactive' });
+    try {
+      const child = fileURLToPath(
+        new URL('./fixtures/gitoxide-baseline-reopen-child.js', import.meta.url),
+      );
+      const result = spawnSync(process.execPath, [child, mode, stateRoot, source], {
+        encoding: 'utf8',
+        timeout: 20_000,
+        windowsHide: true,
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, result.stderr);
+      const outcome = JSON.parse(result.stdout);
+      assert.equal(outcome.accepted.created, true);
+      assert.equal(outcome.retry.created, false);
+      assert.deepEqual(outcome.accepted.committedSuccessor, outcome.retry.committedSuccessor);
+      assert.equal(outcome.accepted.committedSuccessor.commitOid, outcome.proof.candidateCommitOid);
+      assert.deepEqual(outcome.unsettled, []);
+      assert.equal(
+        gitBare(join(stateRoot, 'repository.git'), [
+          'show',
+          `${outcome.proof.candidateCommitOid}:${outcome.proof.path}`,
+        ]),
+        'candidate result',
+      );
+      assert.equal(
+        gitBare(join(stateRoot, 'repository.git'), ['rev-parse', 'refs/maka/accepted']),
+        outcome.proof.baseCommitOid,
+      );
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+      await rm(join(resolveRootControlNamespace(), root.rootId), { recursive: true, force: true });
+      await rm(join(resolveRootOwnershipNamespace(), root.rootId + '.lock'), { force: true });
+    }
+  });
+}
 
 test('revalidates a published candidate after process exit without advancing accepted truth', {
   timeout: 60_000,

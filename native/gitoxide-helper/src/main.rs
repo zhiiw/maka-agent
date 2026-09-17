@@ -199,6 +199,8 @@ enum Request {
         accepted_commit_oid: String,
         path: String,
         managed_tree_policy_version: u8,
+        #[serde(default)]
+        allow_missing: bool,
     },
 }
 
@@ -279,6 +281,15 @@ enum Response<'a> {
         actual_base_commit_oid: String,
         accepted_ref: String,
         candidate_ref: String,
+        managed_tree_policy_version: u8,
+    },
+    #[serde(rename_all = "camelCase")]
+    TreeFileAbsent {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        path: String,
         managed_tree_policy_version: u8,
     },
     #[serde(rename_all = "camelCase")]
@@ -389,6 +400,7 @@ fn run() -> Result<ExitCode, &'static str> {
             accepted_commit_oid,
             path,
             managed_tree_policy_version,
+            allow_missing,
         } => {
             assert_protocol_version(protocol_version)?;
             read_tree_file(
@@ -396,6 +408,7 @@ fn run() -> Result<ExitCode, &'static str> {
                 accepted_commit_oid,
                 path,
                 managed_tree_policy_version,
+                allow_missing,
             )
         }
     }
@@ -1564,6 +1577,7 @@ fn read_tree_file(
     accepted_commit_oid: String,
     path: String,
     managed_tree_policy_version: u8,
+    allow_missing: bool,
 ) -> Result<ExitCode, &'static str> {
     if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
         return Err("unsupported_managed_tree_policy");
@@ -1590,18 +1604,33 @@ fn read_tree_file(
         )?
         .try_into_tree()
         .map_err(|_| "tree_file_invalid")?;
-        let entry = tree
-            .iter()
-            .find_map(|entry| match entry {
-                Ok(entry) if entry.filename() == component.as_bytes() => Some(Ok(entry)),
-                Ok(_) => None,
-                Err(_) => Some(Err("tree_file_lookup_failed")),
-            })
-            .ok_or("tree_file_unavailable")??;
+        // Complete the verified tree scan before proving a negative lookup.
+        // Missing/corrupt objects and malformed entries are never absence.
+        let mut found = None;
+        for entry in tree.iter() {
+            let entry = entry.map_err(|_| "tree_file_lookup_failed")?;
+            if entry.filename() == component.as_bytes() {
+                found = Some((entry.mode().kind(), entry.object_id()));
+            }
+        }
+        let Some((kind, oid)) = found else {
+            if !allow_missing {
+                return Err("tree_file_unavailable");
+            }
+            write_response(&Response::TreeFileAbsent {
+                protocol_version: PROTOCOL_VERSION,
+                object_format: "sha1",
+                accepted_commit_oid: accepted_commit.to_string(),
+                accepted_tree_oid: accepted_tree.to_string(),
+                path,
+                managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+            });
+            return Ok(ExitCode::SUCCESS);
+        };
         if index + 1 == components.len() {
-            final_entry = Some((entry.mode().kind(), entry.object_id()));
-        } else if entry.mode().kind() == gix::objs::tree::EntryKind::Tree {
-            tree_oid = entry.object_id();
+            final_entry = Some((kind, oid));
+        } else if kind == gix::objs::tree::EntryKind::Tree {
+            tree_oid = oid;
         } else {
             return Err("tree_file_invalid");
         }

@@ -234,3 +234,17 @@ workflow 选择范围已纳入新 Host owner、child fixture 与 Storage 变更�
 | macOS | 同 Linux，不以本机 Windows 测试替代平台验证 |
 
 下一步：显式 absent-file proof 与 no-effect terminal；accepted-ref reconciliation；随后连接 Runtime 的单次 operation/result authority 并补完整 Host crash test。完成这些之前不开放 Desktop managed 文件执行。
+
+## 第八检查点：新文件的明确 absence proof
+
+第七检查点的新文件限制现已补齐：`read_tree_file` 增加显式、可选的 `allowMissing: true` 请求。默认 Read 合同不变；只有 opt-in 请求才允许得到 `tree_file_absent` 成功响应，绑定 protocol、policy、accepted commit/tree 和 canonical path。它不包含伪造的空文件内容或 blob OID。
+
+- **Owner**：Rust helper 验证 commit 与每层 tree 对象哈希，完整解析当前 tree 后，才能声明缺少对应 entry；Host 严格验证 response keys 及 request identity，repository capability owner 再核对 accepted tree。
+- 缺失 tree、缺失 blob、解析失败、父路径实际是普通文件均仍为错误，不转换为 absence。原有 strict Read 对不存在路径继续报错。
+- settlement 只把明确的 absence proof 转为纯转换的 `baseContent: null`；Write 可据此新建多级路径，Edit 的缺失目标仍由纯转换拒绝。不扩大文件系统写权限，不读取用户 checkout。
+- **原子性**：absence lookup 完全只读；成功变更仍沿已有 candidate → SQLite successor/T2/reservation transaction。没有新数据库表、receipt 或协议版本迁移。
+- **失败/回滚**：旧 helper 不认识新请求字段时会拒绝，没有 fallback；缺对象或结果不符时保留 T1 reservation，不发布成功。撤回本次接线会停止新文件接受，不删除既有 accepted facts。
+
+真实 Rust 测试先 RED（`invalid_request`）再 GREEN，涵盖明确 absence、strict Read、缺 tree、缺 blob 和文件型父路径。真实 Host owner fixture 覆盖新文件 candidate/原子接受/精确重试，以及成功提交后 `exit(79)`、新进程检查唯一 T2/successor/无 unsettled operation；独立 Git oracle 核对新路径内容。仍没有启动完整 Host 服务或 Desktop，也未完成 stale accepted-ref 的修复。
+
+本机 Windows 验证：Rust **14 unit + 57 integration = 71/71**；Node helper invocation + repository admission **29 pass / 6 skip / 0 fail**，新文件/崩溃用例实际执行。6 个 skip 为 POSIX fake-helper fixture（含新 absence response correlation），不是恢复成功证据。Linux/macOS 使用现有三平台 gate，尚无本轮远程结果。下一步为 no-effect terminal 与 accepted-ref reconciliation。

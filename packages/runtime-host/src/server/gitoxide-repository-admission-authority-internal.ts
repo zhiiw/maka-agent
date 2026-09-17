@@ -34,6 +34,7 @@ import {
   type GitoxideCandidatePublishedV1,
   type GitoxideSourceImportObservationV1,
   type GitoxideTreeFileReadV1,
+  type GitoxideTreeFileAbsentV1,
   type GitoxideRepositoryRejectionV1,
 } from './gitoxide-helper-invocation-internal.js';
 
@@ -367,17 +368,28 @@ export async function createGitoxideCandidateInternal(input: {
   return Object.freeze({ ...result, candidateOutcomeCapability });
 }
 
-export async function readGitoxideTreeFileInternal(input: {
+interface AcceptedTreeFileReadInput {
   readonly acceptedRepositoryOwnerToken: object;
   readonly acceptedRepositoryCapability: GitoxideAcceptedRepositoryCapability;
   readonly path: string;
   readonly abortSignal?: AbortSignal;
-}): Promise<GitoxideTreeFileReadV1> {
+}
+
+export function readGitoxideTreeFileInternal(
+  input: AcceptedTreeFileReadInput & { readonly allowMissing: true },
+): Promise<GitoxideTreeFileReadV1 | GitoxideTreeFileAbsentV1>;
+export function readGitoxideTreeFileInternal(
+  input: AcceptedTreeFileReadInput,
+): Promise<GitoxideTreeFileReadV1>;
+export async function readGitoxideTreeFileInternal(
+  original: AcceptedTreeFileReadInput & { readonly allowMissing?: boolean },
+): Promise<GitoxideTreeFileReadV1 | GitoxideTreeFileAbsentV1> {
+  const input = { ...original };
   const managed = requireAcceptedRepositoryRecord(
     input.acceptedRepositoryOwnerToken,
     input.acceptedRepositoryCapability,
   );
-  const result = await readTreeFileWithGitoxideHelperInternal({
+  const request = {
     invocationOwnerToken: managed.invocationOwnerToken,
     capability: managed.helperCapability,
     repositoryPath: managed.repositoryPath,
@@ -385,7 +397,11 @@ export async function readGitoxideTreeFileInternal(input: {
     path: input.path,
     managedTreePolicyVersion: managed.managedTreePolicyVersion,
     abortSignal: input.abortSignal,
-  });
+  };
+  const result =
+    input.allowMissing === true
+      ? await readTreeFileWithGitoxideHelperInternal({ ...request, allowMissing: true })
+      : await readTreeFileWithGitoxideHelperInternal(request);
   if (
     result.acceptedCommitOid !== managed.acceptedCommitOid ||
     result.acceptedTreeOid !== managed.acceptedTreeOid

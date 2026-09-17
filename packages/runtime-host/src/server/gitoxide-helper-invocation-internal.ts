@@ -228,6 +228,16 @@ export interface GitoxideTreeFileReadV1 {
   readonly managedTreePolicyVersion: 3;
 }
 
+export interface GitoxideTreeFileAbsentV1 {
+  readonly kind: 'tree_file_absent';
+  readonly protocolVersion: 1;
+  readonly objectFormat: 'sha1';
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly path: string;
+  readonly managedTreePolicyVersion: 3;
+}
+
 export type GitoxideHelperInvocationErrorCode =
   | 'gitoxide_helper_invocation_invalid'
   | 'gitoxide_helper_invocation_spawn_failed'
@@ -628,7 +638,7 @@ export async function reopenRepositoryWithGitoxideHelperInternal(input: {
   }
 }
 
-export async function readTreeFileWithGitoxideHelperInternal(input: {
+interface TreeFileReadInput {
   readonly invocationOwnerToken: object;
   readonly capability: GitoxideHelperInvocationCapability;
   readonly repositoryPath: string;
@@ -636,7 +646,18 @@ export async function readTreeFileWithGitoxideHelperInternal(input: {
   readonly path: string;
   readonly managedTreePolicyVersion: 3;
   readonly abortSignal?: AbortSignal;
-}): Promise<GitoxideTreeFileReadV1> {
+}
+
+export function readTreeFileWithGitoxideHelperInternal(
+  input: TreeFileReadInput & { readonly allowMissing: true },
+): Promise<GitoxideTreeFileReadV1 | GitoxideTreeFileAbsentV1>;
+export function readTreeFileWithGitoxideHelperInternal(
+  input: TreeFileReadInput,
+): Promise<GitoxideTreeFileReadV1>;
+export async function readTreeFileWithGitoxideHelperInternal(
+  original: TreeFileReadInput & { readonly allowMissing?: boolean },
+): Promise<GitoxideTreeFileReadV1 | GitoxideTreeFileAbsentV1> {
+  const input = { ...original };
   const deadlineAt =
     performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.acceptedTreeReadMs;
   if (!isBoundedPathTransport(input.path)) {
@@ -647,6 +668,7 @@ export async function readTreeFileWithGitoxideHelperInternal(input: {
     JSON.stringify({
       protocolVersion: prepared.artifact.protocolVersion,
       operation: 'read_tree_file',
+      ...(input.allowMissing === true ? { allowMissing: true } : {}),
       repositoryPath: prepared.repositoryPath,
       acceptedCommitOid: input.acceptedCommitOid,
       path: input.path,
@@ -1130,9 +1152,20 @@ function decodeTreeFileOutcome(
     readonly acceptedCommitOid: string;
     readonly path: string;
     readonly managedTreePolicyVersion: 3;
+    readonly allowMissing?: boolean;
   },
-): GitoxideTreeFileReadV1 {
+): GitoxideTreeFileReadV1 | GitoxideTreeFileAbsentV1 {
   const value = parseHelperOutcome(outcome);
+  if (
+    outcome.exitCode === 0 &&
+    expected.allowMissing === true &&
+    isTreeFileAbsent(value) &&
+    value.acceptedCommitOid === expected.acceptedCommitOid &&
+    value.path === expected.path &&
+    value.managedTreePolicyVersion === expected.managedTreePolicyVersion
+  ) {
+    return Object.freeze(value);
+  }
   if (
     outcome.exitCode === 0 &&
     isTreeFileRead(value) &&
@@ -1225,6 +1258,28 @@ function isTreeFileRead(value: unknown): value is GitoxideTreeFileReadV1 {
     isNonNegativeSafeInteger(value.bytesRead) &&
     value.bytesRead <= MAX_TREE_FILE_BYTES &&
     Buffer.byteLength(value.content, 'utf8') === value.bytesRead &&
+    value.managedTreePolicyVersion === 3
+  );
+}
+
+function isTreeFileAbsent(value: unknown): value is GitoxideTreeFileAbsentV1 {
+  return (
+    hasExactKeys(value, [
+      'protocolVersion',
+      'kind',
+      'objectFormat',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'path',
+      'managedTreePolicyVersion',
+    ]) &&
+    value.protocolVersion === 1 &&
+    value.kind === 'tree_file_absent' &&
+    value.objectFormat === 'sha1' &&
+    isSha1(value.acceptedCommitOid) &&
+    isSha1(value.acceptedTreeOid) &&
+    typeof value.path === 'string' &&
+    isBoundedPathTransport(value.path) &&
     value.managedTreePolicyVersion === 3
   );
 }
