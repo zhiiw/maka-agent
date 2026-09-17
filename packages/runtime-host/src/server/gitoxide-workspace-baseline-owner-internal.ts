@@ -18,6 +18,10 @@
  */
 
 import { createHash } from 'node:crypto';
+import {
+  prepareGitoxideMutationInternal,
+  type GitoxideMutationAdmissionInput,
+} from './gitoxide-mutation-admission-internal.js';
 import { reconcileAcceptedRefWithGitoxideHelperInternal } from './gitoxide-helper-invocation-internal.js';
 import {
   verifyGitoxideCandidateSettlementInternal,
@@ -82,6 +86,12 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
     },
   });
   return Object.freeze({
+    prepareMutation(input: GitoxideMutationAdmissionInput) {
+      return prepareGitoxideMutationInternal(
+        () => openExecutionWorkspaceAuthority(stores, verifiers),
+        input,
+      );
+    },
     async acceptRejectedOperation(
       input: GitoxideRejectedOperationInput,
     ): ReturnType<ExecutionWorkspaceAuthority['commitNoEffect']> {

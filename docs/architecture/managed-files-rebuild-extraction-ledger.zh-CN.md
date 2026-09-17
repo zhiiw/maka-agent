@@ -302,3 +302,21 @@ Windows 本机：repository admission integration **19/19、0 skip**，Storage a
 验证：Rust **14 unit + 58 integration = 72/72**；Host/helper/Storage authority 组合 **75 pass / 6 POSIX-only skip / 0 fail**，新增只读 attestation 禁止 ref 写入测试另 **1/1**。Storage/Host build、Rust fmt、Biome、diff check 通过。
 
 下一步：真实 Runtime/Host managed admission 与结果发布；同时继续列出未决 T1/candidate 的恢复状态，不能把“已接受后的 ref 可修复”说成整个任务已可 Resume。
+
+## 第十二检查点：Host 的只读 mutation admission
+
+开始第二轮接线，先补 Host owner 的 `prepareMutation`，现有真实 Gitoxide/SQLite 进程测试改为消费它，不再自行拼写 workspace/base/profile 描述。当前主线 `prepareExecution` 属于 client-capability 权限合同，本轮没有借用该入口，也没有恢复旧 ToolRuntime 或 StoredMessage 双写。
+
+- **主要不变量**：T1 输入中的 base/path/identity 来自同一 execution group 的当前 accepted head 与 owner-bound repository capability，而不是 caller 提供的 OID/profile。参数在第一次 await 前做平面字符串快照；Host 不规范化或改写路径和内容。
+- **Owner**：Host 检查 epoch/helper/policy/head，读取 verified accepted-tree file 或明确 absence，随后重读 head、重检 abort。返回 immutable admission 数据，包括原参数 hash、base 内容和既有 v2 dispatch 描述。它不是新 filesystem 权限，也不是证明任意 executor 已遵守 profile 的能力；真正 Runtime 执行接线仍待完成。
+- **原子边界**：admission 完全只读，不创建 T1/candidate/receipt；不声称它持有独占 reservation。两个 caller 可以同时完成 preflight，之后仍由 SQLite T1 的唯一 reservation 和 base CAS 仲裁。已存在未结算 mutation 则提前拒绝。
+- **失败/回滚**：取消、非规范路径、参数 getter/非字符串/超限、错误 owner/workspace、旧 capability、读取后 head 漂移都在 T1 前拒绝。没有写入需要回滚。调用者在 admission 返回后仍需使用同一参数身份提交 T1，不能把该结果当成无条件执行许可。
+- **参数范围**：首版只接受 Write/Edit 使用的平面字符串字段，合计最多 64 MiB；不运行参数 getter。Windows 的反斜杠输入目前在 T1 前拒绝，不会一侧规范化另一侧保留。未来若支持路径转换，必须在权限判断和 T1 之前统一处理。
+
+测试先 RED（缺 admission owner），再 GREEN；修改/新文件/no-op/确定性 Edit 拒绝均经过真实 admission → SQLite T1 → candidate/terminal 路径。另覆盖参数在异步读取期间被 caller 修改、前置/在途取消、路径别名、getter 不执行、跨 workspace/owner、active reservation 拒绝及 head 推进后旧 capability 拒绝。
+
+平台矩阵：Windows 本机执行真实 helper/process-exit；Linux/macOS 同一三平台 workflow 已纳入新文件选择，本轮无远程证据。无 filesystem mutation、无新 schema、不承诺断电；测试仍不是完整 Runtime Host 服务或 Desktop。
+
+验证：Host admission/settlement/reopen 集成 **21/21、0 skip**，Gitoxide CI policy **1/1**；Host build、Biome、diff check 通过。
+
+下一步：由 ToolRuntime 在 T1 前消费该 admission，冻结 managed/generic mode，并沿主线统一 modelProjection/commit-before-publish 路径结算。Desktop 开关仍不得先启用。

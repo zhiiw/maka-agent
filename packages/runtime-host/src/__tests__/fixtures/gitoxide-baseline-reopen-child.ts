@@ -179,7 +179,72 @@ try {
     const callId = 'settlement-call';
     if (settling) {
       if (!baseline) throw new Error('Missing fixture baseline');
-      const head = baseline.head;
+      const prepare = owner.prepareMutation;
+      const mutableArgs = { ...args };
+      const preparation = prepare({
+        workspaceKey: 'crash-session',
+        acceptedRepositoryOwnerToken,
+        acceptedRepositoryCapability: capability,
+        toolName,
+        args: mutableArgs,
+      });
+      mutableArgs.path = 'changed-after-admission.txt';
+      mutableArgs.content = 'untrusted later content';
+      const admission = await preparation;
+      assert.equal(admission.canonicalArgsHash, canonicalToolArgsHash(toolName, args));
+      assert.equal(admission.baseContent, newFile ? null : file.content);
+      assert.deepEqual(admission.args, args);
+      assert.ok(Object.isFrozen(admission));
+      assert.ok(Object.isFrozen(admission.args));
+      assert.ok(Object.isFrozen(admission.mutation));
+      if (mode === 'settle-candidate') {
+        const input: Parameters<typeof prepare>[0] = {
+          workspaceKey: 'crash-session',
+          acceptedRepositoryOwnerToken,
+          acceptedRepositoryCapability: capability,
+          toolName,
+          args,
+        };
+        const aborted = new AbortController();
+        aborted.abort(new Error('cancel admission'));
+        await assert.rejects(
+          prepare({ ...input, abortSignal: aborted.signal }),
+          /cancel admission/,
+        );
+        const during = new AbortController();
+        const pending = prepare({ ...input, abortSignal: during.signal });
+        during.abort(new Error('cancel pending admission'));
+        await assert.rejects(pending, /cancel pending admission/);
+        await assert.rejects(prepare({ ...input, acceptedRepositoryOwnerToken: {} }));
+        await assert.rejects(
+          prepare({ ...input, workspaceKey: 'other-workspace' }),
+          /does not match/,
+        );
+        for (const path of ['foo/../hello.txt', 'dir\\hello.txt', '/hello.txt'])
+          await assert.rejects(prepare({ ...input, args: { ...args, path } }), /canonical path/);
+        let getterCalls = 0;
+        await assert.rejects(
+          prepare({
+            ...input,
+            args: {
+              path: args.path,
+              get content() {
+                getterCalls++;
+                return 'bad';
+              },
+            },
+          }),
+          /Invalid managed/,
+        );
+        assert.equal(getterCalls, 0);
+        assert.deepEqual(
+          await stores.runtimeEventStore.readImmutableRuntimeEvents(
+            identity.sessionId,
+            identity.runId,
+          ),
+          [],
+        );
+      }
       await stores.runtimeEventStore.commitToolPrepared({
         operationId,
         journalEventId: `${operationId}_prepared`,
@@ -214,27 +279,21 @@ try {
               toolName,
               canonicalArgsHash: canonicalToolArgsHash(toolName, args),
               recoveryMode: 'reconcile',
-              managedMutation: {
-                protocol: 'managed_mutation_v2',
-                repositoryId: head.repositoryId,
-                workspaceId: head.workspaceId,
-                workspaceEpochId: head.workspaceEpochId,
-                workspaceInstanceId: head.workspaceEpochId.replace('epoch_', 'instance_'),
-                objectFormat: 'sha1',
-                baseWorkspaceVersionId: head.workspaceVersionId,
-                baseAcceptedEventId: head.acceptedEventId,
-                baseHeadRevision: head.revision,
-                baseCommitOid: head.commitOid,
-                baseTreeOid: head.treeOid,
-                expectedPath: args.path,
-                pathPolicyVersion: 3,
-                executionProfileDigest:
-                  'sha256:ffdfdda9cf38f382e0c4db81dac7319cd33586a6c65051a97a15e6c41b88f825',
-              },
+              managedMutation: admission.mutation,
             },
           },
         },
       });
+      await assert.rejects(
+        prepare({
+          workspaceKey: 'crash-session',
+          acceptedRepositoryOwnerToken,
+          acceptedRepositoryCapability: capability,
+          toolName,
+          args,
+        }),
+        /unsettled mutation/,
+      );
     }
     if (mode === 'crash-after-edit-rejection' || mode === 'settle-false-rejection') {
       const accept = owner.acceptRejectedOperation;
@@ -445,6 +504,18 @@ try {
           /outcome does not match/,
         );
         const accepted = await accept(input);
+        if (mode === 'settle-candidate') {
+          await assert.rejects(
+            owner.prepareMutation({
+              workspaceKey: 'crash-session',
+              acceptedRepositoryOwnerToken,
+              acceptedRepositoryCapability: capability,
+              toolName,
+              args,
+            }),
+            /does not match current accepted workspace/,
+          );
+        }
         if (
           mode === 'crash-after-settlement' ||
           mode === 'crash-after-new-file' ||
