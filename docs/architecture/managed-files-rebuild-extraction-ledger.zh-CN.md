@@ -462,3 +462,15 @@ TDD 先复现未知 profile、managed profile 缺能力仍读取凭据、AiSdkBa
 Windows 定向：两条真实进程 task 创建/重开 **2/2**；Host backend creation/preparation 回归 **11/11**；CI gate policy **1/1**；Host build、Biome、diff check 通过。三平台 workflow 的选择范围加入 production execution-composition，测试 pattern 纳入 root preparation；Linux/macOS 本轮无远程结果。不扩大断电/完整任务自动恢复承诺。
 
 仍未开放产品入口：当前发行/bootstrap 尚未给 execution composition 提供 helper capability；默认未配置的 Host 会明确拒绝 managed profile。接下来需要明确 packaged/dev helper admission 与 Host capability negotiation，再将专门 task 创建 owner 接入经过 model/workspace 授权的 session handler。普通 session.create 的 managed 禁止规则保持不变，Desktop 按钮不提前开放。
+
+## 第二十二检查点：candidate → lazy composition 的 helper 传递
+
+核对真实启动链发现：上一检查点只给 execution-composition 加了 helper dependency，而 execution-candidate 使用另一层 composition-source factory；后者没有传递该 dependency。本轮将它纳入 candidate dependency 类型及懒加载 factory，避免“底层支持注入”被误当作“启动入口已经能消费”。
+
+- **Owner/主要不变量**：内部 bootstrap 提供已签发的 invocation capability；factory 立即保存 binding 快照，只在赢得 root 后执行 composition.create 时检查完整操作集合并重验 artifact bytes，再将同一能力交给 execution composition。后续修改调用方 binding 不改变本次启动权限。裸对象、缺操作和 hash 不符不能作为 managed runtime 被安装。
+- **生命周期/失败**：未提供 helper 时完全保留普通 Host 启动，不访问 helper artifact。显式提供无效能力则拒绝本次 candidate startup，不悄悄丢弃权限后宣称支持 managed。artifact 验证复用现有绝对 deadline；底层 Node 文件系统调用无法强制取消的限制仍存在，迟到结果不进入 composition。没有增加 CLI 参数、PATH discovery 或任意文件路径自授权。
+- **边界**：此处只转交既有内存能力，不产生新的 durable truth，不改变 SQLite schema 或 managed mode。没有新增恢复算法；既有真实 candidate 子进程测试继续证明昂贵执行模块在 root election 后加载，loser 不启动执行图。完整 helper 发布、平台签名 trust root 与客户端能力协商均未在此完成。
+
+验证：先以 forged helper 重现旧 factory 静默忽略 dependency（本应拒绝但继续启动），再修复。factory 测试验证无 helper、伪造能力、真实 helper 文件的已签发能力转发、调用方 binding 后改不生效以及 same-size byte tamper 拒绝；该测试核验 artifact，不声称执行了 helper 命令。factory + 真实 candidate startup 回归 **7/7、0 skip**；CI gate policy **1/1**；Host build、Biome、diff check 通过。新文件进入三平台 gate 选择与测试清单。
+
+平台矩阵：Windows 为本机证据；Linux/macOS 由同一 workflow 调度，本轮未取得远程结果。没有新断电保证。下一步仍需真实发布/dev bootstrap 签发 helper capability、按实际可用能力设计客户端协商，再开放专门创建 handler；不能因为此内部转发已接通就打开 Desktop 按钮。
