@@ -639,3 +639,15 @@ Windows 本地：启动选择 5/5，Host factory（含真实 helper）4/4，连�
 上轮两处 TS7006 已确认来自过期 TypeScript 增量缓存：同源 no-incremental 检查成功，使用仓库 clean:main 后 build:main 成功，没有通过类型断言或修改业务代码掩盖问题。
 
 接下来是第 3 步加号菜单显式入口，再做第 4 步真实 Electron 创建与 kill/restart。当前没有可点击的新按钮，不能把 IPC 可用描述为用户已可使用整个产品流程。
+
+## 第三十三检查点：加号菜单显式托管文件任务
+
+第 3 步已接入 renderer：新任务的加号菜单在 Plan/编排选项旁提供“托管文件任务”（英文/简中/繁中）。只在新任务显示，不允许把已有会话原地转换。选中后显示 active mark 和说明：仅限 Git 项目，Read/Write/Edit 使用内部工作区、不直接修改 source checkout。选择按 Host/project 草稿保存，成功创建并激活后消费，不自动影响同一目标上的下一次新建。
+
+- renderer owner 只表达创建意图；选中时清除 Plan/Swarm/Graph，固定 ask。发送 owner 再固定 managed-files-v1/agent/default/ask，避免其他草稿设置污染创建请求。未选中时原行为不变；不声明 Bash、Glob、Grep 可用。
+- 实际产品链是 Composer → newTasks.create → session-local:create → SQLite 本地 creation intent → Desktop client → Host catalog，不是直接走旧 sessions:create。新增 local 入口预检当前 Host managed 能力；不支持/离线时不保存本地任务，返回可本地化的明确提示。队列真正向 Host 创建时仍重新检查能力，预检不替代 Host authority。
+- 不新增 schema 或恢复终态；本地队列保存完整 toolProfile，Host 仍负责授权/import/publication，T1 和 accepted truth 不由 UI 决定。回滚入口只禁止新建，不清除已有本地 intent 或 managed Session。
+
+Windows 验证：UI、Desktop main、renderer build（含 entry output 和 notices 检查）通过；菜单/首次发送/local queue/client 相邻测试 **86/86**，补充 local capable 创建保留 profile 与 Electron session-local 错误提示两项定向回归通过。菜单测试使用真实 React/DOM 组件，发送使用 bridge double；local queue 用真实 SQLite，但 capability 是测试端口。Linux/macOS 未在本轮执行，不声称真实 Electron 点选已验证。
+
+剩余第 4 步：隔离用户数据的真实 Electron 创建 → Read/Write/Edit → kill Host → restart → 内容、transcript、唯一终态验收。开发态仍须显式 helper manifest；官方安装包尚不因本入口自动获得 helper。没有开启自动续跑、无 Git importer 或 M4/M5 能力。

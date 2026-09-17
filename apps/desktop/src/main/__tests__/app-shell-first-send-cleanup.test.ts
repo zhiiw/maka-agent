@@ -51,6 +51,29 @@ import {
 } from './app-shell-chat-actions-fixture.js';
 
 describe('composer first-send cleanup', () => {
+  it('passes explicit managed intent with fixed modes to the new-task bridge', async () => {
+    let creation: unknown;
+    const restoreWindow = installWindow({
+      newTasks: { create: async (_target: unknown, input: unknown) => {
+        creation = input;
+        throw new Error('stop after observing creation request');
+      } },
+    });
+    try {
+      const actions = createAppShellChatActions({
+        ...createActionsDeps(),
+        newChatManagedFiles: true,
+        newChatCollaborationMode: 'plan',
+        newChatOrchestrationMode: 'swarm',
+        newChatPermissionChoice: 'bypass',
+      });
+      await actions.send('Edit the file');
+      assert.deepEqual(creation, {
+        name: 'New Chat', toolProfile: 'managed-files-v1',
+        permissionMode: 'ask', collaborationMode: 'agent', orchestrationMode: 'default',
+      });
+    } finally { restoreWindow(); }
+  });
   it('cancels when the composer owner changes during the readiness check', async () => {
     const readiness = deferred<boolean>();
     const activeIdRef = { current: 'session-a' as string | undefined };

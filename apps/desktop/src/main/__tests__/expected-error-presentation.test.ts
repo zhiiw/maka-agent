@@ -44,6 +44,7 @@ test('managed Host unavailability explains that ordinary chat remains available'
     '当前 Runtime Host 尚未启用托管文件任务。普通聊天仍可使用；请连接支持此能力的 Host 后重试。');
   assert.match(localizedShellErrorMessage(error, 'fallback', 'en'), /Ordinary chat remains available/);
   assert.match(localizedShellErrorMessage(error, 'fallback', 'zh-TW'), /普通聊天仍可使用/);
+  assert.match(localizedShellErrorMessage(new Error("Error invoking remote method 'session-local:create': Error: MAKA_MANAGED_FILES_UNAVAILABLE: offline"), 'fallback', 'en'), /Ordinary chat remains available/);
 });
 
 test('routes Work Board codes through the shared presenter per locale', (context) => {

@@ -983,20 +983,22 @@ export class DesktopRuntimeHostClient {
       : requireSessionProjection(result.session);
   }
 
+  async requireManagedFilesAvailable(): Promise<void> {
+    const capabilities = await this.request('host.execution-capabilities.query', {});
+    if (capabilities.hostEpoch !== this.hostEpoch || capabilities.state !== 'ready'
+      || capabilities.managedFilesResume !== true) {
+      throw new DesktopRuntimeHostClientError(
+        'managed_files_unavailable',
+        'MAKA_MANAGED_FILES_UNAVAILABLE: The connected Runtime Host does not support managed files tasks.',
+      );
+    }
+  }
+
   async createSession(
     input: SessionCreateInput,
   ): Promise<SessionCatalogProjection> {
     input = structuredClone(input);
-    if (input.toolProfile === 'managed-files-v1') {
-      const capabilities = await this.request('host.execution-capabilities.query', {});
-      if (capabilities.hostEpoch !== this.hostEpoch || capabilities.state !== 'ready'
-        || capabilities.managedFilesResume !== true) {
-        throw new DesktopRuntimeHostClientError(
-          'managed_files_unavailable',
-          'MAKA_MANAGED_FILES_UNAVAILABLE: The connected Runtime Host does not support managed files tasks.',
-        );
-      }
-    }
+    if (input.toolProfile === 'managed-files-v1') await this.requireManagedFilesAvailable();
     return requireSessionProjection(
       await this.request("session.create", input),
     );

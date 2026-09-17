@@ -198,6 +198,8 @@ export function createAppShellChatActions(deps: {
   clearNewChatPermissionChoice: () => void;
   newChatCollaborationMode: CollaborationMode;
   newChatOrchestrationMode: OrchestrationMode;
+  newChatManagedFiles?: boolean;
+  clearNewChatManagedFiles?: () => void;
   newTaskTarget: DesktopNewTaskTarget | undefined;
 }): AppShellChatActions {
   const {
@@ -228,6 +230,8 @@ export function createAppShellChatActions(deps: {
     clearNewChatPermissionChoice,
     newChatCollaborationMode,
     newChatOrchestrationMode,
+    newChatManagedFiles,
+    clearNewChatManagedFiles,
     newTaskTarget,
   } = deps;
   const copy = getShellCopy(uiLocale).chatActions;
@@ -392,6 +396,12 @@ export function createAppShellChatActions(deps: {
           ...(newChatPermissionChoice ? { permissionMode: newChatPermissionChoice } : {}),
           collaborationMode: newChatCollaborationMode,
           orchestrationMode: newChatOrchestrationMode,
+          ...(newChatManagedFiles ? {
+            toolProfile: 'managed-files-v1' as const,
+            permissionMode: 'ask' as const,
+            collaborationMode: 'agent' as const,
+            orchestrationMode: 'default' as const,
+          } : {}),
         });
         unsentSessionId = session.id;
         // Creation can also yield while a same-target New Task is reopened.
@@ -415,6 +425,7 @@ export function createAppShellChatActions(deps: {
         // Consumed: the choice is now the created Session's, not the next
         // draft's. A failed create leaves it in place so a retry keeps it.
         if (newChatPermissionChoice) clearNewChatPermissionChoice();
+        if (newChatManagedFiles) clearNewChatManagedFiles?.();
         // Main owns observation-before-dispatch. This only selects the local
         // surface; saving a draft never waits for the Host's event stream.
         await activateSessionForFirstSend(session.id);
