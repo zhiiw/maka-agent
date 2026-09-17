@@ -487,3 +487,16 @@ Windows 定向：两条真实进程 task 创建/重开 **2/2**；Host backend cr
 Windows 本机 Host build、定向测试 **11/11、0 skip** 通过。Linux/macOS 纳入同一 helper gate，尚未取得本轮远程结果。该入口不自动接入 Desktop launcher；后续仍需 Host capability negotiation、经过产品授权的 managed task 创建 handler、Desktop 加号入口，以及独立的正式发布资源验证。
 
 CI gate policy **1/1**、发行文件策略组 **13/13** 通过；完整 release-cli-file-policy 文件执行为 **14 pass / 1 fail**，失败项是本地未生成 `packages/computer-use/dist/index.js`，不作为本切片全量验证通过的证据。Biome 与 diff check 通过。
+
+## 第二十四检查点：Host 执行能力只读查询
+
+新增 `host.execution-capabilities.query`，返回当前 `hostEpoch`、lifecycle `state` 与 `managedFilesResume`。握手成功只证明连接已获准，不证明 execution composition 已恢复；查询在 bootstrap 阶段可用，但仅在 ready 且 composition 明确安装了 helper 时公布 resume 能力。该字段仅表示可尝试重开已有 `managed-files-v1` Session，不表示允许创建新任务、自动恢复、Bash/npm 或 Desktop 产品入口已完成。
+
+- **Owner/主要不变量**：candidate composition factory 在 helper capability、完整操作集合、artifact 字节验证后，给成功创建的 composition 固定不可改写的可用性字段；普通无 helper composition 为 false。kernel 结合自身 lifecycle 产生查询结果。客户端不能通过输入上报能力，严格 decoder 拒绝额外字段、非布尔值及非 ready 状态宣称可用。
+- **权限边界**：查询是提示，不是执行 capability。每次 backend preparation 仍重验 Session mode、root、accepted head、sink 与 helper；查询成功后发生 drain/tamper 时必须在执行处拒绝。它不授权 source 路径或读取内容。没有修改 election、强制终止现有 Host、无 helper fallback 或通用 session.create 的限制。
+- **原子/失败/回滚**：无新 durable 事实、schema 或多库事务。内存能力只在 composition 创建成功后公开；recovering 不公布可用。新增严格 operation 将 compatibility epoch 从 161 提升至 162，旧客户端/Host 在握手拒绝，不留到首个请求才失败。回滚需客户端与 Host 同版重启，不能把既有 managed Session 转为普通模式。
+- **测试**：factory 的缺能力/真实能力发布先 RED 再 GREEN；protocol 测试先证明缺少查询，再实现 strict decoder。真实 listener/connection 测试验证普通 Host ready 为 false，同一连接在 recovering 为 false、ready 为 true，并绑定同一 epoch。两条既有启动测试在本机约 1.2 秒抵达 composition，原 1 秒等待稳定失败；仅将测试握手预算改为有界 5 秒，生产 timeout 不变。
+
+Windows：Host build、协议/dispatcher/connection/peer stream/factory **125/125**，真实 kernel 定向 **2/2**，CI gate policy **1/1**，Biome、diff check 通过。Linux/macOS 使用同一 gate 新增的查询/生命周期用例，本轮未取得远程结果。未新增 crash 或断电保证，未运行 Electron。
+
+下一步：让 Desktop/任务创建调用者在同一连接上消费此查询并明确处理不可用，再接经过 connection/model/workspace 授权的专用创建 handler。当前只完成可观察的能力报告，不能称为客户端协商闭环，更不能提前展示可点击的 managed 创建按钮。

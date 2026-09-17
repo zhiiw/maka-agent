@@ -864,6 +864,14 @@ describe('non-serving Runtime Host kernel', () => {
         assert.equal(status.connections, 1);
       }
       const diagnostics = await connected.connection.request('host.diagnostics.query', {});
+      assert.deepEqual(
+        await connected.connection.request('host.execution-capabilities.query', {}),
+        {
+          hostEpoch: winner.host.hostEpoch,
+          state: 'ready',
+          managedFilesResume: false,
+        },
+      );
       assert.equal(diagnostics.hostEpoch, winner.host.hostEpoch);
       assert.equal(diagnostics.state, 'ready');
       assert.equal(diagnostics.pid, process.pid);
@@ -913,6 +921,7 @@ describe('non-serving Runtime Host kernel', () => {
           markFactoryEntered();
           await factoryReleased;
           return {
+            managedFilesResume: true,
             handlers: {
               ...createUnavailableDomainOperationHandlers(),
               'turn.start': unavailable,
@@ -942,7 +951,7 @@ describe('non-serving Runtime Host kernel', () => {
       let host: RuntimeHostKernel | undefined;
       let transport: FramedTransport | undefined;
       try {
-        await withTimeout(factoryEntered, 1_000, 'Runtime Host did not enter composition');
+        await withTimeout(factoryEntered, 5_000, 'Runtime Host did not enter composition');
         const registration = await readHostRegistration(owner.controlDirectory);
         assert.ok(registration);
         assert.equal(registration.state, 'recovering');
@@ -979,6 +988,44 @@ describe('non-serving Runtime Host kernel', () => {
         assert.ok(!('kind' in query) && query.operation === 'turn.query' && !query.ok);
         if (!('kind' in query) && query.operation === 'turn.query' && !query.ok) {
           assert.equal(query.error.code, 'host_not_ready');
+        }
+        await writeClientFrame(transport, {
+          requestId: 'capabilities',
+          operation: 'host.execution-capabilities.query',
+          input: {},
+        });
+        const capabilities = decodeHostFrame(await transport.read(1_000));
+        assert.ok(
+          !('kind' in capabilities) &&
+            capabilities.operation === 'host.execution-capabilities.query' &&
+            capabilities.ok,
+        );
+        if (
+          !('kind' in capabilities) &&
+          capabilities.operation === 'host.execution-capabilities.query' &&
+          capabilities.ok
+        ) {
+          assert.equal(capabilities.result.managedFilesResume, false);
+          assert.equal(capabilities.result.state, 'recovering');
+        }
+        releaseFactory();
+        host = await hostTask;
+        await writeClientFrame(transport, {
+          requestId: 'capabilities-ready',
+          operation: 'host.execution-capabilities.query',
+          input: {},
+        });
+        const ready = decodeHostFrame(await transport.read(1_000));
+        assert.ok(
+          !('kind' in ready) && ready.operation === 'host.execution-capabilities.query' && ready.ok,
+        );
+        if (
+          !('kind' in ready) &&
+          ready.operation === 'host.execution-capabilities.query' &&
+          ready.ok
+        ) {
+          assert.equal(ready.result.managedFilesResume, true);
+          assert.equal(ready.result.hostEpoch, host.hostEpoch);
         }
       } finally {
         releaseFactory();

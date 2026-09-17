@@ -51,6 +51,7 @@ test('an execution Host starts without a managed Git runtime', async () => {
   const actual = await source.create({} as RuntimeHostCompositionContext);
 
   assert.equal(actual, expected);
+  assert.equal(actual.managedFilesResume, false);
   assert.deepEqual(observed, {});
 });
 
@@ -139,7 +140,9 @@ test('candidate forwards its pinned helper and revalidates bytes at lazy startup
     },
   );
   binding.invocationOwnerToken = {};
-  await source.create({} as RuntimeHostCompositionContext);
+  const composition = await source.create({} as RuntimeHostCompositionContext);
+  assert.equal(composition.managedFilesResume, true);
+  assert.equal(Reflect.set(composition, 'managedFilesResume', false), false);
   assert.equal(starts, 1);
   const damaged = Buffer.from(bytes);
   damaged[damaged.length - 1] ^= 1;

@@ -95,8 +95,15 @@ export async function createExecutionRuntimeHostCompositionSource(
     const createComposition =
       override ??
       (await import('./execution-composition.js')).createExecutionRuntimeHostComposition;
-    return createComposition(context, compositionOptions, {
+    const composition = await createComposition(context, compositionOptions, {
       ...(managedFilesHelper ? { managedFilesHelper } : {}),
     });
+    Object.defineProperty(composition, 'managedFilesResume', {
+      value: managedFilesHelper !== undefined,
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    });
+    return composition;
   });
 }
