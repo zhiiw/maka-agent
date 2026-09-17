@@ -549,6 +549,11 @@ fn inspect_repository(repository_path: PathBuf) -> Result<ExitCode, &'static str
 
 fn open_repository(repository_path: PathBuf) -> Result<gix::Repository, &'static str> {
     let mut metadata_budget = admit_repository_metadata(&repository_path)?;
+    // Keep Windows' extended-length path for downstream ref-lock rename operations.
+    // Admit the original path first so normalization cannot bypass metadata policy.
+    #[cfg(windows)]
+    let repository_path =
+        fs::canonicalize(repository_path).map_err(|_| "repository_open_failed")?;
     let repository = managed_open_options()
         .open(repository_path)
         .map_err(|_| "repository_open_failed")?

@@ -788,6 +788,43 @@ fn publishes_and_exactly_retries_an_operation_candidate_without_advancing_accept
 }
 
 #[test]
+fn publishes_candidate_when_ref_lock_crosses_windows_max_path() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let plain_root = fixture.root.to_string_lossy().replace(r"\\?\", "");
+    let root = PathBuf::from(plain_root);
+    let padding = 185usize.saturating_sub(root.to_string_lossy().len() + 1);
+    let destination = root.join("d".repeat(padding.max(1)));
+    let imported = invoke_import(
+        &root,
+        &fixture.git_output(["rev-parse", "HEAD"]),
+        &destination,
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stdout)
+    );
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let request = serde_json::json!({
+        "protocolVersion": 1, "operation": "create_candidate", "repositoryPath": destination,
+        "acceptedRef": "refs/maka/baseline", "expectedBaseCommitOid": imported["baselineCommitOid"],
+        "expectedBaseTreeOid": imported["baselineTreeOid"],
+        "candidateRef": format!("refs/maka/candidates/{}", "d".repeat(64)),
+        "path": "hello.txt", "contentBase64": "cmVzdWx0Cg==", "managedTreePolicyVersion": 3,
+    });
+    let first = invoke_request(request.clone());
+    assert!(
+        first.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let retry = invoke_request(request);
+    assert!(retry.status.success());
+    assert_eq!(first.stdout, retry.stdout);
+}
+
+#[test]
 fn reconciles_only_the_expected_predecessor_and_converges_concurrent_retries() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let destination = fixture.root.join("reconcile.git");

@@ -651,3 +651,33 @@ Windows 本地：启动选择 5/5，Host factory（含真实 helper）4/4，连�
 Windows 验证：UI、Desktop main、renderer build（含 entry output 和 notices 检查）通过；菜单/首次发送/local queue/client 相邻测试 **86/86**，补充 local capable 创建保留 profile 与 Electron session-local 错误提示两项定向回归通过。菜单测试使用真实 React/DOM 组件，发送使用 bridge double；local queue 用真实 SQLite，但 capability 是测试端口。Linux/macOS 未在本轮执行，不声称真实 Electron 点选已验证。
 
 剩余第 4 步：隔离用户数据的真实 Electron 创建 → Read/Write/Edit → kill Host → restart → 内容、transcript、唯一终态验收。开发态仍须显式 helper manifest；官方安装包尚不因本入口自动获得 helper。没有开启自动续跑、无 Git importer 或 M4/M5 能力。
+
+## 第三十四检查点：真实 Desktop Write/Edit/Read 与 Windows 长路径
+
+第 4 步的正常执行部分已经在 Windows 真实 Electron 窗口通过。新增手动验收脚本 `scripts/desktop-managed-files-smoke.mjs`，使用隔离 userData、真实 preload/main、选举出的 dev Host、SQLite 与 Gitoxide；不设置 MAKA_E2E、不安装 FakeBackend。唯一模型替身是本机 HTTP Anthropic 协议服务，依次要求真实 Write、Edit、Read，检查三个 tool result 成功、Read 返回 edited，且 source checkout 仍为 baseline。脚本实际点击加号菜单与发送按钮，不直接调用创建 handler。
+
+### 本轮发现与修复
+
+真实 Write 在 T1 后出现 candidate_publication_indeterminate。相同仓库、相同输入仅改变 candidate ref 长度：短 ref 成功，完整 64 字节 digest 的 ref 在 Windows 锁文件路径超过 MAX_PATH 后失败；使用 Windows extended-length 仓库地址则成功。Rust CLI 回归先复现该错误，再在 metadata admission 通过后将 Windows 仓库地址 canonicalize 为 extended-length path，供 gix 的 ref-lock rename 使用。没有缩短 digest、放宽元数据策略、重试工具或 generic T2 fallback。
+
+- owner：Gitoxide helper 负责经过 admission 的仓库地址与 ref transaction；Runtime/T1/SQLite authority 不变。
+- 原子边界仍是 Git ref publication，后续 acceptance 使用原有协议；本次不增加跨 Git/SQLite 事务。
+- 失败仍 fail closed，已有 unsettled reservation 不由该修复自动清除。回滚代码不删除历史 ref、candidate 或 RuntimeEvent。
+
+### 运行与证据
+
+先构建当前分支 Desktop（包括 main、preload、renderer）与本平台 Gitoxide helper。使用仓库 release Node 24；系统 Git 仅用于创建隔离测试 source，不作为产品执行依赖。设置 MAKA_GITOXIDE_HELPER_PATH 为实际 helper 可执行文件的绝对路径，然后运行：
+
+```text
+node scripts/desktop-managed-files-smoke.mjs
+```
+
+脚本自行计算 dev manifest 摘要、创建本地测试模型配置，不读取用户模型凭据、不调用公网模型。运行会打开真实窗口；控制台给出证据目录，保留截图、main stderr 和本机模型请求。退出使用现有有界 Electron teardown。此脚本是手动产品验收，不声称已经加入 CI gate。
+
+| 平台 | 本轮证据 |
+| --- | --- |
+| Windows | 真实 Electron 创建、Write/Edit/Read、source 不变通过；candidate 相关 helper 16/16，通过超过 MAX_PATH 的真实 CLI regression 与 exact retry |
+| Linux | 未在本轮运行；路径修复不改变 Unix 分支 |
+| macOS | 未在本轮运行；可使用同一脚本验证，不把可运行脚本视为通过证据 |
+
+**仍未完成**：真实 Electron 中 kill Host/restart、恢复后 transcript/唯一终态和不重跑副作用的检查。本检查点只完成正常执行链，不宣称完整 Desktop Resume 已验收，不开启自动恢复、非 Git importer 或 M4/M5。
