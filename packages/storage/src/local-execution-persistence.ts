@@ -84,6 +84,8 @@ export const localExecutionPersistenceProvider: ExecutionPersistenceProvider = O
               commitManagedMutationTerminalInternal(store, input),
             readHead: (workspaceId: string, epochId: string) =>
               store.readWorkspaceHead(workspaceId, epochId),
+            readEpoch: (workspaceId: string, epochId: string) =>
+              store.readWorkspaceEpoch(workspaceId, epochId),
             readReservation: (instanceId: string) =>
               readActiveManagedMutationInternal(store, instanceId),
           };

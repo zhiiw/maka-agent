@@ -153,3 +153,37 @@ acceptImport 只消费 owner-bound repository capability。Gitoxide admission �
 复用已有 `C:/Users/wzy/.local/llvm-mingw-20260616/llvm-mingw-20260616-ucrt-x86_64/bin`，仅加入构建进程 PATH。Rust 使用 `1.98.0-x86_64-pc-windows-gnullvm`，linker 为 `x86_64-w64-mingw32-clang`，最终 binary 使用 `cargo rustc --locked --manifest-path native/gitoxide-helper/Cargo.toml --bin maka-gitoxide-helper -- -C target-feature=+crt-static`。
 
 默认 MSVC 缺少 link.exe；普通 GNU LLVM 构建又依赖 libunwind.dll，受限 helper 的空 PATH 下无法启动。静态 runtime 构建后依赖表不再含 libunwind.dll，同一真实调用测试由 1/8 改为 8/8，通过后本轮增加 baseline 集成为 9/9。该二进制仅是本地测试产物，不是签名发布产物；不改变正式平台发布配置。
+
+## 第五检查点：已接受 repository 的只读 reopen
+
+第四检查点发现的“进程重启丢失 capability”已增加专用恢复入口，不修改 fresh import 规则。
+
+### 合同与 owner
+
+- Host baseline owner 从当前 execution group 读取 canonical epoch/head；workspace key、repository path 派生 identity、SHA-1、policy 和 helper artifact profile 必须匹配。调用者不能提供另一个 commit/tree 覆盖 SQLite 事实。
+- 新 `reopen_repository` helper operation 只读。拒绝非 bare 目录、symlink/junction 与不可信父路径，沿用 metadata admission budget，再验证 commit/tree 哈希、完整 bounded tree/blob graph、policy v3 和直接的 `refs/maka/accepted`。遍历后重新检查 ref。
+- Host helper response 必须严格匹配请求，且 artifact 必须 attested 支持 reopen。helper 返回后再次读取 Storage head 并检查取消；group 撤权或 head 改变时不向调用者交付 capability。
+- 新 capability 属于新 owner，可供 accepted read / candidate creation 使用；它不是 import provenance，不能拿来伪装成首次 import proof 再提交 baseline。
+- 不写新 receipt、不增加 schema、不移动 ref、不改文件内容，也不需要重新访问 source checkout。权威仍是 SQLite accepted identity + 重新验证的 Git objects，不是进程内 WeakMap 的旧记录。
+
+### 失败、回滚与范围
+
+任何 identity/graph/ref/policy 不匹配都拒绝，不删除/重导入/自动修复。helper 二进制变化导致 profile 不同也拒绝，未为旧 Draft artifact 增加兼容层。撤回入口仅停止发行新 capability，不修改既有事实。
+
+本轮只恢复**已经有 SQLite accepted baseline/head 且 Git ref 一致**的 repository。import 已完成但 baseline 尚未提交、缺失/corrupt Git object、SQLite 已接受但 Git ref 尚未推进的情况仍需后续 owner 处理；不因本轮增加 reopen 就声称所有 crash 点可收敛。
+
+### 实证与平台
+
+先运行真实 helper 得到 RED：`reopen_repository` 为 `invalid_request`；新增 Rust 操作后 GREEN。真实进程测试使用第一 Node 进程执行 import + SQLite baseline 并 `process.exit(77)`，跳过 Store/lease cleanup；第二 Node 进程重新取得 root lock、重新 admission helper、从 SQLite 读 identity、发行新 capability 并读取相同 accepted 内容；第三次重开结果相同。符号 accepted ref 和删除深层 blob 后重开均拒绝，ref 未被恢复逻辑修改。
+
+这是真实 Host owner + Storage + helper 边界的进程退出测试，不是完整 Desktop/模型/Write T1/T2 场景，也不证明断电。
+
+| 平台 | 本轮证据 |
+| --- | --- |
+| Windows | 本机进程退出/新进程 reopen、ref/blob 拒绝测试通过；native junction 用例纳入 Rust suite |
+| Linux | 现有三平台 Gitoxide workflow 会执行同一 fixture；尚无本轮远程结果 |
+| macOS | 同上，不以 Windows 结果替代 macOS 证明 |
+
+workflow 选择范围已纳入新 Host owner、child fixture 与 Storage 变更，避免只改接线时漏跑恢复测试。下一步仍是 candidate → Runtime terminal → SQLite acceptance → accepted-ref reconciliation；Desktop 加号入口尚未启用。
+
+本轮验证记录：Rust 14 个 unit + 55 个 integration 全通过；三组 Host helper 定向测试 27 通过、5 个既有 Windows 条件跳过，新跨进程 reopen 用例实际通过；Storage provider/persistence 定向测试 93/93；Gitoxide workflow policy 定向测试 1/1；Storage、Runtime Host build 与改动 TypeScript 的 Biome check 通过。完整 workflow-policy suite 另有 Windows Bash 路径失败（`shared comparison drives every diff gate on refreshed merges, pushes and dispatches`），不将该 suite 宣称为全绿，也不在本次修改无关脚本。

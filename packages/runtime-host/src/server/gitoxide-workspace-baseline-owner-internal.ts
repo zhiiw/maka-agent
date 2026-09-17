@@ -29,8 +29,13 @@ import {
 } from '@maka/core/workspace-version-authority';
 import {
   requireGitoxideImportedRepositoryInternal,
+  reopenGitoxideRepositoryInternal,
   type GitoxideAcceptedRepositoryCapability,
 } from './gitoxide-repository-admission-authority-internal.js';
+import {
+  requireGitoxideHelperArtifactIdentityInternal,
+  type GitoxideHelperInvocationCapability,
+} from './gitoxide-helper-artifact-authority-internal.js';
 
 const owners = new WeakMap<InteractiveExecutionStoresWriter, ReturnType<typeof createOwner>>();
 
@@ -60,6 +65,59 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
     noEffect: unavailable,
   });
   return Object.freeze({
+    async reopen(input: {
+      workspaceKey: string;
+      repositoryPath: string;
+      invocationOwnerToken: object;
+      helperCapability: GitoxideHelperInvocationCapability;
+      acceptedRepositoryOwnerToken: object;
+      abortSignal?: AbortSignal;
+    }): Promise<GitoxideAcceptedRepositoryCapability> {
+      input.abortSignal?.throwIfAborted();
+      if (!input.workspaceKey.trim() || Buffer.byteLength(input.workspaceKey) > 1024)
+        throw new Error('Invalid managed workspace key');
+      const authority = await openExecutionWorkspaceAuthority(stores, verifiers);
+      const id = hash(`maka-managed-files-workspace-v1\0${input.workspaceKey}`).slice(7, 39);
+      const workspaceId = `workspace_${id}`;
+      const epochId = `epoch_${id}`;
+      const epoch = await authority.readEpoch(workspaceId, epochId);
+      const head = await authority.readHead(workspaceId, epochId);
+      const artifact = requireGitoxideHelperArtifactIdentityInternal(
+        input.invocationOwnerToken,
+        input.helperCapability,
+      );
+      const profile = hash(`maka-gitoxide-import-v3\0${artifact.sha256}`);
+      const repositoryId = `repository_${hash(`maka-managed-files-repository-v1\0${input.repositoryPath}`).slice(7, 39)}`;
+      if (
+        !epoch ||
+        !head ||
+        epoch.repositoryId !== repositoryId ||
+        head.repositoryId !== repositoryId ||
+        epoch.materializationProfileDigest !== profile ||
+        epoch.policyHash !== hash(`maka-managed-files-policy-v3\0${profile}`) ||
+        epoch.objectFormat !== 'sha1'
+      )
+        throw new Error('Managed repository does not match durable workspace identity');
+      const capability = await reopenGitoxideRepositoryInternal({
+        ...input,
+        acceptedCommitOid: head.commitOid,
+        acceptedTreeOid: head.treeOid,
+      });
+      // Recheck the same execution-group authority after asynchronous helper work.
+      const current = await authority.readHead(workspaceId, epochId);
+      input.abortSignal?.throwIfAborted();
+      if (
+        !current ||
+        current.workspaceVersionId !== head.workspaceVersionId ||
+        current.acceptedEventId !== head.acceptedEventId ||
+        current.revision !== head.revision ||
+        current.commitOid !== head.commitOid ||
+        current.treeOid !== head.treeOid
+      ) {
+        throw new Error('Managed workspace advanced during repository reopen');
+      }
+      return capability;
+    },
     async acceptImport(input: {
       workspaceKey: string;
       acceptedRepositoryOwnerToken: object;

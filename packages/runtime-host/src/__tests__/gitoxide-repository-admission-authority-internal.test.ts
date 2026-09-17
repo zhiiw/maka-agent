@@ -18,7 +18,8 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -57,6 +58,74 @@ interface AdmittedHelper {
 }
 
 let admittedHelperPromise: Promise<AdmittedHelper | undefined> | undefined;
+
+test('reopens durable baseline in a fresh process after the importing owner exits without cleanup', {
+  timeout: 45_000,
+}, async (t) => {
+  if (!(await admittedHelper())) {
+    t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
+    return;
+  }
+  const source = await createRepository(t, 'sha1');
+  await writeFile(join(source, 'hello.txt'), 'survives owner exit\n');
+  git(source, ['add', 'hello.txt']);
+  git(source, [
+    '-c',
+    'user.name=Maka Test',
+    '-c',
+    'user.email=test@example.invalid',
+    'commit',
+    '-qm',
+    'fixture',
+  ]);
+  const stateRoot = await mkdtemp(join(tmpdir(), 'maka-gitoxide-reopen-crash-'));
+  const root = await resolveStorageRoot({ path: stateRoot, kind: 'interactive' });
+  const child = fileURLToPath(
+    new URL('./fixtures/gitoxide-baseline-reopen-child.js', import.meta.url),
+  );
+  const run = (mode: string) =>
+    spawnSync(process.execPath, [child, mode, stateRoot, source], {
+      encoding: 'utf8',
+      timeout: 15_000,
+      windowsHide: true,
+    });
+  try {
+    const crashed = run('crash-after-baseline');
+    assert.ifError(crashed.error);
+    assert.equal(crashed.status, 77, crashed.stderr);
+    const reopened = run('reopen');
+    assert.ifError(reopened.error);
+    assert.equal(reopened.status, 0, reopened.stderr);
+    const result = JSON.parse(reopened.stdout);
+    assert.equal(result.content, 'survives owner exit\n');
+    assert.equal(
+      result.commit,
+      gitBare(join(stateRoot, 'repository.git'), ['rev-parse', 'refs/maka/accepted']),
+    );
+    const again = run('reopen');
+    assert.equal(again.status, 0, again.stderr);
+    assert.deepEqual(JSON.parse(again.stdout), result);
+    const acceptedRefPath = join(stateRoot, 'repository.git', 'refs', 'maka', 'accepted');
+    await writeFile(acceptedRefPath, 'ref: refs/heads/attacker\n');
+    const symbolic = run('reopen');
+    assert.equal(symbolic.status, 1);
+    assert.match(symbolic.stderr, /accepted_ref_not_direct/u);
+    await writeFile(acceptedRefPath, `${result.commit}\n`);
+    const blob = gitBare(join(stateRoot, 'repository.git'), [
+      'rev-parse',
+      'refs/maka/accepted:hello.txt',
+    ]);
+    await rm(join(stateRoot, 'repository.git', 'objects', blob.slice(0, 2), blob.slice(2)));
+    const missingBlob = run('reopen');
+    assert.equal(missingBlob.status, 1);
+    assert.match(missingBlob.stderr, /source_blob_unavailable/u);
+    assert.equal((await readFile(acceptedRefPath, 'utf8')).trim(), result.commit);
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(join(resolveRootControlNamespace(), root.rootId), { recursive: true, force: true });
+    await rm(join(resolveRootOwnershipNamespace(), root.rootId + '.lock'), { force: true });
+  }
+});
 
 test('commits a real imported Gitoxide baseline through the root-owned execution group', async (t) => {
   const helper = await admittedHelper();
@@ -124,8 +193,7 @@ test('commits a real imported Gitoxide baseline through the root-owned execution
     await assert.rejects(owner.acceptImport(input));
     stores = await openInteractiveExecutionStoresForWrite(rootOwner.lease);
     const reopened = createGitoxideWorkspaceBaselineOwnerInternal(stores);
-    // This only reopens SQLite. Main's import protocol cannot reissue a capability
-    // for an existing destination; full process recovery requires a separate reopen owner.
+    // Fresh import must remain strict; reopen is a separate read-only operation.
     await assert.rejects(
       importAdmittedGitoxideRepositoryInternal({
         admissionOwnerToken,
@@ -136,6 +204,31 @@ test('commits a real imported Gitoxide baseline through the root-owned execution
       (error) =>
         error instanceof GitoxideHelperInvocationError &&
         error.helperReason === 'import_destination_not_fresh',
+    );
+    const freshOwnerToken = {};
+    const reopenedCapability = await reopened.reopen({
+      workspaceKey: input.workspaceKey,
+      repositoryPath: join(stateRoot, 'repository.git'),
+      ...helper,
+      acceptedRepositoryOwnerToken: freshOwnerToken,
+    });
+    assert.equal(
+      (
+        await readGitoxideTreeFileInternal({
+          acceptedRepositoryOwnerToken: freshOwnerToken,
+          acceptedRepositoryCapability: reopenedCapability,
+          path: 'hello.txt',
+        })
+      ).content,
+      'immutable source\n',
+    );
+    await assert.rejects(
+      reopened.acceptImport({
+        ...input,
+        acceptedRepositoryOwnerToken: freshOwnerToken,
+        acceptedRepositoryCapability: reopenedCapability,
+      }),
+      GitoxideRepositoryAdmissionAuthorityError,
     );
     const retried = await reopened.acceptImport(input);
     assert.equal(retried.created, false);
@@ -674,6 +767,7 @@ async function admittedHelper(): Promise<AdmittedHelper | undefined> {
         'import_source_head',
         'create_candidate',
         'read_tree_file',
+        'reopen_repository',
       ],
     });
     const helperCapability = await admitGitoxideHelperArtifactInternal({

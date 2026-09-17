@@ -29,6 +29,7 @@ import {
   importSourceHeadWithGitoxideHelperInternal,
   inspectCanonicalRepositoryWithGitoxideHelperInternal,
   readTreeFileWithGitoxideHelperInternal,
+  reopenRepositoryWithGitoxideHelperInternal,
   type GitoxideCandidateNoChangeV1,
   type GitoxideCandidatePublishedV1,
   type GitoxideSourceImportObservationV1,
@@ -91,7 +92,7 @@ interface AdmissionCapabilityRecord {
 }
 
 interface AcceptedRepositoryCapabilityRecord {
-  readonly importObservation: Readonly<GitoxideSourceImportObservationV1>;
+  readonly importObservation?: Readonly<GitoxideSourceImportObservationV1>;
   readonly acceptedRepositoryOwnerToken: object;
   readonly invocationOwnerToken: object;
   readonly helperCapability: GitoxideHelperInvocationCapability;
@@ -236,6 +237,10 @@ export function requireGitoxideImportedRepositoryInternal(
   capability: GitoxideAcceptedRepositoryCapability,
 ) {
   const record = requireAcceptedRepositoryRecord(ownerToken, capability);
+  if (!record.importObservation)
+    throw new GitoxideRepositoryAdmissionAuthorityError(
+      'gitoxide_repository_admission_capability_invalid',
+    );
   const artifact = requireGitoxideHelperArtifactIdentityInternal(
     record.invocationOwnerToken,
     record.helperCapability,
@@ -244,6 +249,38 @@ export function requireGitoxideImportedRepositoryInternal(
     ...record.importObservation,
     repositoryPath: record.repositoryPath,
     helperArtifactSha256: artifact.sha256,
+  });
+}
+
+/** Reissues a process-local handle only after checking the caller's durable accepted identity. */
+export async function reopenGitoxideRepositoryInternal(input: {
+  invocationOwnerToken: object;
+  helperCapability: GitoxideHelperInvocationCapability;
+  acceptedRepositoryOwnerToken: object;
+  repositoryPath: string;
+  acceptedCommitOid: string;
+  acceptedTreeOid: string;
+  abortSignal?: AbortSignal;
+}): Promise<GitoxideAcceptedRepositoryCapability> {
+  requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.helperCapability, [
+    'reopen_repository',
+    'create_candidate',
+    'read_tree_file',
+  ]);
+  await reopenRepositoryWithGitoxideHelperInternal({
+    ...input,
+    capability: input.helperCapability,
+  });
+  input.abortSignal?.throwIfAborted();
+  return issueAcceptedRepositoryCapability({
+    acceptedRepositoryOwnerToken: input.acceptedRepositoryOwnerToken,
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    repositoryPath: input.repositoryPath,
+    acceptedRef: ACCEPTED_REPOSITORY_REF,
+    acceptedCommitOid: input.acceptedCommitOid,
+    acceptedTreeOid: input.acceptedTreeOid,
+    managedTreePolicyVersion: MANAGED_TREE_POLICY_VERSION,
   });
 }
 

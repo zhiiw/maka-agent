@@ -163,6 +163,13 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     rename_all_fields = "camelCase"
 )]
 enum Request {
+    ReopenRepository {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        managed_tree_policy_version: u8,
+    },
     InspectRepository {
         protocol_version: u8,
         repository_path: PathBuf,
@@ -198,6 +205,14 @@ enum Request {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Response<'a> {
+    #[serde(rename_all = "camelCase")]
+    RepositoryReopened {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        managed_tree_policy_version: u8,
+    },
     #[serde(rename_all = "camelCase")]
     RepositoryInspected {
         protocol_version: u8,
@@ -306,6 +321,21 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode, &'static str> {
     let request = read_request()?;
     match request {
+        Request::ReopenRepository {
+            protocol_version,
+            repository_path,
+            accepted_commit_oid,
+            accepted_tree_oid,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            reopen_repository(
+                repository_path,
+                accepted_commit_oid,
+                accepted_tree_oid,
+                managed_tree_policy_version,
+            )
+        }
         Request::InspectRepository {
             protocol_version,
             repository_path,
@@ -752,6 +782,66 @@ fn import_source_head(
         managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
         files_imported: copy_stats.files,
         bytes_imported: copy_stats.bytes,
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+fn reopen_repository(
+    repository_path: PathBuf,
+    accepted_commit_oid: String,
+    accepted_tree_oid: String,
+    managed_tree_policy_version: u8,
+) -> Result<ExitCode, &'static str> {
+    if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
+        return Err("unsupported_managed_tree_policy");
+    }
+    assert_import_destination_parent(&repository_path)?;
+    let metadata = fs::symlink_metadata(&repository_path).map_err(|_| "repository_open_failed")?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || is_windows_reparse_point(&metadata)
+    {
+        return Err("repository_open_failed");
+    }
+    let repository = open_repository(repository_path)?;
+    if !repository.is_bare() {
+        return Err("repository_open_failed");
+    }
+    let (commit, tree) = accepted_commit_identity(&repository, &accepted_commit_oid)?;
+    if tree.to_string() != accepted_tree_oid {
+        return Err("base_tree_identity_mismatch");
+    }
+    let read_ref = || {
+        read_direct_commit_ref(
+            &repository,
+            "refs/maka/accepted",
+            "accepted_ref_not_direct",
+            "accepted_ref_target_invalid",
+        )
+    };
+    if read_ref()? != commit {
+        return Err("accepted_ref_target_invalid");
+    }
+    // Reopen proves the entire accepted tree, not just that its root object exists.
+    let mut stats = ManagedTreeStats::default();
+    walk_verified_source_tree(
+        &repository,
+        None,
+        tree,
+        "",
+        0,
+        MANAGED_TREE_POLICY_V3,
+        &mut stats,
+    )?;
+    if read_ref()? != commit {
+        return Err("accepted_ref_target_invalid");
+    }
+    write_response(&Response::RepositoryReopened {
+        protocol_version: PROTOCOL_VERSION,
+        object_format: "sha1",
+        accepted_commit_oid: commit.to_string(),
+        accepted_tree_oid: tree.to_string(),
+        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
     });
     Ok(ExitCode::SUCCESS)
 }

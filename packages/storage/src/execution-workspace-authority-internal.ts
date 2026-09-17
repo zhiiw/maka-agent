@@ -15,6 +15,7 @@ import type {
   WorkspaceBaselineAuthorityInput,
   WorkspaceBaselineCommitResult,
   WorkspaceHeadRecordV1,
+  WorkspaceEpochRecordV1,
   WorkspaceSuccessorAuthorityInput,
 } from '@maka/core/workspace-version-authority';
 import type {
@@ -40,6 +41,7 @@ export interface ExecutionWorkspaceAuthority {
     input: ManagedMutationTerminalCommitInput,
   ): Promise<ManagedMutationTerminalCommitResult>;
   readHead(workspaceId: string, epochId: string): Promise<WorkspaceHeadRecordV1 | undefined>;
+  readEpoch(workspaceId: string, epochId: string): Promise<WorkspaceEpochRecordV1 | undefined>;
   readReservation(instanceId: string): Promise<ManagedMutationReservationRecordV1 | undefined>;
 }
 
@@ -75,6 +77,8 @@ export function registerExecutionWorkspaceAuthorityInternal(
               run(() => backend.commitNoEffect(input)),
             readHead: (workspaceId: string, epochId: string) =>
               run(() => backend.readHead(workspaceId, epochId)),
+            readEpoch: (workspaceId: string, epochId: string) =>
+              run(() => backend.readEpoch(workspaceId, epochId)),
             readReservation: (instanceId: string) => run(() => backend.readReservation(instanceId)),
           }),
         );

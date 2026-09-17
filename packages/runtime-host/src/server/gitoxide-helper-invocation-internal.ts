@@ -551,6 +551,83 @@ export async function createCandidateWithGitoxideHelperInternal(input: {
   });
 }
 
+export async function reopenRepositoryWithGitoxideHelperInternal(input: {
+  readonly invocationOwnerToken: object;
+  readonly capability: GitoxideHelperInvocationCapability;
+  readonly repositoryPath: string;
+  readonly acceptedCommitOid: string;
+  readonly acceptedTreeOid: string;
+  readonly abortSignal?: AbortSignal;
+}): Promise<void> {
+  const deadlineAt =
+    performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.importSourceHeadMs;
+  const artifact = await runGitoxideOperationWithinDeadlineInternal({
+    deadlineAt,
+    abortSignal: input.abortSignal,
+    operation: async () => {
+      requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.capability, [
+        'reopen_repository',
+      ]);
+      if (
+        !isAbsolute(input.repositoryPath) ||
+        !SHA1_OID_PATTERN.test(input.acceptedCommitOid) ||
+        !SHA1_OID_PATTERN.test(input.acceptedTreeOid)
+      ) {
+        throw invocationInvalid('Gitoxide reopen identity is invalid');
+      }
+      return verifyGitoxideHelperArtifactForInvocationInternal(
+        input.invocationOwnerToken,
+        input.capability,
+      );
+    },
+  });
+  // Do not realpath away a symlink/junction before the helper validates the path.
+  const request = Buffer.from(
+    JSON.stringify({
+      operation: 'reopen_repository',
+      protocolVersion: 1,
+      repositoryPath: input.repositoryPath,
+      acceptedCommitOid: input.acceptedCommitOid,
+      acceptedTreeOid: input.acceptedTreeOid,
+      managedTreePolicyVersion: 3,
+    }),
+  );
+  if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
+  const outcome = await invokeHelper({
+    executablePath: artifact.executablePath,
+    request,
+    deadlineAt,
+    abortSignal: input.abortSignal,
+  });
+  let value: unknown;
+  try {
+    value = JSON.parse(outcome.stdout.toString('utf8'));
+  } catch {
+    throw protocolInvalid('Gitoxide reopen response is not JSON');
+  }
+  if (outcome.signal !== null) throw protocolInvalid('Gitoxide reopen exited from a signal');
+  if (outcome.exitCode === 1 && isHelperError(value)) throw operationFailed('reopen', value.reason);
+  if (
+    outcome.exitCode !== 0 ||
+    !hasExactKeys(value, [
+      'kind',
+      'protocolVersion',
+      'objectFormat',
+      'acceptedCommitOid',
+      'acceptedTreeOid',
+      'managedTreePolicyVersion',
+    ]) ||
+    value.kind !== 'repository_reopened' ||
+    value.protocolVersion !== 1 ||
+    value.objectFormat !== 'sha1' ||
+    value.acceptedCommitOid !== input.acceptedCommitOid ||
+    value.acceptedTreeOid !== input.acceptedTreeOid ||
+    value.managedTreePolicyVersion !== 3
+  ) {
+    throw protocolInvalid('Gitoxide reopen response does not match accepted identity');
+  }
+}
+
 export async function readTreeFileWithGitoxideHelperInternal(input: {
   readonly invocationOwnerToken: object;
   readonly capability: GitoxideHelperInvocationCapability;

@@ -88,6 +88,7 @@ test('Local: workspace authority shares group revocation without exposing raw pe
       'commitBaseline',
       'commitNoEffect',
       'commitSuccessor',
+      'readEpoch',
       'readHead',
       'readReservation',
     ]);

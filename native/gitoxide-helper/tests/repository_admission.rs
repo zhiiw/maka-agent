@@ -532,6 +532,44 @@ fn imports_an_exact_source_head_into_a_fresh_managed_repository() {
 }
 
 #[test]
+fn reopen_validates_the_exact_accepted_tree_without_reimporting() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let destination = fixture.root.join("managed-reopen.git");
+    let source_head = fixture.git_output(["rev-parse", "HEAD"]);
+    let imported = invoke_import(&fixture.root, &source_head, &destination);
+    assert!(imported.status.success());
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let commit = imported["baselineCommitOid"].as_str().unwrap();
+    git_bare_output(&destination, ["update-ref", "refs/maka/accepted", commit]);
+    let request = serde_json::json!({
+        "operation": "reopen_repository", "protocolVersion": 1,
+        "repositoryPath": destination, "acceptedCommitOid": commit,
+        "acceptedTreeOid": imported["baselineTreeOid"], "managedTreePolicyVersion": 3,
+    });
+    let reopened = invoke_request(request.clone());
+    assert!(
+        reopened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reopened.stdout)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&reopened.stdout).unwrap();
+    assert_eq!(response["kind"], "repository_reopened");
+    assert_eq!(response["acceptedCommitOid"], commit);
+    let mut wrong_tree = request.clone();
+    wrong_tree["acceptedTreeOid"] = serde_json::json!("0".repeat(40));
+    assert_helper_error(&invoke_request(wrong_tree), "base_tree_identity_mismatch");
+    let alias = fixture.root.join("reopen-alias.git");
+    create_directory_alias(&destination, &alias);
+    let mut aliased = request;
+    aliased["repositoryPath"] = serde_json::json!(alias);
+    assert_helper_error(&invoke_request(aliased), "repository_open_failed");
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/accepted"]),
+        commit
+    );
+}
+
+#[test]
 fn publishes_and_exactly_retries_an_operation_candidate_without_advancing_accepted() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let source_head = fixture.git_output(["rev-parse", "HEAD"]);
