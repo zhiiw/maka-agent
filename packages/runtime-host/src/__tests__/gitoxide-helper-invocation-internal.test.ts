@@ -38,6 +38,7 @@ import {
   importSourceHeadWithGitoxideHelperInternal,
   inspectRepositoryWithGitoxideHelperInternal,
   readTreeFileWithGitoxideHelperInternal,
+  reconcileAcceptedRefWithGitoxideHelperInternal,
   runGitoxideOperationWithinDeadlineInternal,
 } from '../server/gitoxide-helper-invocation-internal.js';
 
@@ -47,6 +48,22 @@ interface AdmittedHelper {
 }
 
 let admittedHelperPromise: Promise<AdmittedHelper | undefined> | undefined;
+
+test('readonly reopen attestation cannot authorize accepted-ref writes', async () => {
+  const helper = await admitHelperPath(process.execPath, ['reopen_repository']);
+  await assert.rejects(
+    reconcileAcceptedRefWithGitoxideHelperInternal({
+      ...helper,
+      repositoryPath: tmpdir(),
+      acceptedCommitOid: 'a'.repeat(40),
+      acceptedTreeOid: 'b'.repeat(40),
+      expectedPreviousCommitOid: 'c'.repeat(40),
+    }),
+    (error) =>
+      error instanceof GitoxideHelperArtifactAuthorityError &&
+      error.code === 'gitoxide_helper_release_claim_unsupported',
+  );
+});
 
 test('uses bounded mutation/import deadlines distinct from repository inspection', () => {
   assert.deepEqual(GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL, {
@@ -630,6 +647,7 @@ async function admitHelperPath(
     | 'import_source_head'
     | 'create_candidate'
     | 'read_tree_file'
+    | 'reopen_repository'
   )[] = ['inspect_repository', 'import_source_head'],
 ): Promise<AdmittedHelper> {
   const helperPath = await realpath(configuredHelperPath);

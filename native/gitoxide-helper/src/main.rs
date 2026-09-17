@@ -163,6 +163,14 @@ const HELPER_ERROR_REASONS_V1: &[&str] = &[
     rename_all_fields = "camelCase"
 )]
 enum Request {
+    ReconcileAcceptedRef {
+        protocol_version: u8,
+        repository_path: PathBuf,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        expected_previous_commit_oid: String,
+        managed_tree_policy_version: u8,
+    },
     ReopenRepository {
         protocol_version: u8,
         repository_path: PathBuf,
@@ -207,6 +215,14 @@ enum Request {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Response<'a> {
+    #[serde(rename_all = "camelCase")]
+    AcceptedRefReconciled {
+        protocol_version: u8,
+        object_format: &'static str,
+        accepted_commit_oid: String,
+        accepted_tree_oid: String,
+        managed_tree_policy_version: u8,
+    },
     #[serde(rename_all = "camelCase")]
     RepositoryReopened {
         protocol_version: u8,
@@ -332,6 +348,23 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode, &'static str> {
     let request = read_request()?;
     match request {
+        Request::ReconcileAcceptedRef {
+            protocol_version,
+            repository_path,
+            accepted_commit_oid,
+            accepted_tree_oid,
+            expected_previous_commit_oid,
+            managed_tree_policy_version,
+        } => {
+            assert_protocol_version(protocol_version)?;
+            reopen_repository(
+                repository_path,
+                accepted_commit_oid,
+                accepted_tree_oid,
+                managed_tree_policy_version,
+                Some(expected_previous_commit_oid),
+            )
+        }
         Request::ReopenRepository {
             protocol_version,
             repository_path,
@@ -345,6 +378,7 @@ fn run() -> Result<ExitCode, &'static str> {
                 accepted_commit_oid,
                 accepted_tree_oid,
                 managed_tree_policy_version,
+                None,
             )
         }
         Request::InspectRepository {
@@ -804,6 +838,7 @@ fn reopen_repository(
     accepted_commit_oid: String,
     accepted_tree_oid: String,
     managed_tree_policy_version: u8,
+    expected_previous_commit_oid: Option<String>,
 ) -> Result<ExitCode, &'static str> {
     if managed_tree_policy_version != MANAGED_TREE_POLICY_VERSION {
         return Err("unsupported_managed_tree_policy");
@@ -832,7 +867,14 @@ fn reopen_repository(
             "accepted_ref_target_invalid",
         )
     };
-    if read_ref()? != commit {
+    let previous = expected_previous_commit_oid
+        .as_ref()
+        .map(|value| {
+            gix::ObjectId::from_hex(value.as_bytes()).map_err(|_| "invalid_base_commit_oid")
+        })
+        .transpose()?;
+    let observed = read_ref()?;
+    if observed != commit && Some(observed) != previous {
         return Err("accepted_ref_target_invalid");
     }
     // Reopen proves the entire accepted tree, not just that its root object exists.
@@ -846,16 +888,47 @@ fn reopen_repository(
         MANAGED_TREE_POLICY_V3,
         &mut stats,
     )?;
+    if observed != commit {
+        // Never dereference a symbolic ref that appeared after observation.
+        use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit};
+        let result = repository.edit_reference(RefEdit {
+            name: "refs/maka/accepted"
+                .try_into()
+                .map_err(|_| "accepted_ref_target_invalid")?,
+            deref: false,
+            change: Change::Update {
+                expected: PreviousValue::MustExistAndMatch(gix::refs::Target::Object(observed)),
+                new: gix::refs::Target::Object(commit),
+                log: LogChange {
+                    message: "maka accepted projection".into(),
+                    ..Default::default()
+                },
+            },
+        });
+        if result.is_err() && read_ref()? != commit {
+            return Err("accepted_ref_target_invalid");
+        }
+    }
     if read_ref()? != commit {
         return Err("accepted_ref_target_invalid");
     }
-    write_response(&Response::RepositoryReopened {
-        protocol_version: PROTOCOL_VERSION,
-        object_format: "sha1",
-        accepted_commit_oid: commit.to_string(),
-        accepted_tree_oid: tree.to_string(),
-        managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
-    });
+    if expected_previous_commit_oid.is_some() {
+        write_response(&Response::AcceptedRefReconciled {
+            protocol_version: PROTOCOL_VERSION,
+            object_format: "sha1",
+            accepted_commit_oid: commit.to_string(),
+            accepted_tree_oid: tree.to_string(),
+            managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+        });
+    } else {
+        write_response(&Response::RepositoryReopened {
+            protocol_version: PROTOCOL_VERSION,
+            object_format: "sha1",
+            accepted_commit_oid: commit.to_string(),
+            accepted_tree_oid: tree.to_string(),
+            managed_tree_policy_version: MANAGED_TREE_POLICY_VERSION,
+        });
+    }
     Ok(ExitCode::SUCCESS)
 }
 

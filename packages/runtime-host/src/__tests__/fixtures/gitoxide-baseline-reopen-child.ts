@@ -131,7 +131,13 @@ if (mode === 'crash-after-baseline' || settling) {
 }
 if (
   !settling &&
-  !['reopen', 'crash-after-candidate', 'retry-candidate', 'conflicting-candidate'].includes(mode)
+  ![
+    'reopen',
+    'crash-after-reopen',
+    'crash-after-candidate',
+    'retry-candidate',
+    'conflicting-candidate',
+  ].includes(mode)
 )
   throw new Error('Unknown child mode');
 try {
@@ -147,6 +153,7 @@ try {
     acceptedRepositoryCapability: capability,
     path: 'hello.txt',
   });
+  if (mode === 'crash-after-reopen') process.exit(80);
   if (mode !== 'reopen') {
     const candidateOwnerToken = {};
     const operationId = 'crash-candidate-operation';

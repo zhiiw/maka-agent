@@ -561,14 +561,33 @@ export async function createCandidateWithGitoxideHelperInternal(input: {
   });
 }
 
-export async function reopenRepositoryWithGitoxideHelperInternal(input: {
+interface AcceptedRepositoryIdentityInput {
   readonly invocationOwnerToken: object;
   readonly capability: GitoxideHelperInvocationCapability;
   readonly repositoryPath: string;
   readonly acceptedCommitOid: string;
   readonly acceptedTreeOid: string;
   readonly abortSignal?: AbortSignal;
-}): Promise<void> {
+}
+
+export function reopenRepositoryWithGitoxideHelperInternal(
+  input: AcceptedRepositoryIdentityInput,
+): Promise<void> {
+  return verifyAcceptedRepository(input);
+}
+
+export function reconcileAcceptedRefWithGitoxideHelperInternal(
+  input: AcceptedRepositoryIdentityInput & { readonly expectedPreviousCommitOid: string },
+): Promise<void> {
+  return verifyAcceptedRepository(input, input.expectedPreviousCommitOid);
+}
+
+async function verifyAcceptedRepository(
+  input: AcceptedRepositoryIdentityInput,
+  expectedPreviousCommitOid?: string,
+): Promise<void> {
+  const operation =
+    expectedPreviousCommitOid === undefined ? 'reopen_repository' : 'reconcile_accepted_ref';
   const deadlineAt =
     performance.now() + GITOXIDE_HELPER_OPERATION_TIMEOUTS_INTERNAL.importSourceHeadMs;
   const artifact = await runGitoxideOperationWithinDeadlineInternal({
@@ -576,12 +595,14 @@ export async function reopenRepositoryWithGitoxideHelperInternal(input: {
     abortSignal: input.abortSignal,
     operation: async () => {
       requireGitoxideHelperOperationsInternal(input.invocationOwnerToken, input.capability, [
-        'reopen_repository',
+        operation,
       ]);
       if (
         !isAbsolute(input.repositoryPath) ||
         !SHA1_OID_PATTERN.test(input.acceptedCommitOid) ||
-        !SHA1_OID_PATTERN.test(input.acceptedTreeOid)
+        !SHA1_OID_PATTERN.test(input.acceptedTreeOid) ||
+        (expectedPreviousCommitOid !== undefined &&
+          !SHA1_OID_PATTERN.test(expectedPreviousCommitOid))
       ) {
         throw invocationInvalid('Gitoxide reopen identity is invalid');
       }
@@ -594,12 +615,13 @@ export async function reopenRepositoryWithGitoxideHelperInternal(input: {
   // Do not realpath away a symlink/junction before the helper validates the path.
   const request = Buffer.from(
     JSON.stringify({
-      operation: 'reopen_repository',
+      operation,
       protocolVersion: 1,
       repositoryPath: input.repositoryPath,
       acceptedCommitOid: input.acceptedCommitOid,
       acceptedTreeOid: input.acceptedTreeOid,
       managedTreePolicyVersion: 3,
+      ...(expectedPreviousCommitOid === undefined ? {} : { expectedPreviousCommitOid }),
     }),
   );
   if (request.length > MAX_REQUEST_BYTES) throw invocationInvalid('Gitoxide request is too large');
@@ -627,7 +649,8 @@ export async function reopenRepositoryWithGitoxideHelperInternal(input: {
       'acceptedTreeOid',
       'managedTreePolicyVersion',
     ]) ||
-    value.kind !== 'repository_reopened' ||
+    value.kind !==
+      (operation === 'reopen_repository' ? 'repository_reopened' : 'accepted_ref_reconciled') ||
     value.protocolVersion !== 1 ||
     value.objectFormat !== 'sha1' ||
     value.acceptedCommitOid !== input.acceptedCommitOid ||

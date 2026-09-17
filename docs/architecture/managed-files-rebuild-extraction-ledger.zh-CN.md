@@ -284,3 +284,21 @@ Windows 本机：repository admission integration **19/19、0 skip**，Storage a
 验证：Runtime matcher/纯转换 **29/29**，Host repository admission **21/21、0 skip**；Runtime/Host build、Biome、diff check 通过。workflow 的路径选择同时纳入共享 Edit matcher，避免后续匹配语义变化漏跑结算回归。
 
 下一步不变：accepted-ref reconciliation，覆盖 SQLite 已接受而 Git ref 仍旧的重启状态；随后才接真实 Runtime/Host 与 Desktop。
+
+## 第十一检查点：SQLite 接受后的 accepted-ref 修复
+
+新增显式 helper operation `reconcile_accepted_ref`，与只读 `reopen_repository` 分开 attestation。旧的只读 capability 不获得写权限；未声明新 operation 的 helper fail closed，无 fallback，也不升版已有数据库格式。
+
+- **事实 owner**：Host 通过同一 Execution Stores facade 读取当前 head、对应 immutable accepted version 和直接前驱；Storage 的 `readWorkspaceVersion` 从 canonical ledger 验证投影。目标 OID 和可替换的前驱 OID 不由工具调用者提供。
+- **写入 owner/原子边界**：helper 验证 bare repository、目标 commit/tree 及完整对象图后，仅对固定 `refs/maka/accepted` 执行 direct-target compare-and-swap。`deref: false`，不能借符号引用改写其他 ref。当前值等于目标时幂等成功；只允许已证明的直接前驱转换成目标。
+- **能力签发**：修复后仍执行严格只读 reopen；Host 再读 SQLite head，身份变化则拒绝签发 capability。修复不是新的 acceptance，不新增 T2/successor，也不重跑 Write/Edit。
+- **失败状态**：未知/缺失/符号 ref、对象损坏或缺失、CAS 冲突且目标尚未收敛都拒绝。不会强制 reset、清除未知 lock 或把任意旧祖先当作可覆盖前驱。由 helper crash 留下的锁残留尚无自动回收协议；此类情况 fail closed，不宣称任意内部指令点崩溃均已自动收敛。
+- **回滚**：撤回接线后旧代码对 stale ref 继续拒绝；SQLite 已接受事实保留，不删除 candidate/object，也不写相反终态。
+
+回归先 RED：真实子进程已提交 successor 后退出，新进程因旧 ref 拒绝；接线后 GREEN。覆盖修改/新文件、修复后再次直接退出及 reopen、T2/successor 数量与内容不变；符号 ref、未知 ref、缺结果 blob 拒绝且不覆盖旧值。Rust 真实双进程同时修复同一目标，最终收敛并可幂等重试。
+
+平台矩阵：Windows 本机已执行 Rust/helper/SQLite 真实进程测试；Linux/macOS 使用既有三平台 workflow，本轮未取得远程证据。仅承诺已测试的进程退出边界，不承诺断电。仍是内部 Host owner 组合，不是 ToolRuntime/Desktop 产品测试。
+
+验证：Rust **14 unit + 58 integration = 72/72**；Host/helper/Storage authority 组合 **75 pass / 6 POSIX-only skip / 0 fail**，新增只读 attestation 禁止 ref 写入测试另 **1/1**。Storage/Host build、Rust fmt、Biome、diff check 通过。
+
+下一步：真实 Runtime/Host managed admission 与结果发布；同时继续列出未决 T1/candidate 的恢复状态，不能把“已接受后的 ref 可修复”说成整个任务已可 Resume。

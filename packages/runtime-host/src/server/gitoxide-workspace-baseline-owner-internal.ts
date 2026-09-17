@@ -18,6 +18,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { reconcileAcceptedRefWithGitoxideHelperInternal } from './gitoxide-helper-invocation-internal.js';
 import {
   verifyGitoxideCandidateSettlementInternal,
   verifyGitoxideRejectedOperationInternal,
@@ -137,6 +138,7 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
       acceptedRepositoryOwnerToken: object;
       abortSignal?: AbortSignal;
     }): Promise<GitoxideAcceptedRepositoryCapability> {
+      input = { ...input };
       input.abortSignal?.throwIfAborted();
       if (!input.workspaceKey.trim() || Buffer.byteLength(input.workspaceKey) > 1024)
         throw new Error('Invalid managed workspace key');
@@ -162,6 +164,37 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
         epoch.objectFormat !== 'sha1'
       )
         throw new Error('Managed repository does not match durable workspace identity');
+      const version = await authority.readVersion(head.workspaceVersionId);
+      if (
+        !version ||
+        version.acceptedEventId !== head.acceptedEventId ||
+        version.commitOid !== head.commitOid ||
+        version.treeOid !== head.treeOid ||
+        version.repositoryId !== epoch.repositoryId ||
+        version.workspaceEpochId !== epochId ||
+        version.workspaceId !== workspaceId
+      )
+        throw new Error('Managed head has no matching accepted version');
+      if (version.protocol === 'workspace_version_accepted_v1') {
+        const parent = await authority.readVersion(version.parents[0]);
+        if (
+          !parent ||
+          parent.acceptedEventId !== version.baseAcceptedEventId ||
+          parent.repositoryId !== epoch.repositoryId ||
+          parent.workspaceEpochId !== epochId ||
+          parent.workspaceId !== workspaceId
+        )
+          throw new Error('Managed successor has no matching accepted predecessor');
+        await reconcileAcceptedRefWithGitoxideHelperInternal({
+          invocationOwnerToken: input.invocationOwnerToken,
+          capability: input.helperCapability,
+          repositoryPath: input.repositoryPath,
+          acceptedCommitOid: head.commitOid,
+          acceptedTreeOid: head.treeOid,
+          expectedPreviousCommitOid: parent.commitOid,
+          abortSignal: input.abortSignal,
+        });
+      }
       const capability = await reopenGitoxideRepositoryInternal({
         ...input,
         acceptedCommitOid: head.commitOid,

@@ -179,11 +179,50 @@ for (const mode of [
           gitBare(join(stateRoot, 'repository.git'), ['rev-parse', 'refs/maka/accepted']),
           committed.proof.baseCommitOid,
         );
-        // Until accepted-ref reconciliation is connected, reopen must refuse
-        // the stale projection, not silently replay the operation or repair it.
+        // A fresh process derives repair authority from SQLite, never from the ref.
+        if (mode === 'crash-after-settlement') {
+          const refPath = join(stateRoot, 'repository.git', 'refs', 'maka', 'accepted');
+          const previousBytes = await readFile(refPath);
+          await writeFile(refPath, `${'0'.repeat(40)}\n`);
+          const unknown = run('reopen');
+          assert.equal(unknown.status, 1);
+          assert.equal(await readFile(refPath, 'utf8'), `${'0'.repeat(40)}\n`);
+          await writeFile(refPath, 'ref: refs/maka/other\n');
+          const symbolic = run('reopen');
+          assert.equal(symbolic.status, 1);
+          assert.match(symbolic.stderr, /accepted_ref_not_direct/);
+          assert.equal(await readFile(refPath, 'utf8'), 'ref: refs/maka/other\n');
+          await writeFile(refPath, previousBytes);
+          const blobOid = committed.proof.resultBlobOid;
+          const blobPath = join(
+            stateRoot,
+            'repository.git',
+            'objects',
+            blobOid.slice(0, 2),
+            blobOid.slice(2),
+          );
+          const blobBytes = await readFile(blobPath);
+          await rm(blobPath);
+          const missing = run('reopen');
+          assert.equal(missing.status, 1);
+          assert.deepEqual(await readFile(refPath), previousBytes);
+          await writeFile(blobPath, blobBytes);
+          const repairedCrash = run('crash-after-reopen');
+          assert.equal(repairedCrash.status, 80, repairedCrash.stderr);
+        }
         const stale = run('reopen');
-        assert.equal(stale.status, 1);
-        assert.match(stale.stderr, /accepted_ref_target_invalid/u);
+        assert.equal(stale.status, 0, stale.stderr);
+        assert.equal(JSON.parse(stale.stdout).commit, committed.proof.candidateCommitOid);
+        assert.equal(
+          gitBare(join(stateRoot, 'repository.git'), ['rev-parse', 'refs/maka/accepted']),
+          committed.proof.candidateCommitOid,
+        );
+        const again = run('reopen');
+        assert.equal(again.status, 0, again.stderr);
+        assert.deepEqual(JSON.parse(again.stdout), JSON.parse(stale.stdout));
+        const afterRepair = run('read-settlement');
+        assert.equal(afterRepair.status, 0, afterRepair.stderr);
+        assert.deepEqual(JSON.parse(afterRepair.stdout), state);
       }
     } finally {
       await rm(stateRoot, { recursive: true, force: true });

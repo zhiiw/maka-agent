@@ -633,6 +633,57 @@ fn publishes_and_exactly_retries_an_operation_candidate_without_advancing_accept
 }
 
 #[test]
+fn reconciles_only_the_expected_predecessor_and_converges_concurrent_retries() {
+    let fixture = RepositoryFixture::sha1_with_commit();
+    let destination = fixture.root.join("reconcile.git");
+    let source = fixture.git_output(["rev-parse", "HEAD"]);
+    let imported = invoke_import(&fixture.root, &source, &destination);
+    assert!(imported.status.success());
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let base = imported["baselineCommitOid"].as_str().unwrap();
+    git_bare_output(&destination, ["update-ref", "refs/maka/accepted", base]);
+    let candidate = invoke_request(serde_json::json!({
+        "protocolVersion": 1, "operation": "create_candidate", "repositoryPath": destination,
+        "acceptedRef": "refs/maka/accepted", "expectedBaseCommitOid": base,
+        "expectedBaseTreeOid": imported["baselineTreeOid"],
+        "candidateRef": "refs/maka/candidates/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "path": "result.txt", "contentBase64": "cmVzdWx0Cg==", "managedTreePolicyVersion": 3,
+    }));
+    assert!(candidate.status.success());
+    let candidate: serde_json::Value = serde_json::from_slice(&candidate.stdout).unwrap();
+    let request = serde_json::json!({
+        "protocolVersion": 1, "operation": "reconcile_accepted_ref", "repositoryPath": destination,
+        "expectedPreviousCommitOid": base,
+        "acceptedCommitOid": candidate["candidateCommitOid"],
+        "acceptedTreeOid": candidate["candidateTreeOid"], "managedTreePolicyVersion": 3,
+    });
+    let mut wrong = request.clone();
+    wrong["expectedPreviousCommitOid"] = serde_json::json!("0".repeat(40));
+    assert_helper_error(&invoke_request(wrong), "accepted_ref_target_invalid");
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/accepted"]),
+        base
+    );
+    let first = spawn_request(request.clone());
+    let second = spawn_request(request.clone());
+    for child in [first, second] {
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["kind"], "accepted_ref_reconciled");
+    }
+    assert!(invoke_request(request).status.success());
+    assert_eq!(
+        git_bare_output(&destination, ["rev-parse", "refs/maka/accepted"]),
+        candidate["candidateCommitOid"].as_str().unwrap()
+    );
+}
+
+#[test]
 fn rejects_an_existing_candidate_receipt_with_an_unrelated_tree_change() {
     let fixture = RepositoryFixture::sha1_with_commit();
     let source_head = fixture.git_output(["rev-parse", "HEAD"]);
