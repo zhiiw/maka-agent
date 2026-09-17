@@ -17,7 +17,7 @@ import { pathToFileURL } from 'node:url';
 import { expect } from '@playwright/test';
 
 /** Pause real product code after candidate verification, before SQLite acceptance. */
-export async function armCandidateBreakpoint(root, repo) {
+export async function armCandidateBreakpoint(root, repo, noChange = false) {
   let endpoint;
   await expect
     .poll(
@@ -95,8 +95,16 @@ export async function armCandidateBreakpoint(root, repo) {
       'packages/runtime-host/dist/server/gitoxide-workspace-baseline-owner-internal.js',
     );
     const lines = (await readFile(file, 'utf8')).split('\n');
+    const functionName = noChange ? 'acceptUnchangedCandidate' : 'acceptPublishedCandidate';
+    const methodStart = lines.findIndex((line) => line.includes(`async ${functionName}(input)`));
+    assert.ok(methodStart >= 0, 'Expected candidate owner method');
+    const methodEnd = lines.findIndex((line, index) => index > methodStart && line.trim() === '},');
+    assert.ok(methodEnd > methodStart, 'Expected candidate owner method end');
+    const statement = noChange
+      ? 'return verified.authority.commitNoEffect({'
+      : 'return verified.authority.commitSuccessor({';
     const matches = lines.flatMap((line, index) =>
-      line.includes('return verified.authority.commitSuccessor({') ? [index] : [],
+      index > methodStart && index < methodEnd && line.includes(statement) ? [index] : [],
     );
     assert.equal(matches.length, 1, 'Rebuild/review the breakpoint if production code changes');
     const breakpoint = await send('Debugger.setBreakpointByUrl', {
@@ -108,7 +116,7 @@ export async function armCandidateBreakpoint(root, repo) {
       async wait() {
         await expect.poll(() => Boolean(paused), { timeout: 30000 }).toBe(true);
         assert.ok(paused.hitBreakpoints.includes(breakpoint.breakpointId));
-        assert.equal(paused.callFrames[0].functionName, 'acceptPublishedCandidate');
+        assert.equal(paused.callFrames[0].functionName, functionName);
         return {
           functionName: paused.callFrames[0].functionName,
           lineNumber: paused.callFrames[0].location.lineNumber,

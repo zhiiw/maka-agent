@@ -996,3 +996,19 @@ Windows 两次显式独立运行均通过，证据分别位于 `C:/Users/wzy/App
 平台矩阵：Windows 本轮实际运行 Write（`maka-managed-electron-ol92bv`）与 Edit（`maka-managed-electron-WbiHAh`）均通过，包含恢复 outcome/model/transcript 精确一致、唯一 successor、Continue 前后 mutation facts 不变及 source checkout 不变。Linux/macOS 本轮未运行，暂不加入默认 CI。后续仍需 no-op/失败及损坏证据的 Desktop 级矩阵；不因此引入自动续跑或扩大恢复策略。
 
 最终补跑 Write（`maka-managed-electron-xp1iCn`）通过，本轮三次显式运行 3/3；最终脚本语法、Biome 和 diff check 通过。仅测试/launcher/文档改动，无需重新编译产品，不宣称全量 CI 或长期调度稳定性已证明。
+
+## 第五十二检查点：首次 no-op 的候选恢复与 baseline continuation
+
+新增 `--candidate-noop-interrupt`：真实 Write 将 baseline 写为相同内容；断点改为 `acceptUnchangedCandidate` 中已验证 candidate、尚未 `commitNoEffect` 的语句。真实 Host kill/restart 后必须只有一个成功恢复 response、携带 `no_workspace_change` terminal，reservation 为零，workspace heads 与崩溃前逐字段相同，不能产生 successor。断点定位同时核验所在 owner method，避免命中其他 no-effect writer。
+
+新验收确实暴露了生产缺口：`maka-managed-electron-aLSgKz` 中上述持久化检查均通过，但 Continue 被拒绝。原 inspector 强制当前版本为 `workspace_version_accepted_v1`，忽略了首次成功 no-op 后合法保留的 baseline。这不是缺失 T2，也不是应当补写 successor 的状态。
+
+修复 owner 仍为 `GitoxideWorkspaceBaselineOwner.inspectContinuation`。successor 原证据路径保持不变；baseline 必须由 bounded Runtime prefix 中经 tool-ledger scanner 验证的成功 Write/Edit no-change terminal 绑定。terminal 与 dispatch/operation/instance 匹配，T1 的 repository、workspace/epoch、base event/version/revision/commit/tree 和固定执行 profile 必须精确等于当前 accepted head。没有成功 no-change witness 的 baseline 不放行；失败结果不冒充成功 witness。祖先查找只复用原有经过 store 认证、最多 32 段的 continuation lineage，不接受 caller 自报 parent。
+
+最终仍由 Git owner reopen 验证对象、投影 accepted ref，并重读 head/reservation/prefix，发生漂移就拒绝。此修复不写新的 workspace truth、不推进 head、不清除 reservation、不创造 successor；失败没有写入需要回滚。只修成功 no-op 的 continuation 证据，不扩大到失败/no-effect 自动恢复。
+
+Windows RED→GREEN：真实 Desktop 命令在修复前停于“当前不满足继续条件”；修复后 `maka-managed-electron-s5T1pg` 完整通过，包含 Continue 创建新 Run、accepted Read 仍为 baseline、模型与 transcript 等于唯一恢复 outcome、source checkout 不变。新定向子进程回归 2/2、0 skip：no-op 可 inspect（同时拒绝不相关 Run/Session 与错误 high-water），failure 不可作为成功 no-change witness；两者检查后 durable settlement 不变。Host build、Biome/diff check 通过。Linux/macOS 本轮未执行，无断电或自动续跑承诺。
+
+较长的 backend-live-sequence 回归首轮超过其既有 60 秒上限而被取消，不能列为通过；这次与其他定向用例并行执行过，尚不能据此认定超时原因，单独复跑结果另记。
+
+单独复跑该长用例仍于约 61.6 秒被 60 秒 deadline 取消，无明确 assertion failure，但也不能当作逻辑通过。本轮不修改 deadline、不禁用测试，保留为下一轮的验证缺口；不能断言与本次修改无关或宣称完整回归全绿。提交只获得上述真实 no-op Desktop 和定向 2/2 的通过证据。

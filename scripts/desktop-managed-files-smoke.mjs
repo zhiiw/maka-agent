@@ -72,11 +72,19 @@ await git(
 const requests = [];
 const repeatInterrupt = process.argv.includes('--repeat-interrupt');
 const candidateEditInterrupt = process.argv.includes('--candidate-edit-interrupt');
+const candidateNoopInterrupt = process.argv.includes('--candidate-noop-interrupt');
 assert.ok(
-  !(candidateEditInterrupt && process.argv.includes('--candidate-interrupt')),
-  'Choose either Write or Edit candidate interruption',
+  [
+    candidateEditInterrupt,
+    candidateNoopInterrupt,
+    process.argv.includes('--candidate-interrupt'),
+  ].filter(Boolean).length <= 1,
+  'Choose one candidate interruption scenario',
 );
-const candidateInterrupt = candidateEditInterrupt || process.argv.includes('--candidate-interrupt');
+const candidateInterrupt =
+  candidateEditInterrupt ||
+  candidateNoopInterrupt ||
+  process.argv.includes('--candidate-interrupt');
 const candidateToolName = candidateEditInterrupt ? 'Edit' : 'Write';
 // Manual real-process breakpoint test; does not claim arbitrary-instruction crash coverage.
 assert.ok(
@@ -85,25 +93,31 @@ assert.ok(
 );
 const interruptTurn =
   candidateInterrupt || repeatInterrupt || process.argv.includes('--interrupt-turn');
-const expectedContent = candidateInterrupt && !candidateEditInterrupt ? /written/ : /edited/;
+const expectedContent = candidateNoopInterrupt
+  ? /baseline/
+  : candidateInterrupt && !candidateEditInterrupt
+    ? /written/
+    : /edited/;
 let restartNumber = 0;
 let waitingForCompletion = false;
 let operationStep = 0;
 const operations = [
-  ...(candidateEditInterrupt
-    ? [
-        {
-          name: 'Edit',
-          input: { path: 'tracked.txt', old_string: 'baseline', new_string: 'edited' },
-        },
-      ]
-    : [
-        { name: 'Write', input: { path: 'tracked.txt', content: 'written\n' } },
-        {
-          name: 'Edit',
-          input: { path: 'tracked.txt', old_string: 'written', new_string: 'edited' },
-        },
-      ]),
+  ...(candidateNoopInterrupt
+    ? [{ name: 'Write', input: { path: 'tracked.txt', content: 'baseline\n' } }]
+    : candidateEditInterrupt
+      ? [
+          {
+            name: 'Edit',
+            input: { path: 'tracked.txt', old_string: 'baseline', new_string: 'edited' },
+          },
+        ]
+      : [
+          { name: 'Write', input: { path: 'tracked.txt', content: 'written\n' } },
+          {
+            name: 'Edit',
+            input: { path: 'tracked.txt', old_string: 'written', new_string: 'edited' },
+          },
+        ]),
   { name: 'Read', input: { path: 'tracked.txt' } },
 ];
 let restarted = false;
@@ -304,12 +318,15 @@ try {
   await page
     .locator('.maka-composer-editor [contenteditable="true"]')
     .fill(
-      candidateEditInterrupt
-        ? 'Edit tracked.txt from baseline to edited, then read it.'
-        : 'Write tracked.txt to written, edit written to edited, then read it.',
+      candidateNoopInterrupt
+        ? 'Write tracked.txt with its current baseline content, then read it.'
+        : candidateEditInterrupt
+          ? 'Edit tracked.txt from baseline to edited, then read it.'
+          : 'Write tracked.txt to written, edit written to edited, then read it.',
     );
   await expect(page.locator('.maka-composer button[type="submit"]')).toBeEnabled();
-  if (candidateInterrupt) candidateDebugger = await armCandidateBreakpoint(root, repo);
+  if (candidateInterrupt)
+    candidateDebugger = await armCandidateBreakpoint(root, repo, candidateNoopInterrupt);
   await page.locator('.maka-composer button[type="submit"]').click();
   if (candidateInterrupt) {
     const breakpoint = await candidateDebugger.wait();
@@ -347,6 +364,7 @@ try {
         1,
       );
       candidateEvidence = {
+        heads: db.prepare('SELECT * FROM runtime_workspace_heads ORDER BY workspace_id').all(),
         toolName: candidateToolName,
         operationId,
         sessionId: dispatch.sessionId,
@@ -532,11 +550,40 @@ try {
         const successors = recovered.filter(
           (event) => event.actions?.workspaceFact?.kind === 'maka.workspace.version_accepted',
         );
-        assert.equal(successors.length, 1);
-        assert.equal(
-          successors[0].actions.workspaceFact.payload.commitOid,
-          candidateEvidence.candidateCommitOid,
-        );
+        assert.equal(successors.length, candidateNoopInterrupt ? 0 : 1);
+        if (candidateNoopInterrupt) {
+          assert.equal(Boolean(response.content.isError), false);
+          assert.equal(
+            response.actions?.managedMutationTerminal?.terminalKind,
+            'no_workspace_change',
+          );
+          const db = new DatabaseSync(join(workspace, 'runtime.sqlite'), { readOnly: true });
+          try {
+            assert.deepEqual(
+              db.prepare('SELECT * FROM runtime_workspace_heads ORDER BY workspace_id').all(),
+              candidateEvidence.heads,
+            );
+            assert.equal(
+              db
+                .prepare(
+                  'SELECT COUNT(*) AS count FROM runtime_managed_mutation_reservations WHERE operation_id = ?',
+                )
+                .get(candidateEvidence.operationId).count,
+              0,
+            );
+          } finally {
+            db.close();
+          }
+          await writeFile(
+            join(root, 'no-change-recovered.json'),
+            JSON.stringify(response, null, 2),
+          );
+        } else {
+          assert.equal(
+            successors[0].actions.workspaceFact.payload.commitOid,
+            candidateEvidence.candidateCommitOid,
+          );
+        }
         mutationsBefore = recovered;
       }
       await page

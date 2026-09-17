@@ -258,6 +258,17 @@ for (const mode of [
               : 'accepted original\n',
       );
       assert.deepEqual(JSON.parse(run('read-settlement').stdout), durable);
+      if (mode === 'runtime-live-noop') {
+        const inspected = run('inspect-continuation');
+        assert.equal(inspected.status, 0, inspected.stderr);
+        assert.equal(JSON.parse(inspected.stdout).restored, true);
+        assert.deepEqual(JSON.parse(run('read-settlement').stdout), durable);
+      }
+      if (mode === 'runtime-live-rejection') {
+        const inspected = run('inspect-continuation');
+        assert.notEqual(inspected.status, 0, 'An error is not a successful no-change witness');
+        assert.deepEqual(JSON.parse(run('read-settlement').stdout), durable);
+      }
       if (mode === 'backend-live-sequence') {
         const inspected = run('inspect-continuation');
         assert.equal(inspected.status, 0, inspected.stderr);

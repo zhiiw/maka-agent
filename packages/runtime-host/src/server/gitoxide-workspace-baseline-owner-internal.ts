@@ -18,6 +18,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import { scanToolLedger } from '@maka/core/tool-ledger-scanner';
+import {
+  MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST,
+  type RuntimeEvent,
+} from '@maka/core/runtime-event';
 import {
   prepareGitoxideCandidateRecoveryInternal,
   type GitoxideCandidateRecoveryInput,
@@ -190,11 +195,7 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
       if (!head || !epoch || (await authority.readReservation(epoch.workspaceInstanceId)))
         throw new Error('Managed continuation has no settled workspace head');
       const version = await authority.readVersion(head.workspaceVersionId);
-      if (
-        !version ||
-        version.protocol !== 'workspace_version_accepted_v1' ||
-        version.acceptedEventId !== head.acceptedEventId
-      )
+      if (!version || version.acceptedEventId !== head.acceptedEventId)
         throw new Error('Managed continuation has no source-bound accepted mutation');
       const prefixInput = { sessionId: input.sessionId, runId: input.sourceRunId };
       const budget = {
@@ -217,8 +218,46 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
       });
       if (prefix.prefixDigest !== proof.prefixDigest)
         throw new Error('Managed continuation source prefix changed');
+      // A successful no-change operation can bind an unchanged baseline to this
+      // Run. It must not manufacture a successor simply to become resumable.
+      const representsHead = (events: readonly RuntimeEvent[]) => {
+        if (version.protocol === 'workspace_version_accepted_v1')
+          return events.some((event) => event.id === version.origin.outcomeEventId);
+        const scan = scanToolLedger(events);
+        if (scan.hasCorruption) throw new Error('Corrupt baseline continuation ledger');
+        return scan.operations.some((operation) => {
+          const dispatch = operation.dispatchEvent;
+          const mutation = dispatch?.actions?.toolDispatch?.managedMutation;
+          const response = operation.responseEvent;
+          const terminal = response?.actions?.managedMutationTerminal;
+          return (
+            operation.callEvent?.content?.kind === 'function_call' &&
+            ['Write', 'Edit'].includes(operation.callEvent.content.name) &&
+            dispatch?.sessionId === input.sessionId &&
+            response?.sessionId === input.sessionId &&
+            response.runId === dispatch.runId &&
+            response.content?.kind === 'function_response' &&
+            !response.content.isError &&
+            response.refs?.operationId === operation.operationId &&
+            terminal?.terminalKind === 'no_workspace_change' &&
+            terminal.operationId === operation.operationId &&
+            terminal.dispatchEventId === dispatch.id &&
+            terminal.workspaceInstanceId === epoch.workspaceInstanceId &&
+            mutation?.workspaceInstanceId === epoch.workspaceInstanceId &&
+            mutation.workspaceId === workspaceId &&
+            mutation.workspaceEpochId === epochId &&
+            mutation.repositoryId === head.repositoryId &&
+            mutation.baseAcceptedEventId === head.acceptedEventId &&
+            mutation.baseWorkspaceVersionId === head.workspaceVersionId &&
+            mutation.baseHeadRevision === head.revision &&
+            mutation.baseCommitOid === head.commitOid &&
+            mutation.baseTreeOid === head.treeOid &&
+            mutation.executionProfileDigest === MANAGED_MUTATION_EXECUTION_PROFILE_V1_DIGEST
+          );
+        });
+      };
       let evidence = prefix;
-      if (!evidence.events.some((event) => event.id === version.origin.outcomeEventId)) {
+      if (!representsHead(evidence.events)) {
         // Only a store-authenticated continuation may inherit accepted evidence.
         // A caller-supplied parent ID (or today's latest head) is not lineage.
         const opening = prefix.events[0];
@@ -268,31 +307,37 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
           const ancestor = await stores.runtimeEventStore.readImmutableRuntimePrefix(ancestorInput);
           if (ancestor.prefixDigest !== ancestorProof.prefixDigest)
             throw new Error('Managed continuation ancestor changed during verification');
-          if (ancestor.events.some((event) => event.id === version.origin.outcomeEventId)) {
+          if (representsHead(ancestor.events)) {
             evidence = ancestor;
             break;
           }
         }
       }
-      const outcome = evidence.events.find((event) => event.id === version.origin.outcomeEventId);
-      const dispatch = evidence.events.find((event) => event.id === version.origin.dispatchEventId);
-      const mutation = dispatch?.actions?.toolDispatch?.managedMutation;
-      if (
-        !outcome ||
-        outcome.sessionId !== input.sessionId ||
-        outcome.runId !== evidence.identity.runId ||
-        outcome.content?.kind !== 'function_response' ||
-        outcome.content.isError === true ||
-        outcome.refs?.operationId !== version.origin.operationId ||
-        dispatch?.actions?.toolDispatch?.operationId !== version.origin.operationId ||
-        !mutation ||
-        mutation.workspaceId !== workspaceId ||
-        mutation.workspaceEpochId !== epochId ||
-        mutation.repositoryId !== head.repositoryId ||
-        mutation.baseAcceptedEventId !== version.baseAcceptedEventId ||
-        mutation.executionProfileDigest !== version.executionProfileDigest
-      )
-        throw new Error('Managed accepted head does not belong to the source Run');
+      if (version.protocol === 'workspace_version_accepted_v1') {
+        const outcome = evidence.events.find((event) => event.id === version.origin.outcomeEventId);
+        const dispatch = evidence.events.find(
+          (event) => event.id === version.origin.dispatchEventId,
+        );
+        const mutation = dispatch?.actions?.toolDispatch?.managedMutation;
+        if (
+          !outcome ||
+          outcome.sessionId !== input.sessionId ||
+          outcome.runId !== evidence.identity.runId ||
+          outcome.content?.kind !== 'function_response' ||
+          outcome.content.isError === true ||
+          outcome.refs?.operationId !== version.origin.operationId ||
+          dispatch?.actions?.toolDispatch?.operationId !== version.origin.operationId ||
+          !mutation ||
+          mutation.workspaceId !== workspaceId ||
+          mutation.workspaceEpochId !== epochId ||
+          mutation.repositoryId !== head.repositoryId ||
+          mutation.baseAcceptedEventId !== version.baseAcceptedEventId ||
+          mutation.executionProfileDigest !== version.executionProfileDigest
+        )
+          throw new Error('Managed accepted head does not belong to the source Run');
+      } else if (!representsHead(evidence.events)) {
+        throw new Error('Baseline continuation has no source-bound no-change result');
+      }
       // Reuse the artifact owner: it verifies objects and reconciles only the accepted ref.
       await this.reopen(input);
       const current = await authority.readHead(workspaceId, epochId);
