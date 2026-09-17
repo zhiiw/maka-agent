@@ -740,3 +740,18 @@ node scripts/desktop-managed-files-smoke.mjs --interrupt-turn
 先让真实 SessionManager 测试断言收到 sourceRunId，确认 RED（原实现只传 sessionId），再实现。补充 execution 两次复验的固定 high-water/冻结参数断言，以及 local inspector 转发到 checkpoint owner 的测试。Windows Runtime/Host build 通过；continuation/resume/handoff 定向 **32/32**，包含真实子进程 SIGKILL 后的 continuation claim/start/terminal prefix 修复测试。该 crash harness 使用原有测试 backend，不等同于 Gitoxide/真实 Desktop 中断恢复闭环。Linux/macOS 本轮未执行。
 
 下一步仍是 Host managed accepted-head owner：消费这个 source 边界，验证 epoch、accepted event/tree 与 Runtime prefix 的因果对应，并在 activation 时重验。该校验尚未接入；全局恢复开关、Desktop 中断场景的默认拒绝维持不变。
+
+## 第三十八检查点：source-bound accepted-head checkpoint
+
+Gitoxide baseline owner 新增 inspectContinuation，复用同 execution-stores 的 workspace authority，不接受上层提供 head/blob/接受结论。读取当前 head/version/epoch 并要求无 active mutation reservation；读取 source Run 的有界 immutable prefix proof（16,384 events、32 MiB 总量、8 MiB 单条），再读取该 proof 固定的 prefix。已指定 high-water 必须精确相等，不允许静默截短或采用后来追加的事件。
+
+当前 head 必须是 successor，其 outcome/dispatch/operation ID 确实出现在指定 session/source Run 的 prefix，且为成功工具结果；dispatch 的 workspace、epoch、repository、base accepted event 与 execution profile 必须匹配 accepted version。随后通过已有 reopen owner 验证 Git artifact、必要时修复 accepted-ref projection，最后重验 head/revision/tree/commit、prefix digest/high-water 和 reservation。任何缺失或漂移均拒绝，不重跑 mutation。
+
+- **调用权限**：session-bound execution capability 只接收 sourceRunId/high-water。sessionId、workspaceKey、repository path、helper owner 和 ledger 来自已绑定记录。Host local safety inspector 的 readWorkspaceCheckpoint 已消费此入口；普通会话或没有 source 的新 Run 不走此校验。
+- **原子边界**：这是有界观察与异步后的复验，不是跨 Git/SQLite 的原子快照或写锁。后续执行仍必须经过 Runtime activation 内的同一 inspector 和既有 continuation claim；本次没有宣称观察一旦签发就永久有效。
+- **失败/回滚**：没有 active head、未结算 reservation、错误 source、high-water 不符、Git 对象失效或验证中漂移均 fail closed。读验证不删除数据；reopen 只按原协议修复 accepted ref，不改 accepted truth。撤回接线不影响已有工具结果。
+- **保守范围**：只证明 source Run 自己包含当前 accepted mutation 的情况。baseline-only、read-only source 或仅通过祖先 lineage 持有该 head，目前拒绝；后续要补 durable read/lineage 证据，不以当前最新 head 猜测历史。
+
+先通过真实 helper/SQLite 子进程 fixture 复现缺少 inspect owner 的 RED，再实现。正常 AiSdk Write/Edit/Read 后新进程校验通过；错误 Run、错误 Session、过期 high-water 拒绝；session-bound capability 返回相同 checkpoint。相邻 backend 在第一次 durable outcome 后直接退出的原恢复用例继续通过。Windows 执行；Linux/macOS 本轮未执行。不将这些 fixture 称为完整 Desktop Continue 验收。
+
+恢复开关保持关闭。下一步是限定 managed profile 的启用策略与真实 Desktop Continue 正向验收，并补 source-bound head 之后发生推进时的拒绝证据；不打开所有普通会话的通用恢复开关，也不新增 schema/protocol。

@@ -225,7 +225,11 @@ import { startHostModelMetadataRefresh } from './model-metadata-refresh.js';
 import { HostRuntimeResourceCoordinator } from './runtime-resource-coordinator.js';
 import { SessionAdmissionGate } from './session-admission-gate.js';
 import { HostSessionCatalogCoordinator } from './session-catalog-coordinator.js';
-import { publishPreparedGitoxideManagedTaskInternal } from './gitoxide-managed-session-internal.js';
+import {
+  publishPreparedGitoxideManagedTaskInternal,
+  reopenGitoxideManagedTaskInternal,
+  requireGitoxideManagedSessionInternal,
+} from './gitoxide-managed-session-internal.js';
 import { HostWorkspaceResolver } from './workspace-resolver.js';
 import { HostSessionRetirementCoordinator } from './session-retirement-coordinator.js';
 import { HostStorageMaintenance } from './storage-maintenance.js';
@@ -1407,6 +1411,22 @@ export async function createExecutionRuntimeHostComposition(
           (await stores.sessionStore.readHeaderSnapshot(sessionId)).cwd,
         resolveWorkspaceIdentity: async (cwd) => resolveWorkspaceIdentity({ path: cwd }),
         listAvailableToolNames: resolveAvailableToolNames,
+        readWorkspaceCheckpoint: async (sessionId, source) => {
+          if (!source) return undefined;
+          const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
+          if (header.toolProfile !== 'managed-files-v1') return undefined;
+          if (!dependencies.managedFilesHelper)
+            throw new Error('Managed continuation requires the admitted helper');
+          const capability = await reopenGitoxideManagedTaskInternal(context.owner.lease, {
+            sessionId,
+            ...dependencies.managedFilesHelper,
+          });
+          return requireGitoxideManagedSessionInternal(
+            capability,
+            sessionId,
+            stores.runtimeEventStore,
+          ).inspectContinuation(source);
+        },
         hasPendingBackgroundOperations: async (sessionId) => {
           const graph = requireGraphCoordinator(graphCoordinator);
           const graphWake = requireGraphSupervisorWake(graphSupervisorWake);

@@ -140,6 +140,98 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
         toolOutcome: verified.toolOutcome,
       });
     },
+    async inspectContinuation(input: {
+      workspaceKey: string;
+      repositoryPath: string;
+      invocationOwnerToken: object;
+      helperCapability: GitoxideHelperInvocationCapability;
+      acceptedRepositoryOwnerToken: object;
+      sessionId: string;
+      sourceRunId: string;
+      expectedRuntimeEventHighWater?: number;
+      abortSignal?: AbortSignal;
+    }): Promise<{ ref: string; restored: true; runtimeEventHighWater: number }> {
+      input = { ...input };
+      const authority = await openExecutionWorkspaceAuthority(stores, verifiers);
+      const id = hash(`maka-managed-files-workspace-v1\0${input.workspaceKey}`).slice(7, 39);
+      const workspaceId = `workspace_${id}`;
+      const epochId = `epoch_${id}`;
+      const head = await authority.readHead(workspaceId, epochId);
+      const epoch = await authority.readEpoch(workspaceId, epochId);
+      if (!head || !epoch || (await authority.readReservation(epoch.workspaceInstanceId)))
+        throw new Error('Managed continuation has no settled workspace head');
+      const version = await authority.readVersion(head.workspaceVersionId);
+      if (
+        !version ||
+        version.protocol !== 'workspace_version_accepted_v1' ||
+        version.acceptedEventId !== head.acceptedEventId
+      )
+        throw new Error('Managed continuation has no source-bound accepted mutation');
+      const prefixInput = { sessionId: input.sessionId, runId: input.sourceRunId };
+      const budget = {
+        maxEvents: 16384,
+        maxBytes: 32 * 1024 * 1024,
+        maxRecordBytes: 8 * 1024 * 1024,
+      };
+      const proof = await stores.runtimeEventStore.readImmutableRuntimePrefixProof(
+        prefixInput,
+        budget,
+      );
+      if (
+        input.expectedRuntimeEventHighWater !== undefined &&
+        proof.position.lastEventSeq !== input.expectedRuntimeEventHighWater
+      )
+        throw new Error('Managed continuation source high-water changed');
+      const prefix = await stores.runtimeEventStore.readImmutableRuntimePrefix({
+        ...prefixInput,
+        upToEventSeq: proof.position.lastEventSeq,
+      });
+      if (prefix.prefixDigest !== proof.prefixDigest)
+        throw new Error('Managed continuation source prefix changed');
+      const outcome = prefix.events.find((event) => event.id === version.origin.outcomeEventId);
+      const dispatch = prefix.events.find((event) => event.id === version.origin.dispatchEventId);
+      const mutation = dispatch?.actions?.toolDispatch?.managedMutation;
+      if (
+        !outcome ||
+        outcome.sessionId !== input.sessionId ||
+        outcome.runId !== input.sourceRunId ||
+        outcome.content?.kind !== 'function_response' ||
+        outcome.content.isError === true ||
+        outcome.refs?.operationId !== version.origin.operationId ||
+        dispatch?.actions?.toolDispatch?.operationId !== version.origin.operationId ||
+        !mutation ||
+        mutation.workspaceId !== workspaceId ||
+        mutation.workspaceEpochId !== epochId ||
+        mutation.repositoryId !== head.repositoryId ||
+        mutation.baseAcceptedEventId !== version.baseAcceptedEventId ||
+        mutation.executionProfileDigest !== version.executionProfileDigest
+      )
+        throw new Error('Managed accepted head does not belong to the source Run');
+      // Reuse the artifact owner: it verifies objects and reconciles only the accepted ref.
+      await this.reopen(input);
+      const current = await authority.readHead(workspaceId, epochId);
+      const finalProof = await stores.runtimeEventStore.readImmutableRuntimePrefixProof(
+        prefixInput,
+        budget,
+      );
+      input.abortSignal?.throwIfAborted();
+      if (
+        !current ||
+        current.acceptedEventId !== head.acceptedEventId ||
+        current.revision !== head.revision ||
+        current.commitOid !== head.commitOid ||
+        current.treeOid !== head.treeOid ||
+        (await authority.readReservation(epoch.workspaceInstanceId)) ||
+        finalProof.prefixDigest !== proof.prefixDigest ||
+        finalProof.position.lastEventSeq !== proof.position.lastEventSeq
+      )
+        throw new Error('Managed continuation boundary changed during verification');
+      return Object.freeze({
+        ref: `managed-accepted:${head.acceptedEventId}`,
+        restored: true as const,
+        runtimeEventHighWater: proof.position.lastEventSeq,
+      });
+    },
     async reopen(input: {
       workspaceKey: string;
       repositoryPath: string;

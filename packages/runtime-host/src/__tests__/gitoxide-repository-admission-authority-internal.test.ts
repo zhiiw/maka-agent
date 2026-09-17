@@ -256,6 +256,11 @@ for (const mode of [
               : 'accepted original\n',
       );
       assert.deepEqual(JSON.parse(run('read-settlement').stdout), durable);
+      if (mode === 'backend-live-sequence') {
+        const inspected = run('inspect-continuation');
+        assert.equal(inspected.status, 0, inspected.stderr);
+        assert.equal(JSON.parse(inspected.stdout).restored, true);
+      }
       assert.equal(await readFile(join(source, 'hello.txt'), 'utf8'), 'accepted original\n');
     } finally {
       await rm(stateRoot, { recursive: true, force: true });

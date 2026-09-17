@@ -23,6 +23,7 @@ import {
 import { requireEntityId } from '../protocol/codec.js';
 import type { MakaTool, ToolRuntimeInput } from '@maka/runtime/tool-runtime';
 import type { RuntimeCommitSink } from '@maka/runtime/runtime-commit-sink';
+import type { RuntimeContinuationSafetySource } from '@maka/runtime/runtime-resume';
 import { readPage, readParameters, resolveReadInput } from '@maka/runtime/read-page';
 import {
   openInteractiveExecutionStoresForWrite,
@@ -47,6 +48,10 @@ type ReopenInput = Parameters<
 >[0];
 type Prepare = NonNullable<ToolRuntimeInput['prepareManagedMutation']>;
 interface SessionExecution {
+  readonly inspectContinuation: (
+    source: RuntimeContinuationSafetySource,
+    abortSignal?: AbortSignal,
+  ) => Promise<{ ref: string; restored: true; runtimeEventHighWater: number }>;
   readonly projectTools: (tools: readonly MakaTool[]) => readonly MakaTool[];
   readonly sessionId: string;
   readonly runtimeCommitSink: RuntimeCommitSink;
@@ -474,6 +479,16 @@ export async function openGitoxideManagedSessionInternal(
           .map((tool) => (tool.name === 'Read' ? readTool : tool)),
       sessionId,
       runtimeCommitSink: stores.runtimeEventStore,
+      inspectContinuation(source, signal) {
+        return owner.inspectContinuation({
+          ...binding,
+          acceptedRepositoryOwnerToken,
+          sessionId,
+          sourceRunId: source.sourceRunId,
+          expectedRuntimeEventHighWater: source.expectedRuntimeEventHighWater,
+          abortSignal: signal,
+        });
+      },
       async prepareManagedMutation(request) {
         if (request.sessionId !== sessionId)
           throw new Error('Managed mutation does not belong to this session');

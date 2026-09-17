@@ -94,6 +94,48 @@ const stores = await openInteractiveExecutionStoresForWrite(leaseOwner.lease);
 const owner = createGitoxideWorkspaceBaselineOwnerInternal(stores);
 const acceptedRepositoryOwnerToken = {};
 const repositoryPath = join(rootPath, 'repository.git');
+if (mode === 'inspect-continuation') {
+  try {
+    const inspect = owner.inspectContinuation.bind(owner);
+    const input = {
+      workspaceKey: 'crash-session',
+      repositoryPath,
+      invocationOwnerToken,
+      helperCapability,
+      acceptedRepositoryOwnerToken,
+      sessionId: 'settlement-session',
+      sourceRunId: 'settlement-run',
+    };
+    const observed = await inspect(input);
+    assert.ok(observed.restored);
+    assert.ok(observed.ref);
+    const sessionCapability = await openGitoxideManagedSessionInternal(stores, input);
+    const session = requireGitoxideManagedSessionInternal(
+      sessionCapability,
+      input.sessionId,
+      stores.runtimeEventStore,
+    );
+    assert.deepEqual(
+      await session.inspectContinuation({
+        sourceRunId: input.sourceRunId,
+        expectedRuntimeEventHighWater: observed.runtimeEventHighWater,
+      }),
+      observed,
+    );
+    await assert.rejects(inspect({ ...input, sourceRunId: 'unrelated-run' }));
+    await assert.rejects(inspect({ ...input, sessionId: 'unrelated-session' }));
+    await assert.rejects(
+      inspect({
+        ...input,
+        expectedRuntimeEventHighWater: observed.runtimeEventHighWater - 1,
+      }),
+    );
+    writeSync(1, JSON.stringify(observed));
+  } finally {
+    await leaseOwner.close();
+  }
+  process.exit(0);
+}
 if (mode.startsWith('catalog-')) {
   const sessionId = 'catalog-created-session';
   const existed = await stores.sessionStore.readHeader(sessionId).then(
