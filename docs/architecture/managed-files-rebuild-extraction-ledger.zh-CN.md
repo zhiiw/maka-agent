@@ -57,7 +57,7 @@
 | `packages/runtime/src/__tests__/managed-mutation-transform.test.ts` | 原 3 个直接测试保留；新增 6 个大文件局部 diff、空文件/no-op、新行变更、路径绑定、别名隔离与 Edit 失败语义测试 |
 | `packages/runtime/src/tool-runtime.ts` | 完全不改；后续接线必须保留主线 model projection、统一发布和权限判断 |
 | `packages/runtime/src/__tests__/tool-runtime-durable-boundary.test.ts` | 完全不改；运行主线测试作为回归基线，不恢复被 #5287 删除的约千行专用测试 |
-| `packages/storage/src/execution-stores.ts` | 完全不改；当前生命周期是后续接线约束 |
+| `packages/storage/src/execution-stores.ts` | 注册内部 workspace 窄接口；所有调用复用当前 `run()`，不另建 lifetime owner |
 | `packages/storage/src/execution-stores-workspace-authority-internal.ts` | 不移植；待真实消费者确定受限接口 |
 | 同名 Storage authority test | 不移植；旧 fake API 不能证明新 provider/lease 生命周期 |
 | `packages/storage/src/workspace-version-authority-internal.ts` | 新增显式、package-private 的 non-workspace state adoption；保留严格 binder 默认行为 |
@@ -115,3 +115,19 @@ Windows 的 file-only profile 不依赖 Bash/npm command sandbox；启用前仍�
 | macOS | 相同测试可运行；本检查点未实跑，不宣称平台完成 |
 
 尚未完成：ExecutionPersistence 的受限 workspace facade、其 close/drain 接线、Gitoxide candidate 消费者、Runtime settlement、Desktop 加号入口。此检查点只是这些接线的数据库前置，不能宣称 Write/Edit Resume 已可用。
+
+## 第三检查点：workspace authority 进入 execution group 生命周期
+
+第二检查点所列 facade/close/drain 接线已完成；Gitoxide/Runtime/产品接线仍未完成。
+
+- **Owner**：现有 `InteractiveExecutionStoresWriter` 的 root lease 和 `run()`。新增 `execution-workspace-authority-internal.ts` 只按真实 stores 对象登记 capability，没有自己的数据库或 close owner；目前不新增 package export。
+- **窄接口**：验证后提交 baseline/successor/no-effect，读取 canonical head/reservation。调用方拿不到 SQL、原始 store、root 重绑定或单独关闭权限。
+- **proof owner**：每个 execution group 只选定一个 trusted composition verifier 对象；并发打开返回同一 facade，替换 owner 被拒绝。捕获 verifier 方法，后续替换对象上的方法不会改写已选定的方法。它不是针对任意恶意同进程代码的隔离沙箱，实际 Gitoxide verifier 尚待 Host 接入。
+- **一致性域**：Local provider 懒加载使用现有 runtime store，同一 rootId，不建立旁路连接。Memory/其他没有该域的 provider 明确拒绝，不 fallback 到 SQLite；普通聊天仍可使用。
+- **关闭/失败**：open/read/commit 都计入同一在途调用集合；close 先撤权，再 drain，再关数据库。root owner 被撤销时 retained facade 也失效。打开失败保留失败 promise，不在同一 group 上重试未知状态或更换 verifier。
+- **原子边界**：底层仍为已有 SQLite baseline / successor+T2 / no-effect+T2 事务，本轮没有改变事实格式和数据库版本。
+- **回滚**：取消 workspace 组合入口即可停止新调用；不删除既有 binding、RuntimeEvent、head 或 reservation。普通 session/T1/T2 路径未改变。
+
+新增 6 项真实 provider 合同测试：窄接口/关闭、固定 proof owner 与 baseline reopen、不支持的 provider 与伪造 group、close drain、root 撤权、uncertain open。首项先 RED（Local 未提供该域）再 GREEN。provider 合同全集 93 项，加 Storage persistence、Runtime durable boundary 和纯转换，共 161 项通过、无跳过；Storage/Runtime build、Biome 和 diff check 通过。
+
+平台证据仍仅为本机 Windows；没有宣称 Linux/macOS、完整 Host/helper crash 或 Desktop 验收完成。下一步才是 Host Gitoxide proof owner 消费这一窄接口，并接一次真实 Write 的 terminal settlement。
