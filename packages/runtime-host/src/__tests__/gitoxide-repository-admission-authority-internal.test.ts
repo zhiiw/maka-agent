@@ -169,6 +169,10 @@ for (const crashMode of [
   });
 }
 
+// Sixteen sequential real processes: budget each evidence phase independently.
+// Keep child deadlines; a slower/hung individual process must still fail.
+const backendSequenceBudget = { setup: 20_000, continuation: 30_000, candidateRecovery: 40_000 };
+
 for (const mode of [
   'runtime-crash-write',
   'runtime-crash-noop',
@@ -180,8 +184,11 @@ for (const mode of [
   'backend-crash-first',
 ]) {
   test(`Runtime mutation preserves its owner outcome across publication/reopen: ${mode}`, {
-    // This case now includes independent claim, drift, T1-exit and recovery processes.
-    timeout: mode === 'backend-live-sequence' ? 60_000 : 30_000,
+    // Total is the sum of the named phases, not an unbounded test timeout.
+    timeout:
+      mode === 'backend-live-sequence'
+        ? Object.values(backendSequenceBudget).reduce((sum, value) => sum + value, 0)
+        : 30_000,
   }, async (t) => {
     if (!(await admittedHelper())) {
       t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
@@ -205,11 +212,13 @@ for (const mode of [
       new URL('./fixtures/gitoxide-baseline-reopen-child.js', import.meta.url),
     );
     const run = (mode: string) => {
+      const began = performance.now();
       const result = spawnSync(process.execPath, [child, mode, stateRoot, source], {
         encoding: 'utf8',
         timeout: 20_000,
         windowsHide: true,
       });
+      t.diagnostic(`${mode}: ${Math.round(performance.now() - began)}ms; exit=${result.status}`);
       assert.ifError(result.error);
       return result;
     };
@@ -270,44 +279,60 @@ for (const mode of [
         assert.deepEqual(JSON.parse(run('read-settlement').stdout), durable);
       }
       if (mode === 'backend-live-sequence') {
-        const inspected = run('inspect-continuation');
-        assert.equal(inspected.status, 0, inspected.stderr);
-        assert.equal(JSON.parse(inspected.stdout).restored, true);
-        const inherited = run('inspect-inherited');
-        assert.equal(inherited.status, 87, inherited.stderr);
-        const inheritedReopen = run('inspect-inherited-reopen');
-        assert.equal(inheritedReopen.status, 0, inheritedReopen.stderr);
-        const drifted = run('inspect-head-drift');
-        assert.equal(drifted.status, 0, drifted.stderr);
-        const parkedDrift = run('recover-head-drift');
-        assert.equal(parkedDrift.status, 0, parkedDrift.stderr);
-        const pending = run('crash-unsettled');
-        assert.equal(pending.status, 88, pending.stderr);
-        const parkedPending = run('recover-unsettled');
-        assert.equal(parkedPending.status, 0, parkedPending.stderr);
-        const candidateOnly = run('publish-pending-candidate');
-        assert.equal(candidateOnly.status, 89, candidateOnly.stderr);
-        assert.match(JSON.parse(candidateOnly.stdout).candidateCommitOid, /^[a-f0-9]{40}$/);
-        const candidateRefPath = join(
-          stateRoot,
-          'repository.git',
-          JSON.parse(candidateOnly.stdout).candidateRef,
+        await t.test(
+          'authenticates continuation lineage and rejects head drift',
+          {
+            timeout: backendSequenceBudget.continuation,
+          },
+          async () => {
+            const inspected = run('inspect-continuation');
+            assert.equal(inspected.status, 0, inspected.stderr);
+            assert.equal(JSON.parse(inspected.stdout).restored, true);
+            const inherited = run('inspect-inherited');
+            assert.equal(inherited.status, 87, inherited.stderr);
+            const inheritedReopen = run('inspect-inherited-reopen');
+            assert.equal(inheritedReopen.status, 0, inheritedReopen.stderr);
+            const drifted = run('inspect-head-drift');
+            assert.equal(drifted.status, 0, drifted.stderr);
+            const parkedDrift = run('recover-head-drift');
+            assert.equal(parkedDrift.status, 0, parkedDrift.stderr);
+          },
         );
-        const candidateBytes = await readFile(candidateRefPath);
-        await writeFile(candidateRefPath, `${'0'.repeat(40)}\n`);
-        const corruptCandidate = run('settle-pending-candidate');
-        assert.equal(corruptCandidate.status, 1, corruptCandidate.stderr);
-        assert.match(corruptCandidate.stderr, /candidate_ref_target_invalid/);
-        await writeFile(candidateRefPath, candidateBytes);
-        const parkedCandidate = run('recover-pending-candidate');
-        assert.equal(parkedCandidate.status, 0, parkedCandidate.stderr);
-        const settledCandidate = run('settle-pending-candidate');
-        assert.equal(settledCandidate.status, 90, settledCandidate.stderr);
-        const repeatedSettlement = run('retry-pending-settlement');
-        assert.equal(repeatedSettlement.status, 0, repeatedSettlement.stderr);
-        assert.deepEqual(
-          JSON.parse(repeatedSettlement.stdout),
-          JSON.parse(settledCandidate.stdout),
+        await t.test(
+          'parks incomplete evidence and converges one accepted candidate',
+          {
+            timeout: backendSequenceBudget.candidateRecovery,
+          },
+          async () => {
+            const pending = run('crash-unsettled');
+            assert.equal(pending.status, 88, pending.stderr);
+            const parkedPending = run('recover-unsettled');
+            assert.equal(parkedPending.status, 0, parkedPending.stderr);
+            const candidateOnly = run('publish-pending-candidate');
+            assert.equal(candidateOnly.status, 89, candidateOnly.stderr);
+            assert.match(JSON.parse(candidateOnly.stdout).candidateCommitOid, /^[a-f0-9]{40}$/);
+            const candidateRefPath = join(
+              stateRoot,
+              'repository.git',
+              JSON.parse(candidateOnly.stdout).candidateRef,
+            );
+            const candidateBytes = await readFile(candidateRefPath);
+            await writeFile(candidateRefPath, `${'0'.repeat(40)}\n`);
+            const corruptCandidate = run('settle-pending-candidate');
+            assert.equal(corruptCandidate.status, 1, corruptCandidate.stderr);
+            assert.match(corruptCandidate.stderr, /candidate_ref_target_invalid/);
+            await writeFile(candidateRefPath, candidateBytes);
+            const parkedCandidate = run('recover-pending-candidate');
+            assert.equal(parkedCandidate.status, 0, parkedCandidate.stderr);
+            const settledCandidate = run('settle-pending-candidate');
+            assert.equal(settledCandidate.status, 90, settledCandidate.stderr);
+            const repeatedSettlement = run('retry-pending-settlement');
+            assert.equal(repeatedSettlement.status, 0, repeatedSettlement.stderr);
+            assert.deepEqual(
+              JSON.parse(repeatedSettlement.stdout),
+              JSON.parse(settledCandidate.stdout),
+            );
+          },
         );
       }
       assert.equal(await readFile(join(source, 'hello.txt'), 'utf8'), 'accepted original\n');
