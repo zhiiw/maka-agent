@@ -10,6 +10,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import { createHash } from 'node:crypto';
+import { isAbsolute } from 'node:path';
 import type { MakaTool, ToolRuntimeInput } from '@maka/runtime/tool-runtime';
 import type { RuntimeCommitSink } from '@maka/runtime/runtime-commit-sink';
 import { readPage, readParameters, resolveReadInput } from '@maka/runtime/read-page';
@@ -37,6 +39,90 @@ interface SessionExecution {
   ) => ReturnType<typeof readGitoxideTreeFileInternal>;
 }
 const sessions = new WeakMap<GitoxideManagedSessionCapability, SessionExecution>();
+
+/** Publish a Session only after its session-keyed accepted workspace is verifiable. */
+export async function createGitoxideManagedSessionInternal(
+  stores: InteractiveExecutionStoresWriter,
+  input: Omit<ReopenInput, 'acceptedRepositoryOwnerToken' | 'workspaceKey'> & {
+    readonly sessionId: string;
+    readonly sourcePath: string;
+    readonly connectionId: string;
+    readonly connectionSlug: string;
+    readonly model: string;
+    readonly name: string;
+  },
+): Promise<{ readonly created: boolean; readonly capability: GitoxideManagedSessionCapability }> {
+  input = { ...input };
+  for (const value of [
+    input.sessionId,
+    input.sourcePath,
+    input.repositoryPath,
+    input.connectionId,
+    input.connectionSlug,
+    input.model,
+    input.name,
+  ]) {
+    if (
+      typeof value !== 'string' ||
+      !value.trim() ||
+      value.includes('\0') ||
+      Buffer.byteLength(value) > 4096
+    )
+      throw new Error('Invalid managed session creation input');
+  }
+  if (!isAbsolute(input.sourcePath) || !isAbsolute(input.repositoryPath))
+    throw new Error('Managed session paths must be absolute');
+  input.abortSignal?.throwIfAborted();
+  const createInput = Object.freeze({
+    cwd: input.sourcePath,
+    name: input.name,
+    llmConnectionId: input.connectionId,
+    llmConnectionSlug: input.connectionSlug,
+    model: input.model,
+    toolProfile: 'managed-files-v1' as const,
+    toolMode: 'direct' as const,
+    permissionMode: 'ask' as const,
+    collaborationMode: 'agent' as const,
+    orchestrationMode: 'default' as const,
+  });
+  const requestFingerprint = `sha256:${createHash('sha256')
+    .update(
+      JSON.stringify([
+        'maka-managed-session-create-v1',
+        input.sessionId,
+        input.repositoryPath,
+        createInput,
+      ]),
+    )
+    .digest('hex')}`;
+  const probe = await stores.sessionStore.probeStableSessionCreate(
+    input.sessionId,
+    requestFingerprint,
+  );
+  if (probe.kind === 'conflict') throw new Error('Managed session creation conflict');
+  // Never create a visible Session before the accepted epoch and object graph exist.
+  const capability = await openGitoxideManagedSessionInternal(stores, {
+    sessionId: input.sessionId,
+    workspaceKey: input.sessionId,
+    repositoryPath: input.repositoryPath,
+    invocationOwnerToken: input.invocationOwnerToken,
+    helperCapability: input.helperCapability,
+    abortSignal: input.abortSignal,
+  });
+  input.abortSignal?.throwIfAborted();
+  const result = await stores.sessionStore.createStableSession({
+    sessionId: input.sessionId,
+    requestFingerprint,
+    input: createInput,
+  });
+  if (result.kind === 'conflict') throw new Error('Managed session creation conflict');
+  if (
+    result.record.header.toolProfile !== 'managed-files-v1' ||
+    result.record.header.cwd !== input.sourcePath
+  )
+    throw new Error('Managed session persisted identity mismatch');
+  return Object.freeze({ created: result.kind === 'created', capability });
+}
 
 /** Bind a verified existing epoch, never implicitly import a checkout or change mode. */
 export async function openGitoxideManagedSessionInternal(

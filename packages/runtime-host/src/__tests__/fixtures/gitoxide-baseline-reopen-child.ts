@@ -28,6 +28,7 @@ import { ToolRuntime } from '@maka/runtime/tool-runtime';
 import { AiSdkBackend } from '@maka/runtime/ai-sdk-backend';
 import {
   openGitoxideManagedSessionInternal,
+  createGitoxideManagedSessionInternal,
   requireGitoxideManagedSessionInternal,
 } from '../../server/gitoxide-managed-session-internal.js';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
@@ -121,7 +122,12 @@ const settling =
   mode === 'settle-wrong-content' ||
   mode === 'crash-after-settlement';
 let baseline: WorkspaceBaselineCommitResult | undefined;
-if (mode === 'crash-after-baseline' || settling) {
+if (
+  mode === 'crash-after-baseline' ||
+  settling ||
+  mode === 'session-baseline-exit' ||
+  mode === 'session-publish-exit'
+) {
   const admissionOwnerToken = {};
   const admitted = await admitGitoxideRepositoryInternal({
     invocationOwnerToken,
@@ -137,12 +143,73 @@ if (mode === 'crash-after-baseline' || settling) {
     destinationRepositoryPath: repositoryPath,
   });
   baseline = await owner.acceptImport({
-    workspaceKey: 'crash-session',
+    workspaceKey: mode.startsWith('session-') ? 'managed-created-session' : 'crash-session',
     acceptedRepositoryOwnerToken,
     acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
   });
   // Deliberately bypass store/lease cleanup. Next process must reacquire and revalidate.
   if (mode === 'crash-after-baseline') process.exit(77);
+  if (mode === 'session-baseline-exit') process.exit(85);
+}
+if (mode.startsWith('session-')) {
+  try {
+    const request = {
+      sessionId: 'managed-created-session',
+      sourcePath,
+      repositoryPath,
+      invocationOwnerToken,
+      helperCapability,
+      connectionId: 'test-connection',
+      connectionSlug: 'test',
+      model: 'test-model',
+      name: 'Managed test',
+    };
+    if (mode === 'session-missing-baseline' || mode === 'session-preabort') {
+      const controller = new AbortController();
+      if (mode === 'session-preabort') controller.abort(new Error('cancel before publication'));
+      await assert.rejects(
+        createGitoxideManagedSessionInternal(stores, {
+          ...request,
+          abortSignal: controller.signal,
+        }),
+        mode === 'session-preabort' ? /cancel before publication/ : /durable workspace identity/,
+      );
+      await assert.rejects(stores.sessionStore.readHeader(request.sessionId));
+      await stores.sessionStore.close?.();
+      await leaseOwner.close();
+      process.exit(0);
+    }
+    const result = await createGitoxideManagedSessionInternal(stores, request);
+    if (mode === 'session-publish-exit') process.exit(84);
+    const header = await stores.sessionStore.readHeader(request.sessionId);
+    const execution = requireGitoxideManagedSessionInternal(
+      result.capability,
+      request.sessionId,
+      stores.runtimeEventStore,
+    );
+    const read = await execution.readAcceptedFile('hello.txt');
+    const repeated = await createGitoxideManagedSessionInternal(stores, request);
+    assert.equal(repeated.created, false);
+    await assert.rejects(
+      createGitoxideManagedSessionInternal(stores, { ...request, name: 'Different intent' }),
+      /conflict/i,
+    );
+    writeSync(
+      1,
+      JSON.stringify({
+        created: result.created,
+        profile: header.toolProfile,
+        content: read.content,
+        facts: (
+          await stores.runtimeEventStore.readSessionRuntimeEvents(WORKSPACE_AUTHORITY_SESSION_ID)
+        ).length,
+      }),
+    );
+  } finally {
+    await stores.sessionStore.close?.();
+    await leaseOwner.close();
+  }
+  process.exit(0);
 }
 if (
   !settling &&

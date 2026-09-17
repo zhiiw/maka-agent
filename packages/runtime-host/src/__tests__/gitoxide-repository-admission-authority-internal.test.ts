@@ -59,6 +59,65 @@ interface AdmittedHelper {
 
 let admittedHelperPromise: Promise<AdmittedHelper | undefined> | undefined;
 
+for (const crashMode of ['session-baseline-exit', 'session-publish-exit']) {
+  test(`managed session publication resumes after ${crashMode}`, { timeout: 30_000 }, async (t) => {
+    if (!(await admittedHelper())) {
+      t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
+      return;
+    }
+    const source = await createRepository(t, 'sha1');
+    await writeFile(join(source, 'hello.txt'), 'accepted original\n');
+    git(source, ['add', '.']);
+    git(source, [
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.invalid',
+      'commit',
+      '-qm',
+      'base',
+    ]);
+    const stateRoot = await mkdtemp(join(tmpdir(), 'maka-session-publish-'));
+    const root = await resolveStorageRoot({ path: stateRoot, kind: 'interactive' });
+    const child = fileURLToPath(
+      new URL('./fixtures/gitoxide-baseline-reopen-child.js', import.meta.url),
+    );
+    const run = (mode: string) =>
+      spawnSync(process.execPath, [child, mode, stateRoot, source], {
+        encoding: 'utf8',
+        timeout: 20_000,
+        windowsHide: true,
+      });
+    try {
+      const missing = run('session-missing-baseline');
+      assert.ifError(missing.error);
+      assert.equal(missing.status, 0, missing.stderr);
+      const crashed = run(crashMode);
+      assert.ifError(crashed.error);
+      assert.equal(crashed.status, crashMode === 'session-baseline-exit' ? 85 : 84, crashed.stderr);
+      if (crashMode === 'session-baseline-exit') {
+        const aborted = run('session-preabort');
+        assert.ifError(aborted.error);
+        assert.equal(aborted.status, 0, aborted.stderr);
+      }
+      const retry = run('session-retry');
+      assert.ifError(retry.error);
+      assert.equal(retry.status, 0, retry.stderr);
+      assert.deepEqual(JSON.parse(retry.stdout), {
+        created: crashMode === 'session-baseline-exit',
+        profile: 'managed-files-v1',
+        content: 'accepted original\n',
+        facts: 2,
+      });
+      assert.equal(await readFile(join(source, 'hello.txt'), 'utf8'), 'accepted original\n');
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+      await rm(join(resolveRootControlNamespace(), root.rootId), { recursive: true, force: true });
+      await rm(join(resolveRootOwnershipNamespace(), root.rootId + '.lock'), { force: true });
+    }
+  });
+}
+
 for (const mode of [
   'runtime-crash-write',
   'runtime-crash-noop',

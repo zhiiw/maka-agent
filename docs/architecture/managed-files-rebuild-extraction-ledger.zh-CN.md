@@ -389,3 +389,18 @@ TDD 先复现未知 profile、managed profile 缺能力仍读取凭据、AiSdkBa
 平台矩阵：Windows 本机具备上述证据；Linux/macOS 由现有三平台 workflow 调度新增 profile/admission 回归，本轮未取得远程结果。没有新增恢复协议，不扩大断电承诺。仍未开放 Desktop/CLI managed 创建入口。
 
 下一步：以 session ID 绑定 import destination/workspace key，设计并验证 import→baseline→session 的可重试创建 owner（中断时不得出现可执行但缺 baseline 的会话），再将 capability 重建接入 live Host backend factory。随后开放显式 Desktop 入口，而非让普通创建 API 接受裸 profile 绕过 admission。
+
+## 第十七检查点：accepted baseline → Session 发布
+
+核对实现后确认：当前 Rust import 使用 fresh-destination claim；不能对半完成目录简单重新调用 import。本轮不把“捕获异常后重试”包装成完整创建恢复，而先闭合已经接受 baseline 之后的 Session 发布边界。
+
+- **Owner/主要不变量**：`createGitoxideManagedSessionInternal` 只消费同一 Execution Stores 中以 session ID 为 workspace key 的已接受 epoch。调用 baseline owner 严格 reopen（含 helper、repository、accepted objects/head 验证）成功之后，才调用现有 stable Session create；返回 capability 与该 Session/Runtime sink 绑定。缺 baseline 不创建 Session。
+- **模式和请求身份**：Owner 只接收有界的 session/source/repository/model/name 字符串与真实 helper capability，不接收任意 CreateSessionInput。固定 managed-files-v1、direct、ask、agent/default；不允许注入 plugin executor、子会话或 bypass 字段。固定字段序列的 SHA-256 fingerprint 绑定创建意图与 repository path；同请求返回 existing，变化请求返回 conflict。
+- **原子边界**：baseline 与 Session 不是一个跨资源事务。baseline 先存在；Session 的唯一创建/重试由原有 SQLite stable-create 协议仲裁。进程在 baseline 后退出可留下无 Session 的 accepted workspace，但不会留下有 Session、无 baseline 的成功创建状态。已有 Session 的重试仍重验 accepted repository，不把 metadata 的 existing 结果当作执行权限。
+- **取消/失败/回滚**：前置取消及 reopen 后、Session commit 前取消都拒绝；commit 已开始后的不确定结果通过同 fingerprint 重试确认，不做反向删除。冲突不覆盖已有 Session；reopen 失败不退到 generic 或 source checkout。未发布 baseline/对象暂时保留，不能在此路径递归清理用户目录或猜测垃圾所有权。
+
+真实 child-process 测试：baseline 提交后直接退出 → 新进程发布；Session 提交后直接退出 → 新进程 exact retry；都验证只有两条 baseline authority facts、同一 accepted 内容、source checkout 不变。另覆盖缺 baseline、预先取消、重复请求和变更创建意图。测试不是异常模拟，也不是完整 Host/Electron 启动测试。
+
+验证：新增 publication 两例及既有 backend 连续执行/退出恢复 **4/4、0 skip**；Host backend 定向 **11/11**；CI policy **1/1**；Host build、Biome、diff check 通过。三平台 workflow 已调度该测试文件。Windows 为本机证据，Linux/macOS 本轮未取得远程执行结果；不承诺断电或 import 内部任意指令点恢复。
+
+尚未完成：半完成 import 的可信 intent/重验/隔离协议；source admission 与完整创建请求的绑定；根据 storage root/session ID 重建 repository 路由；live Host 创建和 reopen 接线。当前 API 接收可信内部调用者提供的已接受 repository 路径，尚不是用户创建 API，普通 session.create 的 managed 禁止规则保持不变。下一步优先闭合 import 前半段，而不是提前开放 Desktop。
