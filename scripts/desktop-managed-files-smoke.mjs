@@ -70,11 +70,15 @@ await git(
   'baseline',
 );
 const requests = [];
+const failedBeforeTerminal = process.argv.includes('--failed-before-terminal');
+const failedResultInterrupt = process.argv.includes('--failed-result-interrupt');
 const repeatInterrupt = process.argv.includes('--repeat-interrupt');
 const candidateEditInterrupt = process.argv.includes('--candidate-edit-interrupt');
 const candidateNoopInterrupt = process.argv.includes('--candidate-noop-interrupt');
 assert.ok(
   [
+    failedBeforeTerminal,
+    failedResultInterrupt,
     candidateEditInterrupt,
     candidateNoopInterrupt,
     process.argv.includes('--candidate-interrupt'),
@@ -82,42 +86,54 @@ assert.ok(
   'Choose one candidate interruption scenario',
 );
 const candidateInterrupt =
+  failedBeforeTerminal ||
   candidateEditInterrupt ||
   candidateNoopInterrupt ||
   process.argv.includes('--candidate-interrupt');
-const candidateToolName = candidateEditInterrupt ? 'Edit' : 'Write';
+const candidateToolName = candidateEditInterrupt || failedBeforeTerminal ? 'Edit' : 'Write';
 // Manual real-process breakpoint test; does not claim arbitrary-instruction crash coverage.
 assert.ok(
-  !(candidateInterrupt && repeatInterrupt),
+  !((candidateInterrupt || failedResultInterrupt) && repeatInterrupt),
   'Candidate interruption is a single-restart test',
 );
 const interruptTurn =
-  candidateInterrupt || repeatInterrupt || process.argv.includes('--interrupt-turn');
-const expectedContent = candidateNoopInterrupt
-  ? /baseline/
-  : candidateInterrupt && !candidateEditInterrupt
-    ? /written/
-    : /edited/;
+  failedResultInterrupt ||
+  candidateInterrupt ||
+  repeatInterrupt ||
+  process.argv.includes('--interrupt-turn');
+const expectedContent =
+  failedBeforeTerminal || failedResultInterrupt || candidateNoopInterrupt
+    ? /baseline/
+    : candidateInterrupt && !candidateEditInterrupt
+      ? /written/
+      : /edited/;
 let restartNumber = 0;
 let waitingForCompletion = false;
 let operationStep = 0;
 const operations = [
-  ...(candidateNoopInterrupt
-    ? [{ name: 'Write', input: { path: 'tracked.txt', content: 'baseline\n' } }]
-    : candidateEditInterrupt
-      ? [
-          {
-            name: 'Edit',
-            input: { path: 'tracked.txt', old_string: 'baseline', new_string: 'edited' },
-          },
-        ]
-      : [
-          { name: 'Write', input: { path: 'tracked.txt', content: 'written\n' } },
-          {
-            name: 'Edit',
-            input: { path: 'tracked.txt', old_string: 'written', new_string: 'edited' },
-          },
-        ]),
+  ...(failedBeforeTerminal || failedResultInterrupt
+    ? [
+        {
+          name: 'Edit',
+          input: { path: 'tracked.txt', old_string: 'ABSENT_PATTERN', new_string: 'unexpected' },
+        },
+      ]
+    : candidateNoopInterrupt
+      ? [{ name: 'Write', input: { path: 'tracked.txt', content: 'baseline\n' } }]
+      : candidateEditInterrupt
+        ? [
+            {
+              name: 'Edit',
+              input: { path: 'tracked.txt', old_string: 'baseline', new_string: 'edited' },
+            },
+          ]
+        : [
+            { name: 'Write', input: { path: 'tracked.txt', content: 'written\n' } },
+            {
+              name: 'Edit',
+              input: { path: 'tracked.txt', old_string: 'written', new_string: 'edited' },
+            },
+          ]),
   { name: 'Read', input: { path: 'tracked.txt' } },
 ];
 let restarted = false;
@@ -318,15 +334,21 @@ try {
   await page
     .locator('.maka-composer-editor [contenteditable="true"]')
     .fill(
-      candidateNoopInterrupt
-        ? 'Write tracked.txt with its current baseline content, then read it.'
-        : candidateEditInterrupt
-          ? 'Edit tracked.txt from baseline to edited, then read it.'
-          : 'Write tracked.txt to written, edit written to edited, then read it.',
+      failedBeforeTerminal || failedResultInterrupt
+        ? 'Attempt an Edit of ABSENT_PATTERN in tracked.txt, report the failure, then read tracked.txt.'
+        : candidateNoopInterrupt
+          ? 'Write tracked.txt with its current baseline content, then read it.'
+          : candidateEditInterrupt
+            ? 'Edit tracked.txt from baseline to edited, then read it.'
+            : 'Write tracked.txt to written, edit written to edited, then read it.',
     );
   await expect(page.locator('.maka-composer button[type="submit"]')).toBeEnabled();
   if (candidateInterrupt)
-    candidateDebugger = await armCandidateBreakpoint(root, repo, candidateNoopInterrupt);
+    candidateDebugger = await armCandidateBreakpoint(
+      root,
+      repo,
+      failedBeforeTerminal ? 'failure' : candidateNoopInterrupt ? 'no_change' : 'successor',
+    );
   await page.locator('.maka-composer button[type="submit"]').click();
   if (candidateInterrupt) {
     const breakpoint = await candidateDebugger.wait();
@@ -376,30 +398,32 @@ try {
     } finally {
       db.close();
     }
-    const candidateRefPath = join(
-      workspace,
-      `managed-files-${createHash('sha256').update(candidateEvidence.sessionId).digest('hex')}.git`,
-      'refs',
-      'maka',
-      'candidates',
-      createHash('sha256').update(candidateEvidence.operationId).digest('hex'),
-    );
-    await expect
-      .poll(
-        async () => {
-          try {
-            candidateEvidence.candidateCommitOid = (
-              await readFile(candidateRefPath, 'utf8')
-            ).trim();
-            return /^[a-f0-9]{40}$/.test(candidateEvidence.candidateCommitOid);
-          } catch (error) {
-            if (error.code === 'ENOENT') return false;
-            throw error;
-          }
-        },
-        { timeout: 10000, intervals: [10, 25, 50] },
-      )
-      .toBe(true);
+    if (!failedBeforeTerminal) {
+      const candidateRefPath = join(
+        workspace,
+        `managed-files-${createHash('sha256').update(candidateEvidence.sessionId).digest('hex')}.git`,
+        'refs',
+        'maka',
+        'candidates',
+        createHash('sha256').update(candidateEvidence.operationId).digest('hex'),
+      );
+      await expect
+        .poll(
+          async () => {
+            try {
+              candidateEvidence.candidateCommitOid = (
+                await readFile(candidateRefPath, 'utf8')
+              ).trim();
+              return /^[a-f0-9]{40}$/.test(candidateEvidence.candidateCommitOid);
+            } catch (error) {
+              if (error.code === 'ENOENT') return false;
+              throw error;
+            }
+          },
+          { timeout: 10000, intervals: [10, 25, 50] },
+        )
+        .toBe(true);
+    }
     await writeFile(
       join(root, 'candidate-before-kill.json'),
       JSON.stringify(candidateEvidence, null, 2),
@@ -416,11 +440,8 @@ try {
   const results = finalRequest.body.messages
     .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
     .filter((part) => part.type === 'tool_result');
-  assert.equal(results.length, candidateInterrupt ? 0 : 3);
-  assert.equal(
-    results.some((result) => result.is_error),
-    false,
-  );
+  assert.equal(results.length, candidateInterrupt ? 0 : failedResultInterrupt ? 2 : 3);
+  assert.equal(results.filter((result) => result.is_error).length, failedResultInterrupt ? 1 : 0);
   if (!candidateInterrupt) assert.match(JSON.stringify(results.at(-1)), expectedContent);
   assert.equal(await readFile(join(source, 'tracked.txt'), 'utf8'), 'baseline\n');
   await page.screenshot({ path: join(root, 'desktop.png') });
@@ -443,8 +464,40 @@ try {
   let mutationsBefore = readMutations();
   assert.equal(
     mutationsBefore.filter((event) => event.content?.kind === 'function_response').length,
-    candidateInterrupt ? 0 : 2,
+    candidateInterrupt ? 0 : failedResultInterrupt ? 1 : 2,
   );
+  if (failedResultInterrupt) {
+    const response = mutationsBefore.find((event) => event.content?.kind === 'function_response');
+    assert.equal(response.content.name, 'Edit');
+    assert.equal(response.content.isError, true);
+    assert.equal(
+      response.actions?.managedMutationTerminal?.terminalKind,
+      'operation_failed_no_effect',
+    );
+    assert.equal(mutationsBefore.filter((event) => event.actions?.workspaceFact).length, 0);
+    candidateEvidence = {
+      sessionId: response.sessionId,
+      turnId: response.turnId,
+      operationId: response.refs.operationId,
+    };
+    const db = new DatabaseSync(join(workspace, 'runtime.sqlite'), { readOnly: true });
+    try {
+      candidateEvidence.heads = db
+        .prepare('SELECT * FROM runtime_workspace_heads ORDER BY workspace_id')
+        .all();
+      assert.equal(
+        db.prepare('SELECT COUNT(*) AS count FROM runtime_managed_mutation_reservations').get()
+          .count,
+        0,
+      );
+    } finally {
+      db.close();
+    }
+    await writeFile(
+      join(root, 'failed-result-before-kill.json'),
+      JSON.stringify(response, null, 2),
+    );
+  }
   const { controlDirectory } = await resolveExistingStorageRootControlDirectory(capability);
   for (restartNumber = 1; restartNumber <= (repeatInterrupt ? 2 : 1); restartNumber++) {
     const registration = JSON.parse(
@@ -530,6 +583,72 @@ try {
       .getByText('Managed files smoke task', { exact: true })
       .first()
       .click({ timeout: 30000 });
+    if (failedBeforeTerminal) {
+      // An in-memory error is not durable evidence. Startup must not synthesize it.
+      assert.deepEqual(readMutations(), mutationsBefore);
+      await page
+        .getByRole('button', { name: 'Continue this turn', exact: true })
+        .click({ timeout: 30000 });
+      await expect(
+        page
+          .getByRole('log')
+          .getByText('This task does not currently meet the conditions to continue.', {
+            exact: false,
+          }),
+      ).toBeVisible({ timeout: 15000 });
+      const reopened = JSON.parse(
+        await readFile(join(controlDirectory, 'registration.json'), 'utf8'),
+      );
+      assert.equal(reopened.rootId, capability.rootId);
+      assert.notEqual(reopened.hostEpoch, registration.hostEpoch);
+      await assert.rejects(
+        readFile(
+          join(
+            workspace,
+            `managed-files-${createHash('sha256').update(candidateEvidence.sessionId).digest('hex')}.git`,
+            'refs',
+            'maka',
+            'candidates',
+            createHash('sha256').update(candidateEvidence.operationId).digest('hex'),
+          ),
+        ),
+        { code: 'ENOENT' },
+      );
+      const db = new DatabaseSync(join(workspace, 'runtime.sqlite'), { readOnly: true });
+      try {
+        const events = db
+          .prepare('SELECT payload_json FROM runtime_events ORDER BY rowid')
+          .all()
+          .map(({ payload_json }) => JSON.parse(payload_json));
+        assert.equal(
+          events.filter((event) => event.content?.kind === 'invocation_opened').length,
+          1,
+        );
+        assert.equal(
+          db
+            .prepare(
+              'SELECT COUNT(*) AS count FROM runtime_managed_mutation_reservations WHERE operation_id = ?',
+            )
+            .get(candidateEvidence.operationId).count,
+          1,
+        );
+        assert.deepEqual(
+          db.prepare('SELECT * FROM runtime_workspace_heads ORDER BY workspace_id').all(),
+          candidateEvidence.heads,
+        );
+        assert.deepEqual(readMutations(), mutationsBefore);
+        assert.equal(requests.filter(({ body }) => body.stream).length, 1);
+        assert.equal(await readFile(join(source, 'tracked.txt'), 'utf8'), 'baseline\n');
+        await writeFile(
+          join(root, 'failed-before-terminal-parked.json'),
+          JSON.stringify({ events, candidateEvidence }, null, 2),
+        );
+      } finally {
+        db.close();
+      }
+      await page.screenshot({ path: join(root, 'parked.png') });
+      break;
+    }
     if (interruptTurn) {
       if (candidateInterrupt) {
         await expect
@@ -612,19 +731,23 @@ try {
         .filter((part) => part.type === 'tool_result');
       assert.equal(
         afterResults.length,
-        (candidateInterrupt ? 1 : 3) + restartNumber,
+        (candidateInterrupt ? 1 : failedResultInterrupt ? 2 : 3) + restartNumber,
         'Reopened model history includes the three durable results and new Read',
       );
       assert.match(JSON.stringify(afterResults.at(-1)), expectedContent);
       assert.equal(Boolean(afterResults.at(-1)?.is_error), false);
-      if (candidateInterrupt) {
+      if (candidateInterrupt || failedResultInterrupt) {
         const response = mutationsBefore.find(
           (event) => event.content?.kind === 'function_response',
         );
-        assert.equal(response.content.modelProjection.kind, 'json');
+        const projection = response.content.modelProjection;
+        assert.ok(['json', 'text'].includes(projection.kind));
+        assert.equal(Boolean(afterResults[0].is_error), failedResultInterrupt);
         assert.deepEqual(
-          JSON.parse(afterResults[0].content),
-          response.content.modelProjection.value,
+          projection.kind === 'json'
+            ? JSON.parse(afterResults[0].content)
+            : afterResults[0].content,
+          projection.kind === 'json' ? projection.value : projection.text,
           'Model replay must use the accepted recovered result',
         );
         const transcript = await page.evaluate(async ({ sessionId, turnId }) => {
@@ -641,7 +764,7 @@ try {
           1,
           'Desktop transcript must show exactly one recovered result',
         );
-        assert.equal(recoveredResults[0].isError, false);
+        assert.equal(recoveredResults[0].isError, failedResultInterrupt);
         assert.deepEqual(recoveredResults[0].content, response.content.result);
         await writeFile(
           join(root, 'recovered-transcript.json'),
@@ -654,6 +777,22 @@ try {
       mutationsBefore,
       'Reopen must preserve the exact Write/Edit outcomes and successors',
     );
+    if (failedResultInterrupt) {
+      const db = new DatabaseSync(join(workspace, 'runtime.sqlite'), { readOnly: true });
+      try {
+        assert.deepEqual(
+          db.prepare('SELECT * FROM runtime_workspace_heads ORDER BY workspace_id').all(),
+          candidateEvidence.heads,
+        );
+        assert.equal(
+          db.prepare('SELECT COUNT(*) AS count FROM runtime_managed_mutation_reservations').get()
+            .count,
+          0,
+        );
+      } finally {
+        db.close();
+      }
+    }
     if (interruptTurn) {
       const db = new DatabaseSync(join(workspace, 'runtime.sqlite'), { readOnly: true });
       try {
@@ -701,7 +840,7 @@ try {
     );
   }
   console.log(
-    `PASS: ${candidateInterrupt ? 'candidate-only interruption settles once and Continue replays its exact result' : interruptTurn ? 'interrupted turn continues with accepted Read' : 'completed turn reopens with accepted Read'} after Host kill and Desktop restart; accepted mutation events unchanged.`,
+    `PASS: ${failedBeforeTerminal ? 'uncommitted failure stays unresolved and Continue is denied' : candidateInterrupt ? 'candidate-only interruption settles once and Continue replays its exact result' : interruptTurn ? 'interrupted turn continues with accepted Read' : 'completed turn reopens with accepted Read'} after Host kill and Desktop restart; accepted mutation events unchanged.`,
   );
 } catch (error) {
   if (page && !page.isClosed()) {

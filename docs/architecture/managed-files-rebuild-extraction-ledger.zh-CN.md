@@ -1022,3 +1022,30 @@ Windows RED→GREEN：真实 Desktop 命令在修复前停于“当前不满足�
 临时 stderr 埋点改为测试 diagnostic，每个 child 的 mode、耗时和退出状态均保留在测试报告，方便后续定位慢步骤。不为每一步另造新 PR，不合并进程而丢失 crash/reopen 边界。本轮只改变验收组织，Linux/macOS 未执行，不扩大恢复平台承诺。
 
 Windows 复跑通过：来源/漂移子测试 20.2 秒，candidate recovery 子测试 28.5 秒，整体 64.1 秒；Node 计数包含父测试为 3/3，0 fail/cancel/skip，全部 16 个 child 执行完毕。Host build、Biome、diff check 通过。由此关闭第五十二检查点记录的相关长回归超时缺口；不宣称全仓 CI 或三平台全绿。
+
+## 第五十四检查点：失败/no-effect 的可信终态与未提交边界
+
+先建立 RED：真实子进程执行首次 Edit 失败，SQLite 已提交 `operation_failed_no_effect`、释放 reservation、保留 baseline，但 `inspectContinuation` 拒绝。此前第五十二检查点刻意只认可成功 no-op；现在将需求明确为“可信的已提交失败也可以继续任务”，不是将失败冒充成功。
+
+生产修复仍由同一个 continuation owner 完成：baseline witness 接受两个互斥组合——`no_workspace_change + 非错误 outcome`，或 `operation_failed_no_effect + isError === true`。它们都必须有真实 T1/terminal、精确匹配 operation/dispatch/instance、当前 base event/version/revision/commit/tree 和固定 profile；bounded scanner、经过认证的祖先来源、最终 head/reservation/prefix 重检全部保留。泛化的错误、缺失 T2、未结算操作均不获得恢复权。没有新 writer/schema，不写 successor，不把 error 改成 success。
+
+真实 Desktop 新增两条手工命令：
+
+- `node scripts/desktop-managed-files-smoke.mjs --failed-result-interrupt`：模型请求 Edit 不存在的文本，真实 Runtime 产生业务失败；模型下一请求已经携带失败和 accepted Read 结果时杀 Host。重启 Continue 后仍精确重放原失败 projection，transcript 的 `isError` 为 true、内容与 durable response 一致；head、原 mutation events、source checkout 均不变，reservation 为零。最终通过目录 `maka-managed-electron-bjloj4`。
+- `node scripts/desktop-managed-files-smoke.mjs --failed-before-terminal`：在 `acceptRejectedOperation` 验证完成、`commitNoEffect` 之前由 debugger 暂停真实 Host，再 kill/restart。内存里的失败不作为 durable evidence；恢复后没有 T2/candidate，reservation 仍为 1，head/events 不变。实际点击 Continue 被拒绝，仍只有一个 Run 和一次模型请求，不执行新的工具。最终通过目录 `maka-managed-electron-LmaQJg`。
+
+测试修正记录：完成失败首轮比对误取 text projection 的 JSON `value`，应取其 `text`；未提交失败首轮 UI selector 同时匹配对话提示与 toast，已限定到对话 log。两处均为测试契约问题，未压制生产错误或降低最终状态断言。
+
+### 本轮收口范围
+
+| Windows Desktop 场景 | 已证明结果 |
+| --- | --- |
+| 已提交 Write/Edit 后中断 | Continue 不重复 mutation，读取 accepted 内容 |
+| Write/Edit candidate 已存在、T2 未提交 | 重启唯一结算，Continue 精确重放结果 |
+| 首次成功 no-op | 无 successor、head 不变，仍能 Continue |
+| 失败/no-effect 已提交 | 可 Continue，原错误保留且没有新 mutation |
+| 失败尚未提交 | 保留 reservation，拒绝 Continue，不猜测结果 |
+
+上述是当前窄范围的手动 Write/Edit Resume 收口，不表示“任意 Write/Edit 崩溃都会无感自动完成”。缺失 candidate 的 T1-only 状态仍 park；自动续跑、Bash/npm、M4/M5 不在本轮。剩余交付工作为 macOS/Linux 同场景证据、CI/审核和最新 main 上的最终交付检查；不因这些交付工作继续扩大此轮生产功能。当前所有新增 Desktop 证据均为 Windows，不能替代跨平台或断电证明。
+
+最终验证：no-op 与失败/no-effect 的真实子进程回归 2/2、0 skip/fail/cancel；Host build、Biome、脚本语法和 diff check 通过。上轮长恢复回归已在第五十三检查点通过，本轮未重新运行全部 Host/Storage 或 CI，不作全量通过声明。

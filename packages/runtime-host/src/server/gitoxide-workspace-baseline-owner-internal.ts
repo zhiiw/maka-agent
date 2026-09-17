@@ -218,8 +218,8 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
       });
       if (prefix.prefixDigest !== proof.prefixDigest)
         throw new Error('Managed continuation source prefix changed');
-      // A successful no-change operation can bind an unchanged baseline to this
-      // Run. It must not manufacture a successor simply to become resumable.
+      // A committed no-effect terminal binds an unchanged baseline to this Run.
+      // Success and failure keep distinct outcome semantics; neither needs a successor.
       const representsHead = (events: readonly RuntimeEvent[]) => {
         if (version.protocol === 'workspace_version_accepted_v1')
           return events.some((event) => event.id === version.origin.outcomeEventId);
@@ -237,9 +237,10 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
             response?.sessionId === input.sessionId &&
             response.runId === dispatch.runId &&
             response.content?.kind === 'function_response' &&
-            !response.content.isError &&
+            ((terminal?.terminalKind === 'no_workspace_change' && !response.content.isError) ||
+              (terminal?.terminalKind === 'operation_failed_no_effect' &&
+                response.content.isError === true)) &&
             response.refs?.operationId === operation.operationId &&
-            terminal?.terminalKind === 'no_workspace_change' &&
             terminal.operationId === operation.operationId &&
             terminal.dispatchEventId === dispatch.id &&
             terminal.workspaceInstanceId === epoch.workspaceInstanceId &&
@@ -336,7 +337,7 @@ function createOwner(stores: InteractiveExecutionStoresWriter) {
         )
           throw new Error('Managed accepted head does not belong to the source Run');
       } else if (!representsHead(evidence.events)) {
-        throw new Error('Baseline continuation has no source-bound no-change result');
+        throw new Error('Baseline continuation has no source-bound no-effect terminal');
       }
       // Reuse the artifact owner: it verifies objects and reconciles only the accepted ref.
       await this.reopen(input);

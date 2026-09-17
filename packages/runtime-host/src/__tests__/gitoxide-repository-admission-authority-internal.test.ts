@@ -275,7 +275,12 @@ for (const mode of [
       }
       if (mode === 'runtime-live-rejection') {
         const inspected = run('inspect-continuation');
-        assert.notEqual(inspected.status, 0, 'An error is not a successful no-change witness');
+        assert.equal(
+          inspected.status,
+          0,
+          'A committed failure/no-effect terminal binds the baseline without becoming success',
+        );
+        assert.equal(JSON.parse(inspected.stdout).restored, true);
         assert.deepEqual(JSON.parse(run('read-settlement').stdout), durable);
       }
       if (mode === 'backend-live-sequence') {
