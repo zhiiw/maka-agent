@@ -189,6 +189,7 @@ enum Request {
         repository_path: PathBuf,
     },
     ImportSourceHead {
+        request_fingerprint: Option<String>,
         protocol_version: u8,
         source_repository_path: PathBuf,
         expected_source_head_commit_oid: String,
@@ -197,6 +198,7 @@ enum Request {
         managed_tree_policy_version: u8,
     },
     VerifySourceImport {
+        request_fingerprint: Option<String>,
         protocol_version: u8,
         source_repository_path: PathBuf,
         expected_source_head_commit_oid: String,
@@ -403,6 +405,7 @@ fn run() -> Result<ExitCode, &'static str> {
             inspect_repository(repository_path)
         }
         Request::ImportSourceHead {
+            request_fingerprint,
             protocol_version,
             source_repository_path,
             expected_source_head_commit_oid,
@@ -418,9 +421,11 @@ fn run() -> Result<ExitCode, &'static str> {
                 baseline_ref,
                 managed_tree_policy_version,
                 false,
+                request_fingerprint,
             )
         }
         Request::VerifySourceImport {
+            request_fingerprint,
             protocol_version,
             source_repository_path,
             expected_source_head_commit_oid,
@@ -436,6 +441,7 @@ fn run() -> Result<ExitCode, &'static str> {
                 baseline_ref,
                 managed_tree_policy_version,
                 true,
+                request_fingerprint,
             )
         }
         Request::CreateCandidate {
@@ -750,8 +756,19 @@ fn import_source_head(
     baseline_ref: String,
     managed_tree_policy_version: u8,
     verify_only: bool,
+    request_fingerprint: Option<String>,
 ) -> Result<ExitCode, &'static str> {
     use gix::bstr::ByteSlice;
+
+    if request_fingerprint.as_ref().is_some_and(|value| {
+        value.len() != 71
+            || !value.starts_with("sha256:")
+            || !value.as_bytes()[7..]
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    }) {
+        return Err("import_intent_invalid");
+    }
 
     if !baseline_ref.starts_with("refs/maka/") {
         return Err("baseline_ref_outside_maka_namespace");
@@ -827,6 +844,7 @@ fn import_source_head(
     );
     let intent = serde_json::to_vec(&(
         "maka-source-import-intent-v1",
+        request_fingerprint,
         fs::canonicalize(source.git_dir()).map_err(|_| "repository_open_failed")?,
         expected_source_head.to_string(),
         source_tree.to_string(),

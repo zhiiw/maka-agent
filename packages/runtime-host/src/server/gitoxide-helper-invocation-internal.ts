@@ -392,6 +392,7 @@ function invocationTimedOut(): GitoxideHelperInvocationError {
 }
 
 interface SourceImportInput {
+  readonly requestFingerprint?: `sha256:${string}`;
   readonly invocationOwnerToken: object;
   readonly capability: GitoxideHelperInvocationCapability;
   readonly sourceRepositoryPath: string;
@@ -428,7 +429,9 @@ async function observeSourceImport(
         !isAbsolute(input.sourceRepositoryPath) ||
         !isAbsolute(input.destinationRepositoryPath) ||
         !SHA1_OID_PATTERN.test(input.expectedSourceHeadCommitOid) ||
-        !MAKA_REF_PATTERN.test(input.baselineRef)
+        !MAKA_REF_PATTERN.test(input.baselineRef) ||
+        (input.requestFingerprint !== undefined &&
+          !/^sha256:[0-9a-f]{64}$/.test(input.requestFingerprint))
       ) {
         throw new GitoxideHelperInvocationError(
           'gitoxide_helper_invocation_invalid',
@@ -457,6 +460,7 @@ async function observeSourceImport(
       operation,
       sourceRepositoryPath,
       expectedSourceHeadCommitOid: input.expectedSourceHeadCommitOid,
+      requestFingerprint: input.requestFingerprint,
       destinationRepositoryPath: input.destinationRepositoryPath,
       baselineRef: input.baselineRef,
       managedTreePolicyVersion: input.managedTreePolicyVersion,

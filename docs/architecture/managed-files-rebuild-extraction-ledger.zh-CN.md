@@ -434,3 +434,18 @@ TDD 先复现未知 profile、managed profile 缺能力仍读取凭据、AiSdkBa
 平台矩阵：Windows 本机通过；Linux/macOS 由既有同文件三平台 workflow 调度，本轮无远程结果。承诺范围仍是被测试的进程退出恢复，不包含断电持久性、任意 helper 内部指令点收敛或不可信本机进程篡改整个私有 repository。
 
 下一步：由 storage-root/session 创建 owner 固定完整请求与 repository 路由，明确未完成 attempt 的身份与隔离方式，再接 live Host。这里不增加自动清理、全盘扫描或 Desktop fallback。
+
+## 第二十检查点：root-owned managed task 创建
+
+新增内部 `createGitoxideManagedTaskInternal`，只接受真实 interactive write lease、helper capability 和有界 Session 请求，不接受调用方指定 repository 路径。目录由已验证 root 与 session ID 的 SHA-256 推导，stores 也由同一 lease 打开；同 lease 的创建串行化，整个执行持有 root operation，关闭 root 不能绕过在途创建。
+
+- **主要不变量/owner**：创建 owner 决定 source admission → fresh import/只读重验 → baseline acceptance → stable Session publication。完整固定 Session 请求与 repository 路径的 fingerprint 同时进入 import intent 和 Session stable-create；在 Session 尚未发布时更换 name/model/connection 等字段也会被拒绝。Rust 对 fingerprint 使用严格 SHA-256 格式校验并纳入精确 intent 字节。通用低层 repository import 可以不关联 Session fingerprint，但本创建入口始终提供，不能消费无绑定 import。
+- **原子边界**：没有把 Git 与 SQLite 伪装成一个事务。Git intent、baseline ref、SQLite baseline 和 Session 分阶段发布；Session 最后创建。已有目录只走严格 verify，不因存在就接受，不 catch 后 fallback fresh import。Session 已存在时验证 stable fingerprint、当前 accepted head 与对象图，不重新导入 source 或把 head 回退到 baseline。
+- **权限与失败**：浅拷贝/伪造 lease 被 root authority 拒绝；source rejection、部分 import、intent 冲突、取消均不发布新的可执行 Session。取消在排队期间最迟在本次进入 owner 时检查，尚未实现即时移除排队请求；helper 内工作继续用原有 deadline/signal。失败保留残留，不授予递归删除或重建权限。当前不是不可信 IPC 请求处理器，也不替代 connection/model 的产品授权。
+- **回滚**：撤回新创建入口即可停止新增任务，不能把已存在 managed profile 改成普通模式。已发布事实继续依赖 accepted-head reopen；未发布 artifact 留待单独的 owner-bound 隔离协议。没有新增 SQLite schema，也不为旧实验 intent 格式补迁移。
+
+测试先以未实现的创建入口证明无法完成真实 child-process create，再接入真实 helper/SQLite owner。新增两条进程证据：完整创建后进程退出，新进程用同一请求重开；import 完成后进程退出（该 fixture 显式调用同一底层 import seam），新进程先拒绝被替换请求，再用原请求完成创建。后者不冒充在新创建函数内部任意位置 kill 的证明。两条都验证同一 baseline facts、source 不变，并覆盖重复/并发请求、伪造 lease 与预先取消。
+
+验证：Rust **75/75**；Host publication/backend 定向 **7/7、0 skip**；跨语言错误协议 **1/1**；Host build、Biome、diff check 通过。平台矩阵：Windows 本机执行；Linux/macOS 由现有相同测试文件的 workflow 调度，本轮未取得远程结果。不承诺断电、helper 任意内部指令点恢复或半完成目录自动回收。
+
+下一步：live Host 创建 handler 和按持久化 Session 重建 capability 的接线，保持普通会话不受影响；完成真实 Host IPC/election 验证后，才开放 Desktop 加号菜单入口。该检查点仍是内部创建 owner，尚不能称为 Desktop 产品闭环。

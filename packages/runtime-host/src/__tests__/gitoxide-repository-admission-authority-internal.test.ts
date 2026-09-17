@@ -59,7 +59,13 @@ interface AdmittedHelper {
 
 let admittedHelperPromise: Promise<AdmittedHelper | undefined> | undefined;
 
-for (const crashMode of ['session-baseline-exit', 'session-publish-exit', 'session-import-exit']) {
+for (const crashMode of [
+  'session-baseline-exit',
+  'session-publish-exit',
+  'session-import-exit',
+  'task-create-exit',
+  'task-import-exit',
+]) {
   test(`managed session publication resumes after ${crashMode}`, { timeout: 30_000 }, async (t) => {
     if (!(await admittedHelper())) {
       t.skip('MAKA_GITOXIDE_HELPER_PATH is required');
@@ -96,7 +102,15 @@ for (const crashMode of ['session-baseline-exit', 'session-publish-exit', 'sessi
       assert.ifError(crashed.error);
       assert.equal(
         crashed.status,
-        crashMode === 'session-baseline-exit' ? 85 : crashMode === 'session-import-exit' ? 86 : 84,
+        crashMode === 'task-import-exit'
+          ? 88
+          : crashMode === 'task-create-exit'
+            ? 87
+            : crashMode === 'session-baseline-exit'
+              ? 85
+              : crashMode === 'session-import-exit'
+                ? 86
+                : 84,
         crashed.stderr,
       );
       if (crashMode === 'session-baseline-exit') {
@@ -104,13 +118,23 @@ for (const crashMode of ['session-baseline-exit', 'session-publish-exit', 'sessi
         assert.ifError(aborted.error);
         assert.equal(aborted.status, 0, aborted.stderr);
       }
+      if (crashMode === 'task-import-exit') {
+        const changed = run('task-changed-before-session');
+        assert.ifError(changed.error);
+        assert.equal(changed.status, 0, changed.stderr);
+        assert.equal(changed.stdout, 'rejected');
+      }
       const retry = run(
-        crashMode === 'session-import-exit' ? 'session-import-recover' : 'session-retry',
+        crashMode.startsWith('task-')
+          ? 'task-retry'
+          : crashMode === 'session-import-exit'
+            ? 'session-import-recover'
+            : 'session-retry',
       );
       assert.ifError(retry.error);
       assert.equal(retry.status, 0, retry.stderr);
       assert.deepEqual(JSON.parse(retry.stdout), {
-        created: crashMode !== 'session-publish-exit',
+        created: crashMode !== 'session-publish-exit' && crashMode !== 'task-create-exit',
         profile: 'managed-files-v1',
         content: 'accepted original\n',
         facts: 2,

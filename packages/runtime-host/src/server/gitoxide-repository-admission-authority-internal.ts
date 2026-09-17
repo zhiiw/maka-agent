@@ -184,6 +184,7 @@ export function requireGitoxideRepositoryAdmissionInternal(
 }
 
 interface AdmittedImportInput {
+  readonly requestFingerprint?: `sha256:${string}`;
   readonly admissionOwnerToken: object;
   readonly repositoryCapability: GitoxideRepositoryAdmissionCapability;
   readonly acceptedRepositoryOwnerToken: object;
@@ -221,6 +222,7 @@ async function observeAdmittedImport(
     capability: admission.helperCapability,
     sourceRepositoryPath: source.repositoryPath,
     expectedSourceHeadCommitOid: source.headCommitOid,
+    requestFingerprint: input.requestFingerprint,
     destinationRepositoryPath: input.destinationRepositoryPath,
     baselineRef: ACCEPTED_REPOSITORY_REF,
     managedTreePolicyVersion: source.managedTreePolicyVersion,

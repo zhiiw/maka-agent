@@ -29,6 +29,8 @@ import { AiSdkBackend } from '@maka/runtime/ai-sdk-backend';
 import {
   openGitoxideManagedSessionInternal,
   createGitoxideManagedSessionInternal,
+  createGitoxideManagedTaskInternal,
+  describeGitoxideManagedSessionCreateInternal,
   requireGitoxideManagedSessionInternal,
 } from '../../server/gitoxide-managed-session-internal.js';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
@@ -84,6 +86,107 @@ const stores = await openInteractiveExecutionStoresForWrite(leaseOwner.lease);
 const owner = createGitoxideWorkspaceBaselineOwnerInternal(stores);
 const acceptedRepositoryOwnerToken = {};
 const repositoryPath = join(rootPath, 'repository.git');
+if (mode.startsWith('task-')) {
+  try {
+    const request = {
+      sessionId: 'managed-created-session',
+      sourcePath,
+      invocationOwnerToken,
+      helperCapability,
+      connectionId: 'test-connection',
+      connectionSlug: 'test',
+      model: 'test-model',
+      name: 'Managed test',
+    };
+    if (mode === 'task-import-exit') {
+      const destinationRepositoryPath = join(
+        leaseOwner.lease.canonicalPath,
+        `managed-files-${createHash('sha256').update(request.sessionId).digest('hex')}.git`,
+      );
+      const { requestFingerprint } = describeGitoxideManagedSessionCreateInternal({
+        ...request,
+        repositoryPath: destinationRepositoryPath,
+      });
+      const admissionOwnerToken = {};
+      const admitted = await admitGitoxideRepositoryInternal({
+        invocationOwnerToken,
+        helperCapability,
+        admissionOwnerToken,
+        repositoryPath: sourcePath,
+      });
+      if (admitted.kind !== 'accepted') throw new Error(admitted.reason);
+      await importAdmittedGitoxideRepositoryInternal({
+        admissionOwnerToken,
+        repositoryCapability: admitted.capability,
+        acceptedRepositoryOwnerToken,
+        destinationRepositoryPath,
+        requestFingerprint,
+      });
+      process.exit(88);
+    }
+    if (mode === 'task-changed-before-session') {
+      await assert.rejects(
+        createGitoxideManagedTaskInternal(leaseOwner.lease, {
+          ...request,
+          name: 'Changed before publication',
+        }),
+        /import_intent_mismatch/,
+      );
+      await assert.rejects(stores.sessionStore.readHeader(request.sessionId));
+      writeSync(1, 'rejected');
+      await stores.sessionStore.close?.();
+      await leaseOwner.close();
+      process.exit(0);
+    }
+    await assert.rejects(createGitoxideManagedTaskInternal({ ...leaseOwner.lease }, request));
+    const cancelled = new AbortController();
+    cancelled.abort(new Error('cancel task creation'));
+    await assert.rejects(
+      createGitoxideManagedTaskInternal(leaseOwner.lease, {
+        ...request,
+        abortSignal: cancelled.signal,
+      }),
+      /cancel task creation/,
+    );
+    const results = await Promise.all([
+      createGitoxideManagedTaskInternal(leaseOwner.lease, request),
+      createGitoxideManagedTaskInternal(leaseOwner.lease, request),
+    ]);
+    const result = results[0];
+    assert.equal(results[1].created, false);
+    if (mode === 'task-create-exit') process.exit(87);
+    const execution = requireGitoxideManagedSessionInternal(
+      result.capability,
+      request.sessionId,
+      stores.runtimeEventStore,
+    );
+    const read = await execution.readAcceptedFile('hello.txt');
+    await assert.rejects(
+      createGitoxideManagedTaskInternal(leaseOwner.lease, { ...request, name: 'Changed request' }),
+      /conflict/i,
+    );
+    const repeated = await Promise.all([
+      createGitoxideManagedTaskInternal(leaseOwner.lease, request),
+      createGitoxideManagedTaskInternal(leaseOwner.lease, request),
+    ]);
+    assert.ok(repeated.every((entry) => !entry.created));
+    writeSync(
+      1,
+      JSON.stringify({
+        created: result.created,
+        profile: (await stores.sessionStore.readHeader(request.sessionId)).toolProfile,
+        content: read.content,
+        facts: (
+          await stores.runtimeEventStore.readSessionRuntimeEvents(WORKSPACE_AUTHORITY_SESSION_ID)
+        ).length,
+      }),
+    );
+  } finally {
+    await stores.sessionStore.close?.();
+    await leaseOwner.close();
+  }
+  process.exit(0);
+}
 if (mode === 'read-settlement') {
   try {
     const events = await stores.runtimeEventStore.readImmutableRuntimeEvents(

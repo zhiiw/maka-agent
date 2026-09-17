@@ -11,14 +11,24 @@
  * limitations under the License.
  */
 import { createHash } from 'node:crypto';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join } from 'node:path';
+import { lstat } from 'node:fs/promises';
 import type { MakaTool, ToolRuntimeInput } from '@maka/runtime/tool-runtime';
 import type { RuntimeCommitSink } from '@maka/runtime/runtime-commit-sink';
 import { readPage, readParameters, resolveReadInput } from '@maka/runtime/read-page';
-import type { InteractiveExecutionStoresWriter } from '@maka/storage/execution-stores';
+import {
+  openInteractiveExecutionStoresForWrite,
+  type InteractiveExecutionStoresWriter,
+} from '@maka/storage/execution-stores';
 import { createGitoxideWorkspaceBaselineOwnerInternal } from './gitoxide-workspace-baseline-owner-internal.js';
 import { prepareGitoxideRuntimeMutationInternal } from './gitoxide-runtime-mutation-internal.js';
-import { readGitoxideTreeFileInternal } from './gitoxide-repository-admission-authority-internal.js';
+import {
+  readGitoxideTreeFileInternal,
+  admitGitoxideRepositoryInternal,
+  importAdmittedGitoxideRepositoryInternal,
+  verifyAdmittedGitoxideImportInternal,
+} from './gitoxide-repository-admission-authority-internal.js';
+import { runWithStorageRootLease, type StorageRootLease } from '@maka/storage/root-authority';
 
 export interface GitoxideManagedSessionCapability {
   readonly kind: 'gitoxide_managed_files_session';
@@ -39,19 +49,93 @@ interface SessionExecution {
   ) => ReturnType<typeof readGitoxideTreeFileInternal>;
 }
 const sessions = new WeakMap<GitoxideManagedSessionCapability, SessionExecution>();
+const creations = new WeakMap<object, Promise<unknown>>();
 
-/** Publish a Session only after its session-keyed accepted workspace is verifiable. */
-export async function createGitoxideManagedSessionInternal(
-  stores: InteractiveExecutionStoresWriter,
-  input: Omit<ReopenInput, 'acceptedRepositoryOwnerToken' | 'workspaceKey'> & {
-    readonly sessionId: string;
-    readonly sourcePath: string;
-    readonly connectionId: string;
-    readonly connectionSlug: string;
-    readonly model: string;
-    readonly name: string;
-  },
+export function createGitoxideManagedTaskInternal(
+  lease: StorageRootLease<'interactive', 'write'>,
+  input: Omit<ManagedSessionCreateInput, 'repositoryPath'>,
 ): Promise<{ readonly created: boolean; readonly capability: GitoxideManagedSessionCapability }> {
+  input = { ...input };
+  const previous = creations.get(lease) ?? Promise.resolve();
+  const pending = previous
+    .catch(() => undefined)
+    .then(() =>
+      runWithStorageRootLease(lease, 'interactive', 'write', async (root) => {
+        input.abortSignal?.throwIfAborted();
+        if (typeof input.sessionId !== 'string' || Buffer.byteLength(input.sessionId) > 1024)
+          throw new Error('Invalid managed session identity');
+        const repositoryPath = join(
+          root,
+          `managed-files-${createHash('sha256').update(input.sessionId).digest('hex')}.git`,
+        );
+        const request = { ...input, repositoryPath };
+        const { requestFingerprint } = describeGitoxideManagedSessionCreateInternal(request);
+        const stores = await openInteractiveExecutionStoresForWrite(lease);
+        const probe = await stores.sessionStore.probeStableSessionCreate(
+          input.sessionId,
+          requestFingerprint,
+        );
+        if (probe.kind === 'conflict') throw new Error('Managed session creation conflict');
+        if (probe.kind === 'existing') return createGitoxideManagedSessionInternal(stores, request);
+        const admissionOwnerToken = {};
+        const admitted = await admitGitoxideRepositoryInternal({
+          invocationOwnerToken: input.invocationOwnerToken,
+          helperCapability: input.helperCapability,
+          admissionOwnerToken,
+          repositoryPath: input.sourcePath,
+          abortSignal: input.abortSignal,
+        });
+        if (admitted.kind !== 'accepted')
+          throw new Error(`Managed source rejected: ${admitted.reason}`);
+        const exists = await lstat(repositoryPath).then(
+          () => true,
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === 'ENOENT') return false;
+            throw error;
+          },
+        );
+        const acceptedRepositoryOwnerToken = {};
+        const imported = await (exists
+          ? verifyAdmittedGitoxideImportInternal
+          : importAdmittedGitoxideRepositoryInternal)({
+          admissionOwnerToken,
+          repositoryCapability: admitted.capability,
+          acceptedRepositoryOwnerToken,
+          destinationRepositoryPath: repositoryPath,
+          requestFingerprint,
+          abortSignal: input.abortSignal,
+        });
+        input.abortSignal?.throwIfAborted();
+        await createGitoxideWorkspaceBaselineOwnerInternal(stores).acceptImport({
+          workspaceKey: input.sessionId,
+          acceptedRepositoryOwnerToken,
+          acceptedRepositoryCapability: imported.acceptedRepositoryCapability,
+        });
+        return createGitoxideManagedSessionInternal(stores, request);
+      }),
+    );
+  creations.set(lease, pending);
+  void pending
+    .finally(() => {
+      if (creations.get(lease) === pending) creations.delete(lease);
+    })
+    .catch(() => undefined);
+  return pending;
+}
+
+export type ManagedSessionCreateInput = Omit<
+  ReopenInput,
+  'acceptedRepositoryOwnerToken' | 'workspaceKey'
+> & {
+  readonly sessionId: string;
+  readonly sourcePath: string;
+  readonly connectionId: string;
+  readonly connectionSlug: string;
+  readonly model: string;
+  readonly name: string;
+};
+
+export function describeGitoxideManagedSessionCreateInternal(input: ManagedSessionCreateInput) {
   input = { ...input };
   for (const value of [
     input.sessionId,
@@ -85,7 +169,7 @@ export async function createGitoxideManagedSessionInternal(
     collaborationMode: 'agent' as const,
     orchestrationMode: 'default' as const,
   });
-  const requestFingerprint = `sha256:${createHash('sha256')
+  const requestFingerprint: `sha256:${string}` = `sha256:${createHash('sha256')
     .update(
       JSON.stringify([
         'maka-managed-session-create-v1',
@@ -95,6 +179,16 @@ export async function createGitoxideManagedSessionInternal(
       ]),
     )
     .digest('hex')}`;
+  return Object.freeze({ createInput, requestFingerprint });
+}
+
+/** Publish a Session only after its session-keyed accepted workspace is verifiable. */
+export async function createGitoxideManagedSessionInternal(
+  stores: InteractiveExecutionStoresWriter,
+  input: ManagedSessionCreateInput,
+): Promise<{ readonly created: boolean; readonly capability: GitoxideManagedSessionCapability }> {
+  input = { ...input };
+  const { createInput, requestFingerprint } = describeGitoxideManagedSessionCreateInternal(input);
   const probe = await stores.sessionStore.probeStableSessionCreate(
     input.sessionId,
     requestFingerprint,
