@@ -70,7 +70,17 @@ await git(
 );
 const requests = [];
 const repeatInterrupt = process.argv.includes('--repeat-interrupt');
-const interruptTurn = repeatInterrupt || process.argv.includes('--interrupt-turn');
+const candidateInterrupt = process.argv.includes('--candidate-interrupt');
+// Manual diagnostic, not a CI gate: the external SQLite writer lock can also
+// block unrelated Host writes before candidate creation. A missed window fails
+// explicitly; it must not be retried silently or reported as recovery evidence.
+assert.ok(
+  !(candidateInterrupt && repeatInterrupt),
+  'Candidate interruption is a single-restart test',
+);
+const interruptTurn =
+  candidateInterrupt || repeatInterrupt || process.argv.includes('--interrupt-turn');
+const expectedContent = candidateInterrupt ? /written/ : /edited/;
 let restartNumber = 0;
 let waitingForCompletion = false;
 let operationStep = 0;
@@ -142,7 +152,7 @@ const server = createServer(async (req, res) => {
       index: 0,
       content_block: {
         type: 'tool_use',
-        id: `smoke-tool-${operationStep}`,
+        id: `smoke-tool-${restartNumber}-${operationStep}`,
         name: operation.name,
         input: {},
       },
@@ -172,6 +182,8 @@ const server = createServer(async (req, res) => {
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 let app;
 let page;
+let candidateLock;
+let candidateEvidence;
 const logs = [];
 try {
   const capability = await resolveStorageRoot({ path: workspace, kind: 'interactive' });
@@ -275,7 +287,97 @@ try {
     .fill('Write tracked.txt to written, edit written to edited, then read it.');
   await expect(page.locator('.maka-composer button[type="submit"]')).toBeEnabled();
   await page.locator('.maka-composer button[type="submit"]').click();
-  if (interruptTurn) {
+  if (candidateInterrupt) {
+    candidateLock = new DatabaseSync(join(workspace, 'runtime.sqlite'));
+    candidateLock.exec('PRAGMA busy_timeout=0');
+    await expect
+      .poll(
+        () => {
+          const events = candidateLock
+            .prepare('SELECT payload_json FROM runtime_events ORDER BY rowid')
+            .all()
+            .map(({ payload_json }) => JSON.parse(payload_json));
+          const dispatch = events.find((event) => event.actions?.toolDispatch?.managedMutation);
+          if (!dispatch) return false;
+          assert.equal(
+            events.some(
+              (event) =>
+                event.refs?.operationId === dispatch.actions.toolDispatch.operationId &&
+                event.content?.kind === 'function_response',
+            ),
+            false,
+            'Missed the candidate/T2 window',
+          );
+          try {
+            candidateLock.exec('BEGIN IMMEDIATE');
+          } catch (error) {
+            if (String(error).includes('locked')) return false;
+            throw error;
+          }
+          // Re-read after acquiring the lock: a concurrent T2 must not slip past our first read.
+          const lockedEvents = candidateLock
+            .prepare('SELECT payload_json FROM runtime_events ORDER BY rowid')
+            .all()
+            .map(({ payload_json }) => JSON.parse(payload_json));
+          const operationId = dispatch.actions.toolDispatch.operationId;
+          assert.equal(
+            lockedEvents.some(
+              (event) =>
+                event.refs?.operationId === operationId &&
+                event.content?.kind === 'function_response',
+            ),
+            false,
+            'T2 won the write-lock race',
+          );
+          assert.equal(
+            candidateLock
+              .prepare(
+                'SELECT COUNT(*) AS count FROM runtime_managed_mutation_reservations WHERE operation_id = ?',
+              )
+              .get(operationId).count,
+            1,
+          );
+          candidateEvidence = {
+            operationId,
+            sessionId: dispatch.sessionId,
+            turnId: dispatch.turnId,
+            dispatchId: dispatch.id,
+            before: lockedEvents,
+          };
+          return true;
+        },
+        { timeout: 10000, intervals: [1, 2, 5] },
+      )
+      .toBe(true);
+    const candidateRefPath = join(
+      workspace,
+      `managed-files-${createHash('sha256').update(candidateEvidence.sessionId).digest('hex')}.git`,
+      'refs',
+      'maka',
+      'candidates',
+      createHash('sha256').update(candidateEvidence.operationId).digest('hex'),
+    );
+    await expect
+      .poll(
+        async () => {
+          try {
+            candidateEvidence.candidateCommitOid = (
+              await readFile(candidateRefPath, 'utf8')
+            ).trim();
+            return /^[a-f0-9]{40}$/.test(candidateEvidence.candidateCommitOid);
+          } catch (error) {
+            if (error.code === 'ENOENT') return false;
+            throw error;
+          }
+        },
+        { timeout: 10000, intervals: [10, 25, 50] },
+      )
+      .toBe(true);
+    await writeFile(
+      join(root, 'candidate-before-kill.json'),
+      JSON.stringify(candidateEvidence, null, 2),
+    );
+  } else if (interruptTurn) {
     await expect.poll(() => waitingForCompletion, { timeout: 30000 }).toBe(true);
   } else {
     await expect(page.getByText('MANAGED_DESKTOP_SMOKE_OK', { exact: true })).toBeVisible({
@@ -287,12 +389,12 @@ try {
   const results = finalRequest.body.messages
     .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
     .filter((part) => part.type === 'tool_result');
-  assert.equal(results.length, 3);
+  assert.equal(results.length, candidateInterrupt ? 0 : 3);
   assert.equal(
     results.some((result) => result.is_error),
     false,
   );
-  assert.match(JSON.stringify(results.at(-1)), /edited/);
+  if (!candidateInterrupt) assert.match(JSON.stringify(results.at(-1)), expectedContent);
   assert.equal(await readFile(join(source, 'tracked.txt'), 'utf8'), 'baseline\n');
   await page.screenshot({ path: join(root, 'desktop.png') });
   const readMutations = () => {
@@ -311,10 +413,10 @@ try {
       db.close();
     }
   };
-  const mutationsBefore = readMutations();
+  let mutationsBefore = readMutations();
   assert.equal(
     mutationsBefore.filter((event) => event.content?.kind === 'function_response').length,
-    2,
+    candidateInterrupt ? 0 : 2,
   );
   const { controlDirectory } = await resolveExistingStorageRootControlDirectory(capability);
   for (restartNumber = 1; restartNumber <= (repeatInterrupt ? 2 : 1); restartNumber++) {
@@ -349,6 +451,28 @@ try {
     assert.ok(command.includes(workspace), 'Host must name the isolated workspace path');
     assert.ok(command.includes('--expected-root-id'), 'Host must use verified-root startup');
     process.kill(registration.pid, 'SIGKILL');
+    if (candidateLock) {
+      // Wait for death before releasing the writer lock; otherwise the old Host
+      // could commit T2 while SIGKILL delivery is still pending.
+      await expect
+        .poll(
+          () => {
+            try {
+              process.kill(registration.pid, 0);
+              return false;
+            } catch (error) {
+              if (error.code === 'ESRCH') return true;
+              throw error;
+            }
+          },
+          { timeout: 10000 },
+        )
+        .toBe(true);
+      candidateLock.exec('ROLLBACK');
+      candidateLock.close();
+      candidateLock = undefined;
+      assert.deepEqual(readMutations(), mutationsBefore, 'Killed Host must not have committed T2');
+    }
     await closeElectronApplication(app, 5000);
     app = undefined;
     restarted = true;
@@ -380,6 +504,31 @@ try {
       .first()
       .click({ timeout: 30000 });
     if (interruptTurn) {
+      if (candidateInterrupt) {
+        await expect
+          .poll(
+            () =>
+              readMutations().filter((event) => event.content?.kind === 'function_response').length,
+            { timeout: 30000 },
+          )
+          .toBe(1);
+        const recovered = readMutations();
+        assert.deepEqual(
+          recovered.filter((event) => mutationsBefore.some((before) => before.id === event.id)),
+          mutationsBefore,
+        );
+        const response = recovered.find((event) => event.content?.kind === 'function_response');
+        assert.equal(response.id, `${candidateEvidence.operationId}_recovered_response`);
+        const successors = recovered.filter(
+          (event) => event.actions?.workspaceFact?.kind === 'maka.workspace.version_accepted',
+        );
+        assert.equal(successors.length, 1);
+        assert.equal(
+          successors[0].actions.workspaceFact.payload.commitOid,
+          candidateEvidence.candidateCommitOid,
+        );
+        mutationsBefore = recovered;
+      }
       await page
         .getByRole('button', { name: 'Continue this turn', exact: true })
         .click({ timeout: 30000 });
@@ -406,11 +555,42 @@ try {
         .filter((part) => part.type === 'tool_result');
       assert.equal(
         afterResults.length,
-        3 + restartNumber,
+        (candidateInterrupt ? 1 : 3) + restartNumber,
         'Reopened model history includes the three durable results and new Read',
       );
-      assert.match(JSON.stringify(afterResults.at(-1)), /edited/);
+      assert.match(JSON.stringify(afterResults.at(-1)), expectedContent);
       assert.equal(Boolean(afterResults.at(-1)?.is_error), false);
+      if (candidateInterrupt) {
+        const response = mutationsBefore.find(
+          (event) => event.content?.kind === 'function_response',
+        );
+        assert.equal(response.content.modelProjection.kind, 'json');
+        assert.deepEqual(
+          JSON.parse(afterResults[0].content),
+          response.content.modelProjection.value,
+          'Model replay must use the accepted recovered result',
+        );
+        const transcript = await page.evaluate(async ({ sessionId, turnId }) => {
+          const sessions = await window.maka.sessions.list();
+          const matches = sessions.filter((session) => JSON.parse(session.id)[1] === sessionId);
+          if (matches.length !== 1) throw new Error('Expected one scoped Desktop recovery session');
+          return window.maka.transcripts.readTurn(matches[0].id, turnId);
+        }, candidateEvidence);
+        const recoveredResults = transcript.filter(
+          (message) => message.type === 'tool_result' && message.toolUseId === response.content.id,
+        );
+        assert.equal(
+          recoveredResults.length,
+          1,
+          'Desktop transcript must show exactly one recovered result',
+        );
+        assert.equal(recoveredResults[0].isError, false);
+        assert.deepEqual(recoveredResults[0].content, response.content.result);
+        await writeFile(
+          join(root, 'recovered-transcript.json'),
+          JSON.stringify(transcript, null, 2),
+        );
+      }
     }
     assert.deepEqual(
       readMutations(),
@@ -452,9 +632,11 @@ try {
           oldEpoch: registration.hostEpoch,
           newEpoch: reopened.hostEpoch,
           mutationEvents: mutationsBefore.map((event) => event.id),
-          checkpoint: interruptTurn
-            ? 'tool results durable; model completion pending; explicit source-bound Continue'
-            : 'completed turn; not an in-flight mutation crash',
+          checkpoint: candidateInterrupt
+            ? 'candidate durable; SQLite T2 blocked; Host killed; startup settlement; explicit Continue'
+            : interruptTurn
+              ? 'tool results durable; model completion pending; explicit source-bound Continue'
+              : 'completed turn; not an in-flight mutation crash',
         },
         null,
         2,
@@ -462,7 +644,7 @@ try {
     );
   }
   console.log(
-    `PASS: ${interruptTurn ? 'interrupted turn continues with accepted Read' : 'completed turn reopens with accepted Read'} after Host kill and Desktop restart; mutation events unchanged.`,
+    `PASS: ${candidateInterrupt ? 'candidate-only interruption settles once and Continue replays its exact result' : interruptTurn ? 'interrupted turn continues with accepted Read' : 'completed turn reopens with accepted Read'} after Host kill and Desktop restart; accepted mutation events unchanged.`,
   );
 } catch (error) {
   if (page && !page.isClosed()) {
@@ -471,6 +653,12 @@ try {
   throw error;
 } finally {
   try {
+    if (candidateLock) {
+      try {
+        candidateLock.exec('ROLLBACK');
+      } catch {}
+      candidateLock.close();
+    }
     if (app) await closeElectronApplication(app, 5000);
   } finally {
     server.closeAllConnections();

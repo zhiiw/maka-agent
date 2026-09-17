@@ -958,3 +958,17 @@ Owner 仍是原 repository admission authority。必须持有匹配的 accepted 
 下一步：真实 Desktop 的 candidate-window Host kill → 重启 → 手动 Continue 验收，并验证 transcript 与模型恢复只读取已接受的同一结果。仍不引入启动自动续跑、T1-only 重做、扫描优化或 Bash/npm。
 
 验证：新增真实 composition 用例先 RED（重启后 0 条 T2），接线后通过；含 helper 缺失/篡改/T1-only 的最终用例复跑通过。关联启动资源清理/可选 Store 故障等定向总计 4/4、0 skip；Host build、Biome、diff check 通过。无全量 CI 或其他平台通过声明。
+
+## 第四十九检查点：真实 Electron 候选窗口恢复与 transcript/model 一致性
+
+手工验收脚本新增 `--candidate-interrupt`：从真实 Desktop 加号入口创建任务并发送消息，观察真实 T1/reservation 后，用外部 SQLite writer lock 阻止 T2；等待真实 Gitoxide candidate ref 发布，核验 elected Host 命令行绑定隔离 workspace/root 后杀死该 Host。确认进程退出才释放锁，并再次断言 T2 尚未出现。测试不写业务数据、不自行构造 T1/T2、不安装 fake Runtime、不向产品加入环境变量 failpoint；本地 HTTP 服务仅替代模型响应。
+
+重启走真实 Desktop/main/Host election 与第四十八检查点的启动恢复。脚本要求唯一的 `<operationId>_recovered_response` 和引用原 candidate 的唯一 successor，然后实际点击 Continue。新 Run 仅要求 accepted Read：模型 replay 内容必须等于恢复事件的 modelProjection；通过 preload 会话目录取得真实 scoped Session key，再调用生产 transcript API，要求原 Turn 中恰好一个恢复 tool_result，且内容精确等于 durable result。Continue 前后 mutation events 必须逐条不变，source checkout 仍为 baseline。恢复不重放 Write/Edit handler；纯转换重算与已有 candidate 验证仍由生产 owner 完成。
+
+Windows 本轮完整通过证据目录：`C:/Users/wzy/AppData/Local/Temp/maka-managed-electron-8kqfl4`，包含 candidate-before-kill、restart-evidence、recovered-transcript、model-requests 与截图。Host epoch 从 `5f62290a-bbc9-4e8e-9bf0-71063cb4289c` 更换为 `33d98dc5-3522-41e9-b59a-07cacb54213e`。前一次运行错误地将原始 UUID 传给 scoped Desktop API，已修正测试调用；不是通过绕过 API 或修改生产 reader 让断言通过。
+
+**调度限制必须保留：此脚本尚不是稳定 CI gate。** 本轮另一次运行在持有写锁时未等到 candidate（目录 `maka-managed-electron-VpMvZZ`，10 秒超时）。外部 DB 锁可能阻塞候选生成前其他 Host 写入；不能将重跑成功解释为稳定性已经证明。脚本不静默重试、不跳过失败窗口，不加入默认 CI；后续需要独立、可观测的候选发布握手来稳定 kill 时机，不能靠增加 sleep 或扩大超时充当证明。
+
+当前新增的 UI 崩溃窗口只覆盖首次 Write 的 candidate 已存在而 T2 未提交；不宣称覆盖 Edit/no-op 的所有窗口、任意机器指令崩溃或断电。Linux/macOS 本轮未运行。启动自动结算已有候选不等于自动续跑模型，用户仍需 Continue；T1-only 继续保留未结算状态，不创建缺失候选。下一步优先稳定候选窗口的验收编排并补 Edit 对称场景；自动续跑、扫描优化和 Bash/npm 不扩大到本轮。
+
+原 `--interrupt-turn` 回归也通过（`maka-managed-electron-p3kcIQ`）：真实 Write/Edit/Read 已完成后杀 Host，重启并 Continue，原 mutation facts 不变。Runtime Host、Desktop main/resources 构建通过，脚本语法、Biome 与 diff check 通过。本轮仅改验收脚本和记录，没有生产代码变更。
