@@ -826,3 +826,44 @@ Windows 复现目录：`C:/Users/wzy/AppData/Local/Temp/maka-managed-electron-JK
 平台：本轮真实 Desktop 反例及 fixture 在 Windows；Linux/macOS 未运行。连续多次 Desktop Resume 仍未闭环，首次只读、mutation 内部崩溃等前述剩余项不因本检查点自动完成。
 
 验证：Runtime Host build、Biome、diff check 通过；backend-live-sequence（包含 claim/start 进程退出重开、继承与 head 漂移）及 backend-crash-first 共 2/2 通过。`--repeat-interrupt` 失败已保留为下一检查点验收，不宣称 Desktop 全绿。
+
+## 第四十二检查点：已启动 continuation 的独占 Host 重启收口
+
+第四十一检查点的反例本轮再次复现：第二次重启没有 Continue。根因不是按钮或 head 继承，而是 claim-only repair 与 generic Run repair 均有意跳过 live-provider continuation，缺少独占 Host 重启情况下的接管分支。
+
+### Owner 与能力边界
+
+新增 recoverInterruptedSessionsAfterHostRestart，只有 Host 在 execution recovery 阶段、尚未开放新执行时调用。入口通过 storage WeakMap 认证真实 interactive execution writer，并要求 session/agent-run/runtime-event 三个 stores 与 SessionManager 的依赖逐一同一引用；每次 facade 访问仍受 live root lease 保护。单纯 StrictRecoveryStores 结构、布尔开关或复制对象不能获得该权限。普通 best-effort/strict recovery 的 live-provider indeterminate 行为不变。
+
+在原 continuation claim owner 中增加一个受限分支，不删除 generic repair 的排除规则：
+
+1. start 必须通过共享的 continuationStartEventMatchesClaim 完整验证；已终结 target 不改写。
+2. 仅 managed-files-v1、无 plugin executor 的 Session 进入；工具 resolver 必须无 corruption、无需 reconciliation，且所有 decision 均 completed。
+3. source-bound safety inspector 必须证明 background operations settled、accepted checkpoint restored、有 ref，high-water 精确等于本 target 的 immutable events 数量。任何不可用或不匹配均保留未终结状态，不猜测副作用。
+4. 异步检查后重新读取 target events，必须完全不变，然后通过既有 terminal writer 提交确定 ID 的 app_restarted failed terminal。该事件说明旧物理执行中断，不把已成功工具结果改成失败，也不重新执行工具。
+
+原子边界仍是 terminal RuntimeEvent 的持久化；其余运行状态为投影。提交前失败不写终态；提交后崩溃由已有 terminal 事实收敛，重复启动不添加第二个 terminal。真正 Continue 仍重新规划、复验 head/prefix/profile 并取得新 claim；startup repair 本身不调用模型、不自动启动新 Run。撤回入口接线会恢复为保守 park，不回滚已存在事实。
+
+### 真实产品验收
+
+同一 `--repeat-interrupt` 脚本从 RED 转为通过：
+
+```text
+Write → Edit → Read → 模型等待 → kill Host
+→ 重启 → Continue → Read → 模型等待 → kill Host
+→ 重启 → Continue → Read → 完成
+```
+
+验证三个不同 Run、两条 sourceRunId 相接的 continuation lineage，每次只新增一个 Run，最终模型历史包含原工具结果与两次 Read；Write/Edit call/result/successor 逐条不变，用户 source checkout 仍是 baseline。首次通过证据：`C:/Users/wzy/AppData/Local/Temp/maka-managed-electron-XmWDCW`。
+
+完成格式化和重建后第二次复跑也通过：`C:/Users/wzy/AppData/Local/Temp/maka-managed-electron-LbKNZc`。这两次通过不替代不同平台或未结算副作用场景的证据。
+
+Runtime/Host build、格式检查通过；continuation/resume/handoff 定向 32/32，包括真实 SIGKILL claim/start/terminal harness，以及伪造 writer 入口拒绝。无独占 writer 的旧 crash harness 对 started target 仍要求不制造 terminal，继续通过。
+
+| 平台 | 本轮证据与范围 |
+| --- | --- |
+| Windows | 真实 Electron 两次 Host kill/Continue 通过，限定已结算 Write/Edit 与之后的 Read |
+| Linux | 本轮未运行，不外推 Windows 结果 |
+| macOS | 本轮未运行，可用相同显式 smoke 参数复跑 |
+
+尚未承诺：任意 mutation T1 中途崩溃自动收敛、首次只读 fresh Run、无限次/无限长度历史、启动自动续跑、断电。下一优先项是此新入口对未结算 mutation/漂移的真实重启负向验收，然后才扩展 mutation 内部窗口，不扩大到 Bash/npm 或自动扫描优化。

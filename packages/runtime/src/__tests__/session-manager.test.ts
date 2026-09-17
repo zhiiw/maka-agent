@@ -5866,6 +5866,15 @@ describe('SessionManager permission mode updates', () => {
       now: nextNow(6_530),
     });
     const session = await manager.createSession(makeInput());
+    await assert.rejects(
+      manager.recoverInterruptedSessionsAfterHostRestart({
+        kind: 'interactive',
+        sessionStore: store,
+        agentRunStore: runStore,
+        runtimeEventStore: runStore,
+      } as unknown as Parameters<SessionManager['recoverInterruptedSessionsAfterHostRestart']>[0]),
+      /execution.*stores/i,
+    );
     const header = await store.readHeader(session.id);
     const sourceRunId = 'source-run-authoritative-plan';
     const sourceTurnId = 'source-turn-authoritative-plan';

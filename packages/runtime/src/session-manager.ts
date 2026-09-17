@@ -130,7 +130,14 @@ import type {
 import type { AgentGraphScheduleUpdateSource } from '@maka/core/agent-graph-schedule';
 import type { AgentRunEvent, AgentRunStore } from '@maka/core/agent-run';
 import { isArtifactChildResultOutput, type ArtifactRecord } from '@maka/core/artifacts';
-import { invocationMatchesClaimTarget } from '@maka/core/runtime-boundary';
+import {
+  invocationMatchesClaimTarget,
+  continuationStartEventMatchesClaim,
+} from '@maka/core/runtime-boundary';
+import {
+  authenticateExecutionStoresWriter,
+  type InteractiveExecutionStoresWriter,
+} from '@maka/storage/execution-stores';
 import type { ContinuationClaimV1 } from '@maka/core/runtime-boundary';
 import {
   readRunInvocation,
@@ -192,7 +199,10 @@ import {
   classifyAgentRunRecovery,
   type AgentRunRecoveryDecision,
 } from './agent-run-recovery.js';
-import { buildInterruptedCodeModeOutcomeCommits } from './recovery-resolver.js';
+import {
+  buildInterruptedCodeModeOutcomeCommits,
+  resolveRuntimeRecovery,
+} from './recovery-resolver.js';
 import {
   isRuntimeHostedRootAuthority,
   RuntimeMessageAuthorityInvariantError,
@@ -1513,6 +1523,25 @@ export class SessionManager {
     return this.recoverInterruptedSessionsWithPolicy({ kind: 'strict', stores });
   }
 
+  /** Host startup only, before accepting executions. The genuine writer pins
+   * the exclusive root lease; structural store lookalikes are not authority. */
+  async recoverInterruptedSessionsAfterHostRestart(
+    stores: InteractiveExecutionStoresWriter,
+  ): Promise<string[]> {
+    authenticateExecutionStoresWriter(stores, 'interactive');
+    if (
+      stores.sessionStore !== this.deps.store ||
+      stores.agentRunStore !== this.deps.runStore ||
+      stores.runtimeEventStore !== this.deps.runtimeEventStore
+    )
+      throw new Error('Host restart recovery stores must match the SessionManager composition');
+    return this.recoverInterruptedSessionsWithPolicy({
+      kind: 'strict',
+      stores,
+      exclusiveHostRestart: true,
+    });
+  }
+
   private async recoverInterruptedSessionsWithPolicy(policy: RecoveryPolicy): Promise<string[]> {
     const interrupted = (await listSessionsForRecovery(this.deps.store, policy)).filter(
       (session) => !session.isArchived,
@@ -1565,7 +1594,7 @@ export class SessionManager {
       const continuationAuthority = runtimeContinuationAuthority(this.deps.runtimeEventStore);
       if (this.deps.runStore && continuationAuthority) {
         try {
-          continuationClaimRecovered = await this.recoverContinuationClaimsBeforeProvider(
+          continuationClaimRecovered = await this.recoverContinuationClaims(
             session.id,
             continuationAuthority,
             policy,
@@ -4669,15 +4698,13 @@ export class SessionManager {
    * committed in the claim, commits a deterministic continuation-start as
    * event 1, then records an auditable failed terminal fact.
    *
-   * A start written by the normal admission path is provider T1. Without an
-   * exclusive cross-process owner proof we cannot know that its provider is
-   * dead, so that state remains `continuation_started_indeterminate` and is
-   * deliberately left non-terminal.
+   * Live-provider starts remain indeterminate except in exclusive Host startup
+   * recovery, with settled managed tools and an authenticated workspace checkpoint.
    */
-  private async recoverContinuationClaimsBeforeProvider(
+  private async recoverContinuationClaims(
     sessionId: string,
     authority: RuntimeContinuationAuthorityStore,
-    _policy: RecoveryPolicy,
+    policy: RecoveryPolicy,
   ): Promise<boolean> {
     if (!this.deps.runStore) return false;
     const states = await authority.listContinuationClaimsForRecovery(sessionId);
@@ -4727,17 +4754,69 @@ export class SessionManager {
       }
 
       const start = targetEvents[0];
-      if (!start || start.id !== state.startEventId) {
+      if (
+        !start ||
+        start.id !== state.startEventId ||
+        !continuationStartEventMatchesClaim(start, claim, state.startKind)
+      ) {
         throw new Error(`Continuation claim ${claim.claimId} has an invalid start boundary`);
       }
       const repairedBeforeProvider = state.startKind === 'claim_repair';
-      if (!repairedBeforeProvider) continue;
-      const failureClass = 'continuation_abandoned_before_provider_dispatch';
+      if (!repairedBeforeProvider) {
+        if (targetEvents.some(isTerminalRuntimeEvent)) continue;
+        if (
+          policy.kind !== 'strict' ||
+          !policy.exclusiveHostRestart ||
+          state.startKind !== 'runtime_admission' ||
+          !this.deps.inspectContinuationSafety
+        )
+          continue;
+        const header = await this.deps.store.readHeader(sessionId);
+        if (header.toolProfile !== 'managed-files-v1' || header.executorId) continue;
+        const resolution = resolveRuntimeRecovery(targetEvents);
+        if (
+          resolution.hasCorruption ||
+          resolution.requiresReconciliation ||
+          resolution.decisions.some((decision) => decision.status !== 'completed')
+        )
+          continue;
+        // The workspace owner proves settled accepted content (including a
+        // claimed ancestor head). Never manufacture no-effect tool outcomes.
+        let observation: RuntimeContinuationSafetyObservation;
+        try {
+          observation = await this.deps.inspectContinuationSafety(
+            sessionId,
+            Object.freeze({
+              sourceRunId: claim.target.runId,
+              expectedRuntimeEventHighWater: targetEvents.length,
+            }),
+          );
+        } catch {
+          continue;
+        }
+        if (
+          !observation.backgroundOperationsSettled ||
+          !observation.workspaceCheckpoint?.restored ||
+          !observation.workspaceCheckpoint.ref ||
+          observation.workspaceCheckpoint.runtimeEventHighWater !== targetEvents.length
+        )
+          continue;
+        const current = await authority.readImmutableRuntimeEvents(sessionId, claim.target.runId);
+        if (!isDeepStrictEqual(current, targetEvents))
+          throw new Error('Continuation target changed during exclusive restart recovery');
+      }
+      const failureClass = repairedBeforeProvider
+        ? 'continuation_abandoned_before_provider_dispatch'
+        : 'app_restarted';
       const expectedTerminal = buildRecoveredTerminalRuntimeEvent({
         id: continuationRepairEventId('terminal', claim.claimId),
         run: claim.target,
         status: 'failed',
-        ts: Math.max(start.ts + 1, claim.claimedAt + 1),
+        ts: targetEvents.reduce(
+          (latest, event) =>
+            isTerminalRuntimeEvent(event) ? latest : Math.max(latest, event.ts + 1),
+          claim.claimedAt + 1,
+        ),
         recoveryReason: failureClass,
         invocationId: claim.target.invocationId,
         failureClass,
@@ -4993,7 +5072,9 @@ function continuationExecutionErrorClass(error: unknown): string {
   return error instanceof Error ? error.name : 'unknown';
 }
 
-type RecoveryPolicy = { kind: 'best_effort' } | { kind: 'strict'; stores: StrictRecoveryStores };
+type RecoveryPolicy =
+  | { kind: 'best_effort' }
+  | { kind: 'strict'; stores: StrictRecoveryStores; exclusiveHostRestart?: true };
 
 const MAX_BEST_EFFORT_OUTCOME_COMMIT_ATTEMPTS = 2;
 
