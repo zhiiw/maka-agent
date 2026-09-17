@@ -21,6 +21,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -28,7 +29,11 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { _electron as electron, expect } from '@playwright/test';
-import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
+import {
+  resolveStorageRoot,
+  resolveExistingStorageRootControlDirectory,
+  tryAcquireInteractiveRootOwner,
+} from '@maka/storage/root-authority';
 import { openInteractiveRuntimePolicyStoresForWrite } from '@maka/storage/runtime-policy-stores';
 import { createProjectCatalog } from '@maka/storage/project-catalog';
 import { createSettingsStore } from '@maka/storage/settings-store';
@@ -70,6 +75,7 @@ const operations = [
   { name: 'Edit', input: { path: 'tracked.txt', old_string: 'written', new_string: 'edited' } },
   { name: 'Read', input: { path: 'tracked.txt' } },
 ];
+let restarted = false;
 const server = createServer(async (req, res) => {
   let raw = '';
   for await (const chunk of req) {
@@ -97,7 +103,11 @@ const server = createServer(async (req, res) => {
     );
     return;
   }
-  const operation = operations[operationStep++];
+  const operation = restarted
+    ? operationStep++ === 0
+      ? { name: 'Read', input: { path: 'tracked.txt' } }
+      : undefined
+    : operations[operationStep++];
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   const event = (type, data) =>
     res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
@@ -131,7 +141,10 @@ const server = createServer(async (req, res) => {
     event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
     event('content_block_delta', {
       index: 0,
-      delta: { type: 'text_delta', text: 'MANAGED_DESKTOP_SMOKE_OK' },
+      delta: {
+        type: 'text_delta',
+        text: restarted ? 'MANAGED_DESKTOP_REOPEN_OK' : 'MANAGED_DESKTOP_SMOKE_OK',
+      },
     });
   }
   event('content_block_stop', { index: 0 });
@@ -262,8 +275,134 @@ try {
   assert.match(JSON.stringify(results.at(-1)), /edited/);
   assert.equal(await readFile(join(source, 'tracked.txt'), 'utf8'), 'baseline\n');
   await page.screenshot({ path: join(root, 'desktop.png') });
+  const readMutations = () => {
+    const db = new DatabaseSync(join(workspace, 'runtime.sqlite'), { readOnly: true });
+    try {
+      return db
+        .prepare('SELECT payload_json FROM runtime_events ORDER BY rowid')
+        .all()
+        .map(({ payload_json }) => JSON.parse(payload_json))
+        .filter(
+          (event) =>
+            ['Write', 'Edit'].includes(event.content?.name) ||
+            event.actions?.workspaceFact?.kind === 'maka.workspace.version_accepted',
+        );
+    } finally {
+      db.close();
+    }
+  };
+  const mutationsBefore = readMutations();
+  assert.equal(
+    mutationsBefore.filter((event) => event.content?.kind === 'function_response').length,
+    2,
+  );
+  const { controlDirectory } = await resolveExistingStorageRootControlDirectory(capability);
+  const registration = JSON.parse(
+    await readFile(join(controlDirectory, 'registration.json'), 'utf8'),
+  );
+  assert.equal(registration.rootId, capability.rootId);
+  assert.equal(registration.state, 'ready');
+  assert.ok(Number.isSafeInteger(registration.pid) && registration.pid > 0);
+  // Desktop may launch through a utility process. Verify the actual Host command,
+  // not an assumed direct-parent topology, against this newly created root.
+  const command =
+    process.platform === 'win32'
+      ? (
+          await promisify(execFile)(
+            'powershell.exe',
+            [
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${registration.pid}').CommandLine`,
+            ],
+            { timeout: 10000, windowsHide: true },
+          )
+        ).stdout.trim()
+      : (
+          await promisify(execFile)('ps', ['-o', 'args=', '-p', String(registration.pid)], {
+            timeout: 10000,
+          })
+        ).stdout.trim();
+  assert.ok(command.includes(capability.rootId), 'Host must name the isolated root ID');
+  assert.ok(command.includes(workspace), 'Host must name the isolated workspace path');
+  assert.ok(command.includes('--expected-root-id'), 'Host must use verified-root startup');
+  process.kill(registration.pid, 'SIGKILL');
+  await closeElectronApplication(app, 5000);
+  app = undefined;
+  restarted = true;
+  operationStep = 0;
+  app = await electron.launch({
+    args: [join(repo, 'scripts/desktop-managed-smoke-entry.cjs')],
+    cwd: join(repo, 'apps/desktop'),
+    env,
+    timeout: 30000,
+  });
+  app.process().stderr?.on('data', (chunk) => logs.push(chunk.toString()));
+  await expect
+    .poll(
+      () => {
+        page = app
+          .windows()
+          .find(
+            (candidate) =>
+              candidate.url().includes('/index.html') && !candidate.url().includes('surface='),
+          );
+        return Boolean(page);
+      },
+      { timeout: 30000 },
+    )
+    .toBe(true);
+  await page
+    .getByText('Managed files smoke task', { exact: true })
+    .first()
+    .click({ timeout: 30000 });
+  await expect(page.getByText('MANAGED_DESKTOP_SMOKE_OK', { exact: true })).toBeVisible({
+    timeout: 30000,
+  });
+  await page
+    .locator('.maka-composer-editor [contenteditable="true"]')
+    .fill('Read tracked.txt after restarting. Do not write or edit.');
+  await page.locator('.maka-composer button[type="submit"]').click();
+  await expect(page.getByText('MANAGED_DESKTOP_REOPEN_OK', { exact: true })).toBeVisible({
+    timeout: 30000,
+  });
+  const afterRequest = requests.filter(({ body }) => body.stream).at(-1);
+  const afterResults = afterRequest.body.messages
+    .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+    .filter((part) => part.type === 'tool_result');
+  assert.equal(
+    afterResults.length,
+    4,
+    'Reopened model history includes the three durable results and new Read',
+  );
+  assert.match(JSON.stringify(afterResults.at(-1)), /edited/);
+  assert.equal(Boolean(afterResults.at(-1)?.is_error), false);
+  assert.deepEqual(
+    readMutations(),
+    mutationsBefore,
+    'Reopen must preserve the exact Write/Edit outcomes and successors',
+  );
+  const reopened = JSON.parse(await readFile(join(controlDirectory, 'registration.json'), 'utf8'));
+  assert.equal(reopened.rootId, capability.rootId);
+  assert.notEqual(reopened.hostEpoch, registration.hostEpoch);
+  assert.equal(await readFile(join(source, 'tracked.txt'), 'utf8'), 'baseline\n');
+  await page.screenshot({ path: join(root, 'reopened.png') });
+  await writeFile(
+    join(root, 'restart-evidence.json'),
+    JSON.stringify(
+      {
+        oldEpoch: registration.hostEpoch,
+        newEpoch: reopened.hostEpoch,
+        mutationEvents: mutationsBefore.map((event) => event.id),
+        checkpoint: 'completed turn; not an in-flight mutation crash',
+      },
+      null,
+      2,
+    ),
+  );
   console.log(
-    'PASS: real Electron managed creation, Write/Edit/Read and source isolation; no crash claim yet.',
+    'PASS: completed Write/Edit survives Host kill and Desktop restart; transcript/accepted Read preserved, mutation events unchanged.',
   );
 } catch (error) {
   if (page && !page.isClosed()) {

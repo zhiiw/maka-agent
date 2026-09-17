@@ -681,3 +681,26 @@ node scripts/desktop-managed-files-smoke.mjs
 | macOS | 未在本轮运行；可使用同一脚本验证，不把可运行脚本视为通过证据 |
 
 **仍未完成**：真实 Electron 中 kill Host/restart、恢复后 transcript/唯一终态和不重跑副作用的检查。本检查点只完成正常执行链，不宣称完整 Desktop Resume 已验收，不开启自动恢复、非 Git importer 或 M4/M5。
+
+## 第三十五检查点：完成态 Host 强杀 → Desktop 重开
+
+沿用第三十四检查点的真实窗口脚本，新增完成态故障步骤：Write/Edit/Read 返回且聊天显示完成后，读取本次隔离 root 的 Host registration，核对 root ID、ready、PID，并从 OS 查询该 PID 命令行，要求同时包含本次新建 workspace 绝对路径、root ID 与 expected-root-id 启动参数。只对这个 Host 发 SIGKILL，不枚举/批量终止其他 Host；随后关闭测试 Desktop，再用同一 userData 启动新 Desktop。
+
+测试最初将 Host 假定为 Electron main 的直接子进程，保护性断言拒绝继续且没有发 kill。实际 Desktop 经 utility process 启动 Host，因此改为验证真实进程的隔离 root 启动身份，而不是依赖直接父子拓扑。没有削弱产品身份校验或修改生产 lifecycle。
+
+重开后通过 UI 点击同一个任务，检查旧完成消息可见，再发送仅 Read 的新一轮。验证：
+
+- 新 Host epoch 与被杀 Host 不同，root ID 相同；
+- 模型历史保留原工具结果，新的 accepted Read 返回 edited；
+- SQLite 中原 Write/Edit call/result 与 workspace successor 事件逐条保持相同，不能增加或改写；
+- source checkout 仍是 baseline，未被恢复路径写回。
+
+证据目录新增 reopened.png 与 restart-evidence.json，记录前后 epoch、原 mutation event IDs 和精确故障边界。SQLite 只读查询仅是验收 oracle，产品 UI/模型读取仍走真实 Host/transcript 链。脚本仍不使用 MAKA_E2E/FakeBackend，不访问用户数据和公网模型。
+
+| 平台 | 本轮状态 |
+| --- | --- |
+| Windows | 真实 Electron/Host 强杀与重开通过；完成态 transcript、accepted Read、原修改事件不变 |
+| Linux | 同脚本提供 ps 身份检查，尚未本轮实跑 |
+| macOS | 同脚本可运行，尚未本轮实跑 |
+
+本次只增加测试与文档，没有改变 writer、原子边界或恢复策略。失败保留证据，关闭流程仍有超时；回滚脚本不影响产品数据。**尚未证明** T1 后或 acceptance 后、模型收到结果前的执行中断恢复，也不证明自动 continuation、断电恢复或任意 process-tree kill。下一步应在真实模型请求/持久化边界设置可观察屏障，再验证中断任务的恢复，而不是把本次已完成任务重开当作自动 Resume 闭环。
