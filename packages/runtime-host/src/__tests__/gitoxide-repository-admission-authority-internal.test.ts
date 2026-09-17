@@ -112,7 +112,7 @@ for (const mode of [
       const state = run('read-settlement');
       assert.equal(state.status, 0, state.stderr);
       const durable = JSON.parse(state.stdout);
-      assert.equal(durable.outcomes.length, mode === 'backend-live-sequence' ? 2 : 1);
+      assert.equal(durable.outcomes.length, mode === 'backend-live-sequence' ? 3 : 1);
       assert.equal(
         durable.successors.length,
         mode === 'backend-live-sequence'

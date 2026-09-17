@@ -321,12 +321,14 @@ async function buildHostAiSdkBackend(
   };
   const recordRunComposition = input.context.recordRunComposition;
   const recordRequestComposition = input.context.recordRequestComposition;
+  const projectModelTools = (tools: readonly MakaTool[]): readonly MakaTool[] =>
+    managedSession ? managedSession.projectTools(tools) : tools;
   const resolveModelTools = (): readonly MakaTool[] =>
-    modelComposition.resolveTools?.() ?? modelComposition.tools;
+    projectModelTools(modelComposition.resolveTools?.() ?? modelComposition.tools);
   // RunComposition remains the immutable C0 baseline. Dynamic Tool changes
   // belong exclusively to RequestComposition epochs, so never re-sample them
   // while committing the baseline immediately before provider dispatch.
-  const initialModelTools = Object.freeze([...modelComposition.tools]);
+  const initialModelTools = Object.freeze([...projectModelTools(modelComposition.tools)]);
   const runCompositionCommits = new Map<string, Promise<void>>();
   const commitRunComposition = recordRunComposition
     ? async (context: { readonly turnId: string; readonly runId: string }): Promise<void> => {
@@ -405,7 +407,7 @@ async function buildHostAiSdkBackend(
         ...(modelComposition.planTraceContext
           ? { planTraceContext: modelComposition.planTraceContext }
           : {}),
-        ...(!input.context.tools && input.childAgents ? input.childAgents : {}),
+        ...(!managedSession && !input.context.tools && input.childAgents ? input.childAgents : {}),
         providerOptions,
         contextBudget: buildDefaultContextBudgetPolicy({
           name: 'runtime-host-default-history-budget',

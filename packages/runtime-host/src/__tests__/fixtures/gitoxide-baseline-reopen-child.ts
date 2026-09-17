@@ -183,6 +183,52 @@ try {
       'settlement-session',
       stores.runtimeEventStore,
     );
+    const projected = session.projectTools(
+      ['Read', 'Bash', 'Glob', 'Grep', 'apply_patch', 'Write', 'Edit'].map((name) => ({
+        name,
+        description: 'checkout tool',
+        parameters: z.object({}),
+        impl() {
+          throw new Error('Checkout execution forbidden');
+        },
+      })),
+    );
+    assert.deepEqual(
+      projected.map((tool) => tool.name),
+      ['Read', 'Write', 'Edit'],
+    );
+    assert.deepEqual(session.projectTools([]), []);
+    const readTool = projected[0]!;
+    const readContext = {
+      sessionId: 'settlement-session',
+      turnId: 'read-contract',
+      cwd: sourcePath,
+      toolCallId: 'read-contract',
+      abortSignal: new AbortController().signal,
+      emitOutput() {},
+    };
+    await assert.rejects(
+      async () =>
+        readTool.impl(
+          { path: 'hello.txt' },
+          {
+            ...readContext,
+            sessionId: 'other-session',
+          },
+        ),
+      /does not belong/,
+    );
+    await assert.rejects(async () => readTool.impl({ path: '../hello.txt' }, readContext));
+    await assert.rejects(async () =>
+      readTool.impl({ path: 'maka://runtime/anything' }, readContext),
+    );
+    assert.deepEqual(await readTool.impl({ path: 'hello.txt', offset: 0, limit: 1 }, readContext), {
+      content: 'accepted original',
+      offset: 0,
+      returnedLines: 1,
+      totalLines: 2,
+      next: null,
+    });
     assert.throws(
       () =>
         requireGitoxideManagedSessionInternal(
@@ -248,7 +294,7 @@ try {
       connection: { slug: 'test', providerType: 'anthropic', defaultModel: 'test' },
       apiKey: 'offline',
       modelId: 'test',
-      maxSteps: 3,
+      maxSteps: 4,
       readExecutionBoundary: async () => createExternalExecutionBoundary(),
       readPermissionMode: async () => 'ask',
       loadTurnRuntimeEvents: () =>
@@ -276,26 +322,34 @@ try {
         };
       },
       tools: [
-        {
-          name: 'Write',
-          description: 'write accepted content',
-          parameters: z.object({ path: z.string(), content: z.string() }),
-          impl() {
-            throw new Error('Checkout Write forbidden');
+        ...session.projectTools([
+          {
+            name: 'Read',
+            description: 'read checkout',
+            parameters: z.object({ path: z.string() }),
+            impl: async () => ({ content: await readFile(join(sourcePath, 'hello.txt'), 'utf8') }),
           },
-        },
-        {
-          name: 'Edit',
-          description: 'edit accepted content',
-          parameters: z.object({
-            path: z.string(),
-            old_string: z.string(),
-            new_string: z.string(),
-          }),
-          impl() {
-            throw new Error('Checkout Edit forbidden');
+          {
+            name: 'Write',
+            description: 'write accepted content',
+            parameters: z.object({ path: z.string(), content: z.string() }),
+            impl() {
+              throw new Error('Checkout Write forbidden');
+            },
           },
-        },
+          {
+            name: 'Edit',
+            description: 'edit accepted content',
+            parameters: z.object({
+              path: z.string(),
+              old_string: z.string(),
+              new_string: z.string(),
+            }),
+            impl() {
+              throw new Error('Checkout Edit forbidden');
+            },
+          },
+        ]),
       ],
       modelFactory: () =>
         new MockLanguageModelV4({
@@ -308,21 +362,23 @@ try {
             return {
               stream: simulateReadableStream<LanguageModelV4StreamPart>({
                 chunks:
-                  current < 2
+                  current < 3
                     ? [
                         { type: 'stream-start', warnings: [] },
                         {
                           type: 'tool-call',
                           toolCallId: `backend-call-${current}`,
-                          toolName: current === 0 ? 'Write' : 'Edit',
+                          toolName: current === 0 ? 'Write' : current === 1 ? 'Edit' : 'Read',
                           input: JSON.stringify(
                             current === 0
                               ? { path: 'hello.txt', content: 'first result\n' }
-                              : {
-                                  path: 'hello.txt',
-                                  old_string: 'first result',
-                                  new_string: 'second result',
-                                },
+                              : current === 1
+                                ? {
+                                    path: 'hello.txt',
+                                    old_string: 'first result',
+                                    new_string: 'second result',
+                                  }
+                                : { path: 'hello.txt' },
                           ),
                         },
                         {
@@ -360,7 +416,7 @@ try {
     }
     assert.equal(
       events.filter((event) => event.type === 'tool_result').length,
-      2,
+      3,
       JSON.stringify(events),
     );
     assert.equal(
@@ -369,6 +425,14 @@ try {
       JSON.stringify(events),
     );
     assert.equal((await session.readAcceptedFile('hello.txt')).content, 'second result\n');
+    const readOutcome = (
+      await stores.runtimeEventStore.readImmutableRuntimeEvents(head.sessionId, head.runId!)
+    ).find((event) => event.content?.kind === 'function_response' && event.content.name === 'Read');
+    assert.ok(readOutcome?.content?.kind === 'function_response');
+    assert.deepEqual(readOutcome.content.result, {
+      kind: 'json',
+      value: { content: 'second result\n', offset: 0, returnedLines: 2, totalLines: 2, next: null },
+    });
     writeSync(
       1,
       JSON.stringify({ results: events.filter((event) => event.type === 'tool_result') }),

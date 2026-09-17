@@ -889,6 +889,7 @@ test('the Gitoxide gate owns repository admission changes', () => {
     'packages/runtime-host/src/server/gitoxide-managed-session-internal.ts',
     'packages/runtime-host/src/server/execution-model-composition.ts',
     'packages/runtime/src/ai-sdk-backend.ts',
+    'packages/runtime/src/read-page.ts',
     'packages/runtime/src/tool-runtime.ts',
     'packages/runtime/src/__tests__/tool-runtime-durable-boundary.test.ts',
   ]) {

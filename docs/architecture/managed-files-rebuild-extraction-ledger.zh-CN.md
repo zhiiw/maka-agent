@@ -356,3 +356,19 @@ Windows 本机：repository admission integration **19/19、0 skip**，Storage a
 定向验证：backend 连续执行/退出恢复 **2/2**；Host backend 创建/activation/伪造能力 **10/10**；Runtime durable boundary **28/28**；AiSdkBackend durable 回归 **18/18**；CI policy **1/1**。这些是定向结果，不代表全量测试或完整产品能力通过。
 
 下一步：持久化的显式 managed session/profile 创建与 Host 能力协商，接同一 accepted world 的读取工具，再开放 Desktop 加号菜单入口和真实 Host/Electron crash 验收。不恢复旧 StoredMessage 双写，不引入系统 Git/npm 依赖。
+
+## 第十五检查点：accepted-world Read 与工具集合收窄
+
+在开放 session 创建前先关闭混合读取问题：真实 backend 已能 Write/Edit accepted tree，但原 Read 仍读取 source checkout。回归首先观察到 `accepted original` 而不是第二次修改的 `second result`；本轮将 managed Read 的实现收归 session owner。
+
+- **主要不变量/owner**：显式 managed session 的 Read 只读取当前 SQLite accepted head 对应的 immutable Git tree，不读取 cwd 或 checkout。实现由 session capability 签发，校验实际工具上下文的 session ID；不沿用原 Read 的 implementation、prepareExecution 或 permissionArgs。
+- **工具权限**：当前只保留上层已提供的 Read/Write/Edit；不会凭空补齐被 Plan/权限层删除的工具。Bash、Glob、Grep、apply_patch、插件等尚未证明属于 accepted world 的工具暂不进入该集合。动态工具解析和初始 RunComposition 的 catalog hash 使用同一投影；managed backend 不注入普通 child-agent 能力。普通 backend 不走此投影。
+- **读取边界**：每次调用先 reopen 最新 accepted head，随后 helper 读取该次固定 commit 的文本 blob；本次读取期间后续 head 前进不改变这次 blob。分页复用主线 `readPage`，返回有界页面，continuation 校验内容摘要。只接受 helper 验证的 canonical repo-relative 文件路径；不支持用户目录、图片或任意 Maka runtime resource。既有 backend 专属结果归档资源机制不因此变成 checkout 权限。
+- **持久化/失败**：Read 沿当前通用 durable tool 协议提交结果，不引入新 ledger 或 schema。路径越界、错误 session、取消、helper/accepted identity 错误均拒绝，不回退 checkout。已提交的 Read outcome 从 ledger 重放；未提交读取的重试可以观察新的 accepted head，当前尚未承诺整个 continuation 固定同一 causal boundary。
+- **回滚**：禁用 managed session 注入即可停止新入口；不能把已有 managed 任务改成普通 checkout 任务。此检查点未开放 Desktop，也没有新增磁盘工作树 projection。
+
+验证：真实 AiSdkBackend 的 Write→Edit→Read 得到 accepted 新内容，独立进程 reopen 后结果一致，source checkout 保持原样；T2 后退出用例继续通过。另覆盖跨 session、父路径、runtime 地址拒绝和行范围读取。真实 helper/backend 两例 **2/2**，Host backend 定向 **10/10**，主线分页 **7/7**，workflow policy **1/1**；Host build、Biome、diff check 通过。
+
+平台矩阵：Windows 本机执行以上验证；Linux/macOS 使用相同 Gitoxide workflow，新增 `read-page.ts` 变更选择范围，本轮没有远程运行证据。不扩大此前进程崩溃承诺，不宣称断电恢复或完整 Electron 恢复可用。
+
+下一步仍是持久化 managed session/profile 与 Host admission 接线。Glob/Grep 需要 accepted-tree 枚举/搜索 owner，当前不能通过放回普通工具来补齐；Desktop 加号入口须等待该产品合同明确后再开放。

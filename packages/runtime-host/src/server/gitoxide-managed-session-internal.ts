@@ -10,8 +10,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import type { ToolRuntimeInput } from '@maka/runtime/tool-runtime';
+import type { MakaTool, ToolRuntimeInput } from '@maka/runtime/tool-runtime';
 import type { RuntimeCommitSink } from '@maka/runtime/runtime-commit-sink';
+import { readPage, readParameters, resolveReadInput } from '@maka/runtime/read-page';
 import type { InteractiveExecutionStoresWriter } from '@maka/storage/execution-stores';
 import { createGitoxideWorkspaceBaselineOwnerInternal } from './gitoxide-workspace-baseline-owner-internal.js';
 import { prepareGitoxideRuntimeMutationInternal } from './gitoxide-runtime-mutation-internal.js';
@@ -26,6 +27,7 @@ type ReopenInput = Parameters<
 >[0];
 type Prepare = NonNullable<ToolRuntimeInput['prepareManagedMutation']>;
 interface SessionExecution {
+  readonly projectTools: (tools: readonly MakaTool[]) => readonly MakaTool[];
   readonly sessionId: string;
   readonly runtimeCommitSink: RuntimeCommitSink;
   readonly prepareManagedMutation: Prepare;
@@ -55,10 +57,40 @@ export async function openGitoxideManagedSessionInternal(
       abortSignal: signal,
     });
   await reopen(abortSignal);
+  const readAcceptedFile: SessionExecution['readAcceptedFile'] = async (path, signal) => {
+    const acceptedRepositoryCapability = await reopen(signal);
+    return readGitoxideTreeFileInternal({
+      acceptedRepositoryOwnerToken,
+      acceptedRepositoryCapability,
+      path,
+      abortSignal: signal,
+    });
+  };
+  const readTool: MakaTool = Object.freeze({
+    name: 'Read',
+    activityKind: 'read',
+    categoryHint: 'read',
+    recoveryMode: 'replay_safe',
+    description:
+      'Read a bounded text page from the current accepted Git tree. Use a canonical repository-relative path, or the complete next object from the previous page. Does not read the user checkout, images, or runtime resources.',
+    parameters: readParameters,
+    async impl(input, context) {
+      if (context.sessionId !== sessionId)
+        throw new Error('Managed read does not belong to this session');
+      const args = readParameters.parse(input);
+      const { path } = resolveReadInput(args);
+      const file = await readAcceptedFile(path, context.abortSignal);
+      return readPage(file.content, args);
+    },
+  } satisfies MakaTool);
   const capability = Object.freeze({ kind: 'gitoxide_managed_files_session' as const });
   sessions.set(
     capability,
     Object.freeze({
+      projectTools: (tools: readonly MakaTool[]) =>
+        tools
+          .filter((tool) => ['Read', 'Write', 'Edit'].includes(tool.name))
+          .map((tool) => (tool.name === 'Read' ? readTool : tool)),
       sessionId,
       runtimeCommitSink: stores.runtimeEventStore,
       async prepareManagedMutation(request) {
@@ -85,15 +117,7 @@ export async function openGitoxideManagedSessionInternal(
           },
         } satisfies Awaited<ReturnType<Prepare>>);
       },
-      async readAcceptedFile(path, signal) {
-        const acceptedRepositoryCapability = await reopen(signal);
-        return readGitoxideTreeFileInternal({
-          acceptedRepositoryOwnerToken,
-          acceptedRepositoryCapability,
-          path,
-          abortSignal: signal,
-        });
-      },
+      readAcceptedFile,
     } satisfies SessionExecution),
   );
   return capability;
