@@ -372,3 +372,20 @@ Windows 本机：repository admission integration **19/19、0 skip**，Storage a
 平台矩阵：Windows 本机执行以上验证；Linux/macOS 使用相同 Gitoxide workflow，新增 `read-page.ts` 变更选择范围，本轮没有远程运行证据。不扩大此前进程崩溃承诺，不宣称断电恢复或完整 Electron 恢复可用。
 
 下一步仍是持久化 managed session/profile 与 Host admission 接线。Glob/Grep 需要 accepted-tree 枚举/搜索 owner，当前不能通过放回普通工具来补齐；Desktop 加号入口须等待该产品合同明确后再开放。
+
+## 第十六检查点：显式持久化 profile 与禁止降级
+
+新增 `managed-files-v1` Session tool profile，沿现有严格 protocol decoder 和 SessionHeader JSON 持久化，不新增数据库 schema 或旧实验格式兼容。profile 只定义 Read/Write/Edit、隔离 accepted tree、不可运行命令/测试/依赖安装/Publish；关闭 memory extraction。它不是 repository admission capability。
+
+- **主要不变量**：模式由 persisted profile 声明，执行权限由 Host 的真实 session capability 提供，缺任一边不能进入普通执行。Host 在读取 provider credentials 前验证配对，prepared activation 按实际 context 再验证；AiSdkBackend 自身也拒绝 managed profile 缺 preparation port/runtime sink，或普通 profile 注入 managed preparation port。
+- **Owner/原子边界**：Session metadata owner 按原协议保存 profile；workspace accepted truth 仍在 RuntimeEvent/SQLite authority 中。单独写 profile 不会建立 epoch、import repository 或领取 reservation。本轮并未实现 session 与 baseline 的跨资源创建协议。
+- **创建入口收口**：普通 session.create、Host create 和 WorkHub prepare 共用的创建校验明确拒绝 `managed-files-v1`，直到专门 workspace admission owner 接入。协议识别该值不等于允许用户创建半成品任务。普通 profile 不受影响，不默认启用 managed，不靠普通 cwd 推导权限。
+- **失败/回滚**：缺能力或模式错配在 backend/T1 前拒绝，不调用 generic Write/Edit；撤回功能不得把已持久化 managed profile 改成普通模式。旧 binary 不认识该 profile 时应拒绝，不建设实验分支降级兼容。
+
+TDD 先复现未知 profile、managed profile 缺能力仍读取凭据、AiSdkBackend 静默构造 generic backend，以及普通创建入口可接受未经 admission 的标签；随后封闭这些路径。SQLite reopen 回归验证 profile 保留且 schema 版本不变；真实 backend/crash fixture 已使用显式 profile。
+
+验证：Core/Runtime/Storage/Host build 通过；真实 helper backend/process-exit **2/2**，Host backend 定向 **11/11**，AiSdkBackend durable/mode 定向 **19/19**，SQLite profile reopen **1/1**，CI policy **1/1**。profile/catalog 扩展回归 **59 pass / 2 fail**，两条失败均在 Windows fixture 创建 symlink 时 `EPERM`，未执行相应业务逻辑；本轮未修改或跳过它们，不宣称全量绿。
+
+平台矩阵：Windows 本机具备上述证据；Linux/macOS 由现有三平台 workflow 调度新增 profile/admission 回归，本轮未取得远程结果。没有新增恢复协议，不扩大断电承诺。仍未开放 Desktop/CLI managed 创建入口。
+
+下一步：以 session ID 绑定 import destination/workspace key，设计并验证 import→baseline→session 的可重试创建 owner（中断时不得出现可执行但缺 baseline 的会话），再将 capability 重建接入 live Host backend factory。随后开放显式 Desktop 入口，而非让普通创建 API 接受裸 profile 绕过 admission。

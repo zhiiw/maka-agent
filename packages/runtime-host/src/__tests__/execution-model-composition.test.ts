@@ -5064,6 +5064,19 @@ async function publishConnectionModel(
   assert.equal(committed.kind, 'committed');
 }
 
+test('rejects a managed profile without execution capability before provider credentials', async () => {
+  const input = backendCreationFixture({
+    abortSignal: new AbortController().signal,
+    resolveExecutionConnection: async () => {
+      throw new Error('provider must not be read');
+    },
+    readPricing: async () => ({ revision: 0, overrides: [] }),
+  });
+  input.context.header.toolProfile = 'managed-files-v1';
+  for (const create of [createHostAiSdkBackend, prepareHostAiSdkBackend])
+    await assert.rejects(create(input), /Managed files profile requires its session capability/);
+});
+
 test('rejects a forged managed session before resolving provider credentials', async () => {
   let providerReads = 0;
   const input = backendCreationFixture({

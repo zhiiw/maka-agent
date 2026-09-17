@@ -290,6 +290,7 @@ try {
         cwd: sourcePath,
         permissionMode: 'ask',
         toolMode: 'direct',
+        toolProfile: 'managed-files-v1',
       } as SessionHeader,
       connection: { slug: 'test', providerType: 'anthropic', defaultModel: 'test' },
       apiKey: 'offline',

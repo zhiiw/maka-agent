@@ -22,6 +22,12 @@ on:
     paths:
       - '.github/workflows/gitoxide-helper-admission.yml'
       - 'native/gitoxide-helper/**'
+      - 'packages/core/src/session.ts'
+      - 'packages/runtime-host/src/server/hosted-execution-tool-profile.ts'
+      - 'packages/runtime-host/src/server/session-catalog-coordinator.ts'
+      - 'packages/runtime-host/src/__tests__/hosted-execution-tool-profile.test.ts'
+      - 'packages/runtime-host/src/__tests__/session-catalog-coordinator.test.ts'
+      - 'packages/runtime/src/__tests__/ai-sdk-backend.test.ts'
       - 'packages/runtime-host/src/server/gitoxide-helper-*.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-helper-*.test.ts'
       - 'packages/runtime-host/src/server/gitoxide-repository-admission-authority-internal.ts'
@@ -50,6 +56,12 @@ on:
     paths:
       - '.github/workflows/gitoxide-helper-admission.yml'
       - 'native/gitoxide-helper/**'
+      - 'packages/core/src/session.ts'
+      - 'packages/runtime-host/src/server/hosted-execution-tool-profile.ts'
+      - 'packages/runtime-host/src/server/session-catalog-coordinator.ts'
+      - 'packages/runtime-host/src/__tests__/hosted-execution-tool-profile.test.ts'
+      - 'packages/runtime-host/src/__tests__/session-catalog-coordinator.test.ts'
+      - 'packages/runtime/src/__tests__/ai-sdk-backend.test.ts'
       - 'packages/runtime-host/src/server/gitoxide-helper-*.ts'
       - 'packages/runtime-host/src/__tests__/gitoxide-helper-*.test.ts'
       - 'packages/runtime-host/src/server/gitoxide-repository-admission-authority-internal.ts'
@@ -159,5 +171,9 @@ jobs:
           packages/runtime-host/dist/__tests__/gitoxide-repository-admission-authority-internal.test.js
       - name: Verify managed backend identity admission
         run: >-
-          node --test --test-name-pattern="rejects a forged managed session"
+          node --test --test-name-pattern="managed profile|managed files|forged managed session|ordinary session creation cannot mint"
           packages/runtime-host/dist/__tests__/execution-model-composition.test.js
+          packages/runtime-host/dist/__tests__/hosted-execution-tool-profile.test.js
+          packages/runtime-host/dist/__tests__/session-catalog-coordinator.test.js
+          packages/storage/dist/__tests__/sqlite-session-metadata-store.test.js
+          packages/runtime/dist/__tests__/ai-sdk-backend.test.js

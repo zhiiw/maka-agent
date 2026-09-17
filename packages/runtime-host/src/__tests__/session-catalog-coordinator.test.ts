@@ -80,6 +80,33 @@ const context: ConnectionContext = {
   acquireResidency: () => ({ release: () => undefined }),
 };
 
+test('ordinary session creation cannot mint a managed profile without workspace admission', async () => {
+  const fixture = createFixture();
+  const outcome = await fixture.coordinator.handlers['session.create'](
+    {
+      sessionId: fixture.sessionId,
+      workspace: { kind: 'host_path', path: process.cwd() },
+      modelTarget: {
+        kind: 'explicit',
+        connectionId: 'connection-1',
+        connectionSlug: 'test',
+        model: 'model-1',
+      },
+      toolProfile: 'managed-files-v1',
+    },
+    context,
+  );
+  assert.deepEqual(outcome, {
+    ok: false,
+    error: {
+      code: 'invalid_request',
+      message:
+        'Managed files creation requires workspace admission; this entry point is unavailable',
+    },
+  });
+  assert.equal(fixture.drainRequests(), 0);
+});
+
 test('projects only bounded execution boundary presentation facts', async () => {
   const fixture = createFixture({
     stores: {

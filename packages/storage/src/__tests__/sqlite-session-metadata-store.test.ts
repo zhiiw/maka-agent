@@ -58,6 +58,27 @@ import {
 import { SQLITE_AGENT_GRAPH_CONTROL_TABLES } from '../sqlite-session-metadata-schema.js';
 
 describe('SqliteSessionMetadataStore', () => {
+  test('preserves the explicit managed files profile across database reopen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-managed-profile-'));
+    const path = join(root, 'state.sqlite');
+    try {
+      const store = createSqliteSessionMetadataStore(path);
+      try {
+        await store.create(fullHeader({ toolProfile: 'managed-files-v1' }));
+      } finally {
+        store.close();
+      }
+      const reopened = createSqliteSessionMetadataStore(path);
+      try {
+        assert.equal((await reopened.read('session-1'))?.header.toolProfile, 'managed-files-v1');
+        assert.equal(reopened.schemaVersion(), SQLITE_SESSION_METADATA_SCHEMA_VERSION);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   test('migrates version 38 and resumes the body-free Coordination index idempotently', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-coordination-index-migration-'));
     const path = join(root, 'state.sqlite');

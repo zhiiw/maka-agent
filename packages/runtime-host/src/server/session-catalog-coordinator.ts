@@ -1351,6 +1351,13 @@ interface PreparedSessionCreate {
 }
 
 async function prepareCreate(input: SessionCreateInput): Promise<PreparedSessionCreate> {
+  // A profile string cannot substitute for the epoch/import admission owner.
+  if (input.toolProfile === 'managed-files-v1') {
+    throw new SessionOperationFailure(
+      'invalid_request',
+      'Managed files creation requires workspace admission; this entry point is unavailable',
+    );
+  }
   if ((input.executorId === undefined) === (input.modelTarget === undefined)) {
     throw new SessionOperationFailure(
       'invalid_request',

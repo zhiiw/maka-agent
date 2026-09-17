@@ -543,15 +543,24 @@ export async function prepareHostAiSdkBackend(
 function managedSessionForBackend(input: {
   readonly managedFilesSession?: GitoxideManagedSessionCapability;
   readonly runtimeCommitSink?: RuntimeCommitSink;
-  readonly context: { readonly sessionId: string };
+  readonly context: {
+    readonly sessionId: string;
+    readonly header: { readonly toolProfile?: string };
+  };
 }) {
-  return input.managedFilesSession === undefined
-    ? undefined
-    : requireGitoxideManagedSessionInternal(
-        input.managedFilesSession,
-        input.context.sessionId,
-        input.runtimeCommitSink,
-      );
+  if (input.managedFilesSession === undefined) {
+    if (input.context.header.toolProfile === 'managed-files-v1')
+      throw new Error('Managed files profile requires its session capability');
+    return undefined;
+  }
+  const session = requireGitoxideManagedSessionInternal(
+    input.managedFilesSession,
+    input.context.sessionId,
+    input.runtimeCommitSink,
+  );
+  if (input.context.header.toolProfile !== 'managed-files-v1')
+    throw new Error('Managed session capability requires the managed files profile');
+  return session;
 }
 
 class HostAiSdkBackend extends AiSdkBackend {

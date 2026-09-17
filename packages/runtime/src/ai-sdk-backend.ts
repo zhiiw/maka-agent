@@ -334,6 +334,12 @@ export class AiSdkBackend implements AgentBackend {
     contextProviderDroppingReported: false,
   };
   constructor(input: AiSdkBackendInput) {
+    if (input.header.toolProfile === 'managed-files-v1') {
+      if (!input.prepareManagedMutation || !input.runtimeCommitSink)
+        throw new Error('Managed files profile requires durable managed execution');
+    } else if (input.prepareManagedMutation) {
+      throw new Error('Managed execution requires the managed files profile');
+    }
     this.input = input;
     this.sessionId = input.sessionId;
     this.newId = input.newId ?? (() => crypto.randomUUID());
